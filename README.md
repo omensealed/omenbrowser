@@ -19,6 +19,22 @@ Rust was chosen for a bit of "guardrail" for the AI to chew on while developing 
 nature of the Rust compiler itself and what Rust offers to keep things "better". 
 The project will expand when Rust crates for RNS expand. I have no interest in the "internals" of this and intend to only stay within "desktop browser" area. I'll eventually pass some docs to the Columba dev and he can or decide not to implement a OMENchat client, which will be available in this repo when I get to the "how to" part of that. 
 
+## Screenshots
+
+Click a thumbnail to open the full-size workspace screenshot.
+
+<p>
+  <a href="docs/assets/screenshots/workspace-purple.png">
+    <img src="docs/assets/screenshots/workspace-purple-thumb.png" alt="OMENbrowser workspace with NomadNet, OMENchat, and LXMF panes in purple theme" width="31%">
+  </a>
+  <a href="docs/assets/screenshots/workspace-red.png">
+    <img src="docs/assets/screenshots/workspace-red-thumb.png" alt="OMENbrowser workspace with NomadNet, OMENchat, and LXMF panes in red theme" width="31%">
+  </a>
+  <a href="docs/assets/screenshots/workspace-teal.png">
+    <img src="docs/assets/screenshots/workspace-teal-thumb.png" alt="OMENbrowser workspace with NomadNet, OMENchat, and LXMF panes in teal theme" width="31%">
+  </a>
+</p>
+
 ## Current Pieces
 
 - `omenbrowser_rs`: desktop OMENbrowser client with NomadNet browsing, LXMF
