@@ -1,13 +1,23 @@
 # OMENbrowser_rs
 
 Rust desktop/TUI browser and messaging client for Reticulum, NomadNet, LXMF,
-Micron, MicronPlus, and OMENchat.
+Micron, MicronPlus, and OMENchat. LXST voice is unsupported, for now.
 
 Repository: <https://github.com/omensealed/omenbrowser>
 
 This repository is still in private alpha. It is a native Rust browser/client
 with pane management, isolated identities, native Reticulum/LXMF integration,
 and a built-in OMENchat client.
+
+Project was "vibe coded" not only as a test for my own curiosity with vibe coding consoles
+but if it could truly be guided to relative "quality software" in the hands of somebody
+who's been doing it for quite some time and push projects that normally take a long time
+to personally develop and thought this relatively "new" landscape on RNS and software dev
+something like this is where I'd begin testing the capability of codex.
+
+Rust was chosen for a bit of "guardrail" for the AI to chew on while developing due to the
+nature of the Rust compiler itself and what Rust offers to keep things "better". 
+The project will expand when Rust crates for RNS expand. I have no interest in the "internals" of this and intend to only stay within "desktop browser" area. I'll eventually pass some docs to the Columba dev and he can or decide not to implement a OMENchat client, which will be available in this repo when I get to the "how to" part of that. 
 
 ## Current Pieces
 
