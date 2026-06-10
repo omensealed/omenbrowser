@@ -235,7 +235,7 @@ Useful notes to include with a report:
 - which app root or server home was used;
 - whether the same issue happens after restart;
 - whether Monitoring showed browser/path, LXMF, OMENchat, or upload activity;
-- whether the same destination works in a Python NomadNet/OMENbrowser client.
+- whether the same destination works in another NomadNet client.
 
 ## Known Alpha Gaps
 

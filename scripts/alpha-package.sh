@@ -19,9 +19,13 @@ cp target/release/omenbrowser_rs "$target_dir/bin/"
 cp src/server/target/release/omenchatd "$target_dir/bin/"
 cp README.md "$target_dir/"
 cp TESTERS.md "$target_dir/"
-cp docs/27-alpha-test-runbook.md "$target_dir/docs/"
-cp docs/28-alpha-handoff.md "$target_dir/docs/"
-cp docs/26-omenchat-protocol-v0.1.md "$target_dir/docs/"
+cp docs/README.md "$target_dir/docs/"
+cp docs/QUICKSTART.md "$target_dir/docs/"
+cp docs/TESTING.md "$target_dir/docs/"
+cp docs/OMENCHAT.md "$target_dir/docs/"
+cp docs/OMENCHAT_PROTOCOL.md "$target_dir/docs/"
+cp docs/CONFIGURATION.md "$target_dir/docs/"
+cp docs/TROUBLESHOOTING.md "$target_dir/docs/"
 cp scripts/alpha-collect.sh "$target_dir/scripts/"
 cp scripts/alpha-omenchat-smoke.sh "$target_dir/scripts/"
 cp scripts/alpha-root-sanity.sh "$target_dir/scripts/"
@@ -138,8 +142,9 @@ The smoke writes a timestamped report directory under:
   /tmp/omenbrowser-rs-omenchat-smoke/
 
 Read TESTERS.md first.
-Read docs/27-alpha-test-runbook.md before testing with real identities.
-Read docs/28-alpha-handoff.md for the short private-alpha handoff.
+Read docs/QUICKSTART.md for the fastest build/run path.
+Read docs/TESTING.md before testing with real identities.
+Read docs/OMENCHAT.md for chat server/client setup.
 EOF
 
 cat > "$target_dir/PACKAGE-METADATA.txt" <<EOF
@@ -194,9 +199,13 @@ rm -rf "$selfcheck_home"
     omenchatd-init-selfcheck.txt \
     omenchatd-status-selfcheck.txt \
     omenchatd-doctor-selfcheck.txt \
-    docs/27-alpha-test-runbook.md \
-    docs/28-alpha-handoff.md \
-    docs/26-omenchat-protocol-v0.1.md \
+    docs/README.md \
+    docs/QUICKSTART.md \
+    docs/TESTING.md \
+    docs/OMENCHAT.md \
+    docs/OMENCHAT_PROTOCOL.md \
+    docs/CONFIGURATION.md \
+    docs/TROUBLESHOOTING.md \
     scripts/alpha-collect.sh \
     scripts/alpha-omenchat-smoke.sh \
     scripts/alpha-root-sanity.sh \

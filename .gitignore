@@ -53,6 +53,7 @@ Thumbs.db
 # Agent/local working material not needed by GitHub users
 /.agents/
 /.codex/
+/ai-docs/
 /old-src/
 /official-sources/
 /vendor/

@@ -1,30 +1,25 @@
-# OMENbrowser_rs Documentation
+# OMENbrowser_rs Docs
 
-This directory contains public documentation for OMENbrowser_rs, OMENchat, and
-`omenchatd`.
+These docs are for testers, users, server operators, and developers working with
+the current Rust application.
 
 Start here:
 
-- [`../README.md`](../README.md) - build, run, package, and safety overview.
-- [`../TESTERS.md`](../TESTERS.md) - shortest private-alpha tester sheet.
-- [`27-alpha-test-runbook.md`](27-alpha-test-runbook.md) - practical alpha test
-  flow with isolated roots.
-- [`28-alpha-handoff.md`](28-alpha-handoff.md) - concise alpha handoff note.
-- [`25-omenchat-plugin-server-plan.md`](25-omenchat-plugin-server-plan.md) and
-  [`26-omenchat-protocol-v0.1.md`](26-omenchat-protocol-v0.1.md) - OMENchat
-  client/server design and protocol.
+- [Quickstart](QUICKSTART.md) - build and start the browser or an isolated test
+  profile.
+- [Testing Guide](TESTING.md) - safe alpha testing with separate identities and
+  storage roots.
+- [OMENchat](OMENCHAT.md) - using the built-in chat client and running
+  `omenchatd`.
+- [OMENchat Protocol](OMENCHAT_PROTOCOL.md) - protocol notes for client/server
+  compatibility.
+- [Configuration](CONFIGURATION.md) - identity, storage, Reticulum interfaces,
+  Tor/SOCKS, and runtime paths.
+- [Packaging](PACKAGING.md) - local `.deb`, AppImage, and alpha archive builds.
+- [Troubleshooting](TROUBLESHOOTING.md) - common startup, link, chat, and media
+  issues.
+- [Developer Notes](DEVELOPERS.md) - source layout, feature flags, and test
+  commands.
 
-Architecture and implementation reference:
-
-- `00` through `11` describe the original Rust port plan and module boundaries.
-- `12` through `22` document the live runtime, UI, plugin, security, testing,
-  and release work.
-- `24` is a native live-network validation runbook.
-- `RUST_RETICULUM_LXMF.md` captures Reticulum/LXMF integration notes.
-
-Not included in the public repository:
-
-- local agent handoff notes;
-- implementation scratch logs;
-- local source archives;
-- runtime data, identities, caches, debug output, and package artifacts.
+OMENbrowser_rs is a native Rust application for NomadNet browsing, LXMF
+messaging, Micron/MicronPlus rendering, and OMENchat.

@@ -1,14 +1,13 @@
 # OMENbrowser_rs
 
-Rust desktop/TUI port of OMENbrowser for Reticulum, NomadNet, LXMF, Micron,
-MicronPlus, and OMENchat.
+Rust desktop/TUI browser and messaging client for Reticulum, NomadNet, LXMF,
+Micron, MicronPlus, and OMENchat.
 
 Repository: <https://github.com/omensealed/omenbrowser>
 
-This repository is still in private alpha. The goal is not a line-by-line Python
-translation; it is a native Rust browser/client with stronger pane management,
-isolated identities, native Reticulum/LXMF integration, and a built-in OMENchat
-client.
+This repository is still in private alpha. It is a native Rust browser/client
+with pane management, isolated identities, native Reticulum/LXMF integration,
+and a built-in OMENchat client.
 
 ## Current Pieces
 
@@ -19,7 +18,7 @@ client.
   independent from the browser and owns its own storage root.
 - `TESTERS.md`: concise private-alpha tester sheet included at the root of the
   packaged archive.
-- `docs/27-alpha-test-runbook.md`: practical alpha tester path.
+- `docs/TESTING.md`: practical alpha tester path.
 
 ## Identity And Storage Safety
 
@@ -276,14 +275,12 @@ cargo test --manifest-path src/server/Cargo.toml --features live-rns-net
 ## Alpha Runbook
 
 Use [TESTERS.md](TESTERS.md) as the first sheet for outside testers. Use
-[docs/27-alpha-test-runbook.md](docs/27-alpha-test-runbook.md) before giving the
-build to another tester. It covers isolated roots, live NomadNet smoke, LXMF
-smoke, OMENchat server setup, two-client OMENchat testing, delete/restore
-regressions, and issue report bundles.
+[docs/TESTING.md](docs/TESTING.md) before giving the build to another tester.
+It covers isolated roots, local smoke tests, live NomadNet/LXMF checks,
+OMENchat server setup, two-client OMENchat testing, and issue report bundles.
 
-Use [docs/28-alpha-handoff.md](docs/28-alpha-handoff.md) as the short private
-alpha handoff note for what is ready, first tester flow, known alpha risks, and
-report bundle instructions.
+Use [docs/QUICKSTART.md](docs/QUICKSTART.md) for the shortest build/run path
+and [docs/OMENCHAT.md](docs/OMENCHAT.md) for chat server/client setup.
 
 ## Known Alpha Gaps
 

@@ -8,7 +8,7 @@ This directory must not import OMENbrowser_rs modules or depend on the browser
 crate. The client and server communicate through the documented protocol in:
 
 ```text
-../../docs/26-omenchat-protocol-v0.1.md
+../../docs/OMENCHAT_PROTOCOL.md
 ```
 
 Standalone check:
