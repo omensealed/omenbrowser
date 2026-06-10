@@ -1,0 +1,62 @@
+# Build output
+/target/
+/src/server/target/
+**/target/
+
+# Local alpha/release artifacts
+/dist/
+/*.tar.gz
+/*.tar.gz.sha256
+/*.deb
+/*.AppImage
+/*.zsync
+
+# Local runtime and test data
+/.omenbrowser_rs/
+/.omenchatd/
+/tmp/
+/cache/
+/messages/
+/identity_storage/
+/identities/
+/downloads/
+/logs/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Diagnostics and profiling output
+debug.output
+*.output
+perf.data
+perf.data.old
+perf.report
+gdb-samples.output
+*.profraw
+*.profdata
+*.log
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Agent/local working material not needed by GitHub users
+/.agents/
+/.codex/
+/old-src/
+/official-sources/
+/vendor/
+/docs/23-codex-prompts.md
+/docs/CODEX_HANDOFF.md
+/docs/99-implementation-notes.md
+/AGENTS.md

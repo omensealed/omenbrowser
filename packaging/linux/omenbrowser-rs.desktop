@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=OMENbrowser_rs
+Comment=Reticulum/NomadNet/LXMF browser and OMENchat client
+Exec=omenbrowser_rs --desktop
+Icon=omenbrowser-rs
+Terminal=false
+Categories=Network;Chat;
+StartupNotify=true

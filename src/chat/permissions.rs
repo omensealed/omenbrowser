@@ -1,0 +1,10 @@
+pub const PERM_READ: u64 = 1 << 0;
+pub const PERM_WRITE: u64 = 1 << 1;
+pub const PERM_INVITE: u64 = 1 << 2;
+pub const PERM_KICK: u64 = 1 << 3;
+pub const PERM_BAN: u64 = 1 << 4;
+pub const PERM_SET_TOPIC: u64 = 1 << 5;
+pub const PERM_SET_MODES: u64 = 1 << 6;
+pub const PERM_GRANT_ROLES: u64 = 1 << 7;
+pub const PERM_VIEW_AUDIT: u64 = 1 << 8;
+pub const PERM_ADMIN: u64 = 1 << 63;

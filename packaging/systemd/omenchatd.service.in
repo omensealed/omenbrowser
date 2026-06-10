@@ -1,0 +1,15 @@
+[Unit]
+Description=OMENchat server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKING_DIRECTORY__
+ExecStart=__OMENCHATD_BIN__ run --home __OMENCHATD_HOME__
+Restart=on-failure
+RestartSec=10
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

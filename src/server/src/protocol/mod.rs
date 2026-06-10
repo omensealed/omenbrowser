@@ -1,0 +1,209 @@
+pub mod batch;
+pub mod codec;
+
+pub type ServerId = String;
+pub type RoomId = u32;
+pub type UserId = u32;
+pub type EventId = u64;
+pub type Seq = u32;
+pub type Revision = u64;
+
+pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_NAME: &str = "omenchat-v0.1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Compression {
+    None = 0,
+    Bzip2 = 1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum ChatOp {
+    SessionOpen = 1,
+    SessionAccept = 2,
+    SessionReject = 3,
+    JoinRoom = 10,
+    JoinAccept = 11,
+    PartRoom = 12,
+    RoomSubscribe = 13,
+    RoomUnsubscribe = 14,
+    RoomMessage = 20,
+    RoomAction = 21,
+    RoomNotice = 22,
+    RoomEvent = 23,
+    MessageAck = 24,
+    UserListSnapshotInline = 30,
+    UserListSnapshotResource = 31,
+    UserDelta = 32,
+    RoomDelta = 33,
+    RoleDelta = 34,
+    HistoryBefore = 40,
+    HistoryInline = 41,
+    HistoryResourceOffer = 42,
+    HistoryEnd = 43,
+    HistoryRecent = 44,
+    HistoryCurrent = 45,
+    Command = 50,
+    CommandResult = 51,
+    ContactRequest = 60,
+    ContactOffer = 61,
+    ContactAccept = 62,
+    ContactReject = 63,
+    UploadOffer = 70,
+    UploadAccept = 71,
+    UploadReject = 72,
+    UploadComplete = 73,
+    UploadFetch = 74,
+    UploadResourceOffer = 75,
+    UploadInlineChunk = 76,
+    Error = 90,
+    Ping = 100,
+    Pong = 101,
+}
+
+impl TryFrom<u64> for ChatOp {
+    type Error = ProtocolError;
+
+    fn try_from(value: u64) -> Result<Self, ProtocolError> {
+        match value {
+            1 => Ok(Self::SessionOpen),
+            2 => Ok(Self::SessionAccept),
+            3 => Ok(Self::SessionReject),
+            10 => Ok(Self::JoinRoom),
+            11 => Ok(Self::JoinAccept),
+            12 => Ok(Self::PartRoom),
+            13 => Ok(Self::RoomSubscribe),
+            14 => Ok(Self::RoomUnsubscribe),
+            20 => Ok(Self::RoomMessage),
+            21 => Ok(Self::RoomAction),
+            22 => Ok(Self::RoomNotice),
+            23 => Ok(Self::RoomEvent),
+            24 => Ok(Self::MessageAck),
+            30 => Ok(Self::UserListSnapshotInline),
+            31 => Ok(Self::UserListSnapshotResource),
+            32 => Ok(Self::UserDelta),
+            33 => Ok(Self::RoomDelta),
+            34 => Ok(Self::RoleDelta),
+            40 => Ok(Self::HistoryBefore),
+            41 => Ok(Self::HistoryInline),
+            42 => Ok(Self::HistoryResourceOffer),
+            43 => Ok(Self::HistoryEnd),
+            44 => Ok(Self::HistoryRecent),
+            45 => Ok(Self::HistoryCurrent),
+            50 => Ok(Self::Command),
+            51 => Ok(Self::CommandResult),
+            60 => Ok(Self::ContactRequest),
+            61 => Ok(Self::ContactOffer),
+            62 => Ok(Self::ContactAccept),
+            63 => Ok(Self::ContactReject),
+            70 => Ok(Self::UploadOffer),
+            71 => Ok(Self::UploadAccept),
+            72 => Ok(Self::UploadReject),
+            73 => Ok(Self::UploadComplete),
+            74 => Ok(Self::UploadFetch),
+            75 => Ok(Self::UploadResourceOffer),
+            76 => Ok(Self::UploadInlineChunk),
+            90 => Ok(Self::Error),
+            100 => Ok(Self::Ping),
+            101 => Ok(Self::Pong),
+            _ => Err(ProtocolError::UnknownOp(value)),
+        }
+    }
+}
+
+impl TryFrom<u64> for Compression {
+    type Error = ProtocolError;
+
+    fn try_from(value: u64) -> Result<Self, ProtocolError> {
+        match value {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Bzip2),
+            _ => Err(ProtocolError::UnknownCompression(value)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum RoomEventCode {
+    UserJoined = 1,
+    UserParted = 2,
+    UserQuit = 3,
+    UserKicked = 4,
+    UserBanned = 5,
+    UserUnbanned = 6,
+    TopicSet = 7,
+    ModeChanged = 8,
+    RoleChanged = 9,
+    MessageEdited = 10,
+    MessageDeleted = 11,
+    RoomNotice = 12,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum ChatErrorCode {
+    PermissionDenied = 1001,
+    NotJoined = 1002,
+    RoomNotFound = 1003,
+    UserNotFound = 1004,
+    RateLimited = 1005,
+    HistoryUnavailable = 1006,
+    MalformedFrame = 1007,
+    UnsupportedProtocolVersion = 1008,
+    CompressionUnsupported = 1009,
+    ResourceUnavailable = 1010,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    pub version: u8,
+    pub op: ChatOp,
+    pub flags: u16,
+    pub seq: Seq,
+    pub room_id: Option<RoomId>,
+    pub body: FrameBody,
+}
+
+impl Frame {
+    pub fn new(op: ChatOp, seq: Seq, room_id: Option<RoomId>, body: FrameBody) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            op,
+            flags: 0,
+            seq,
+            room_id,
+            body,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FrameBody {
+    Empty,
+    Text(String),
+    Fields(Vec<FrameValue>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FrameValue {
+    Nil,
+    Bool(bool),
+    U64(u64),
+    I64(i64),
+    String(String),
+    Bytes(Vec<u8>),
+    Array(Vec<FrameValue>),
+}
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ProtocolError {
+    #[error("unknown OMENchat op code {0}")]
+    UnknownOp(u64),
+    #[error("unknown OMENchat compression code {0}")]
+    UnknownCompression(u64),
+    #[error("malformed frame: {0}")]
+    MalformedFrame(&'static str),
+}

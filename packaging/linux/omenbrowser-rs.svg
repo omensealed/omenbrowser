@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="18" fill="#12090d"/>
+  <rect x="12" y="12" width="104" height="104" rx="10" fill="none" stroke="#b45aac" stroke-width="6"/>
+  <text x="64" y="76" text-anchor="middle" font-family="monospace" font-size="38" fill="#e7d7e8">OM</text>
+</svg>

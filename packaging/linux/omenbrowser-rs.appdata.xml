@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.omensealed.omenbrowser</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <name>OMENbrowser_rs</name>
+  <summary>Reticulum, NomadNet, LXMF, and OMENchat desktop client</summary>
+  <developer id="io.github.omensealed">
+    <name>OMENbrowser_rs maintainers</name>
+  </developer>
+  <description>
+    <p>
+      OMENbrowser_rs is a native Rust desktop client for Reticulum,
+      NomadNet browsing, LXMF messaging, Micron/MicronPlus rendering,
+      and OMENchat.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/omensealed/omenbrowser</url>
+  <launchable type="desktop-id">omenbrowser-rs.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+</component>

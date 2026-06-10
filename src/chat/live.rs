@@ -1,0 +1,4305 @@
+use std::collections::BTreeMap;
+
+use super::client::{
+    ChatClient, ChatClientEvent, ChatClientRequest, ChatSessionId, ChatSessionView,
+};
+use super::descriptor::OmenChatDescriptor;
+use super::model::{ChatEvent, ChatEventKind, ChatRoomSummary, ChatServerSummary, ChatUserSummary};
+use super::protocol::{
+    ChatErrorCode, ChatOp, Frame, FrameBody, FrameValue, RoomId, DEFAULT_JOIN_BACKLOG_EVENTS,
+    PROTOCOL_NAME,
+};
+use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveChatClientState {
+    next_seq: u32,
+    pending_local_echoes: BTreeMap<u32, PendingLocalEcho>,
+    pending_uploads: BTreeMap<u32, PendingLiveUpload>,
+    pending_upload_downloads: BTreeMap<String, PendingLiveUploadDownload>,
+}
+
+impl Default for LiveChatClientState {
+    fn default() -> Self {
+        Self {
+            next_seq: 1,
+            pending_local_echoes: BTreeMap::new(),
+            pending_uploads: BTreeMap::new(),
+            pending_upload_downloads: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingLocalEcho {
+    session_id: ChatSessionId,
+    room_id: RoomId,
+    temp_event_id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingLiveUpload {
+    filename: String,
+    content_type: Option<String>,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingLiveUploadDownload {
+    filename: String,
+    content_type: Option<String>,
+    total_len: usize,
+    bytes: Vec<u8>,
+}
+
+impl LiveChatClientState {
+    fn reserve_seq(&mut self) -> u32 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1).max(1);
+        seq
+    }
+}
+
+pub fn handle_live_request<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    request: ChatClientRequest,
+) -> Vec<ChatClientEvent> {
+    match request {
+        ChatClientRequest::OpenServer(descriptor) => {
+            open_live_server(client, state, transport, descriptor)
+        }
+        ChatClientRequest::JoinRoom { session_id, room } => send_frame_or_error(
+            transport,
+            Frame::new(
+                ChatOp::JoinRoom,
+                state.reserve_seq(),
+                None,
+                FrameBody::Text(room),
+            ),
+            Some(session_id),
+        )
+        .map_or_else(
+            || drain_live_events(client, transport, Some(session_id)),
+            |event| vec![event],
+        ),
+        ChatClientRequest::PartRoom { session_id, room } => {
+            part_live_room(client, state, transport, session_id, room)
+        }
+        ChatClientRequest::SendMessage {
+            session_id,
+            room: _,
+            body,
+        } => send_live_room_text(
+            client,
+            state,
+            transport,
+            session_id,
+            body,
+            ChatOp::RoomMessage,
+        ),
+        ChatClientRequest::SendAction {
+            session_id,
+            room: _,
+            body,
+        } => send_live_room_text(
+            client,
+            state,
+            transport,
+            session_id,
+            body,
+            ChatOp::RoomAction,
+        ),
+        ChatClientRequest::SendNotice {
+            session_id,
+            room: _,
+            body,
+        } => send_live_room_text(
+            client,
+            state,
+            transport,
+            session_id,
+            body,
+            ChatOp::RoomNotice,
+        ),
+        ChatClientRequest::SendUpload {
+            session_id,
+            room: _,
+            filename,
+            content_type,
+            bytes,
+        } => send_live_upload_offer(
+            client,
+            state,
+            transport,
+            session_id,
+            filename,
+            content_type,
+            bytes,
+        ),
+        ChatClientRequest::RequestUpload {
+            session_id,
+            room: _,
+            resource_id,
+        } => request_live_upload_resource(client, state, transport, session_id, resource_id),
+        ChatClientRequest::RefreshRooms { session_id } => {
+            refresh_live_rooms(client, state, transport, session_id)
+        }
+        ChatClientRequest::SetTopic { session_id, topic } => {
+            set_live_room_topic(client, state, transport, session_id, topic)
+        }
+        ChatClientRequest::CreateRoom {
+            session_id,
+            room,
+            topic,
+        } => create_live_room(client, state, transport, session_id, room, topic),
+        ChatClientRequest::ModerateUser {
+            session_id,
+            action,
+            target,
+        } => moderate_live_user(client, state, transport, session_id, action, target),
+        ChatClientRequest::SyncRecent { session_id } => {
+            sync_live_recent_history(client, state, transport, session_id)
+        }
+        ChatClientRequest::LoadOlder { session_id } => {
+            load_live_history_before(client, state, transport, session_id)
+        }
+    }
+}
+
+pub fn reconnect_live_server<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    descriptor: OmenChatDescriptor,
+) -> Vec<ChatClientEvent> {
+    let Some(session) = client.session_mut(session_id) else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat reconnect session no longer exists".into(),
+        }];
+    };
+    if session.server.destination != descriptor.server_destination {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat reconnect destination changed".into(),
+        }];
+    }
+    session.status = "live link connected; reopening OMENchat session".into();
+
+    let mut events = vec![ChatClientEvent::ServerOpened {
+        session_id,
+        server: session.server.clone(),
+    }];
+    events.extend(send_session_open_and_join(
+        client,
+        state,
+        transport,
+        session_id,
+        descriptor.local_display_name.as_deref(),
+    ));
+    events
+}
+
+pub fn drain_live_events<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    transport: &mut T,
+    preferred_session_id: Option<ChatSessionId>,
+) -> Vec<ChatClientEvent> {
+    drain_live_events_inner(client, None, transport, preferred_session_id)
+}
+
+pub fn drain_live_events_with_state<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    preferred_session_id: Option<ChatSessionId>,
+) -> Vec<ChatClientEvent> {
+    drain_live_events_inner(client, Some(state), transport, preferred_session_id)
+}
+
+fn drain_live_events_inner<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    mut state: Option<&mut LiveChatClientState>,
+    transport: &mut T,
+    preferred_session_id: Option<ChatSessionId>,
+) -> Vec<ChatClientEvent> {
+    let mut events = Vec::new();
+    loop {
+        match recv_chat_event(transport) {
+            Ok(Some(link_event)) => apply_live_link_event(
+                client,
+                state.as_deref_mut(),
+                transport,
+                preferred_session_id,
+                link_event,
+                &mut events,
+            ),
+            Ok(None) => break,
+            Err(error) => {
+                events.push(ChatClientEvent::Error {
+                    session_id: preferred_session_id,
+                    message: format!("OMENchat live frame decode failed: {error}"),
+                });
+                break;
+            }
+        }
+    }
+    events
+}
+
+pub fn ping_live_session<T: ChatLinkTransport>(
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+) -> Option<ChatClientEvent> {
+    send_frame_or_error(
+        transport,
+        Frame::new(ChatOp::Ping, state.reserve_seq(), None, FrameBody::Empty),
+        Some(session_id),
+    )
+}
+
+fn open_live_server<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    descriptor: OmenChatDescriptor,
+) -> Vec<ChatClientEvent> {
+    let local_display_name = descriptor.local_display_name.clone();
+    let session_id = client.reserve_session_id();
+    let server = ChatServerSummary {
+        server_id: descriptor.server_destination.clone(),
+        destination: descriptor.server_destination,
+        display_name: descriptor
+            .display_name
+            .unwrap_or_else(|| "OMENchat Server".to_string()),
+    };
+    let active_room = ChatRoomSummary {
+        server_id: server.server_id.clone(),
+        room_id: 1,
+        name: descriptor
+            .rooms_hint
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "lobby".to_string()),
+        topic: None,
+        unread: 0,
+        joined: false,
+    };
+    client.push_session(ChatSessionView {
+        session_id,
+        server,
+        active_room: active_room.clone(),
+        users: Vec::new(),
+        events: Vec::new(),
+        rooms: vec![active_room.clone()],
+        status: "live link connected; opening OMENchat session".into(),
+    });
+
+    let mut events = vec![ChatClientEvent::ServerOpened {
+        session_id,
+        server: client
+            .session(session_id)
+            .expect("new live session")
+            .server
+            .clone(),
+    }];
+
+    events.extend(send_session_open_and_join(
+        client,
+        state,
+        transport,
+        session_id,
+        local_display_name.as_deref(),
+    ));
+    events
+}
+
+fn send_session_open_and_join<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    local_display_name: Option<&str>,
+) -> Vec<ChatClientEvent> {
+    let mut events = Vec::new();
+    let session_open_body = local_display_name
+        .map(|name| {
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::String(name.trim().to_owned()),
+            ])
+        })
+        .unwrap_or(FrameBody::Empty);
+    if let Err(error) = send_chat_frame(
+        transport,
+        &Frame::new(
+            ChatOp::SessionOpen,
+            state.reserve_seq(),
+            None,
+            session_open_body,
+        ),
+    ) {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: format!("OMENchat live session open failed: {error}"),
+        });
+        return events;
+    }
+
+    let room_name = client
+        .session(session_id)
+        .map(|session| session.active_room.name.clone())
+        .unwrap_or_else(|| "lobby".to_string());
+    if let Err(error) = send_chat_frame(
+        transport,
+        &Frame::new(
+            ChatOp::JoinRoom,
+            state.reserve_seq(),
+            None,
+            FrameBody::Text(room_name),
+        ),
+    ) {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: format!("OMENchat live join failed: {error}"),
+        });
+        return events;
+    }
+
+    events.extend(drain_live_events(client, transport, Some(session_id)));
+    events
+}
+
+fn part_live_room<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    room: Option<String>,
+) -> Vec<ChatClientEvent> {
+    let Some(room_id) = client.session(session_id).and_then(|session| {
+        room.as_deref()
+            .and_then(|name| {
+                let name = name.trim().trim_start_matches('#');
+                session
+                    .rooms
+                    .iter()
+                    .find(|room| room.name.eq_ignore_ascii_case(name))
+                    .map(|room| room.room_id)
+            })
+            .or(Some(session.active_room.room_id))
+    }) else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat live session is not available".into(),
+        }];
+    };
+    send_frame_or_error(
+        transport,
+        Frame::new(
+            ChatOp::PartRoom,
+            state.reserve_seq(),
+            Some(room_id),
+            FrameBody::Empty,
+        ),
+        Some(session_id),
+    )
+    .map_or_else(
+        || drain_live_events(client, transport, Some(session_id)),
+        |event| vec![event],
+    )
+}
+
+fn send_live_room_text<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    body: String,
+    op: ChatOp,
+) -> Vec<ChatClientEvent> {
+    let Some(room_id) = client
+        .session(session_id)
+        .map(|session| session.active_room.room_id)
+    else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat live session is not available".into(),
+        }];
+    };
+    let seq = state.reserve_seq();
+    let frame = Frame::new(op, seq, Some(room_id), FrameBody::Text(body.clone()));
+    match send_frame_or_error(transport, frame, Some(session_id)) {
+        Some(event) => vec![event],
+        None => {
+            if matches!(op, ChatOp::RoomMessage | ChatOp::RoomAction) {
+                let Some(local_echo) =
+                    append_pending_local_echo(client, session_id, room_id, seq, body, op)
+                else {
+                    return drain_live_events(client, transport, Some(session_id));
+                };
+                state.pending_local_echoes.insert(
+                    seq,
+                    PendingLocalEcho {
+                        session_id,
+                        room_id,
+                        temp_event_id: local_echo.event_id,
+                    },
+                );
+                let mut events = vec![ChatClientEvent::EventAppended {
+                    session_id,
+                    event: local_echo,
+                }];
+                events.extend(drain_live_events_with_state(
+                    client,
+                    state,
+                    transport,
+                    Some(session_id),
+                ));
+                events
+            } else {
+                drain_live_events_with_state(client, state, transport, Some(session_id))
+            }
+        }
+    }
+}
+
+fn append_pending_local_echo(
+    client: &mut ChatClient,
+    session_id: ChatSessionId,
+    room_id: RoomId,
+    seq: u32,
+    body: String,
+    op: ChatOp,
+) -> Option<ChatEvent> {
+    let server_id = client
+        .session(session_id)
+        .map(|session| session.server.server_id.clone())?;
+    let event = ChatEvent {
+        server_id,
+        room_id,
+        event_id: local_echo_event_id(seq),
+        actor_user_id: None,
+        actor_display_name: Some("You".into()),
+        at_unix: current_unix_secs(),
+        kind: match op {
+            ChatOp::RoomAction => ChatEventKind::Action { body },
+            _ => ChatEventKind::Message { body },
+        },
+    };
+    append_event(client, session_id, event.clone(), false);
+    Some(event)
+}
+
+fn local_echo_event_id(seq: u32) -> u64 {
+    u64::MAX.saturating_sub(seq as u64)
+}
+
+fn is_local_echo_event_id(event_id: u64) -> bool {
+    event_id > u64::MAX.saturating_sub(1_000_000)
+}
+
+fn current_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn send_live_upload_offer<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    filename: String,
+    content_type: Option<String>,
+    bytes: Vec<u8>,
+) -> Vec<ChatClientEvent> {
+    let Some(room_id) = client
+        .session(session_id)
+        .map(|session| session.active_room.room_id)
+    else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat live session is not available".into(),
+        }];
+    };
+    let filename = filename.trim().to_owned();
+    if filename.is_empty() || bytes.is_empty() {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "usage: /upload <path> with a non-empty file".into(),
+        }];
+    }
+    let byte_len = bytes.len() as u64;
+    let seq = state.reserve_seq();
+    state.pending_uploads.insert(
+        seq,
+        PendingLiveUpload {
+            filename: filename.clone(),
+            content_type: content_type.clone(),
+            bytes,
+        },
+    );
+    let mut fields = vec![
+        FrameValue::String(filename.clone()),
+        FrameValue::U64(byte_len),
+    ];
+    fields.push(
+        content_type
+            .map(FrameValue::String)
+            .unwrap_or(FrameValue::Nil),
+    );
+    if let Some(event) = send_frame_or_error(
+        transport,
+        Frame::new(
+            ChatOp::UploadOffer,
+            seq,
+            Some(room_id),
+            FrameBody::Fields(fields),
+        ),
+        Some(session_id),
+    ) {
+        state.pending_uploads.remove(&seq);
+        return vec![event];
+    }
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = format!("offered upload {filename} ({})", human_bytes(byte_len));
+    }
+    drain_live_events_with_state(client, state, transport, Some(session_id))
+}
+
+fn request_live_upload_resource<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    resource_id: String,
+) -> Vec<ChatClientEvent> {
+    let Some(room_id) = client
+        .session(session_id)
+        .map(|session| session.active_room.room_id)
+    else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat live session is not available".into(),
+        }];
+    };
+    let resource_id = resource_id.trim().to_owned();
+    if resource_id.is_empty() {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "upload resource id is empty".into(),
+        }];
+    }
+    let frame = Frame::new(
+        ChatOp::UploadFetch,
+        state.reserve_seq(),
+        Some(room_id),
+        FrameBody::Fields(vec![FrameValue::String(resource_id.clone())]),
+    );
+    if let Some(event) = send_frame_or_error(transport, frame, Some(session_id)) {
+        return vec![event];
+    }
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = format!("requested upload resource {resource_id}");
+    }
+    drain_live_events_with_state(client, state, transport, Some(session_id))
+}
+
+fn load_live_history_before<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+) -> Vec<ChatClientEvent> {
+    let Some(session) = client.session(session_id) else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat live session is not available".into(),
+        }];
+    };
+    let before = session
+        .events
+        .iter()
+        .filter(|event| event.room_id == session.active_room.room_id)
+        .map(|event| event.event_id)
+        .min()
+        .unwrap_or(u64::MAX);
+    let frame = Frame::new(
+        ChatOp::HistoryBefore,
+        state.reserve_seq(),
+        Some(session.active_room.room_id),
+        FrameBody::Fields(vec![FrameValue::U64(before)]),
+    );
+    if let Some(event) = send_frame_or_error(transport, frame, Some(session_id)) {
+        return vec![event];
+    }
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = "requested older room history".into();
+    }
+    drain_live_events(client, transport, Some(session_id))
+}
+
+fn sync_live_recent_history<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+) -> Vec<ChatClientEvent> {
+    let Some(session) = client.session(session_id) else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat live session is not available".into(),
+        }];
+    };
+    let fingerprint = recent_history_fingerprint(session);
+    let frame = Frame::new(
+        ChatOp::HistoryRecent,
+        state.reserve_seq(),
+        Some(session.active_room.room_id),
+        FrameBody::Fields(vec![
+            FrameValue::U64(fingerprint.first_event_id),
+            FrameValue::U64(fingerprint.last_event_id),
+            FrameValue::U64(fingerprint.event_count),
+            FrameValue::U64(fingerprint.checksum),
+        ]),
+    );
+    tracing::debug!(
+        session_id,
+        room_id = session.active_room.room_id,
+        first_event_id = fingerprint.first_event_id,
+        last_event_id = fingerprint.last_event_id,
+        event_count = fingerprint.event_count,
+        checksum = fingerprint.checksum,
+        "OMENchat requesting bounded recent room history sync"
+    );
+    if let Some(event) = send_frame_or_error(transport, frame, Some(session_id)) {
+        return vec![event];
+    }
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = "requested recent room history".into();
+    }
+    drain_live_events(client, transport, Some(session_id))
+}
+
+fn refresh_live_rooms<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+) -> Vec<ChatClientEvent> {
+    send_frame_or_error(
+        transport,
+        Frame::new(
+            ChatOp::Command,
+            state.reserve_seq(),
+            None,
+            FrameBody::Text("rooms".into()),
+        ),
+        Some(session_id),
+    )
+    .map_or_else(
+        || drain_live_events(client, transport, Some(session_id)),
+        |event| vec![event],
+    )
+}
+
+fn set_live_room_topic<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    topic: String,
+) -> Vec<ChatClientEvent> {
+    let Some(room_id) = client
+        .session(session_id)
+        .map(|session| session.active_room.room_id)
+    else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat live session is not available".into(),
+        }];
+    };
+    let command = format!("topic {}", topic.trim()).trim().to_owned();
+    send_frame_or_error(
+        transport,
+        Frame::new(
+            ChatOp::Command,
+            state.reserve_seq(),
+            Some(room_id),
+            FrameBody::Text(command),
+        ),
+        Some(session_id),
+    )
+    .map_or_else(
+        || drain_live_events(client, transport, Some(session_id)),
+        |event| vec![event],
+    )
+}
+
+fn create_live_room<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    room: String,
+    topic: Option<String>,
+) -> Vec<ChatClientEvent> {
+    if client.session(session_id).is_none() {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat live session is not available".into(),
+        }];
+    }
+    let room = room.trim().trim_start_matches('#');
+    if room.is_empty() {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "room name is required".into(),
+        }];
+    }
+    let command = topic
+        .as_deref()
+        .map(str::trim)
+        .filter(|topic| !topic.is_empty())
+        .map(|topic| format!("create {room} {topic}"))
+        .unwrap_or_else(|| format!("create {room}"));
+    send_frame_or_error(
+        transport,
+        Frame::new(
+            ChatOp::Command,
+            state.reserve_seq(),
+            None,
+            FrameBody::Text(command),
+        ),
+        Some(session_id),
+    )
+    .map_or_else(
+        || drain_live_events(client, transport, Some(session_id)),
+        |event| vec![event],
+    )
+}
+
+fn moderate_live_user<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    action: String,
+    target: String,
+) -> Vec<ChatClientEvent> {
+    let Some(room_id) = client
+        .session(session_id)
+        .map(|session| session.active_room.room_id)
+    else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat live session is not available".into(),
+        }];
+    };
+    let action = action.trim().to_ascii_lowercase();
+    let target = target.trim();
+    if target.is_empty()
+        || !matches!(
+            action.as_str(),
+            "kick" | "ban" | "unban" | "mute" | "unmute" | "role"
+        )
+    {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message:
+                "usage: /kick <user>, /ban <user>, /unban <user>, /mute <user>, /unmute <user>, or /role <user> <role>".into(),
+        }];
+    }
+    send_frame_or_error(
+        transport,
+        Frame::new(
+            ChatOp::Command,
+            state.reserve_seq(),
+            Some(room_id),
+            FrameBody::Text(format!("{action} {target}")),
+        ),
+        Some(session_id),
+    )
+    .map_or_else(
+        || drain_live_events(client, transport, Some(session_id)),
+        |event| vec![event],
+    )
+}
+
+fn send_frame_or_error<T: ChatLinkTransport>(
+    transport: &mut T,
+    frame: Frame,
+    session_id: Option<ChatSessionId>,
+) -> Option<ChatClientEvent> {
+    send_chat_frame(transport, &frame)
+        .err()
+        .map(|error| ChatClientEvent::Error {
+            session_id,
+            message: format!("OMENchat live send failed: {error}"),
+        })
+}
+
+fn apply_live_link_event(
+    client: &mut ChatClient,
+    state: Option<&mut LiveChatClientState>,
+    transport: &mut dyn ChatLinkTransport,
+    preferred_session_id: Option<ChatSessionId>,
+    link_event: ChatLinkEvent,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    match link_event {
+        ChatLinkEvent::Frame(frame) => apply_frame_with_state(
+            client,
+            state,
+            transport,
+            preferred_session_id,
+            frame,
+            events,
+        ),
+        ChatLinkEvent::InlineBatch {
+            op,
+            room_id,
+            values,
+        }
+        | ChatLinkEvent::ResourceBatch {
+            op,
+            room_id,
+            values,
+            ..
+        } => apply_batch(client, preferred_session_id, op, room_id, values, events),
+        ChatLinkEvent::UploadResource {
+            resource_id,
+            filename,
+            content_type,
+            data,
+            ..
+        } => {
+            let Some(session_id) = preferred_session_id else {
+                return;
+            };
+            let bytes = data.len();
+            if let Some(session) = client.session_mut(session_id) {
+                session.status = format!(
+                    "upload resource received: {filename} ({})",
+                    human_bytes(bytes as u64)
+                );
+            }
+            events.push(ChatClientEvent::UploadResourceAvailable {
+                session_id,
+                resource_id,
+                filename,
+                content_type,
+                bytes: data,
+            });
+        }
+    }
+}
+
+fn apply_frame(
+    client: &mut ChatClient,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let mut transport = NoopChatTransport;
+    apply_frame_with_state(
+        client,
+        None,
+        &mut transport,
+        preferred_session_id,
+        frame,
+        events,
+    );
+}
+
+struct NoopChatTransport;
+
+impl ChatLinkTransport for NoopChatTransport {
+    fn send_frame(&mut self, _frame_bytes: Vec<u8>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn recv_frame(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    fn fetch_resource(&mut self, _resource_id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+}
+
+fn apply_frame_with_state(
+    client: &mut ChatClient,
+    state: Option<&mut LiveChatClientState>,
+    transport: &mut dyn ChatLinkTransport,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    match frame.op {
+        ChatOp::SessionAccept => {
+            let policy = body_values(&frame.body).map(|values| {
+                let upload_quota_bytes = values.get(3)?.as_u64()?;
+                let ping_interval_seconds = values.get(4)?.as_u64()?.clamp(5, 600);
+                let upload_max_file_bytes = values
+                    .get(5)
+                    .and_then(FrameValueExt::as_u64)
+                    .unwrap_or(512 * 1024);
+                Some((
+                    upload_quota_bytes,
+                    upload_max_file_bytes,
+                    ping_interval_seconds,
+                ))
+            });
+            let motd = body_values(&frame.body)
+                .and_then(|values| values.get(2))
+                .and_then(FrameValueExt::as_str)
+                .map(str::trim)
+                .filter(|motd| !motd.is_empty())
+                .map(ToOwned::to_owned);
+            let rooms = body_values(&frame.body)
+                .and_then(|values| values.get(1))
+                .and_then(FrameValueExt::as_array)
+                .map(|values| {
+                    let server_id = preferred_session_id
+                        .and_then(|id| client.session(id))
+                        .map(|session| session.server.server_id.clone())
+                        .unwrap_or_default();
+                    values
+                        .iter()
+                        .filter_map(|value| parse_room(value, server_id.clone(), false))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if let Some(session_id) = preferred_session_id {
+                if let Some(motd) = motd {
+                    events.push(ChatClientEvent::ServerMotd { session_id, motd });
+                }
+                if !rooms.is_empty() {
+                    if let Some(session) = client.session_mut(session_id) {
+                        session.rooms = merge_rooms(session.rooms.clone(), rooms.clone());
+                    }
+                    events.push(ChatClientEvent::RoomsUpdated { session_id, rooms });
+                }
+                if let Some(Some((
+                    upload_quota_bytes,
+                    upload_max_file_bytes,
+                    ping_interval_seconds,
+                ))) = policy
+                {
+                    events.push(ChatClientEvent::ServerPolicy {
+                        session_id,
+                        upload_quota_bytes,
+                        upload_max_file_bytes,
+                        ping_interval_seconds,
+                    });
+                }
+            }
+            if let Some(session) = preferred_session_id.and_then(|id| client.session_mut(id)) {
+                session.status = "session accepted; joining room".into();
+            }
+        }
+        ChatOp::JoinAccept => {
+            let Some(session_id) = preferred_session_id else {
+                return;
+            };
+            let Some(room_value) = body_values(&frame.body).and_then(|values| values.first())
+            else {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "OMENchat join response did not include a room".into(),
+                });
+                return;
+            };
+            let Some(room) = parse_room(
+                room_value,
+                client
+                    .session(session_id)
+                    .map(|s| s.server.server_id.clone())
+                    .unwrap_or_default(),
+                true,
+            ) else {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "OMENchat join response had an invalid room shape".into(),
+                });
+                return;
+            };
+            if let Some(session) = client.session_mut(session_id) {
+                session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
+                for current in &mut session.rooms {
+                    if current.room_id == room.room_id {
+                        current.joined = true;
+                    }
+                }
+                session.active_room = room.clone();
+                clear_room_unread(session, room.room_id);
+                session.users.clear();
+                session.status = "joined live room".into();
+            }
+            events.push(ChatClientEvent::RoomJoined {
+                session_id,
+                room,
+                users: client
+                    .session(session_id)
+                    .map(|session| session.users.clone())
+                    .unwrap_or_default(),
+                latest_events: client
+                    .session(session_id)
+                    .map(|session| {
+                        session
+                            .events
+                            .iter()
+                            .filter(|event| event.room_id == session.active_room.room_id)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            });
+        }
+        ChatOp::RoomEvent => {
+            let Some(session_id) = preferred_session_id else {
+                return;
+            };
+            let server_id = client
+                .session(session_id)
+                .map(|session| session.server.server_id.clone())
+                .unwrap_or_default();
+            let Some(value) = body_values(&frame.body).and_then(|values| values.first()) else {
+                return;
+            };
+            let Some(event) = parse_event(value, server_id, frame.room_id.unwrap_or(1)) else {
+                return;
+            };
+            let gap_detected =
+                live_event_gap_detected(client, session_id, event.room_id, event.event_id);
+            append_event(client, session_id, event.clone(), false);
+            events.push(ChatClientEvent::EventAppended { session_id, event });
+            if gap_detected {
+                events.push(ChatClientEvent::HistorySyncNeeded {
+                    session_id,
+                    room_id: frame.room_id.unwrap_or(1),
+                });
+            }
+        }
+        ChatOp::MessageAck => {
+            if let Some(state) = state {
+                apply_message_ack(client, state, preferred_session_id, &frame, events);
+            }
+        }
+        ChatOp::Error | ChatOp::SessionReject => {
+            events.push(ChatClientEvent::Error {
+                session_id: preferred_session_id,
+                message: parse_error_text(&frame.body),
+            });
+        }
+        ChatOp::Pong => {
+            if let Some(session) = preferred_session_id.and_then(|id| client.session_mut(id)) {
+                session.status = "live ping acknowledged".into();
+            }
+        }
+        ChatOp::HistoryEnd => {
+            if let Some(session) = preferred_session_id.and_then(|id| client.session_mut(id)) {
+                session.status = "start of room history reached".into();
+            }
+        }
+        ChatOp::HistoryCurrent => {
+            if let Some(session_id) = preferred_session_id {
+                if let Some(session) = client.session_mut(session_id) {
+                    session.status = "room history sync current".into();
+                }
+                tracing::debug!(
+                    session_id,
+                    room_id = frame.room_id.unwrap_or(1),
+                    "OMENchat recent room history is current"
+                );
+                events.push(ChatClientEvent::HistorySynced {
+                    session_id,
+                    room_id: frame.room_id.unwrap_or(1),
+                });
+            }
+        }
+        ChatOp::CommandResult => {
+            apply_command_result(client, preferred_session_id, &frame.body, events);
+        }
+        ChatOp::RoomDelta => {
+            apply_room_delta(client, preferred_session_id, &frame.body, events);
+        }
+        ChatOp::UserDelta => {
+            apply_user_delta(client, preferred_session_id, &frame.body, events);
+        }
+        ChatOp::UploadAccept => {
+            apply_upload_accept(
+                client,
+                state,
+                transport,
+                preferred_session_id,
+                &frame,
+                events,
+            );
+        }
+        ChatOp::UploadReject => {
+            apply_upload_reject(client, state, preferred_session_id, &frame, events);
+        }
+        ChatOp::UploadComplete => {
+            apply_upload_complete(client, preferred_session_id, &frame, events);
+        }
+        ChatOp::UploadInlineChunk => {
+            apply_upload_inline_chunk(client, state, preferred_session_id, &frame, events);
+        }
+        _ => {}
+    }
+}
+
+fn apply_upload_inline_chunk(
+    client: &mut ChatClient,
+    state: Option<&mut LiveChatClientState>,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(session_id) = preferred_session_id else {
+        return;
+    };
+    let Some(state) = state else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat upload chunk received without live state".into(),
+        });
+        return;
+    };
+    let Some(values) = body_values(&frame.body) else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat upload chunk had an invalid body".into(),
+        });
+        return;
+    };
+    let Some(resource_id) = values.first().and_then(FrameValueExt::as_str) else {
+        return;
+    };
+    let Some(filename) = values.get(1).and_then(FrameValueExt::as_str) else {
+        return;
+    };
+    let total_len = values.get(2).and_then(FrameValueExt::as_u64).unwrap_or(0) as usize;
+    let content_type = values
+        .get(3)
+        .and_then(FrameValueExt::as_str)
+        .map(ToOwned::to_owned);
+    let offset = values
+        .get(4)
+        .and_then(FrameValueExt::as_u64)
+        .unwrap_or(usize::MAX as u64) as usize;
+    let Some(chunk) = values.get(5).and_then(FrameValueExt::as_bytes) else {
+        return;
+    };
+    let done = values
+        .get(6)
+        .and_then(FrameValueExt::as_bool)
+        .unwrap_or(false);
+    let entry = state
+        .pending_upload_downloads
+        .entry(resource_id.to_owned())
+        .or_insert_with(|| PendingLiveUploadDownload {
+            filename: filename.to_owned(),
+            content_type,
+            total_len,
+            bytes: Vec::with_capacity(total_len.min(512 * 1024)),
+        });
+    if offset != entry.bytes.len() {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: format!(
+                "OMENchat upload chunk out of order for {filename}: expected {}, got {offset}",
+                entry.bytes.len()
+            ),
+        });
+        return;
+    }
+    entry.bytes.extend_from_slice(chunk);
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = format!(
+            "upload resource receiving: {} / {}",
+            human_bytes(entry.bytes.len() as u64),
+            human_bytes(entry.total_len as u64)
+        );
+    }
+    events.push(ChatClientEvent::UploadResourceProgress {
+        session_id,
+        resource_id: resource_id.to_owned(),
+        filename: filename.to_owned(),
+        received: entry.bytes.len() as u64,
+        total: entry.total_len as u64,
+    });
+    if done || entry.bytes.len() >= entry.total_len {
+        let Some(entry) = state.pending_upload_downloads.remove(resource_id) else {
+            return;
+        };
+        if entry.bytes.len() != entry.total_len {
+            events.push(ChatClientEvent::Error {
+                session_id: Some(session_id),
+                message: format!(
+                    "OMENchat upload resource incomplete: got {}, expected {}",
+                    entry.bytes.len(),
+                    entry.total_len
+                ),
+            });
+            return;
+        }
+        events.push(ChatClientEvent::UploadResourceAvailable {
+            session_id,
+            resource_id: resource_id.to_owned(),
+            filename: entry.filename,
+            content_type: entry.content_type,
+            bytes: entry.bytes,
+        });
+    }
+}
+
+fn apply_message_ack(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(pending) = state.pending_local_echoes.remove(&frame.seq) else {
+        return;
+    };
+    if preferred_session_id.is_some_and(|session_id| session_id != pending.session_id) {
+        state.pending_local_echoes.insert(frame.seq, pending);
+        return;
+    }
+    let Some(values) = body_values(&frame.body) else {
+        return;
+    };
+    let Some(event_id) = values.first().and_then(FrameValueExt::as_u64) else {
+        return;
+    };
+    let kind_id = values.get(1).and_then(FrameValueExt::as_u64).unwrap_or(1);
+    let actor_user_id = values
+        .get(2)
+        .and_then(FrameValueExt::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let at_unix = values
+        .get(3)
+        .and_then(FrameValueExt::as_i64)
+        .unwrap_or_else(current_unix_secs);
+    let actor_display_name = values
+        .get(4)
+        .and_then(FrameValueExt::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let Some(session) = client.session_mut(pending.session_id) else {
+        return;
+    };
+    let Some(event) = session
+        .events
+        .iter_mut()
+        .find(|event| event.room_id == pending.room_id && event.event_id == pending.temp_event_id)
+    else {
+        return;
+    };
+    event.event_id = event_id;
+    event.actor_user_id = actor_user_id;
+    event.actor_display_name = actor_display_name;
+    event.at_unix = at_unix;
+    if kind_id == 2 {
+        if let ChatEventKind::Message { body } = &event.kind {
+            event.kind = ChatEventKind::Action { body: body.clone() };
+        }
+    }
+    let confirmed = event.clone();
+    session.status = "message delivered".into();
+    events.push(ChatClientEvent::EventAppended {
+        session_id: pending.session_id,
+        event: confirmed,
+    });
+}
+
+fn apply_upload_accept(
+    client: &mut ChatClient,
+    state: Option<&mut LiveChatClientState>,
+    transport: &mut dyn ChatLinkTransport,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(session_id) = preferred_session_id else {
+        return;
+    };
+    let Some(values) = body_values(&frame.body) else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat upload accept had an invalid body".into(),
+        });
+        return;
+    };
+    let Some(resource_id) = values
+        .first()
+        .and_then(FrameValueExt::as_str)
+        .map(str::to_owned)
+    else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat upload accept did not include a resource id".into(),
+        });
+        return;
+    };
+    let Some(state) = state else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat upload accepted after pending upload state was unavailable".into(),
+        });
+        return;
+    };
+    let Some(upload) = state.pending_uploads.remove(&frame.seq) else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat upload accepted but no matching pending file exists".into(),
+        });
+        return;
+    };
+    let byte_len = upload.bytes.len() as u64;
+    if let Err(error) = transport.send_resource(&resource_id, upload.bytes) {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: format!("OMENchat upload resource send failed: {error}"),
+        });
+        return;
+    }
+    if let Some(session) = client.session_mut(session_id) {
+        let content_suffix = upload
+            .content_type
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" as {value}"))
+            .unwrap_or_default();
+        session.status = format!(
+            "upload accepted; sending {} ({}){}",
+            upload.filename,
+            human_bytes(byte_len),
+            content_suffix
+        );
+    }
+    events.push(ChatClientEvent::UploadAccepted {
+        session_id,
+        resource_id,
+        filename: upload.filename,
+        bytes: byte_len,
+    });
+}
+
+fn apply_upload_reject(
+    client: &mut ChatClient,
+    state: Option<&mut LiveChatClientState>,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(session_id) = preferred_session_id else {
+        return;
+    };
+    if let Some(state) = state {
+        state.pending_uploads.remove(&frame.seq);
+    }
+    let reason = body_values(&frame.body)
+        .and_then(|values| values.first())
+        .and_then(FrameValueExt::as_str)
+        .unwrap_or("upload rejected by server")
+        .to_owned();
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = reason.clone();
+    }
+    events.push(ChatClientEvent::UploadRejected { session_id, reason });
+}
+
+fn apply_upload_complete(
+    client: &mut ChatClient,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(session_id) = preferred_session_id else {
+        return;
+    };
+    let Some(values) = body_values(&frame.body) else {
+        return;
+    };
+    let resource_id = values
+        .first()
+        .and_then(FrameValueExt::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let filename = values
+        .get(1)
+        .and_then(FrameValueExt::as_str)
+        .unwrap_or("upload")
+        .to_owned();
+    let bytes = values.get(2).and_then(FrameValueExt::as_u64).unwrap_or(0);
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = format!("upload complete: {filename} ({})", human_bytes(bytes));
+    }
+    events.push(ChatClientEvent::UploadCompleted {
+        session_id,
+        resource_id,
+        filename,
+        bytes,
+    });
+}
+
+fn apply_user_delta(
+    client: &mut ChatClient,
+    preferred_session_id: Option<ChatSessionId>,
+    body: &FrameBody,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(session_id) = preferred_session_id else {
+        return;
+    };
+    let server_id = client
+        .session(session_id)
+        .map(|session| session.server.server_id.clone())
+        .unwrap_or_default();
+    let Some(user) = body_values(body)
+        .and_then(|values| values.first())
+        .and_then(|value| parse_user(value, server_id))
+    else {
+        if let Some(session) = client.session_mut(session_id) {
+            session.status = "server returned an invalid user update".into();
+        }
+        return;
+    };
+    if let Some(session) = client.session_mut(session_id) {
+        if let Some(current) = session.users.iter_mut().find(|current| {
+            current.user_id == user.user_id || current.display_name == user.display_name
+        }) {
+            *current = user.clone();
+        } else {
+            session.users.push(user.clone());
+            session
+                .users
+                .sort_by(|left, right| left.display_name.cmp(&right.display_name));
+        }
+        session.status = format!("user updated: {}", user.display_name);
+    }
+    events.push(ChatClientEvent::UserUpdated { session_id, user });
+}
+
+fn apply_room_delta(
+    client: &mut ChatClient,
+    preferred_session_id: Option<ChatSessionId>,
+    body: &FrameBody,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(session_id) = preferred_session_id else {
+        return;
+    };
+    let server_id = client
+        .session(session_id)
+        .map(|session| session.server.server_id.clone())
+        .unwrap_or_default();
+    let Some(mut room) = body_values(body)
+        .and_then(|values| values.first())
+        .and_then(|value| parse_room(value, server_id, false))
+    else {
+        if let Some(session) = client.session_mut(session_id) {
+            session.status = "server returned an invalid room update".into();
+        }
+        return;
+    };
+    if let Some(session) = client.session_mut(session_id) {
+        if let Some(current) = session
+            .rooms
+            .iter()
+            .find(|current| current.room_id == room.room_id)
+        {
+            room.joined = current.joined;
+            room.unread = current.unread;
+        }
+        let active = session.active_room.room_id == room.room_id;
+        if active {
+            room.joined = session.active_room.joined;
+            session.active_room = room.clone();
+        }
+        session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
+        session.status = format!("room updated: #{}", room.name);
+    }
+    events.push(ChatClientEvent::RoomsUpdated {
+        session_id,
+        rooms: vec![room],
+    });
+}
+
+fn apply_command_result(
+    client: &mut ChatClient,
+    preferred_session_id: Option<ChatSessionId>,
+    body: &FrameBody,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(session_id) = preferred_session_id else {
+        return;
+    };
+    let Some(values) = body_values(body) else {
+        return;
+    };
+    let Some(command) = values.first().and_then(FrameValueExt::as_str) else {
+        return;
+    };
+    let server_id = client
+        .session(session_id)
+        .map(|session| session.server.server_id.clone())
+        .unwrap_or_default();
+    match command {
+        "rooms" => {
+            let rooms = values
+                .get(1)
+                .and_then(FrameValueExt::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| parse_room(value, server_id.clone(), false))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if rooms.is_empty() {
+                if let Some(session) = client.session_mut(session_id) {
+                    session.status = "server returned no rooms".into();
+                }
+                return;
+            }
+            if let Some(session) = client.session_mut(session_id) {
+                session.rooms = merge_rooms(session.rooms.clone(), rooms.clone());
+                session.status = format!("rooms refreshed: {}", rooms.len());
+            }
+            events.push(ChatClientEvent::RoomsUpdated { session_id, rooms });
+        }
+        "topic" => {
+            let Some(room) = values
+                .get(1)
+                .and_then(|value| parse_room(value, server_id, true))
+            else {
+                if let Some(session) = client.session_mut(session_id) {
+                    session.status = "server returned an invalid topic update".into();
+                }
+                return;
+            };
+            if let Some(session) = client.session_mut(session_id) {
+                let active = session.active_room.room_id == room.room_id;
+                session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
+                if active {
+                    session.active_room = room.clone();
+                }
+                session.status = if room.topic.as_deref().unwrap_or("").is_empty() {
+                    "topic cleared".into()
+                } else {
+                    "topic updated".into()
+                };
+            }
+            events.push(ChatClientEvent::RoomsUpdated {
+                session_id,
+                rooms: vec![room],
+            });
+        }
+        "create" => {
+            let Some(room) = values
+                .get(1)
+                .and_then(|value| parse_room(value, server_id, false))
+            else {
+                if let Some(session) = client.session_mut(session_id) {
+                    session.status = "server returned an invalid room create result".into();
+                }
+                return;
+            };
+            if let Some(session) = client.session_mut(session_id) {
+                session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
+                session.status = format!("room created: #{}", room.name);
+            }
+            events.push(ChatClientEvent::RoomsUpdated {
+                session_id,
+                rooms: vec![room],
+            });
+        }
+        "part" => {
+            let Some(room) = values
+                .get(1)
+                .and_then(|value| parse_room(value, server_id, false))
+            else {
+                if let Some(session) = client.session_mut(session_id) {
+                    session.status = "server returned an invalid room part result".into();
+                }
+                return;
+            };
+            if let Some(session) = client.session_mut(session_id) {
+                let active = session.active_room.room_id == room.room_id;
+                session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
+                if let Some(current) = session
+                    .rooms
+                    .iter_mut()
+                    .find(|current| current.room_id == room.room_id)
+                {
+                    current.joined = false;
+                }
+                if active {
+                    session.users.clear();
+                    if let Some(next_room) = session.rooms.iter().find(|room| room.joined).cloned()
+                    {
+                        session.active_room = next_room.clone();
+                        session.status =
+                            format!("left #{}; selected #{}", room.name, next_room.name);
+                    } else {
+                        session.active_room.joined = false;
+                        session.status =
+                            format!("left #{}; join another room to resume chat", room.name);
+                    }
+                } else {
+                    session.status = format!("left #{}", room.name);
+                }
+            }
+            events.push(ChatClientEvent::RoomsUpdated {
+                session_id,
+                rooms: vec![room],
+            });
+        }
+        "kick" | "ban" | "unban" | "mute" | "unmute" | "role" => {
+            let target_user = values
+                .get(1)
+                .and_then(|value| parse_user(value, String::new()));
+            let target = target_user
+                .as_ref()
+                .map(|user| user.display_name.clone())
+                .or_else(|| {
+                    values
+                        .get(1)
+                        .and_then(FrameValueExt::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "user".into());
+            if let Some(session) = client.session_mut(session_id) {
+                if matches!(command, "kick" | "ban") {
+                    if let Some(target_user) = target_user {
+                        session
+                            .users
+                            .retain(|user| user.user_id != target_user.user_id);
+                    } else {
+                        session
+                            .users
+                            .retain(|user| !user.display_name.eq_ignore_ascii_case(&target));
+                    }
+                } else if command == "role" {
+                    if let Some(target_user) = target_user {
+                        if let Some(current) = session
+                            .users
+                            .iter_mut()
+                            .find(|user| user.user_id == target_user.user_id)
+                        {
+                            *current = target_user;
+                        }
+                    }
+                }
+                session.status = format!("{command} applied to {target}");
+            }
+        }
+        _ => {}
+    }
+}
+
+fn merge_rooms(
+    mut existing: Vec<ChatRoomSummary>,
+    incoming: Vec<ChatRoomSummary>,
+) -> Vec<ChatRoomSummary> {
+    for room in incoming {
+        if let Some(current) = existing
+            .iter_mut()
+            .find(|current| current.room_id == room.room_id)
+        {
+            let unread = if room.unread == 0 {
+                current.unread
+            } else {
+                room.unread
+            };
+            let joined = current.joined || room.joined;
+            *current = room;
+            current.unread = unread;
+            current.joined = joined;
+        } else {
+            existing.push(room);
+        }
+    }
+    existing.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.room_id.cmp(&right.room_id))
+    });
+    existing
+}
+
+fn apply_batch(
+    client: &mut ChatClient,
+    preferred_session_id: Option<ChatSessionId>,
+    op: ChatOp,
+    room_id: Option<u32>,
+    values: Vec<FrameValue>,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(session_id) = preferred_session_id else {
+        return;
+    };
+    let Some(server_id) = client
+        .session(session_id)
+        .map(|session| session.server.server_id.clone())
+    else {
+        return;
+    };
+
+    match op {
+        ChatOp::UserListSnapshotInline | ChatOp::UserListSnapshotResource => {
+            if let Some(snapshot_room_id) = room_id {
+                let active_room_id = client
+                    .session(session_id)
+                    .map(|session| session.active_room.room_id);
+                if active_room_id != Some(snapshot_room_id) {
+                    return;
+                }
+            }
+            let users = values
+                .iter()
+                .filter_map(|value| parse_user(value, server_id.clone()))
+                .collect::<Vec<_>>();
+            if let Some(session) = client.session_mut(session_id) {
+                session.users = users;
+                session.status = "live userlist updated".into();
+            }
+        }
+        ChatOp::HistoryInline | ChatOp::HistoryResourceOffer => {
+            let parsed = values
+                .iter()
+                .filter_map(|value| parse_event(value, server_id.clone(), room_id.unwrap_or(1)))
+                .collect::<Vec<_>>();
+            let mut added = Vec::new();
+            for event in parsed {
+                if append_event(client, session_id, event.clone(), true) {
+                    added.push(event);
+                }
+            }
+            if !added.is_empty() {
+                if let Some(session) = client.session_mut(session_id) {
+                    session.status = format!("synced {} recent room history event(s)", added.len());
+                }
+                tracing::debug!(
+                    session_id,
+                    room_id = room_id.unwrap_or(1),
+                    count = added.len(),
+                    first_event_id = added.first().map(|event| event.event_id).unwrap_or(0),
+                    last_event_id = added.last().map(|event| event.event_id).unwrap_or(0),
+                    "OMENchat merged recent room history"
+                );
+                events.push(ChatClientEvent::HistoryPrepended {
+                    session_id,
+                    events: added,
+                });
+            } else if !values.is_empty() {
+                if let Some(session) = client.session_mut(session_id) {
+                    session.status = "room history sync current".into();
+                }
+                tracing::debug!(
+                    session_id,
+                    room_id = room_id.unwrap_or(1),
+                    count = values.len(),
+                    "OMENchat recent room history batch matched local cache"
+                );
+                events.push(ChatClientEvent::HistorySynced {
+                    session_id,
+                    room_id: room_id.unwrap_or(1),
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn append_event(
+    client: &mut ChatClient,
+    session_id: ChatSessionId,
+    event: ChatEvent,
+    sort_after: bool,
+) -> bool {
+    let Some(session) = client.session_mut(session_id) else {
+        return false;
+    };
+    if session
+        .events
+        .iter()
+        .any(|existing| existing.room_id == event.room_id && existing.event_id == event.event_id)
+    {
+        return false;
+    }
+    if event.room_id == session.active_room.room_id {
+        clear_room_unread(session, event.room_id);
+    } else {
+        increment_room_unread(session, event.room_id);
+    }
+    session.events.push(event);
+    if sort_after {
+        session
+            .events
+            .sort_by_key(|event| (event.room_id, event.event_id));
+    }
+    session.status = "live events updated".into();
+    true
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn live_event_gap_detected(
+    client: &ChatClient,
+    session_id: ChatSessionId,
+    room_id: RoomId,
+    event_id: u64,
+) -> bool {
+    let Some(session) = client.session(session_id) else {
+        return false;
+    };
+    let Some(last_event_id) = session
+        .events
+        .iter()
+        .filter(|event| event.room_id == room_id)
+        .map(|event| event.event_id)
+        .max()
+    else {
+        return false;
+    };
+    event_id > last_event_id.saturating_add(1)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RecentHistoryFingerprint {
+    first_event_id: u64,
+    last_event_id: u64,
+    event_count: u64,
+    checksum: u64,
+}
+
+fn recent_history_fingerprint(session: &ChatSessionView) -> RecentHistoryFingerprint {
+    let mut events = session
+        .events
+        .iter()
+        .filter(|event| event.room_id == session.active_room.room_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    events.sort_by_key(|event| event.event_id);
+    let keep = usize::from(DEFAULT_JOIN_BACKLOG_EVENTS);
+    if events.len() > keep {
+        events = events.split_off(events.len() - keep);
+    }
+    chat_event_fingerprint(&events)
+}
+
+fn chat_event_fingerprint(events: &[ChatEvent]) -> RecentHistoryFingerprint {
+    let mut checksum = 0xcbf29ce484222325_u64;
+    for event in events {
+        checksum = fnv_mix_u64(checksum, event.event_id);
+        checksum = fnv_mix_u64(checksum, event.room_id as u64);
+        checksum = fnv_mix_u64(checksum, event.actor_user_id.unwrap_or_default() as u64);
+        checksum = fnv_mix_u64(checksum, event.at_unix as u64);
+        checksum = fnv_mix_bytes(checksum, event.actor_display_name.as_deref().unwrap_or(""));
+        match &event.kind {
+            ChatEventKind::Message { body } => {
+                checksum = fnv_mix_u64(checksum, 1);
+                checksum = fnv_mix_bytes(checksum, body);
+            }
+            ChatEventKind::Action { body } => {
+                checksum = fnv_mix_u64(checksum, 2);
+                checksum = fnv_mix_bytes(checksum, body);
+            }
+            ChatEventKind::Notice { body } => {
+                checksum = fnv_mix_u64(checksum, 3);
+                checksum = fnv_mix_bytes(checksum, body);
+            }
+            ChatEventKind::System { body } => {
+                checksum = fnv_mix_u64(checksum, 4);
+                checksum = fnv_mix_bytes(checksum, body);
+            }
+            ChatEventKind::Upload {
+                resource_id,
+                filename,
+                bytes,
+            } => {
+                checksum = fnv_mix_u64(checksum, 5);
+                checksum = fnv_mix_bytes(checksum, resource_id);
+                checksum = fnv_mix_bytes(checksum, filename);
+                checksum = fnv_mix_u64(checksum, *bytes);
+            }
+        }
+    }
+    RecentHistoryFingerprint {
+        first_event_id: events.first().map(|event| event.event_id).unwrap_or(0),
+        last_event_id: events.last().map(|event| event.event_id).unwrap_or(0),
+        event_count: events.len() as u64,
+        checksum,
+    }
+}
+
+fn fnv_mix_u64(mut checksum: u64, value: u64) -> u64 {
+    for byte in value.to_le_bytes() {
+        checksum ^= u64::from(byte);
+        checksum = checksum.wrapping_mul(0x100000001b3);
+    }
+    checksum
+}
+
+fn fnv_mix_bytes(mut checksum: u64, value: &str) -> u64 {
+    for byte in value.as_bytes() {
+        checksum ^= u64::from(*byte);
+        checksum = checksum.wrapping_mul(0x100000001b3);
+    }
+    checksum
+}
+
+fn clear_room_unread(session: &mut ChatSessionView, room_id: u32) {
+    if session.active_room.room_id == room_id {
+        session.active_room.unread = 0;
+    }
+    if let Some(room) = session
+        .rooms
+        .iter_mut()
+        .find(|room| room.room_id == room_id)
+    {
+        room.unread = 0;
+    }
+}
+
+fn increment_room_unread(session: &mut ChatSessionView, room_id: u32) {
+    if session.active_room.room_id == room_id {
+        return;
+    }
+    if let Some(room) = session
+        .rooms
+        .iter_mut()
+        .find(|room| room.room_id == room_id)
+    {
+        room.unread = room.unread.saturating_add(1);
+    } else {
+        session.rooms.push(ChatRoomSummary {
+            server_id: session.server.server_id.clone(),
+            room_id,
+            name: format!("room-{room_id}"),
+            topic: None,
+            unread: 1,
+            joined: false,
+        });
+    }
+}
+
+fn parse_room(value: &FrameValue, server_id: String, joined: bool) -> Option<ChatRoomSummary> {
+    let fields = value.as_array()?;
+    Some(ChatRoomSummary {
+        server_id,
+        room_id: fields.first()?.as_u64()? as u32,
+        name: fields.get(1)?.as_str()?.to_string(),
+        topic: match fields.get(2) {
+            Some(FrameValue::String(topic)) if !topic.trim().is_empty() => {
+                Some(topic.trim().to_owned())
+            }
+            _ => None,
+        },
+        unread: 0,
+        joined,
+    })
+}
+
+fn parse_user(value: &FrameValue, server_id: String) -> Option<ChatUserSummary> {
+    let fields = value.as_array()?;
+    Some(ChatUserSummary {
+        server_id,
+        user_id: fields.first()?.as_u64()? as u32,
+        display_name: fields.get(1)?.as_str()?.to_string(),
+        role_bits: fields.get(2).and_then(FrameValueExt::as_u64).unwrap_or(0),
+        status_bits: fields.get(3).and_then(FrameValueExt::as_u64).unwrap_or(0) as u32,
+        lxmf_available: fields
+            .get(4)
+            .and_then(FrameValueExt::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn parse_event(value: &FrameValue, server_id: String, room_id: u32) -> Option<ChatEvent> {
+    let fields = value.as_array()?;
+    let kind_id = fields.get(1)?.as_u64()?;
+    let body = fields.get(4)?.as_str()?.to_string();
+    let kind = match kind_id {
+        1 => ChatEventKind::Message { body },
+        2 => ChatEventKind::Action { body },
+        3 => ChatEventKind::Notice { body },
+        4 => ChatEventKind::System { body },
+        5 => ChatEventKind::Upload {
+            resource_id: fields.get(6)?.as_str()?.to_owned(),
+            filename: fields.get(7)?.as_str()?.to_owned(),
+            bytes: fields.get(8)?.as_u64()?,
+        },
+        _ => return None,
+    };
+    Some(ChatEvent {
+        server_id,
+        room_id,
+        event_id: fields.first()?.as_u64()?,
+        actor_user_id: match fields.get(2) {
+            Some(FrameValue::Nil) | None => None,
+            Some(value) => Some(value.as_u64()? as u32),
+        },
+        actor_display_name: match fields.get(5) {
+            Some(FrameValue::String(name)) if !name.trim().is_empty() => {
+                Some(name.trim().to_owned())
+            }
+            _ => None,
+        },
+        at_unix: fields.get(3)?.as_i64()?,
+        kind,
+    })
+}
+
+fn body_values(body: &FrameBody) -> Option<&[FrameValue]> {
+    match body {
+        FrameBody::Fields(values) => Some(values),
+        _ => None,
+    }
+}
+
+fn parse_error_text(body: &FrameBody) -> String {
+    match body {
+        FrameBody::Text(value) => value.clone(),
+        FrameBody::Fields(values) => {
+            let code = values.iter().find_map(FrameValueExt::as_u64);
+            let message = values
+                .iter()
+                .find_map(FrameValueExt::as_str)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "OMENchat server returned an error".into());
+            if let Some(label) = code.and_then(error_code_label) {
+                format!("{label}: {message}")
+            } else {
+                message
+            }
+        }
+        FrameBody::Empty => "OMENchat server returned an error".into(),
+    }
+}
+
+fn error_code_label(code: u64) -> Option<&'static str> {
+    match code as u16 {
+        value if value == ChatErrorCode::PermissionDenied as u16 => Some("permission denied"),
+        value if value == ChatErrorCode::NotJoined as u16 => Some("not joined"),
+        value if value == ChatErrorCode::RoomNotFound as u16 => Some("room not found"),
+        value if value == ChatErrorCode::UserNotFound as u16 => Some("user not found"),
+        value if value == ChatErrorCode::RateLimited as u16 => Some("rate limited"),
+        value if value == ChatErrorCode::HistoryUnavailable as u16 => Some("history unavailable"),
+        value if value == ChatErrorCode::MalformedFrame as u16 => Some("malformed frame"),
+        value if value == ChatErrorCode::UnsupportedProtocolVersion as u16 => {
+            Some("unsupported protocol")
+        }
+        value if value == ChatErrorCode::CompressionUnsupported as u16 => {
+            Some("compression unsupported")
+        }
+        value if value == ChatErrorCode::ResourceUnavailable as u16 => Some("resource unavailable"),
+        _ => None,
+    }
+}
+
+trait FrameValueExt {
+    fn as_array(&self) -> Option<&[FrameValue]>;
+    fn as_bool(&self) -> Option<bool>;
+    fn as_bytes(&self) -> Option<&[u8]>;
+    fn as_i64(&self) -> Option<i64>;
+    fn as_str(&self) -> Option<&str>;
+    fn as_u64(&self) -> Option<u64>;
+}
+
+impl FrameValueExt for FrameValue {
+    fn as_array(&self) -> Option<&[FrameValue]> {
+        match self {
+            FrameValue::Array(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            FrameValue::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            FrameValue::Bytes(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            FrameValue::I64(value) => Some(*value),
+            FrameValue::U64(value) => i64::try_from(*value).ok(),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            FrameValue::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_u64(&self) -> Option<u64> {
+        match self {
+            FrameValue::U64(value) => Some(*value),
+            FrameValue::I64(value) if *value >= 0 => Some(*value as u64),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::codec::decode_frame;
+    use crate::chat::protocol::batch::compressed_values_body;
+    use crate::chat::rns::CapturedChatTransport;
+
+    #[test]
+    fn session_accept_surfaces_optional_server_motd() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: Vec::new(),
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "opening".into(),
+        });
+        let mut events = Vec::new();
+
+        apply_frame(
+            &mut client,
+            Some(session_id),
+            Frame::new(
+                ChatOp::SessionAccept,
+                1,
+                None,
+                FrameBody::Fields(vec![
+                    FrameValue::String("omenchat-v0.1".into()),
+                    FrameValue::Array(vec![]),
+                    FrameValue::String("Welcome to the field node".into()),
+                ]),
+            ),
+            &mut events,
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::ServerMotd { session_id: 1, motd }]
+            if motd == "Welcome to the field node"
+        ));
+    }
+
+    #[test]
+    fn session_accept_surfaces_server_policy_when_advertised() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: Vec::new(),
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "opening".into(),
+        });
+        let mut events = Vec::new();
+
+        apply_frame(
+            &mut client,
+            Some(session_id),
+            Frame::new(
+                ChatOp::SessionAccept,
+                1,
+                None,
+                FrameBody::Fields(vec![
+                    FrameValue::String("omenchat-v0.1".into()),
+                    FrameValue::Array(vec![]),
+                    FrameValue::Nil,
+                    FrameValue::U64(12_345),
+                    FrameValue::U64(45),
+                    FrameValue::U64(512),
+                ]),
+            ),
+            &mut events,
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::ServerPolicy {
+                session_id: 1,
+                upload_quota_bytes: 12_345,
+                upload_max_file_bytes: 512,
+                ping_interval_seconds: 45
+            }
+        )));
+    }
+
+    #[test]
+    fn live_open_sends_session_open_and_join_then_applies_server_frames() {
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::SessionAccept,
+                1,
+                None,
+                FrameBody::Fields(vec![
+                    FrameValue::String("omenchat-v0.1".into()),
+                    FrameValue::Array(vec![]),
+                ]),
+            ))
+            .expect("session accept");
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::JoinAccept,
+                2,
+                Some(1),
+                FrameBody::Fields(vec![room_value(1, "lobby")]),
+            ))
+            .expect("join accept");
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::UserListSnapshotInline,
+                2,
+                Some(1),
+                compressed_values_body(&[FrameValue::Array(vec![
+                    FrameValue::U64(7),
+                    FrameValue::String("Operator".into()),
+                    FrameValue::U64(1),
+                    FrameValue::U64(0),
+                    FrameValue::Bool(true),
+                ])])
+                .expect("userlist"),
+            ))
+            .expect("userlist");
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::HistoryInline,
+                2,
+                Some(1),
+                compressed_values_body(&[event_value(10, 7, "hello")]).expect("history"),
+            ))
+            .expect("history");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::OpenServer(OmenChatDescriptor {
+                server_destination: "abcd".into(),
+                display_name: Some("Test Chat".into()),
+                ..OmenChatDescriptor::default()
+            }),
+        );
+
+        assert_eq!(transport.sent_frames.len(), 2);
+        assert!(matches!(
+            events.first(),
+            Some(ChatClientEvent::ServerOpened { session_id: 1, .. })
+        ));
+        let session = client.session(1).expect("session");
+        assert_eq!(session.server.display_name, "Test Chat");
+        assert_eq!(session.active_room.name, "lobby");
+        assert_eq!(session.rooms[0].name, "lobby");
+        assert_eq!(session.users[0].display_name, "Operator");
+        assert_eq!(session.events.len(), 1);
+    }
+
+    #[test]
+    fn live_upload_offer_sends_accepted_resource_payload() {
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "joined".into(),
+        });
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendUpload {
+                session_id,
+                room: "lobby".into(),
+                filename: "proof.txt".into(),
+                content_type: Some("text/plain".into()),
+                bytes: b"proof".to_vec(),
+            },
+        );
+
+        assert!(events.is_empty());
+        let offer = decode_frame(&transport.sent_frames[0]).expect("upload offer");
+        assert_eq!(offer.op, ChatOp::UploadOffer);
+        assert_eq!(offer.room_id, Some(1));
+        assert_eq!(offer.seq, 1);
+
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::UploadAccept,
+                offer.seq,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("upload:1:7:1".into()),
+                    FrameValue::U64(50 * 1024 * 1024),
+                    FrameValue::U64(5),
+                    FrameValue::U64(0),
+                ]),
+            ))
+            .expect("upload accept");
+        let events =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+
+        assert_eq!(
+            transport.sent_resources.get("upload:1:7:1"),
+            Some(&b"proof".to_vec())
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::UploadAccepted {
+                filename,
+                bytes: 5,
+                ..
+            }] if filename == "proof.txt"
+        ));
+    }
+
+    #[test]
+    fn live_upload_inline_chunks_emit_available_resource() {
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "joined".into(),
+        });
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::UploadInlineChunk,
+                4,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("upload:1:7:4".into()),
+                    FrameValue::String("image.png".into()),
+                    FrameValue::U64(7),
+                    FrameValue::String("image/png".into()),
+                    FrameValue::U64(0),
+                    FrameValue::Bytes(b"abc".to_vec()),
+                    FrameValue::Bool(false),
+                ]),
+            ))
+            .expect("chunk 1");
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::UploadInlineChunk,
+                4,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("upload:1:7:4".into()),
+                    FrameValue::String("image.png".into()),
+                    FrameValue::U64(7),
+                    FrameValue::String("image/png".into()),
+                    FrameValue::U64(3),
+                    FrameValue::Bytes(b"defg".to_vec()),
+                    FrameValue::Bool(true),
+                ]),
+            ))
+            .expect("chunk 2");
+
+        let events =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ChatClientEvent::UploadResourceProgress {
+                    resource_id: first_resource_id,
+                    received: 3,
+                    total: 7,
+                    ..
+                },
+                ChatClientEvent::UploadResourceProgress {
+                    resource_id: second_resource_id,
+                    received: 7,
+                    total: 7,
+                    ..
+                },
+                ChatClientEvent::UploadResourceAvailable {
+                resource_id,
+                filename,
+                content_type: Some(content_type),
+                bytes,
+                ..
+            }
+            ] if first_resource_id == "upload:1:7:4"
+                && second_resource_id == "upload:1:7:4"
+                && resource_id == "upload:1:7:4"
+                && filename == "image.png"
+                && content_type == "image/png"
+                && bytes == b"abcdefg"
+        ));
+    }
+
+    #[test]
+    fn live_join_room_switches_active_room_and_retains_other_room_history() {
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::JoinAccept,
+                1,
+                Some(2),
+                FrameBody::Fields(vec![room_value(2, "support")]),
+            ))
+            .expect("join accept");
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::HistoryInline,
+                1,
+                Some(2),
+                compressed_values_body(&[event_value(20, 7, "support hello")]).expect("history"),
+            ))
+            .expect("history");
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![
+                room_summary("abcd", 1, "lobby"),
+                room_summary("abcd", 2, "support"),
+            ],
+            users: Vec::new(),
+            events: vec![ChatEvent {
+                server_id: "abcd".into(),
+                room_id: 1,
+                event_id: 1,
+                actor_user_id: None,
+                actor_display_name: None,
+                at_unix: 0,
+                kind: ChatEventKind::System {
+                    body: "old lobby event".into(),
+                },
+            }],
+            status: "ready".into(),
+        });
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::JoinRoom {
+                session_id,
+                room: "support".into(),
+            },
+        );
+
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.active_room.name, "support");
+        assert_eq!(
+            session
+                .rooms
+                .iter()
+                .find(|room| room.name == "lobby")
+                .map(|room| room.joined),
+            Some(true)
+        );
+        assert_eq!(
+            session
+                .rooms
+                .iter()
+                .find(|room| room.name == "support")
+                .map(|room| room.joined),
+            Some(true)
+        );
+        assert_eq!(
+            session
+                .events
+                .iter()
+                .map(|event| (event.room_id, event.event_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (2, 20)]
+        );
+        assert!(matches!(
+            events.first(),
+            Some(ChatClientEvent::RoomJoined {
+                room,
+                latest_events,
+                ..
+            }) if room.name == "support" && latest_events.iter().all(|event| event.room_id == 2)
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::HistoryPrepended { events, .. }
+                if events.iter().map(|event| event.room_id).collect::<Vec<_>>() == vec![2]
+        )));
+    }
+
+    #[test]
+    fn live_rejoin_same_room_preserves_restored_cached_history() {
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::JoinAccept,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![room_value(1, "lobby")]),
+            ))
+            .expect("join accept");
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: vec![ChatEvent {
+                server_id: "abcd".into(),
+                room_id: 1,
+                event_id: 1,
+                actor_user_id: None,
+                actor_display_name: None,
+                at_unix: 0,
+                kind: ChatEventKind::Message {
+                    body: "restored cached message".into(),
+                },
+            }],
+            status: "restored from local cache".into(),
+        });
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::JoinRoom {
+                session_id,
+                room: "lobby".into(),
+            },
+        );
+
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.active_room.name, "lobby");
+        assert_eq!(session.events.len(), 1);
+        assert_eq!(
+            session.events[0].kind,
+            ChatEventKind::Message {
+                body: "restored cached message".into()
+            }
+        );
+        assert!(matches!(
+            events.first(),
+            Some(ChatClientEvent::RoomJoined { room, .. }) if room.name == "lobby"
+        ));
+    }
+
+    #[test]
+    fn live_load_older_history_uses_active_room_event_floor() {
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 2,
+                name: "help".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![
+                room_summary("abcd", 1, "lobby"),
+                room_summary("abcd", 2, "help"),
+            ],
+            users: Vec::new(),
+            events: vec![
+                ChatEvent {
+                    server_id: "abcd".into(),
+                    room_id: 1,
+                    event_id: 1,
+                    actor_user_id: None,
+                    actor_display_name: None,
+                    at_unix: 1,
+                    kind: ChatEventKind::Message {
+                        body: "older lobby row".into(),
+                    },
+                },
+                ChatEvent {
+                    server_id: "abcd".into(),
+                    room_id: 2,
+                    event_id: 10,
+                    actor_user_id: None,
+                    actor_display_name: None,
+                    at_unix: 10,
+                    kind: ChatEventKind::Message {
+                        body: "active help row".into(),
+                    },
+                },
+            ],
+            status: "ready".into(),
+        });
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::LoadOlder { session_id },
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("frame");
+        assert_eq!(frame.op, ChatOp::HistoryBefore);
+        assert_eq!(frame.room_id, Some(2));
+        assert_eq!(
+            match &frame.body {
+                FrameBody::Fields(values) => values.iter().find_map(FrameValueExt::as_u64),
+                _ => None,
+            },
+            Some(10)
+        );
+        assert_eq!(
+            client.session(session_id).expect("session").status,
+            "requested older room history"
+        );
+    }
+
+    #[test]
+    fn live_sync_recent_history_requests_latest_active_room_batch() {
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::HistoryInline,
+                7,
+                Some(2),
+                compressed_values_body(&[event_value(11, 7, "missed while offline")])
+                    .expect("history"),
+            ))
+            .expect("history frame");
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 2,
+                name: "help".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![
+                room_summary("abcd", 1, "lobby"),
+                room_summary("abcd", 2, "help"),
+            ],
+            users: Vec::new(),
+            events: vec![ChatEvent {
+                server_id: "abcd".into(),
+                room_id: 2,
+                event_id: 10,
+                actor_user_id: None,
+                actor_display_name: None,
+                at_unix: 10,
+                kind: ChatEventKind::Message {
+                    body: "cached active help row".into(),
+                },
+            }],
+            status: "ready".into(),
+        });
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SyncRecent { session_id },
+        );
+
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("frame");
+        assert_eq!(frame.op, ChatOp::HistoryRecent);
+        assert_eq!(frame.room_id, Some(2));
+        let FrameBody::Fields(values) = &frame.body else {
+            panic!("recent sync fingerprint fields");
+        };
+        assert_eq!(values.first().and_then(FrameValueExt::as_u64), Some(10));
+        assert_eq!(values.get(1).and_then(FrameValueExt::as_u64), Some(10));
+        assert_eq!(values.get(2).and_then(FrameValueExt::as_u64), Some(1));
+        assert!(values.get(3).and_then(FrameValueExt::as_u64).is_some());
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::HistoryPrepended { events, .. }]
+                if events.iter().map(|event| event.event_id).collect::<Vec<_>>() == vec![11]
+        ));
+        assert_eq!(
+            client
+                .session(session_id)
+                .expect("session")
+                .events
+                .iter()
+                .filter(|event| event.room_id == 2)
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+    }
+
+    #[test]
+    fn live_history_batch_reports_room_history_status() {
+        let mut client = ChatClient::new();
+        let mut transport = CapturedChatTransport::default();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::HistoryInline,
+                7,
+                Some(1),
+                compressed_values_body(&[event_value(1, 7, "one"), event_value(2, 7, "two")])
+                    .expect("history"),
+            ))
+            .expect("history frame");
+
+        let events = drain_live_events(&mut client, &mut transport, Some(session_id));
+
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::HistoryPrepended { events, .. }] if events.len() == 2
+        ));
+        assert_eq!(
+            client.session(session_id).expect("session").status,
+            "synced 2 recent room history event(s)"
+        );
+    }
+
+    #[test]
+    fn live_duplicate_recent_history_reports_room_current() {
+        let mut client = ChatClient::new();
+        let mut transport = CapturedChatTransport::default();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: vec![ChatEvent {
+                server_id: "abcd".into(),
+                room_id: 1,
+                event_id: 2,
+                actor_user_id: Some(7),
+                actor_display_name: None,
+                at_unix: 2,
+                kind: ChatEventKind::Message {
+                    body: "already cached".into(),
+                },
+            }],
+            status: "requested recent room history".into(),
+        });
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::HistoryInline,
+                7,
+                Some(1),
+                compressed_values_body(&[event_value(2, 7, "already cached")]).expect("history"),
+            ))
+            .expect("history frame");
+
+        let events = drain_live_events(&mut client, &mut transport, Some(session_id));
+
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::HistorySynced {
+                session_id: 1,
+                room_id: 1
+            }]
+        ));
+        assert_eq!(
+            client.session(session_id).expect("session").status,
+            "room history sync current"
+        );
+    }
+
+    #[test]
+    fn live_userlist_snapshot_for_inactive_room_does_not_replace_active_users() {
+        let mut client = ChatClient::new();
+        let mut transport = CapturedChatTransport::default();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 2, "help"),
+            rooms: vec![
+                room_summary("abcd", 1, "lobby"),
+                room_summary("abcd", 2, "help"),
+            ],
+            users: vec![ChatUserSummary {
+                server_id: "abcd".into(),
+                user_id: 9,
+                display_name: "ActiveUser".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: true,
+            }],
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::UserListSnapshotInline,
+                7,
+                Some(1),
+                compressed_values_body(&[FrameValue::Array(vec![
+                    FrameValue::U64(7),
+                    FrameValue::String("StaleLobbyUser".into()),
+                    FrameValue::U64(0),
+                    FrameValue::U64(0),
+                    FrameValue::Bool(true),
+                ])])
+                .expect("userlist"),
+            ))
+            .expect("userlist frame");
+
+        let events = drain_live_events(&mut client, &mut transport, Some(session_id));
+
+        assert!(events.is_empty());
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.users.len(), 1);
+        assert_eq!(session.users[0].display_name, "ActiveUser");
+        assert_eq!(session.status, "ready");
+    }
+
+    #[test]
+    fn live_send_message_local_echo_is_confirmed_by_message_ack() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            }],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::MessageAck,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::U64(11),
+                    FrameValue::U64(1),
+                    FrameValue::U64(7),
+                    FrameValue::I64(12),
+                    FrameValue::String("Alice".into()),
+                ]),
+            ))
+            .expect("message ack");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendMessage {
+                session_id,
+                room: "lobby".into(),
+                body: "sent".into(),
+            },
+        );
+
+        assert_eq!(transport.sent_frames.len(), 1);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| {
+            matches!(event, ChatClientEvent::EventAppended { event, .. }
+                if is_local_echo_event_id(event.event_id))
+        }));
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.events.len(), 1);
+        assert_eq!(session.events[0].event_id, 11);
+        assert_eq!(session.events[0].actor_user_id, Some(7));
+        assert_eq!(
+            session.events[0].actor_display_name.as_deref(),
+            Some("Alice")
+        );
+        assert_eq!(session.status, "message delivered");
+    }
+
+    #[test]
+    fn live_send_message_without_ack_keeps_pending_local_echo() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendMessage {
+                session_id,
+                room: "lobby".into(),
+                body: "unsent until ack".into(),
+            },
+        );
+
+        assert_eq!(transport.sent_frames.len(), 1);
+        assert_eq!(state.pending_local_echoes.len(), 1);
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::EventAppended { session_id: 1, event }]
+                if is_local_echo_event_id(event.event_id)
+                    && event.actor_display_name.as_deref() == Some("You")
+        ));
+        assert_eq!(client.session(session_id).expect("session").events.len(), 1);
+    }
+
+    #[test]
+    fn live_room_event_gap_requests_recent_history_sync() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: vec![ChatEvent {
+                server_id: "abcd".into(),
+                room_id: 1,
+                event_id: 11,
+                actor_user_id: Some(7),
+                actor_display_name: None,
+                at_unix: 11,
+                kind: ChatEventKind::Message {
+                    body: "cached".into(),
+                },
+            }],
+            status: "ready".into(),
+        });
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::RoomEvent,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![event_value(13, 7, "new")]),
+            ))
+            .expect("room event");
+
+        let events = drain_live_events(&mut client, &mut transport, Some(session_id));
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ChatClientEvent::EventAppended { session_id: 1, .. },
+                ChatClientEvent::HistorySyncNeeded {
+                    session_id: 1,
+                    room_id: 1
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn live_room_event_for_inactive_room_increments_unread() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![
+                room_summary("abcd", 1, "lobby"),
+                room_summary("abcd", 2, "support"),
+            ],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut events = Vec::new();
+        apply_frame(
+            &mut client,
+            Some(session_id),
+            Frame::new(
+                ChatOp::RoomEvent,
+                1,
+                Some(2),
+                FrameBody::Fields(vec![event_value(11, 7, "support ping")]),
+            ),
+            &mut events,
+        );
+
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.active_room.unread, 0);
+        assert_eq!(
+            session
+                .rooms
+                .iter()
+                .find(|room| room.room_id == 2)
+                .map(|room| room.unread),
+            Some(1)
+        );
+        assert_eq!(session.events.len(), 1);
+    }
+
+    #[test]
+    fn live_join_room_clears_room_unread_count() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let mut support = room_summary("abcd", 2, "support");
+        support.unread = 4;
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby"), support],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut events = Vec::new();
+        apply_frame(
+            &mut client,
+            Some(session_id),
+            Frame::new(
+                ChatOp::JoinAccept,
+                1,
+                Some(2),
+                FrameBody::Fields(vec![room_value(2, "support")]),
+            ),
+            &mut events,
+        );
+
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.active_room.name, "support");
+        assert_eq!(session.active_room.unread, 0);
+        assert_eq!(
+            session
+                .rooms
+                .iter()
+                .find(|room| room.room_id == 2)
+                .map(|room| room.unread),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn live_refresh_rooms_uses_command_result_room_catalog() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                1,
+                None,
+                FrameBody::Fields(vec![
+                    FrameValue::String("rooms".into()),
+                    FrameValue::Array(vec![room_value(1, "lobby"), room_value(2, "ops")]),
+                ]),
+            ))
+            .expect("rooms command result");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::RefreshRooms { session_id },
+        );
+
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.op, ChatOp::Command);
+        assert_eq!(frame.body, FrameBody::Text("rooms".into()));
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::RoomsUpdated { session_id: 1, rooms }] if rooms.len() == 2
+        ));
+        assert!(client
+            .session(session_id)
+            .expect("session")
+            .rooms
+            .iter()
+            .any(|room| room.name == "ops"));
+    }
+
+    #[test]
+    fn live_set_topic_updates_active_room_from_command_result() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("topic".into()),
+                    room_value_with_topic(1, "lobby", "Operational updates"),
+                ]),
+            ))
+            .expect("topic command result");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SetTopic {
+                session_id,
+                topic: "Operational updates".into(),
+            },
+        );
+
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.op, ChatOp::Command);
+        assert_eq!(frame.room_id, Some(1));
+        assert_eq!(
+            frame.body,
+            FrameBody::Text("topic Operational updates".into())
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::RoomsUpdated { session_id: 1, rooms }]
+                if rooms.first().and_then(|room| room.topic.as_deref())
+                    == Some("Operational updates")
+        ));
+        assert_eq!(
+            client
+                .session(session_id)
+                .expect("session")
+                .active_room
+                .topic
+                .as_deref(),
+            Some("Operational updates")
+        );
+    }
+
+    #[test]
+    fn live_room_delta_updates_active_room_and_preserves_joined_state() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut events = Vec::new();
+
+        apply_frame(
+            &mut client,
+            Some(session_id),
+            Frame::new(
+                ChatOp::RoomDelta,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![room_value_with_topic(1, "lobby", "New live topic")]),
+            ),
+            &mut events,
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::RoomsUpdated { session_id: 1, rooms }]
+                if rooms.first().and_then(|room| room.topic.as_deref()) == Some("New live topic")
+                    && rooms.first().map(|room| room.joined) == Some(true)
+        ));
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.active_room.topic.as_deref(), Some("New live topic"));
+        assert!(session.active_room.joined);
+        assert!(session.rooms.iter().any(|room| {
+            room.room_id == 1 && room.topic.as_deref() == Some("New live topic") && room.joined
+        }));
+    }
+
+    #[test]
+    fn live_create_room_sends_command_and_merges_room_result() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                1,
+                None,
+                FrameBody::Fields(vec![
+                    FrameValue::String("create".into()),
+                    room_value_with_topic(2, "ops", "Operations desk"),
+                ]),
+            ))
+            .expect("create command result");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::CreateRoom {
+                session_id,
+                room: "#ops".into(),
+                topic: Some("Operations desk".into()),
+            },
+        );
+
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.op, ChatOp::Command);
+        assert_eq!(frame.room_id, None);
+        assert_eq!(
+            frame.body,
+            FrameBody::Text("create ops Operations desk".into())
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::RoomsUpdated { session_id: 1, rooms }]
+                if rooms.first().map(|room| room.name.as_str()) == Some("ops")
+        ));
+        assert!(client
+            .session(session_id)
+            .expect("session")
+            .rooms
+            .iter()
+            .any(|room| room.name == "ops" && room.topic.as_deref() == Some("Operations desk")));
+    }
+
+    #[test]
+    fn live_moderation_command_targets_active_room() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 7,
+                name: "ops".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 7, "ops")],
+            users: vec![
+                ChatUserSummary {
+                    server_id: "abcd".into(),
+                    user_id: 1,
+                    display_name: "Alice".into(),
+                    role_bits: 0,
+                    status_bits: 0,
+                    lxmf_available: false,
+                },
+                ChatUserSummary {
+                    server_id: "abcd".into(),
+                    user_id: 2,
+                    display_name: "Bob".into(),
+                    role_bits: 0,
+                    status_bits: 0,
+                    lxmf_available: false,
+                },
+            ],
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                1,
+                Some(7),
+                FrameBody::Fields(vec![
+                    FrameValue::String("kick".into()),
+                    FrameValue::Array(vec![
+                        FrameValue::U64(2),
+                        FrameValue::String("Bob".into()),
+                        FrameValue::U64(0),
+                        FrameValue::U64(0),
+                        FrameValue::Bool(false),
+                    ]),
+                ]),
+            ))
+            .expect("kick command result");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::ModerateUser {
+                session_id,
+                action: "kick".into(),
+                target: "Bob".into(),
+            },
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.op, ChatOp::Command);
+        assert_eq!(frame.room_id, Some(7));
+        assert_eq!(frame.body, FrameBody::Text("kick Bob".into()));
+        assert_eq!(
+            client.session(session_id).expect("session").status,
+            "kick applied to Bob"
+        );
+        assert!(!client
+            .session(session_id)
+            .expect("session")
+            .users
+            .iter()
+            .any(|user| user.display_name == "Bob"));
+    }
+
+    #[test]
+    fn live_unban_command_targets_active_room_without_pruning_userlist() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 7,
+                name: "ops".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 7, "ops")],
+            users: vec![ChatUserSummary {
+                server_id: "abcd".into(),
+                user_id: 2,
+                display_name: "Bob".into(),
+                role_bits: 0,
+                status_bits: 1,
+                lxmf_available: false,
+            }],
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                1,
+                Some(7),
+                FrameBody::Fields(vec![
+                    FrameValue::String("unban".into()),
+                    FrameValue::Array(vec![
+                        FrameValue::U64(2),
+                        FrameValue::String("Bob".into()),
+                        FrameValue::U64(0),
+                        FrameValue::U64(0),
+                        FrameValue::Bool(false),
+                    ]),
+                ]),
+            ))
+            .expect("unban command result");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::ModerateUser {
+                session_id,
+                action: "unban".into(),
+                target: "Bob".into(),
+            },
+        );
+
+        assert!(events.is_empty());
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.room_id, Some(7));
+        assert_eq!(frame.body, FrameBody::Text("unban Bob".into()));
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.status, "unban applied to Bob");
+        assert!(session.users.iter().any(|user| user.display_name == "Bob"));
+    }
+
+    #[test]
+    fn live_mute_command_targets_active_room_without_pruning_userlist() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 7,
+                name: "ops".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 7, "ops")],
+            users: vec![ChatUserSummary {
+                server_id: "abcd".into(),
+                user_id: 2,
+                display_name: "Bob".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+            }],
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                1,
+                Some(7),
+                FrameBody::Fields(vec![
+                    FrameValue::String("mute".into()),
+                    FrameValue::Array(vec![
+                        FrameValue::U64(2),
+                        FrameValue::String("Bob".into()),
+                        FrameValue::U64(0),
+                        FrameValue::U64(2),
+                        FrameValue::Bool(false),
+                    ]),
+                ]),
+            ))
+            .expect("mute command result");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::ModerateUser {
+                session_id,
+                action: "mute".into(),
+                target: "Bob".into(),
+            },
+        );
+
+        assert!(events.is_empty());
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.room_id, Some(7));
+        assert_eq!(frame.body, FrameBody::Text("mute Bob".into()));
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.status, "mute applied to Bob");
+        assert!(session.users.iter().any(|user| user.display_name == "Bob"));
+    }
+
+    #[test]
+    fn live_role_command_updates_visible_user_role() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 7,
+                name: "ops".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 7, "ops")],
+            users: vec![ChatUserSummary {
+                server_id: "abcd".into(),
+                user_id: 2,
+                display_name: "Bob".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+            }],
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                1,
+                Some(7),
+                FrameBody::Fields(vec![
+                    FrameValue::String("role".into()),
+                    FrameValue::Array(vec![
+                        FrameValue::U64(2),
+                        FrameValue::String("Bob".into()),
+                        FrameValue::U64(3),
+                        FrameValue::U64(0),
+                        FrameValue::Bool(false),
+                    ]),
+                ]),
+            ))
+            .expect("role command result");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::ModerateUser {
+                session_id,
+                action: "role".into(),
+                target: "Bob mod".into(),
+            },
+        );
+
+        assert!(events.is_empty());
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.room_id, Some(7));
+        assert_eq!(frame.body, FrameBody::Text("role Bob mod".into()));
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.status, "role applied to Bob");
+        assert_eq!(
+            session
+                .users
+                .iter()
+                .find(|user| user.display_name == "Bob")
+                .map(|user| user.role_bits),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn live_user_delta_updates_visible_user_role_without_command_result() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 7,
+                name: "ops".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 7, "ops")],
+            users: vec![ChatUserSummary {
+                server_id: "abcd".into(),
+                user_id: 2,
+                display_name: "Bob".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+            }],
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut events = Vec::new();
+
+        apply_frame(
+            &mut client,
+            Some(session_id),
+            Frame::new(
+                ChatOp::UserDelta,
+                1,
+                Some(7),
+                FrameBody::Fields(vec![FrameValue::Array(vec![
+                    FrameValue::U64(2),
+                    FrameValue::String("Bob".into()),
+                    FrameValue::U64(3),
+                    FrameValue::U64(0),
+                    FrameValue::Bool(false),
+                ])]),
+            ),
+            &mut events,
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::UserUpdated { session_id: 1, user }]
+                if user.display_name == "Bob" && user.role_bits == 3
+        ));
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.status, "user updated: Bob");
+        assert_eq!(
+            session
+                .users
+                .iter()
+                .find(|user| user.display_name == "Bob")
+                .map(|user| user.role_bits),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn live_send_action_uses_room_action_op() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            }],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendAction {
+                session_id,
+                room: "lobby".into(),
+                body: "waves".into(),
+            },
+        );
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChatClientEvent::EventAppended {
+                session_id: appended_session,
+                event,
+            } => {
+                assert_eq!(*appended_session, session_id);
+                assert_eq!(event.room_id, 1);
+                assert_eq!(event.actor_display_name.as_deref(), Some("You"));
+                assert!(is_local_echo_event_id(event.event_id));
+                assert_eq!(
+                    event.kind,
+                    ChatEventKind::Action {
+                        body: "waves".into()
+                    }
+                );
+            }
+            other => panic!("expected local action echo, got {other:?}"),
+        }
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.op, ChatOp::RoomAction);
+        assert_eq!(frame.body, FrameBody::Text("waves".into()));
+    }
+
+    #[test]
+    fn live_send_notice_uses_room_notice_op() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            }],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendNotice {
+                session_id,
+                room: "lobby".into(),
+                body: "server restart in 5".into(),
+            },
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.op, ChatOp::RoomNotice);
+        assert_eq!(frame.body, FrameBody::Text("server restart in 5".into()));
+    }
+
+    #[test]
+    fn live_part_room_sends_part_and_marks_active_room_left() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            }],
+            users: vec![ChatUserSummary {
+                server_id: "abcd".into(),
+                user_id: 7,
+                display_name: "Alice".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: true,
+            }],
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("part".into()),
+                    room_value(1, "lobby"),
+                ]),
+            ))
+            .expect("part result");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::PartRoom {
+                session_id,
+                room: None,
+            },
+        );
+
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.op, ChatOp::PartRoom);
+        assert_eq!(frame.room_id, Some(1));
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::RoomsUpdated { .. }]
+        ));
+        let session = client.session(session_id).expect("session");
+        assert!(!session.active_room.joined);
+        assert_eq!(
+            session
+                .rooms
+                .iter()
+                .find(|room| room.room_id == 1)
+                .map(|room| room.joined),
+            Some(false)
+        );
+        assert!(session.users.is_empty());
+    }
+
+    #[test]
+    fn live_part_active_room_selects_next_joined_room() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![
+                room_summary("abcd", 1, "lobby"),
+                room_summary("abcd", 2, "help"),
+            ],
+            users: vec![ChatUserSummary {
+                server_id: "abcd".into(),
+                user_id: 7,
+                display_name: "Alice".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: true,
+            }],
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("part".into()),
+                    room_value(1, "lobby"),
+                ]),
+            ))
+            .expect("part result");
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::PartRoom {
+                session_id,
+                room: None,
+            },
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::RoomsUpdated { .. }]
+        ));
+        let session = client.session(session_id).expect("session");
+        assert_eq!(session.active_room.name, "help");
+        assert!(session.active_room.joined);
+        assert!(session.users.is_empty());
+        assert_eq!(session.status, "left #lobby; selected #help");
+        assert_eq!(
+            session
+                .rooms
+                .iter()
+                .find(|room| room.name == "lobby")
+                .map(|room| room.joined),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn live_ping_sends_ping_frame_for_health_checks() {
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+
+        assert_eq!(ping_live_session(&mut state, &mut transport, 7), None);
+
+        assert_eq!(transport.sent_frames.len(), 1);
+        let frame = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(frame.op, ChatOp::Ping);
+        assert_eq!(frame.seq, 1);
+    }
+
+    #[test]
+    fn live_history_end_marks_beginning_of_room_history() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "abcd".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+
+        let mut events = Vec::new();
+        apply_frame(
+            &mut client,
+            Some(session_id),
+            Frame::new(ChatOp::HistoryEnd, 7, Some(1), FrameBody::Empty),
+            &mut events,
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(
+            client.session(session_id).expect("session").status,
+            "start of room history reached"
+        );
+    }
+
+    #[test]
+    fn parse_event_preserves_actor_display_name() {
+        let event = parse_event(
+            &FrameValue::Array(vec![
+                FrameValue::U64(22),
+                FrameValue::U64(1),
+                FrameValue::U64(7),
+                FrameValue::I64(123),
+                FrameValue::String("hello".into()),
+                FrameValue::String("Alice".into()),
+            ]),
+            "server-a".into(),
+            1,
+        )
+        .expect("event");
+
+        assert_eq!(event.actor_user_id, Some(7));
+        assert_eq!(event.actor_display_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn parse_room_preserves_topic() {
+        let room = parse_room(
+            &FrameValue::Array(vec![
+                FrameValue::U64(3),
+                FrameValue::String("ops".into()),
+                FrameValue::String("Operations desk".into()),
+                FrameValue::U64(1),
+            ]),
+            "server-a".into(),
+            true,
+        )
+        .expect("room");
+
+        assert_eq!(room.name, "ops");
+        assert_eq!(room.topic.as_deref(), Some("Operations desk"));
+    }
+
+    #[test]
+    fn parse_error_text_includes_known_error_code_label() {
+        let text = parse_error_text(&FrameBody::Fields(vec![
+            FrameValue::U64(ChatErrorCode::PermissionDenied as u16 as u64),
+            FrameValue::String("user is muted".into()),
+        ]));
+
+        assert_eq!(text, "permission denied: user is muted");
+    }
+
+    fn room_value(room_id: u64, name: &str) -> FrameValue {
+        FrameValue::Array(vec![
+            FrameValue::U64(room_id),
+            FrameValue::String(name.into()),
+            FrameValue::Nil,
+            FrameValue::U64(1),
+        ])
+    }
+
+    fn room_value_with_topic(room_id: u64, name: &str, topic: &str) -> FrameValue {
+        FrameValue::Array(vec![
+            FrameValue::U64(room_id),
+            FrameValue::String(name.into()),
+            FrameValue::String(topic.into()),
+            FrameValue::U64(2),
+        ])
+    }
+
+    fn room_summary(server_id: &str, room_id: u32, name: &str) -> ChatRoomSummary {
+        ChatRoomSummary {
+            server_id: server_id.into(),
+            room_id,
+            name: name.into(),
+            topic: None,
+            unread: 0,
+            joined: true,
+        }
+    }
+
+    fn event_value(event_id: u64, actor: u64, body: &str) -> FrameValue {
+        FrameValue::Array(vec![
+            FrameValue::U64(event_id),
+            FrameValue::U64(1),
+            FrameValue::U64(actor),
+            FrameValue::I64(0),
+            FrameValue::String(body.into()),
+        ])
+    }
+}

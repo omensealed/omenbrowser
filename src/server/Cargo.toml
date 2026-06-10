@@ -1,0 +1,29 @@
+[workspace]
+
+[package]
+name = "omenchatd"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone OMENchat server"
+license = "AGPL-3.0-or-later"
+homepage = "https://github.com/omensealed/omenbrowser"
+repository = "https://github.com/omensealed/omenbrowser"
+readme = "README.md"
+
+[features]
+default = []
+live-rns-net = ["dep:rns-crypto", "dep:rns-net"]
+
+[[bin]]
+name = "omenchatd"
+path = "src/main.rs"
+
+[dependencies]
+bzip2 = "0.5.2"
+crossterm = "0.27"
+ratatui = "0.26"
+rmpv = "1.3"
+"rns-crypto" = { version = "0.1.8", optional = true }
+"rns-net" = { version = "0.5.10", optional = true, default-features = false, features = ["iface-tcp", "iface-backbone"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+thiserror = "1.0"
