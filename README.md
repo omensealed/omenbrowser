@@ -5,7 +5,7 @@ Micron, MicronPlus, and OMENchat. LXST voice is unsupported, for now.
 
 Repository: <https://github.com/omensealed/omenbrowser>
 
-This repository is still in private alpha. It is a native Rust browser/client
+This repository is in public alpha. It is a native Rust browser/client
 with pane management, isolated identities, native Reticulum/LXMF integration,
 and a built-in OMENchat client.
 
@@ -42,7 +42,7 @@ Click a thumbnail to open the full-size workspace screenshot.
   Micron/MicronPlus rendering, and the OMENchat plugin client.
 - `src/server`: standalone `omenchatd` server crate. It is intentionally
   independent from the browser and owns its own storage root.
-- `TESTERS.md`: concise private-alpha tester sheet included at the root of the
+- `TESTERS.md`: concise public-alpha tester sheet included at the root of the
   packaged archive.
 - `docs/TESTING.md`: practical alpha tester path.
 
@@ -98,7 +98,7 @@ Standalone OMENchat server:
 cargo build --release --manifest-path src/server/Cargo.toml --features live-rns-net
 ```
 
-Private alpha bundle with both binaries and starter docs:
+Public alpha bundle with both binaries and starter docs:
 
 ```bash
 bash scripts/alpha-package.sh

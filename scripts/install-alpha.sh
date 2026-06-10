@@ -33,7 +33,7 @@ usage() {
   cat <<'USAGE'
 usage: bash scripts/install-alpha.sh [options]
 
-Install or remove the optional private-alpha user integrations.
+Install or remove the optional public-alpha user integrations.
 
 Default install:
   - installs the isolated OMENbrowser_rs Alpha desktop launcher only

@@ -9,7 +9,7 @@ usage() {
   cat <<'USAGE'
 usage: bash scripts/alpha-root-sanity.sh [options]
 
-Check that private-alpha browser/server test roots are distinct and isolated.
+Check that public-alpha browser/server test roots are distinct and isolated.
 This does not create, delete, or modify the roots.
 
 Options:

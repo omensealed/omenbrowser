@@ -1,6 +1,6 @@
-# OMENbrowser_rs Private Alpha Tester Sheet
+# OMENbrowser_rs Public Alpha Tester Sheet
 
-This build is for private alpha testing of OMENbrowser_rs, the built-in
+This build is for public alpha testing of OMENbrowser_rs, the built-in
 OMENchat plugin client, and the standalone `omenchatd` server.
 
 Use release binaries for UI testing. Debug builds are not a useful performance

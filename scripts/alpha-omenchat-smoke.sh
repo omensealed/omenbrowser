@@ -18,7 +18,7 @@ usage() {
 usage: bash scripts/alpha-omenchat-smoke.sh [options]
 
 Start an isolated local omenchatd, then run OMENbrowser_rs's OMENchat Link
-smoke against it. This is intended for private alpha validation from either
+smoke against it. This is intended for public alpha validation from either
 the repo tree or an unpacked alpha bundle.
 
 Options:

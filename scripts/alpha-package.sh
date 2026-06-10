@@ -36,7 +36,7 @@ cp src/server/README.md "$target_dir/src-server/README.md"
 cp packaging/systemd/omenchatd.service.in "$target_dir/packaging/systemd/"
 
 cat > "$target_dir/ALPHA-START.txt" <<'EOF'
-OMENbrowser_rs private alpha bundle
+OMENbrowser_rs public alpha bundle
 
 Show build identity:
 

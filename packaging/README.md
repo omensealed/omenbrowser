@@ -12,7 +12,7 @@ OMENchat server homes.
 bash scripts/alpha-package.sh dist
 ```
 
-The tarball is the current private-alpha distribution format. It includes:
+The tarball is the current public-alpha distribution format. It includes:
 
 - `bin/omenbrowser_rs`
 - `bin/omenchatd`
