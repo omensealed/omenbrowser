@@ -220,7 +220,10 @@ rm -rf "$selfcheck_home"
 echo "== Creating archive =="
 archive_path="${target_dir}.tar.gz"
 tar -C "$(dirname "$target_dir")" -czf "$archive_path" "$(basename "$target_dir")"
-sha256sum "$archive_path" > "${archive_path}.sha256"
+(
+  cd "$(dirname "$archive_path")"
+  sha256sum "$(basename "$archive_path")" > "$(basename "$archive_path").sha256"
+)
 archive_sha="$(sha256sum "$archive_path" | awk '{print $1}')"
 
 echo "== Verifying archive extraction =="
@@ -303,7 +306,10 @@ echo "== Updating latest alpha package copy =="
 latest_archive="${out_root%/}/OMENbrowser_rs-alpha-latest.tar.gz"
 latest_manifest="${out_root%/}/OMENbrowser_rs-alpha-latest.txt"
 cp -f "$archive_path" "$latest_archive"
-sha256sum "$latest_archive" > "${latest_archive}.sha256"
+(
+  cd "$(dirname "$latest_archive")"
+  sha256sum "$(basename "$latest_archive")" > "$(basename "$latest_archive").sha256"
+)
 cat > "$latest_manifest" <<EOF
 created_utc: $timestamp
 version: ${version:-unknown}

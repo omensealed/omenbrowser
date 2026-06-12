@@ -52,5 +52,8 @@ echo "== Building AppImage =="
 mkdir -p "${out_root%/}"
 appimage_path="${out_root%/}/OMENbrowser_rs-${version}-${arch}.AppImage"
 "$appimagetool" "$appdir" "$appimage_path"
-sha256sum "$appimage_path" > "${appimage_path}.sha256"
+(
+  cd "$(dirname "$appimage_path")"
+  sha256sum "$(basename "$appimage_path")" > "$(basename "$appimage_path").sha256"
+)
 echo "$appimage_path"

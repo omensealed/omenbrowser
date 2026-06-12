@@ -59,5 +59,8 @@ echo "== Building .deb =="
 mkdir -p "${out_root%/}"
 deb_path="${out_root%/}/omenbrowser-rs_${version}_${arch}.deb"
 dpkg-deb --root-owner-group --build "$pkg_dir" "$deb_path"
-sha256sum "$deb_path" > "${deb_path}.sha256"
+(
+  cd "$(dirname "$deb_path")"
+  sha256sum "$(basename "$deb_path")" > "$(basename "$deb_path").sha256"
+)
 echo "$deb_path"
