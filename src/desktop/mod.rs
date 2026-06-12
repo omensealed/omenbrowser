@@ -11,11 +11,11 @@ use iced::widget::scrollable::{
 use iced::widget::text::Wrapping;
 use iced::widget::{
     button, column, container, image, pane_grid, row, scrollable, text, text_editor, text_input,
-    tooltip, Button, Scrollable,
+    tooltip, Button, Scrollable, Text,
 };
 use iced::{
     event, keyboard, time, window, Background, Border, Color, ContentFit, Element, Font, Length,
-    Pixels, Settings, Shadow, Subscription, Task, Theme,
+    Padding, Pixels, Settings, Shadow, Subscription, Task, Theme,
 };
 #[cfg(feature = "chat-client-rns")]
 use std::collections::{BTreeMap, VecDeque};
@@ -126,6 +126,12 @@ const OMENCHAT_INLINE_MEDIA_MAX_HEIGHT: f32 = 360.0;
 const COMMON_TOR_SOCKS_PORTS: &[u16] = &[9050, 9150];
 #[cfg(feature = "chat-client")]
 const OMENCHAT_PENDING_DESTINATION_PREFIX: &str = "pending-omenchat-";
+const DESKTOP_SCROLLBAR_WIDTH: u16 = 7;
+const DESKTOP_SCROLLBAR_SCROLLER_WIDTH: u16 = 4;
+const DESKTOP_SCROLLBAR_MARGIN: u16 = 4;
+const DESKTOP_SCROLL_GUTTER_EXTRA: u16 = 12;
+const DESKTOP_PANEL_PADDING: u16 = 12;
+const DESKTOP_SHELL_PADDING: u16 = 16;
 const CONVERSATION_VISIBLE_MESSAGES: usize = 8;
 const CONVERSATION_PREVIEW_CHARS: usize = 220;
 const CONVERSATION_PREVIEW_LINES: usize = 5;
@@ -158,7 +164,7 @@ const OMENCHAT_HISTORY_HELP_LINES: &[&str] = &[
 const OMENCHAT_MEDIA_HELP_LINES: &[&str] = &[
     "OMENchat can preview cached images and animated GIFs inline. NomadNet/Reticulum media stays on the Reticulum path and does not use direct clearweb TCP.",
     "Clearweb HTTP/HTTPS image previews are privacy-gated. Remote media is off by default; when enabled, trusted OMENchat servers can auto-load images only through a detected SOCKS/Tor proxy on 127.0.0.1:9050 or 127.0.0.1:9150.",
-    "Untrusted clearweb images require an explicit Load action. Non-image clearweb links open through the configured external browser prompt; configure that browser for Tor yourself if needed.",
+    "Untrusted clearweb images require an explicit Load action. Non-image clearweb links open through the external browser prompt; use Copy URL for Tor Browser.",
     "Uploads use the native file picker from the attach button or /upload <path>. The server advertises both total upload quota and max file size; current defaults are 50 MiB quota per identity and 512 KiB max per file.",
     "Accepted upload images/GIFs are cached under the active identity's OMENchat media cache and rendered inline for supported image types. Oversized or rejected files should fail before transfer.",
 ];
@@ -233,33 +239,71 @@ fn fc_match_families_output(family: &str, charset: &str) -> Option<String> {
 }
 
 fn detect_external_browsers(preferred_command: Option<&str>) -> Vec<ExternalBrowserChoice> {
-    let mut choices = Vec::new();
-    for (label, command) in [
+    let candidates = [
         ("Default browser", "xdg-open"),
         ("Firefox", "firefox"),
         ("LibreWolf", "librewolf"),
-        ("Tor Browser", "tor-browser"),
         ("Mullvad Browser", "mullvad-browser"),
         ("Brave", "brave-browser"),
+        ("Brave", "brave"),
         ("Chromium", "chromium"),
+        ("Chromium", "chromium-browser"),
         ("Chrome", "google-chrome"),
+        ("Chrome", "google-chrome-stable"),
+        ("Chrome", "chrome"),
+        ("Chrome", "chromium-freeworld"),
         ("Qutebrowser", "qutebrowser"),
-    ] {
-        if command_available(command)
-            && !choices
-                .iter()
-                .any(|choice: &ExternalBrowserChoice| choice.command == command)
+    ];
+    detect_external_browsers_from_candidates(preferred_command, &candidates, command_available)
+}
+
+fn detect_external_browsers_from_candidates(
+    preferred_command: Option<&str>,
+    candidates: &[(&str, &str)],
+    available: impl Fn(&str) -> bool,
+) -> Vec<ExternalBrowserChoice> {
+    let mut choices = Vec::new();
+    let mut seen_labels = HashSet::new();
+    if let Some(command) = preferred_command {
+        if let Some((label, _)) = candidates
+            .iter()
+            .find(|(_, candidate)| *candidate == command)
+        {
+            if available(command) {
+                choices.push(ExternalBrowserChoice {
+                    label: (*label).into(),
+                    command: command.into(),
+                    kind: external_browser_kind(command),
+                });
+                seen_labels.insert((*label).to_string());
+            }
+        }
+    }
+    for (label, command) in candidates.iter().copied() {
+        if !available(command) {
+            continue;
+        }
+        if seen_labels.contains(label) {
+            continue;
+        }
+        let kind = external_browser_kind(command);
+        if !choices
+            .iter()
+            .any(|choice: &ExternalBrowserChoice| choice.command == command)
         {
             choices.push(ExternalBrowserChoice {
                 label: label.into(),
                 command: command.into(),
+                kind,
             });
+            seen_labels.insert(label.into());
         }
     }
     if choices.is_empty() {
         choices.push(ExternalBrowserChoice {
             label: "Default browser".into(),
             command: "xdg-open".into(),
+            kind: ExternalBrowserKind::Default,
         });
     }
     if let Some(command) = preferred_command {
@@ -338,8 +382,41 @@ fn command_available(command: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+fn external_browser_kind(command: &str) -> ExternalBrowserKind {
+    let executable = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command);
+    if executable == "xdg-open" {
+        ExternalBrowserKind::Default
+    } else {
+        ExternalBrowserKind::Standard
+    }
+}
+
 fn shell_word(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn open_external_url_with_choice(choice: &ExternalBrowserChoice, url: &str) -> Result<(), String> {
+    let candidates = external_browser_open_candidates(choice, url);
+    let mut errors = Vec::new();
+    for (program, args) in candidates {
+        match Command::new(&program).args(&args).spawn() {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                errors.push(format!("{program} {:?}: {error}", args));
+            }
+        }
+    }
+    Err(errors.join(" | "))
+}
+
+fn external_browser_open_candidates(
+    choice: &ExternalBrowserChoice,
+    url: &str,
+) -> Vec<(String, Vec<String>)> {
+    vec![(choice.command.clone(), vec![url.into()])]
 }
 
 fn set_desktop_font_size(size: u16) {
@@ -785,6 +862,13 @@ struct ExternalLinkPrompt {
 struct ExternalBrowserChoice {
     label: String,
     command: String,
+    kind: ExternalBrowserKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExternalBrowserKind {
+    Default,
+    Standard,
 }
 
 #[cfg(feature = "chat-client")]
@@ -939,8 +1023,7 @@ enum Message {
     CreateTcpClientInterface,
     CreateI2pInterface,
     CreateRNodeInterface,
-    CreateRmapGateway,
-    CreateWnsGateway,
+    CreateGatewayPreset(String),
     SwitchConversation(usize),
     ConversationScrolled {
         conversation_id: u64,
@@ -1123,6 +1206,7 @@ enum Message {
     SelectNativeBackend,
     StartNativeRuntime,
     NativeQuickstart,
+    InterfaceStatsSampled(Result<crate::runtime::InterfaceStats, String>),
     ToggleNavigation,
     BrowserFieldKey(BrowserFieldKey),
     SubmitBrowserFieldDraft,
@@ -1153,6 +1237,8 @@ enum Message {
     WindowShutdownComplete(window::Id),
     KeyboardModifiersChanged(keyboard::Modifiers),
     OpenExternalLinkWith(usize),
+    CopyExternalLinkUrl,
+    CopyActiveIdentityHash,
     PromptExternalUrl(String),
     #[cfg(feature = "chat-client")]
     OpenCachedOmenChatMedia(String),
@@ -1464,6 +1550,19 @@ impl DesktopApp {
         } else {
             DESKTOP_IDLE_TICK_MS
         }
+    }
+
+    fn sample_runtime_interface_stats(&self) -> Task<Message> {
+        let runtime = self.app.runtime.clone();
+        Task::perform(
+            async move {
+                runtime
+                    .interface_stats()
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            Message::InterfaceStatsSampled,
+        )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1897,11 +1996,8 @@ impl DesktopApp {
             Message::CreateRNodeInterface => {
                 self.app.create_rnode_interface_profile();
             }
-            Message::CreateRmapGateway => {
-                self.app.create_rmap_gateway_interface_profile();
-            }
-            Message::CreateWnsGateway => {
-                self.app.create_wns_gateway_interface_profile();
+            Message::CreateGatewayPreset(gateway_id) => {
+                self.app.create_gateway_interface_profile(&gateway_id);
             }
             Message::SwitchConversation(index) => {
                 self.app.select_conversation_tab(index);
@@ -2386,6 +2482,21 @@ impl DesktopApp {
             Message::NativeQuickstart => {
                 self.app.run_native_quickstart();
             }
+            Message::InterfaceStatsSampled(result) => match result {
+                Ok(stats) => {
+                    self.app.monitoring_state.last_interface_stats = Some(stats.clone());
+                    self.app.status.task = if stats.available {
+                        format!("interfaces: {}", stats.interfaces.len())
+                    } else {
+                        stats
+                            .reason
+                            .unwrap_or_else(|| "interfaces unavailable".into())
+                    };
+                }
+                Err(error) => {
+                    self.app.status.task = format!("interface status failed: {error}");
+                }
+            },
             Message::ToggleNavigation => {
                 self.navigation_open = !self.navigation_open;
             }
@@ -2412,6 +2523,9 @@ impl DesktopApp {
                     #[cfg(feature = "chat-client")]
                     if let Some(task) = self.activate_focused_omenchat_link() {
                         return task;
+                    }
+                    if self.prompt_focused_external_link_if_needed() {
+                        return Task::none();
                     }
                     if self.activate_focused_lxmf_link() {
                         return Task::none();
@@ -2507,12 +2621,20 @@ impl DesktopApp {
                 if self.debug_last_tick_epoch_ms == 0 {
                     self.debug_last_tick_epoch_ms = now;
                 }
-                if self.app.workspace.active_section == WorkspaceSection::Monitoring
-                    && now.saturating_sub(self.monitoring_sample_epoch_ms) >= 1_000
+                let monitoring_sample_due =
+                    section_needs_runtime_interface_sample(self.app.workspace.active_section)
+                        && now.saturating_sub(self.monitoring_sample_epoch_ms) >= 1_000;
+                if monitoring_sample_due
+                    && self.app.workspace.active_section == WorkspaceSection::Monitoring
                 {
-                    self.monitoring_sample_epoch_ms = now;
                     self.monitoring_process_usage = process_resource_usage();
                 }
+                let interface_stats_task = if monitoring_sample_due {
+                    self.monitoring_sample_epoch_ms = now;
+                    self.sample_runtime_interface_stats()
+                } else {
+                    Task::none()
+                };
                 let partials = self.app.refresh_due_browser_partials(now);
                 self.app.flush_due_ui_preferences(now);
                 self.app.flush_due_directory_persistence();
@@ -2586,6 +2708,7 @@ impl DesktopApp {
                     omenchat_heartbeat,
                     #[cfg(feature = "chat-client-rns")]
                     omenchat_reconnect,
+                    interface_stats_task,
                 ];
                 if bottom_anchor_due {
                     tasks.push(self.restore_visible_workspace_scrolls());
@@ -2652,6 +2775,19 @@ impl DesktopApp {
             }
             Message::OpenExternalLinkWith(index) => {
                 self.open_pending_external_link(index);
+            }
+            Message::CopyExternalLinkUrl => {
+                if let Some(prompt) = &self.external_link_prompt {
+                    self.app.status.task = "copied external URL to clipboard".into();
+                    return iced::clipboard::write(prompt.url.clone());
+                }
+            }
+            Message::CopyActiveIdentityHash => {
+                if let Some(identity) = &self.app.runtime_status.active_identity {
+                    self.app.status.task = "copied active identity hash to clipboard".into();
+                    return iced::clipboard::write(identity.hash_hex.clone());
+                }
+                self.app.status.task = "no active identity hash to copy".into();
             }
             Message::PromptExternalUrl(url) => {
                 self.prompt_external_url_if_needed(url, None);
@@ -2834,6 +2970,19 @@ impl DesktopApp {
         true
     }
 
+    fn prompt_focused_external_link_if_needed(&mut self) -> bool {
+        let Some((tab_id, target)) = self
+            .app
+            .active_browser_tab()
+            .focused_link
+            .as_ref()
+            .map(|link| (self.app.active_browser_tab().id, link.target.clone()))
+        else {
+            return false;
+        };
+        self.prompt_external_url_if_needed(target, Some(tab_id))
+    }
+
     fn activate_focused_lxmf_link(&mut self) -> bool {
         let Some(link) = self
             .app
@@ -2971,7 +3120,7 @@ impl DesktopApp {
             self.app.status.task = "selected external browser is no longer available".into();
             return;
         };
-        match Command::new(&choice.command).arg(&prompt.url).spawn() {
+        match open_external_url_with_choice(&choice, &prompt.url) {
             Ok(_) => {
                 self.external_link_prompt = None;
                 self.app.status.task =
@@ -6129,7 +6278,7 @@ impl DesktopApp {
 
         let content_card = container(content)
             .style(card_container_style)
-            .padding(12)
+            .padding(DESKTOP_PANEL_PADDING)
             .width(Length::Fill)
             .height(Length::Fill);
         let status_strip = container(status)
@@ -6139,18 +6288,21 @@ impl DesktopApp {
             .height(Length::Fixed(f32::from(ui_size(44))));
         let workspace = if self.navigation_open {
             row![self.navigation_sidebar(), content_card]
-                .spacing(12)
+                .spacing(DESKTOP_PANEL_PADDING)
                 .height(Length::Fill)
         } else {
             row![content_card].height(Length::Fill)
         };
 
-        let shell: Element<'_, Message> =
-            container(column![workspace, status_strip].spacing(12).padding(16))
-                .style(shell_container_style)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into();
+        let shell: Element<'_, Message> = container(
+            column![workspace, status_strip]
+                .spacing(DESKTOP_PANEL_PADDING)
+                .padding(DESKTOP_SHELL_PADDING),
+        )
+        .style(shell_container_style)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
 
         shell
     }
@@ -6190,10 +6342,10 @@ impl DesktopApp {
                 sections,
                 subtle_button("Hide Menu", Message::ToggleNavigation),
             ]
-            .spacing(12),
+            .spacing(DESKTOP_PANEL_PADDING),
         )
         .style(card_container_style)
-        .padding(12)
+        .padding(DESKTOP_PANEL_PADDING)
         .width(Length::Shrink)
         .height(Length::Fill)
         .into()
@@ -6221,6 +6373,29 @@ impl DesktopApp {
                 ))
             },
         );
+        let browser_commands =
+            self.external_browsers
+                .iter()
+                .fold(column![].spacing(3), |column, browser| {
+                    let label = if Some(browser.command.as_str())
+                        == self
+                            .app
+                            .settings
+                            .clearweb
+                            .preferred_external_browser_command
+                            .as_deref()
+                    {
+                        format!("{} *", browser.label)
+                    } else {
+                        browser.label.clone()
+                    };
+                    column.push(
+                        text(format!("{label}: {}", browser.command))
+                            .size(ui_size(12))
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
+                    )
+                });
         let source = prompt
             .source_tab
             .map(|tab| format!("tab {tab}"))
@@ -6243,15 +6418,19 @@ impl DesktopApp {
             column![
                 row![
                     text("Open external URL").size(ui_size(16)),
+                    omen_button("Copy URL", Message::CopyExternalLinkUrl),
                     subtle_button("X", Message::DismissExternalLinkPrompt)
                 ]
                 .spacing(12)
                 .wrap(),
-                text(format!("from {source}: {}", prompt.url)).size(ui_size(13)),
-                text(proxy_status).size(ui_size(13)),
-                text("OMENbrowser cannot force an external browser through Tor; choose a browser profile you have configured for Tor/SOCKS5.")
-                    .size(ui_size(13)),
+                wrapped_text_owned(format!("from {source}: {}", prompt.url), 13),
+                wrapped_text_owned(proxy_status, 13),
+                wrapped_text_owned(
+                    "Tor Browser is handled by Copy URL so an already-running Tor profile is not disturbed. Other detected browsers can be launched below.",
+                    13,
+                ),
                 browsers.wrap(),
+                browser_commands,
             ]
             .spacing(8),
         )
@@ -6585,6 +6764,7 @@ impl DesktopApp {
         ]
         .spacing(8)
         .height(Length::Fill)
+        .width(Length::Fill)
         .into();
         #[cfg(not(feature = "chat-client"))]
         let content = column![
@@ -6595,6 +6775,7 @@ impl DesktopApp {
         ]
         .spacing(8)
         .height(Length::Fill)
+        .width(Length::Fill)
         .into();
         content
     }
@@ -7585,7 +7766,7 @@ impl DesktopApp {
             .lines
             .into_iter()
             .fold(column![].spacing(4), |column, line| {
-                column.push(text(line).size(ui_size(14)))
+                column.push(wrapped_text_owned(line, 14))
             });
         let style = match diagnostics.severity {
             LxmfMessagingDiagnosticsSeverity::Ready | LxmfMessagingDiagnosticsSeverity::Info => {
@@ -7661,13 +7842,15 @@ impl DesktopApp {
                     .as_ref()
                     .is_some_and(|path| *path == profile.path);
                 let status = if is_active { "active" } else { "managed" };
-                let mut header = row![text(format!(
-                    "{} | {} | {}",
-                    profile.label,
-                    compact_label(&profile.hash_hex, 16),
-                    status
-                ))
-                .width(Length::Fill)]
+                let mut header = row![wrapped_text_owned(
+                    format!(
+                        "{} | {} | {}",
+                        profile.label,
+                        compact_label(&profile.hash_hex, 16),
+                        status
+                    ),
+                    14
+                )]
                 .spacing(8);
                 if !is_active {
                     header = header.push(subtle_button_owned(
@@ -7682,25 +7865,28 @@ impl DesktopApp {
                     container(
                         column![
                             header.wrap(),
-                            text(format!("identity: {}", profile.path.display())).size(ui_size(12)),
-                            text(format!(
-                                "storage: {}",
-                                self.app
-                                    .paths
-                                    .storage_root_for_identity_profile(&profile)
-                                    .display()
-                            ))
-                            .size(ui_size(12)),
-                            text(format!(
-                                "reticulum: {}",
-                                storage_paths.reticulum_storage_dir.display()
-                            ))
-                            .size(ui_size(12)),
-                            text(format!(
-                                "messages: {}",
-                                storage_paths.messages_dir.display()
-                            ))
-                            .size(ui_size(12)),
+                            wrapped_text_owned(format!("identity: {}", profile.path.display()), 12),
+                            wrapped_text_owned(
+                                format!(
+                                    "storage: {}",
+                                    self.app
+                                        .paths
+                                        .storage_root_for_identity_profile(&profile)
+                                        .display()
+                                ),
+                                12
+                            ),
+                            wrapped_text_owned(
+                                format!(
+                                    "reticulum: {}",
+                                    storage_paths.reticulum_storage_dir.display()
+                                ),
+                                12
+                            ),
+                            wrapped_text_owned(
+                                format!("messages: {}", storage_paths.messages_dir.display()),
+                                12
+                            ),
                         ]
                         .spacing(4),
                     )
@@ -7723,10 +7909,19 @@ impl DesktopApp {
                         text_input("identity name", &active_label)
                             .on_input(Message::ActiveIdentityLabelChanged)
                             .width(Length::Fill),
-                        text(format!("hash: {active_hash}")).size(ui_size(14)),
-                        text(format!("identity: {active_path}")).size(ui_size(12)),
-                        text(format!("storage: {active_storage_root}")).size(ui_size(12)),
-                        text(format!("reticulum storage: {active_reticulum_storage}")).size(ui_size(12)),
+                        row![
+                            wrapped_text_owned(format!("hash: {active_hash}"), 14),
+                            subtle_button("Copy", Message::CopyActiveIdentityHash),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center)
+                        .wrap(),
+                        wrapped_text_owned(format!("identity: {active_path}"), 12),
+                        wrapped_text_owned(format!("storage: {active_storage_root}"), 12),
+                        wrapped_text_owned(
+                            format!("reticulum storage: {active_reticulum_storage}"),
+                            12
+                        ),
                         action_grid(
                             vec![
                                 omen_button("Create Identity", Message::CreateIdentity),
@@ -7744,23 +7939,25 @@ impl DesktopApp {
                 section_card(
                     "Paths",
                     column![
-                        text(format!(
+                        wrapped_text_owned(format!(
                             "managed identities: {}",
                             self.app.paths.identities_dir.display()
-                        ))
-                        .size(ui_size(14)),
-                        text(format!(
+                        ), 14),
+                        wrapped_text_owned(format!(
                             "identity storage roots: {}",
                             self.app.paths.identity_storage_dir.display()
-                        ))
-                        .size(ui_size(14)),
-                        text("External identity and custom Reticulum config paths remain editable in Settings.").size(ui_size(14)),
+                        ), 14),
+                        wrapped_text_owned(
+                            "External identity and custom Reticulum config paths remain editable in Settings.",
+                            14,
+                        ),
                         subtle_button("Open Settings", Message::SwitchSection(WorkspaceSection::Settings)),
                     ]
                     .spacing(8),
                 ),
             ]
-            .spacing(12),
+            .spacing(12)
+            .width(Length::Fill),
         )
         .height(Length::Fill)
         .into()
@@ -7773,7 +7970,10 @@ impl DesktopApp {
         container(
             column![
                 text("Delete the active identity?").size(ui_size(16)),
-                text("A backup is created first, but identity loss is critical. Confirm only if this identity should no longer be usable here.").size(ui_size(13)),
+                wrapped_text_owned(
+                    "A backup is created first, but identity loss is critical. Confirm only if this identity should no longer be usable here.",
+                    13,
+                ),
                 row![
                     warning_button("Confirm Delete", Message::ConfirmDeleteActiveIdentity),
                     subtle_button("Cancel", Message::CancelDeleteActiveIdentity),
@@ -7868,8 +8068,9 @@ impl DesktopApp {
         if unknown_count > 0 {
             rows = rows.push(section_card(
                 format!("Unknown Announces ({unknown_count})"),
-                text("Unknown announces are kept out of Nodes/Peers/Propagation until classified.")
-                    .size(ui_size(14)),
+                wrapped_panel_text(
+                    "Unknown announces are kept out of Nodes/Peers/Propagation until classified.",
+                ),
             ));
         }
         let selected_details = self.directory_selected_details_card();
@@ -7893,7 +8094,7 @@ impl DesktopApp {
                 section_card(
                     "Directory State",
                     column![
-                        text(format!(
+                        wrapped_text_owned(format!(
                             "entries={} visible_nodes={} visible_peers={} visible_omenchat={} visible_propagation={} trusted={}",
                             self.app.directory_state.entries.len(),
                             counts.0,
@@ -7901,23 +8102,23 @@ impl DesktopApp {
                             counts.3,
                             counts.2,
                             counts.4
-                        )),
-                        text(format!(
+                        ), 14),
+                        wrapped_text_owned(format!(
                             "filter: {}",
                             if self.app.directory_state.filter.is_empty() {
                                 "none"
                             } else {
                                 self.app.directory_state.filter.as_str()
                             }
-                        )),
-                        text(format!(
+                        ), 14),
+                        wrapped_text_owned(format!(
                             "preferred propagation: {}",
                             self.app
                                 .settings
                                 .preferred_propagation_node_hash
                                 .as_deref()
                                 .unwrap_or("none")
-                        )),
+                        ), 14),
                         action_grid(
                             vec![subtle_button(
                                 "Clear Propagation",
@@ -7931,7 +8132,8 @@ impl DesktopApp {
                 selected_details,
                 rows,
             ]
-            .spacing(12),
+            .spacing(12)
+            .width(Length::Fill),
         )
         .height(Length::Fill)
         .into()
@@ -7968,19 +8170,22 @@ impl DesktopApp {
             .count();
 
         if count == 0 {
+            let empty_message = directory_empty_text_for_scope(
+                empty_text,
+                &scope,
+                &self.app.directory_state.filter,
+            );
             section_card(
                 format!("{title} (0)"),
-                text(directory_empty_text_for_scope(
-                    empty_text,
-                    &scope,
-                    &self.app.directory_state.filter,
-                )),
+                wrapped_text_owned(empty_message, 14),
             )
         } else {
             let body = if count > DIRECTORY_RENDER_LIMIT {
-                entries.push(text(format!(
-                    "Showing first {DIRECTORY_RENDER_LIMIT} of {count}. Use search, saved/trusted scope, or wait for stale live entries to prune."
-                )).size(ui_size(13)))
+                entries.push(
+                    wrapped_text_owned(format!(
+                        "Showing first {DIRECTORY_RENDER_LIMIT} of {count}. Use search, saved/trusted scope, or wait for stale live entries to prune."
+                    ), 13),
+                )
             } else {
                 entries
             };
@@ -7988,11 +8193,11 @@ impl DesktopApp {
         }
     }
 
-    fn directory_entry_card<'a>(
-        &'a self,
+    fn directory_entry_card(
+        &self,
         index: usize,
-        entry: &'a crate::directory::DirectoryEntry,
-    ) -> Element<'a, Message> {
+        entry: &crate::directory::DirectoryEntry,
+    ) -> Element<'static, Message> {
         let marker = if Some(index) == self.app.directory_state.selected {
             "selected"
         } else {
@@ -8021,6 +8226,7 @@ impl DesktopApp {
             }
         };
         let destination_preview = short_destination_hash(&entry.destination_hash);
+        let display_name = entry.display_name.clone();
         let marker_text = if Some(index) == self.app.directory_state.selected {
             "*"
         } else {
@@ -8030,11 +8236,13 @@ impl DesktopApp {
         container(
             row![
                 text(marker_text).size(ui_size(14)),
-                text(entry.display_name.clone())
+                text(display_name)
                     .size(ui_size(14))
+                    .wrapping(Wrapping::WordOrGlyph)
                     .width(Length::FillPortion(3)),
                 text(destination_preview)
                     .size(ui_size(13))
+                    .wrapping(Wrapping::WordOrGlyph)
                     .width(Length::FillPortion(2)),
                 text(relative_time(entry.last_seen))
                     .size(ui_size(13))
@@ -8076,14 +8284,14 @@ impl DesktopApp {
         let state_lines = directory_selected_state_lines(&entry)
             .into_iter()
             .fold(column![].spacing(3), |column, line| {
-                column.push(text(line).size(ui_size(14)))
+                column.push(wrapped_text_owned(line, 14))
             });
         let micronplus_warning_lines = self
             .app
             .micronplus_warning_lines_for_directory_entry(&entry)
             .into_iter()
             .fold(column![].spacing(3), |column, line| {
-                column.push(text(line).size(ui_size(13)))
+                column.push(wrapped_text_owned(line, 13))
             });
         let selected_primary = directory_selected_primary_actions(index, &entry.kind);
         let trust_action = if entry.trust_level == crate::directory::TrustLevel::Trusted {
@@ -8125,24 +8333,28 @@ impl DesktopApp {
             column![
                 selected_primary,
                 selected_management,
-                text(format!(
-                    "primary actions: {}",
-                    directory_selected_primary_action_labels(&entry.kind).join(", ")
-                ))
-                .size(ui_size(13)),
+                wrapped_text_owned(
+                    format!(
+                        "primary actions: {}",
+                        directory_selected_primary_action_labels(&entry.kind).join(", ")
+                    ),
+                    13
+                ),
                 text(format!("{:?}", entry.kind)).size(ui_size(14)),
-                text(format!("destination: {}", entry.destination_hash)).size(ui_size(14)),
-                text(format!("associated: {associated}")).size(ui_size(14)),
-                text(format!("node associated: {node_associated}")).size(ui_size(14)),
+                wrapped_text_owned(format!("destination: {}", entry.destination_hash), 14),
+                wrapped_text_owned(format!("associated: {associated}"), 14),
+                wrapped_text_owned(format!("node associated: {node_associated}"), 14),
                 state_lines,
-                text(format!(
-                    "last seen: {} ({})",
-                    format_epoch_secs(entry.last_seen),
-                    relative_time(entry.last_seen)
-                ))
-                .size(ui_size(14)),
-                text(kind_note).size(ui_size(14)),
-                text(self.app.micronplus_status_for_directory_entry(&entry)).size(ui_size(14)),
+                wrapped_text_owned(
+                    format!(
+                        "last seen: {} ({})",
+                        format_epoch_secs(entry.last_seen),
+                        relative_time(entry.last_seen)
+                    ),
+                    14
+                ),
+                wrapped_text_owned(kind_note, 14),
+                wrapped_text_owned(self.app.micronplus_status_for_directory_entry(&entry), 14),
                 section_card("MicronPlus Node Warnings", micronplus_warning_lines),
             ]
             .spacing(5),
@@ -8151,6 +8363,7 @@ impl DesktopApp {
 
     fn interfaces_view(&self) -> Element<'_, Message> {
         let selected = self.app.interfaces_state.selected;
+        let runtime_interface_stats = self.app.monitoring_state.last_interface_stats.as_ref();
         let profiles = self.app.interfaces_state.profiles.iter().enumerate().fold(
             column![].spacing(8),
             |column, (index, profile)| {
@@ -8176,7 +8389,19 @@ impl DesktopApp {
                     ]
                     .spacing(8)
                     .wrap(),
-                    text(format!("profile id: {}", profile.profile_id)).size(ui_size(14)),
+                    text(format!("profile id: {}", profile.profile_id))
+                        .size(ui_size(14))
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
+                    text(interface_runtime_state_line(profile, runtime_interface_stats))
+                        .size(ui_size(14))
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
+                    text(interface_runtime_status_label(profile, runtime_interface_stats))
+                        .size(ui_size(14))
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
+                    optional_interface_runtime_detail_line(profile, runtime_interface_stats),
                     text_input("interface name", &profile.name)
                         .on_input({
                             let profile_id = profile.profile_id.clone();
@@ -8185,8 +8410,12 @@ impl DesktopApp {
                                 value,
                             }
                         })
-                        .padding(6),
-                    text(format!("network: {}", profile.network_name)).size(ui_size(14)),
+                        .padding(6)
+                        .width(Length::Fill),
+                    text(format!("network: {}", profile.network_name))
+                        .size(ui_size(14))
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
                 ]
                 .spacing(5);
                 body = match profile.kind {
@@ -8198,7 +8427,9 @@ impl DesktopApp {
                                 "TCP gateway: {}:{}",
                                 profile.target_host, profile.target_port
                             ))
-                            .size(ui_size(14)),
+                            .size(ui_size(14))
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
                             text(format!(
                                 "IFAC: network={} passphrase={}",
                                 if profile.network_name.is_empty() {
@@ -8212,7 +8443,9 @@ impl DesktopApp {
                                     "configured"
                                 }
                             ))
-                            .size(ui_size(14)),
+                            .size(ui_size(14))
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
                             row![
                                 text_input("host", &profile.target_host)
                                     .on_input({
@@ -8222,7 +8455,8 @@ impl DesktopApp {
                                             value,
                                         }
                                     })
-                                    .padding(6),
+                                    .padding(6)
+                                    .width(Length::FillPortion(3)),
                                 text_input("port", &profile.target_port.to_string())
                                     .on_input({
                                         let profile_id = profile.profile_id.clone();
@@ -8231,7 +8465,8 @@ impl DesktopApp {
                                             value,
                                         }
                                     })
-                                    .padding(6),
+                                    .padding(6)
+                                    .width(Length::FillPortion(1)),
                             ]
                             .spacing(8)
                             .wrap(),
@@ -8243,7 +8478,8 @@ impl DesktopApp {
                                             value,
                                         }
                                     })
-                                    .padding(6),
+                                    .padding(6)
+                                    .width(Length::FillPortion(1)),
                                 text_input("IFAC passphrase", &profile.passphrase)
                                     .secure(true)
                                     .on_input(move |value| {
@@ -8252,7 +8488,8 @@ impl DesktopApp {
                                             value,
                                         }
                                     })
-                                    .padding(6),
+                                    .padding(6)
+                                    .width(Length::FillPortion(1)),
                             ]
                             .spacing(8)
                             .wrap(),
@@ -8270,7 +8507,9 @@ impl DesktopApp {
                                     "TCP server listen: {}:{}",
                                     profile.target_host, profile.target_port
                                 ))
-                                .size(ui_size(14)),
+                                .size(ui_size(14))
+                                .wrapping(Wrapping::WordOrGlyph)
+                                .width(Length::Fill),
                                 text(format!(
                                     "IFAC: network={} passphrase={}",
                                     if profile.network_name.is_empty() {
@@ -8284,20 +8523,24 @@ impl DesktopApp {
                                         "configured"
                                     }
                                 ))
-                                .size(ui_size(14)),
+                                .size(ui_size(14))
+                                .wrapping(Wrapping::WordOrGlyph)
+                                .width(Length::Fill),
                                 row![
                                     text_input("listen IP", &profile.target_host)
                                         .on_input(move |value| Message::TcpServerHostChanged {
                                             profile_id: host_id.clone(),
                                             value,
                                         })
-                                        .padding(6),
+                                        .padding(6)
+                                        .width(Length::FillPortion(3)),
                                     text_input("listen port", &profile.target_port.to_string())
                                         .on_input(move |value| Message::TcpServerPortChanged {
                                             profile_id: port_id.clone(),
                                             value,
                                         })
-                                        .padding(6),
+                                        .padding(6)
+                                        .width(Length::FillPortion(1)),
                                 ]
                                 .spacing(8)
                                 .wrap(),
@@ -8309,7 +8552,8 @@ impl DesktopApp {
                                                 value,
                                             }
                                         })
-                                        .padding(6),
+                                        .padding(6)
+                                        .width(Length::FillPortion(1)),
                                     text_input("IFAC passphrase", &profile.passphrase)
                                         .secure(true)
                                         .on_input(move |value| {
@@ -8318,7 +8562,8 @@ impl DesktopApp {
                                                 value,
                                             }
                                         })
-                                        .padding(6),
+                                        .padding(6)
+                                        .width(Length::FillPortion(1)),
                                 ]
                                 .spacing(8)
                                 .wrap(),
@@ -8345,7 +8590,9 @@ impl DesktopApp {
                                     profile.peers.join(", ")
                                 }
                             ))
-                            .size(ui_size(14)),
+                            .size(ui_size(14))
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
                             text_input("comma-separated I2P peers", &profile.peers.join(", "))
                                 .on_input({
                                     let profile_id = profile.profile_id.clone();
@@ -8354,7 +8601,8 @@ impl DesktopApp {
                                         value,
                                     }
                                 })
-                                .padding(6),
+                                .padding(6)
+                                .width(Length::Fill),
                         ]
                         .spacing(5),
                     ),
@@ -8368,7 +8616,9 @@ impl DesktopApp {
                                     profile.device_port.as_str()
                                 }
                             ))
-                            .size(ui_size(14)),
+                            .size(ui_size(14))
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
                             text(format!(
                                 "radio: frequency={} bandwidth={} tx_power={} spreading={} coding={}",
                                 profile.frequency,
@@ -8377,7 +8627,9 @@ impl DesktopApp {
                                 profile.spreading_factor,
                                 profile.coding_rate
                             ))
-                            .size(ui_size(14)),
+                            .size(ui_size(14))
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
                             text_input("device port, e.g. /dev/ttyUSB0", &profile.device_port)
                                 .on_input({
                                     let profile_id = profile.profile_id.clone();
@@ -8386,7 +8638,8 @@ impl DesktopApp {
                                         value,
                                     }
                                 })
-                                .padding(6),
+                                .padding(6)
+                                .width(Length::Fill),
                             row![
                                 text_input("frequency Hz", &profile.frequency.to_string())
                                     .on_input({
@@ -8445,7 +8698,9 @@ impl DesktopApp {
                     ),
                     InterfaceKind::Auto | InterfaceKind::Unknown(_) => body.push(
                         column![text("Generic interface: no kind-specific settings are available.")
-                            .size(ui_size(14))]
+                            .size(ui_size(14))
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill)]
                         .spacing(5),
                     ),
                 };
@@ -8457,28 +8712,26 @@ impl DesktopApp {
             .interfaces_state
             .config_preview
             .as_ref()
-            .map(|preview| preview.lines().take(24).collect::<Vec<_>>().join("\n"))
+            .cloned()
             .unwrap_or_else(|| "No generated Reticulum config preview loaded.".into());
+
+        let mut interface_setup_actions = vec![
+            omen_button("Add TCP Gateway", Message::CreateTcpClientInterface),
+            subtle_button("Add I2P", Message::CreateI2pInterface),
+            subtle_button("Add RNode", Message::CreateRNodeInterface),
+        ];
+        interface_setup_actions.extend(self.gateway_preset_buttons());
+        interface_setup_actions.push(subtle_button(
+            "Settings",
+            Message::SwitchSection(WorkspaceSection::Settings),
+        ));
 
         let mut content = column![
             text("Interfaces").size(ui_size(28)),
             section_card(
                 "Native Runtime Interfaces",
                 column![
-                    action_grid(
-                        vec![
-                            omen_button("Add TCP Gateway", Message::CreateTcpClientInterface),
-                            subtle_button("Add I2P", Message::CreateI2pInterface),
-                            subtle_button("Add RNode", Message::CreateRNodeInterface),
-                            subtle_button("Add RMAP Gateway", Message::CreateRmapGateway),
-                            subtle_button("Add WNS Gateway", Message::CreateWnsGateway),
-                            subtle_button(
-                                "Settings",
-                                Message::SwitchSection(WorkspaceSection::Settings)
-                            ),
-                        ],
-                        3,
-                    ),
+                    action_grid(interface_setup_actions, 3),
                     action_grid(
                         vec![
                             omen_button("Start Native Runtime", Message::StartNativeRuntime),
@@ -8497,7 +8750,10 @@ impl DesktopApp {
                         selected
                             .map(|index| index.to_string())
                             .unwrap_or_else(|| "none".into())
-                    )),
+                    ))
+                    .size(ui_size(14))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
                     text(format!(
                         "last export: {}",
                         self.app
@@ -8506,12 +8762,17 @@ impl DesktopApp {
                             .as_ref()
                             .map(|path| path.display().to_string())
                             .unwrap_or_else(|| "none".into())
-                    )),
+                    ))
+                    .size(ui_size(14))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
                     text(format!(
                         "config path: {}",
                         self.app.interface_service.config_path().display()
                     ))
-                    .size(ui_size(13)),
+                    .size(ui_size(13))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
                 ]
                 .spacing(6),
             ),
@@ -8538,12 +8799,39 @@ impl DesktopApp {
                 .spacing(8),
             ));
         }
-        content = content.push(profiles).push(section_card(
-            "Generated Config Preview",
-            text(preview).size(ui_size(13)),
-        ));
+        let preview_lines = interface_config_preview_lines(&preview).into_iter().fold(
+            column![].spacing(2),
+            |column, line| {
+                column.push(
+                    text(line)
+                        .size(ui_size(13))
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
+                )
+            },
+        );
+        content = content
+            .push(profiles)
+            .push(section_card("Generated Config Preview", preview_lines));
 
-        app_scrollable(content).height(Length::Fill).into()
+        app_scrollable(content.width(Length::Fill))
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn gateway_preset_buttons(&self) -> Vec<Button<'static, Message>> {
+        self.app
+            .interface_service
+            .gateway_presets()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|preset| {
+                subtle_button_owned(
+                    format!("Add {} Gateway", preset.name),
+                    Message::CreateGatewayPreset(preset.id),
+                )
+            })
+            .collect()
     }
 
     fn diagnostics_view(&self) -> Element<'_, Message> {
@@ -8552,10 +8840,10 @@ impl DesktopApp {
             section_card(
                 format!("Report Summary: {}", summary.report),
                 column![
-                    text(format!("outcome: {}", summary.outcome)).size(ui_size(15)),
-                    text(format!("stage: {}", summary.stage)).size(ui_size(15)),
-                    text(format!("detail: {}", summary.detail)).size(ui_size(14)),
-                    text(format!("next: {}", summary.next_step)).size(ui_size(14)),
+                    wrapped_text_owned(format!("outcome: {}", summary.outcome), 15),
+                    wrapped_text_owned(format!("stage: {}", summary.stage), 15),
+                    wrapped_text_owned(format!("detail: {}", summary.detail), 14),
+                    wrapped_text_owned(format!("next: {}", summary.next_step), 14),
                 ]
                 .spacing(4),
             )
@@ -8570,7 +8858,7 @@ impl DesktopApp {
             .native_action_status_lines()
             .into_iter()
             .fold(column![].spacing(3), |column, line| {
-                column.push(text(line).size(ui_size(14)))
+                column.push(wrapped_text_owned(line, 14))
             });
         let stage_cards =
             diagnostics_preview_stage_cards(&self.app.diagnostics_state.preview_lines)
@@ -8580,9 +8868,9 @@ impl DesktopApp {
                     column.push(section_card(
                         format!("{}: {}", stage.kind, stage.stage),
                         column![
-                            text(format!("status: {}", stage.status)).size(ui_size(14)),
-                            text(format!("detail: {}", stage.detail)).size(ui_size(14)),
-                            text(format!("next: {}", stage.next_step)).size(ui_size(14)),
+                            wrapped_text_owned(format!("status: {}", stage.status), 14),
+                            wrapped_text_owned(format!("detail: {}", stage.detail), 14),
+                            wrapped_text_owned(format!("next: {}", stage.next_step), 14),
                         ]
                         .spacing(3),
                     ))
@@ -8593,23 +8881,27 @@ impl DesktopApp {
             section_card(
                 "Live Fetch Result",
                 column![
-                    text(format!("outcome: {}", fetch.outcome)).size(ui_size(14)),
-                    text(format!("stage: {}", fetch.stage_hint)).size(ui_size(14)),
-                    text(format!("request backend: {}", fetch.request_backend)).size(ui_size(14)),
-                    text(format!("response: {}", fetch.response_size)).size(ui_size(14)),
-                    text(format!("detail: {}", fetch.detail)).size(ui_size(14)),
-                    text(format!("first failed stage: {}", fetch.first_failed_stage))
-                        .size(ui_size(14)),
-                    text(format!("next: {}", fetch.next_step)).size(ui_size(14)),
+                    wrapped_text_owned(format!("outcome: {}", fetch.outcome), 14),
+                    wrapped_text_owned(format!("stage: {}", fetch.stage_hint), 14),
+                    wrapped_text_owned(format!("request backend: {}", fetch.request_backend), 14),
+                    wrapped_text_owned(format!("response: {}", fetch.response_size), 14),
+                    wrapped_text_owned(format!("detail: {}", fetch.detail), 14),
+                    wrapped_text_owned(
+                        format!("first failed stage: {}", fetch.first_failed_stage),
+                        14
+                    ),
+                    wrapped_text_owned(format!("next: {}", fetch.next_step), 14),
                 ]
                 .spacing(3),
             )
         } else {
             section_card(
-                    "Live Fetch Result",
-                    text("Run Native Live Fetch to see fetch_page stage, backend, and response metadata here.")
-                        .size(ui_size(14)),
-                )
+                "Live Fetch Result",
+                wrapped_text_owned(
+                    "Run Native Live Fetch to see fetch_page stage, backend, and response metadata here.",
+                    14,
+                ),
+            )
         };
         let lxmf_delivery_card = if let Some(lxmf) =
             diagnostics_preview_lxmf_delivery_card(&self.app.diagnostics_state.preview_lines)
@@ -8617,21 +8909,24 @@ impl DesktopApp {
             section_card(
                 "LXMF Delivery Result",
                 column![
-                    text(format!("outcome: {}", lxmf.outcome)).size(ui_size(14)),
-                    text(format!("send: {}", lxmf.send_state)).size(ui_size(14)),
-                    text(format!("proof: {}", lxmf.proof_state)).size(ui_size(14)),
-                    text(format!("inbound: {}", lxmf.inbound_state)).size(ui_size(14)),
-                    text(format!("events: {}", lxmf.event_counts)).size(ui_size(14)),
-                    text(format!("readiness: {}", lxmf.readiness_stage)).size(ui_size(14)),
-                    text(format!("detail: {}", lxmf.detail)).size(ui_size(14)),
-                    text(format!("next: {}", lxmf.next_step)).size(ui_size(14)),
+                    wrapped_text_owned(format!("outcome: {}", lxmf.outcome), 14),
+                    wrapped_text_owned(format!("send: {}", lxmf.send_state), 14),
+                    wrapped_text_owned(format!("proof: {}", lxmf.proof_state), 14),
+                    wrapped_text_owned(format!("inbound: {}", lxmf.inbound_state), 14),
+                    wrapped_text_owned(format!("events: {}", lxmf.event_counts), 14),
+                    wrapped_text_owned(format!("readiness: {}", lxmf.readiness_stage), 14),
+                    wrapped_text_owned(format!("detail: {}", lxmf.detail), 14),
+                    wrapped_text_owned(format!("next: {}", lxmf.next_step), 14),
                 ]
                 .spacing(3),
             )
         } else {
             section_card(
                 "LXMF Delivery Result",
-                text("Run LXMF Interop to see send/proof/inbound evidence here.").size(ui_size(14)),
+                wrapped_text_owned(
+                    "Run LXMF Interop to see send/proof/inbound evidence here.",
+                    14,
+                ),
             )
         };
         let propagation_sync_card = if let Some(sync) =
@@ -8641,27 +8936,29 @@ impl DesktopApp {
                 .event_lines
                 .iter()
                 .fold(column![].spacing(2), |column, line| {
-                    column.push(text(line.clone()).size(ui_size(12)))
+                    column.push(wrapped_text_owned(line.clone(), 12))
                 });
             section_card(
                 "LXMF Propagation Sync",
                 column![
-                    text(format!("outcome: {}", sync.outcome)).size(ui_size(14)),
-                    text(format!("selected node: {}", sync.selected_node)).size(ui_size(14)),
-                    text(format!("before: {}", sync.before)).size(ui_size(14)),
-                    text(format!("after: {}", sync.after)).size(ui_size(14)),
-                    text(format!("events: {}", sync.events)).size(ui_size(14)),
+                    wrapped_text_owned(format!("outcome: {}", sync.outcome), 14),
+                    wrapped_text_owned(format!("selected node: {}", sync.selected_node), 14),
+                    wrapped_text_owned(format!("before: {}", sync.before), 14),
+                    wrapped_text_owned(format!("after: {}", sync.after), 14),
+                    wrapped_text_owned(format!("events: {}", sync.events), 14),
                     section_card("Recent Sync Events", event_lines),
-                    text(format!("blocker: {}", sync.blocker)).size(ui_size(14)),
-                    text(format!("next: {}", sync.next_step)).size(ui_size(14)),
+                    wrapped_text_owned(format!("blocker: {}", sync.blocker), 14),
+                    wrapped_text_owned(format!("next: {}", sync.next_step), 14),
                 ]
                 .spacing(3),
             )
         } else {
             section_card(
                 "LXMF Propagation Sync",
-                text("Run Sync Propagation to see propagation-node /get status, haves/wants, and failures here.")
-                    .size(ui_size(14)),
+                wrapped_text_owned(
+                    "Run Sync Propagation to see propagation-node /get status, haves/wants, and failures here.",
+                    14,
+                ),
             )
         };
         let preview = self
@@ -8671,7 +8968,7 @@ impl DesktopApp {
             .iter()
             .take(80)
             .fold(column![].spacing(3), |column, line| {
-                column.push(text(line.clone()).size(ui_size(13)))
+                column.push(wrapped_text_owned(line.clone(), 13))
             });
         let snapshot = self
             .app
@@ -8681,26 +8978,26 @@ impl DesktopApp {
             .cloned()
             .unwrap_or_else(|| "No diagnostics snapshot captured yet.".into());
         let diagnostic_target = column![
-            text(format!(
+            wrapped_text_owned(format!(
                 "kind: {}",
                 self.app
                     .diagnostics_state
                     .target_kind
                     .as_deref()
                     .unwrap_or("none")
-            ))
-            .size(ui_size(14)),
-            text(format!(
+            ), 14),
+            wrapped_text_owned(format!(
                 "address: {}",
                 self.app
                     .diagnostics_state
                     .target_address
                     .as_deref()
                     .unwrap_or("none")
-            ))
-            .size(ui_size(14)),
-            text("Browser and conversation Diag buttons update this target before running their report.")
-                .size(ui_size(13)),
+            ), 14),
+            wrapped_text_owned(
+                "Browser and conversation Diag buttons update this target before running their report.",
+                13,
+            ),
         ]
         .spacing(3);
 
@@ -8711,14 +9008,17 @@ impl DesktopApp {
                 section_card(
                     "Runtime Readiness",
                     column![
-                        text(format!(
-                            "backend: {:?} | connected={} | {}",
-                            self.app.runtime_status.backend,
-                            self.app.runtime_status.connected,
-                            self.app.runtime_status.message
-                        )),
-                        text(format!("task: {}", self.app.status.task)),
-                        text(format!("identity: {}", self.app.status.identity)),
+                        wrapped_text_owned(
+                            format!(
+                                "backend: {:?} | connected={} | {}",
+                                self.app.runtime_status.backend,
+                                self.app.runtime_status.connected,
+                                self.app.runtime_status.message
+                            ),
+                            14
+                        ),
+                        wrapped_text_owned(format!("task: {}", self.app.status.task), 14),
+                        wrapped_text_owned(format!("identity: {}", self.app.status.identity), 14),
                     ]
                     .spacing(4),
                 ),
@@ -8766,34 +9066,44 @@ impl DesktopApp {
                             ],
                             3
                         ),
-                        text(format!(
-                            "path: {}",
-                            self.app
-                                .diagnostics_state
-                                .last_export_path
-                                .as_ref()
-                                .map(|path| path.display().to_string())
-                                .unwrap_or_else(|| "none".into())
-                        )),
-                        text(format!(
-                            "summary: {}",
-                            self.app
-                                .diagnostics_state
-                                .last_export_summary
-                                .as_deref()
-                                .unwrap_or("none")
-                        )),
-                        text(format!(
-                            "preview scroll: {}",
-                            self.app.diagnostics_state.preview_scroll
-                        )),
+                        wrapped_text_owned(
+                            format!(
+                                "path: {}",
+                                self.app
+                                    .diagnostics_state
+                                    .last_export_path
+                                    .as_ref()
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_else(|| "none".into())
+                            ),
+                            14
+                        ),
+                        wrapped_text_owned(
+                            format!(
+                                "summary: {}",
+                                self.app
+                                    .diagnostics_state
+                                    .last_export_summary
+                                    .as_deref()
+                                    .unwrap_or("none")
+                            ),
+                            14
+                        ),
+                        wrapped_text_owned(
+                            format!(
+                                "preview scroll: {}",
+                                self.app.diagnostics_state.preview_scroll
+                            ),
+                            14
+                        ),
                     ]
                     .spacing(4),
                 ),
-                section_card("Snapshot", text(snapshot).size(ui_size(13))),
+                section_card("Snapshot", wrapped_text_owned(snapshot, 13),),
                 section_card("Preview", preview),
             ]
-            .spacing(12),
+            .spacing(12)
+            .width(Length::Fill),
         )
         .height(Length::Fill)
         .into()
@@ -8871,64 +9181,61 @@ impl DesktopApp {
         .wrap();
 
         let network_lines = column![
-            text(format!(
+            wrapped_text_owned(format!(
                 "backend: {:?} | connected={} | {}",
                 runtime.backend, runtime.connected, runtime.message
-            ))
-            .size(ui_size(14)),
-            text(format!(
+            ), 14),
+            wrapped_text_owned(
+                monitoring_interface_reconnect_line(monitoring.last_interface_stats.as_ref()),
+                14,
+            ),
+            wrapped_text_owned(format!(
                 "identity: {}",
                 runtime
                     .active_identity
                     .as_ref()
                     .map(|identity| format!("{} / {}", identity.label, identity.hash_hex))
                     .unwrap_or_else(|| "none".into())
-            ))
-            .size(ui_size(14)),
-            text(format!(
+            ), 14),
+            wrapped_text_owned(format!(
                 "path updates: {} | page probes: {} | propagation sync events: {}",
                 monitoring.path_updates_received,
                 monitoring.page_fetch_probes,
                 monitoring.propagation_sync_events
-            ))
-            .size(ui_size(14)),
-            text(format!(
+            ), 14),
+            wrapped_text_owned(format!(
                 "outgoing: pages={} partials={} downloads={} diagnostics={}",
                 monitoring.outbound_page_requests,
                 monitoring.outbound_partial_refreshes,
                 monitoring.outbound_file_downloads,
                 monitoring.outbound_diagnostics
-            ))
-            .size(ui_size(14)),
-            text(format!(
+            ), 14),
+            wrapped_text_owned(format!(
                 "outgoing paths/messages: path_requests={} path_warmups={} lxmf_sends={} prop_syncs={}",
                 monitoring.outbound_path_requests,
                 monitoring.outbound_path_warmups,
                 monitoring.outbound_lxmf_sends,
                 monitoring.outbound_propagation_syncs
-            ))
-            .size(ui_size(14)),
-            text(format!(
+            ), 14),
+            wrapped_text_owned(format!(
                 "incoming: page_responses={} downloads={} announces={} inbound_lxmf={}",
                 monitoring.inbound_page_responses,
                 monitoring.inbound_downloads,
                 monitoring.announces_received,
                 monitoring.inbound_messages
-            ))
-            .size(ui_size(14)),
-            text(format!(
+            ), 14),
+            wrapped_text_owned(format!(
                 "LXMF evidence: {} | outbound status updates: {} | runtime errors: {}",
                 monitoring.lxmf_evidence_updates,
                 monitoring.outbound_status_updates,
                 monitoring.runtime_errors
-            ))
-            .size(ui_size(14)),
+            ), 14),
         ]
         .spacing(4);
         let attribution_lines = monitoring_runtime_attribution_lines(monitoring, uptime_secs)
             .into_iter()
             .fold(column![].spacing(4), |lines, line| {
-                lines.push(text(line).size(ui_size(14)))
+                lines.push(wrapped_text_owned(line, 14))
             });
 
         let directory_lines = column![
@@ -8939,23 +9246,25 @@ impl DesktopApp {
             ),
             monitoring_meter("saved", saved_entries, directory_entries.len().max(1)),
             monitoring_meter("trusted", trusted_entries, directory_entries.len().max(1)),
-            text(format!(
-                "nodes={} peers={} propagation={} total={}",
-                directory_entries
-                    .iter()
-                    .filter(|entry| entry.kind == crate::directory::DirectoryKind::Node)
-                    .count(),
-                directory_entries
-                    .iter()
-                    .filter(|entry| entry.kind == crate::directory::DirectoryKind::Peer)
-                    .count(),
-                directory_entries
-                    .iter()
-                    .filter(|entry| entry.kind == crate::directory::DirectoryKind::Propagation)
-                    .count(),
-                directory_entries.len()
-            ))
-            .size(ui_size(14)),
+            wrapped_text_owned(
+                format!(
+                    "nodes={} peers={} propagation={} total={}",
+                    directory_entries
+                        .iter()
+                        .filter(|entry| entry.kind == crate::directory::DirectoryKind::Node)
+                        .count(),
+                    directory_entries
+                        .iter()
+                        .filter(|entry| entry.kind == crate::directory::DirectoryKind::Peer)
+                        .count(),
+                    directory_entries
+                        .iter()
+                        .filter(|entry| entry.kind == crate::directory::DirectoryKind::Propagation)
+                        .count(),
+                    directory_entries.len()
+                ),
+                14
+            ),
         ]
         .spacing(4);
 
@@ -8970,56 +9279,49 @@ impl DesktopApp {
                 outbound_messages,
                 inbound_messages + outbound_messages
             ),
-            text(format!(
-                "conversations={} inbound={} outbound={} pending={pending_messages}",
-                self.app.workspace.conversations.len(),
-                inbound_messages,
-                outbound_messages
-            ))
-            .size(ui_size(14)),
+            wrapped_text_owned(
+                format!(
+                    "conversations={} inbound={} outbound={} pending={pending_messages}",
+                    self.app.workspace.conversations.len(),
+                    inbound_messages,
+                    outbound_messages
+                ),
+                14
+            ),
         ]
         .spacing(4);
 
         let resource_lines = match resources {
             Some(resources) => column![
                 monitoring_meter("rss", resources.rss_bytes as usize, 512 * 1024 * 1024),
-                text(format!("memory: {}", human_bytes(resources.rss_bytes))).size(ui_size(14)),
-                text(format!("process cpu time: {:.2}s", resources.cpu_seconds)).size(ui_size(14)),
+                wrapped_text_owned(format!("memory: {}", human_bytes(resources.rss_bytes)), 14),
+                wrapped_text_owned(
+                    format!("process cpu time: {:.2}s", resources.cpu_seconds),
+                    14
+                ),
             ]
             .spacing(4),
-            None => column![
-                text("Process resource stats are unavailable on this platform.").size(ui_size(14))
-            ]
+            None => column![wrapped_text_owned(
+                "Process resource stats are unavailable on this platform.",
+                14
+            )]
             .spacing(4),
         };
 
         let interface_card = if let Some(stats) = &monitoring.last_interface_stats {
+            let interface_lines = monitoring_interface_status_lines(stats);
             section_card(
                 "Interfaces",
-                column![
-                    text(format!(
-                        "available={} | {}",
-                        stats.available,
-                        stats
-                            .reason
-                            .as_deref()
-                            .unwrap_or("interface stats available")
-                    ))
-                    .size(ui_size(14)),
-                    text(if stats.interfaces.is_empty() {
-                        "interfaces: none reported".into()
-                    } else {
-                        format!("interfaces: {}", stats.interfaces.join(", "))
-                    })
-                    .size(ui_size(14)),
-                ]
-                .spacing(4),
+                interface_lines
+                    .into_iter()
+                    .fold(column![].spacing(4), |column, line| {
+                        column.push(wrapped_text_owned(line, 14))
+                    }),
             )
         } else {
             section_card(
                 "Interfaces",
-                text("No runtime interface stats have been sampled yet. Run Diagnostics or native startup to populate rnstatus-like interface data.")
-                    .size(ui_size(14)),
+                wrapped_panel_text("No runtime interface stats have been sampled yet. Run Diagnostics or native startup to populate rnstatus-like interface data."),
             )
         };
         let omenchat_card = self.omenchat_monitoring_card();
@@ -9027,8 +9329,7 @@ impl DesktopApp {
         app_scrollable(
             column![
                 text("Monitoring").size(ui_size(28)),
-                text("Runtime traffic and resource pressure for keeping OMENbrowser_rs quiet on Reticulum.")
-                    .size(ui_size(14)),
+                wrapped_panel_text("Runtime traffic and resource pressure for keeping OMENbrowser_rs quiet on Reticulum."),
                 traffic_cards,
                 row![
                     section_card("Network Runtime", network_lines),
@@ -9046,7 +9347,8 @@ impl DesktopApp {
                 interface_card,
                 omenchat_card,
             ]
-            .spacing(12),
+            .spacing(12)
+            .width(Length::Fill),
         )
         .height(Length::Fill)
         .into()
@@ -9109,8 +9411,10 @@ impl DesktopApp {
             let mut lines = column![].spacing(6);
             if self.chat_client.sessions().is_empty() {
                 lines = lines.push(
-                    text("No OMENchat sessions are open. Open an omenchat:// destination to monitor live chat traffic.")
-                        .size(ui_size(14)),
+                    wrapped_text_owned(
+                        "No OMENchat sessions are open. Open an omenchat:// destination to monitor live chat traffic.",
+                        14,
+                    ),
                 );
             } else {
                 let media_total = self.omenchat_media_cache.len();
@@ -9132,8 +9436,8 @@ impl DesktopApp {
                 let totals = self.omenchat_live_monitor_totals();
                 lines = lines.push(
                     column![
-                        text(omenchat_monitor_health_line(&totals)).size(ui_size(13)),
-                        text(format!(
+                        wrapped_text_owned(omenchat_monitor_health_line(&totals), 13),
+                        wrapped_text_owned(format!(
                             "summary: {} session(s) | {} connected | {} opening | {} reconnect timer(s) | {} history sync wait(s) | {} awaiting pong(s)",
                             totals.sessions,
                             totals.connected,
@@ -9141,9 +9445,8 @@ impl DesktopApp {
                             totals.reconnect_timers,
                             totals.history_sync_waiting,
                             totals.awaiting_pongs
-                        ))
-                        .size(ui_size(13)),
-                        text(format!(
+                        ), 13),
+                        wrapped_text_owned(format!(
                             "traffic total: frames {} in / {} out | wire {} rx / {} tx | resources {} ({}) | pending resources {}",
                             totals.frames_in,
                             totals.frames_out,
@@ -9152,9 +9455,8 @@ impl DesktopApp {
                             totals.resources_in,
                             human_bytes(totals.resource_bytes_in),
                             totals.pending_resources
-                        ))
-                        .size(ui_size(13)),
-                        text(format!(
+                        ), 13),
+                        wrapped_text_owned(format!(
                             "upload total: fetches {} | offers {} | inline chunks {} ({}) | resources {} ({})",
                             totals.upload_fetches_out,
                             totals.upload_resource_offers_in,
@@ -9162,16 +9464,14 @@ impl DesktopApp {
                             human_bytes(totals.upload_inline_bytes_in),
                             totals.upload_resources_in,
                             human_bytes(totals.upload_resource_bytes_in)
-                        ))
-                        .size(ui_size(13)),
+                        ), 13),
                     ]
                     .spacing(2),
                 );
                 lines = lines.push(
-                    text(format!(
+                    wrapped_text_owned(format!(
                         "media cache: {media_cached} cached / {media_loading} loading / {media_failed} failed ({media_total} tracked)"
-                    ))
-                    .size(ui_size(13)),
+                    ), 13),
                 );
                 for session in self.chat_client.sessions() {
                     let connects = self
@@ -9313,15 +9613,18 @@ impl DesktopApp {
                     };
                     lines = lines.push(
                         column![
-                            text(format!(
-                                "{} | {} | room #{} | users {}",
-                                session.server.display_name,
-                                short_destination_hash(&session.server.destination),
-                                session.active_room.name,
-                                session.users.len()
-                            ))
-                            .size(ui_size(14)),
-                            text(format!(
+                            wrapped_text_owned(
+                                format!(
+                                    "{} | {} | room #{} | users {}",
+                                    session.server.display_name,
+                                    short_destination_hash(&session.server.destination),
+                                    session.active_room.name,
+                                    session.users.len()
+                                ),
+                                14
+                            ),
+                            wrapped_text_owned(
+                                format!(
                                 "{} | connects={} disconnects={} retry_attempts={} | {} | {} | {}",
                                 link_line,
                                 connects,
@@ -9330,15 +9633,16 @@ impl DesktopApp {
                                 reconnect_line,
                                 last_disconnect,
                                 session.status
-                            ))
-                            .size(ui_size(13)),
-                            text(attention_line).size(ui_size(13)),
-                            text(traffic_line).size(ui_size(13)),
-                            text(mix_line).size(ui_size(13)),
-                            text(upload_line).size(ui_size(13)),
-                            text(heartbeat_line).size(ui_size(13)),
-                            text(history_sync_line).size(ui_size(13)),
-                            text(last_frame_line).size(ui_size(13)),
+                            ),
+                                13
+                            ),
+                            wrapped_text_owned(attention_line, 13),
+                            wrapped_text_owned(traffic_line, 13),
+                            wrapped_text_owned(mix_line, 13),
+                            wrapped_text_owned(upload_line, 13),
+                            wrapped_text_owned(heartbeat_line, 13),
+                            wrapped_text_owned(history_sync_line, 13),
+                            wrapped_text_owned(last_frame_line, 13),
                         ]
                         .spacing(2),
                     );
@@ -9415,7 +9719,7 @@ impl DesktopApp {
                             entry.source,
                             format_epoch_ms(entry.epoch_ms)
                         ),
-                        text(entry.message.clone()).size(ui_size(14)),
+                        wrapped_text_owned(entry.message.clone(), 14),
                     ))
                 });
 
@@ -9425,20 +9729,21 @@ impl DesktopApp {
                 section_card(
                     "Log Filters",
                     column![
-                        text(format!(
+                        wrapped_text_owned(format!(
                             "entries={} visible={} severity={:?} source={:?}",
                             self.app.logs.entries.len(),
                             entries.len().min(LOG_VISIBLE_ENTRIES),
                             self.app.logs.severity_filter,
                             self.app.logs.source_filter
-                        )),
-                        text("Filter controls remain in the TUI/keybinding layer; this desktop panel is a readable log deck."),
+                        ), 14),
+                        wrapped_panel_text("Filter controls remain in the TUI/keybinding layer; this desktop panel is a readable log deck."),
                     ]
                     .spacing(4),
                 ),
                 rows,
             ]
-            .spacing(12),
+            .spacing(12)
+            .width(Length::Fill),
         )
         .height(Length::Fill)
         .into()
@@ -9451,7 +9756,7 @@ impl DesktopApp {
             .warnings
             .iter()
             .fold(column![].spacing(4), |column, warning| {
-                column.push(text(warning.clone()).size(ui_size(14)))
+                column.push(wrapped_text_owned(warning.clone(), 14))
             });
         let plugins = self.app.plugins_state.installed.iter().enumerate().fold(
             column![].spacing(8),
@@ -9472,25 +9777,28 @@ impl DesktopApp {
                         .spacing(8)
                         .wrap(),
                         row![
-                            text(format!("id: {}", plugin.manifest.plugin_id)).size(ui_size(14)),
-                            text(format!("v{}", plugin.manifest.version)).size(ui_size(14)),
+                            wrapped_text_owned(format!("id: {}", plugin.manifest.plugin_id), 14),
+                            wrapped_text_owned(format!("v{}", plugin.manifest.version), 14),
                         ]
                         .spacing(8)
                         .wrap(),
-                        text(format!(
-                            "builtin={} enabled={} trusted={}",
-                            plugin.builtin, plugin.enabled, plugin.trusted
-                        ))
-                        .size(ui_size(14)),
-                        text(format!("author: {}", plugin.manifest.author)).size(ui_size(14)),
-                        text(format!("entrypoint: {}", plugin.manifest.entrypoint))
-                            .size(ui_size(14)),
-                        text(format!(
-                            "permissions: {}",
-                            plugin.manifest.permissions.len()
-                        ))
-                        .size(ui_size(14)),
-                        text(plugin.manifest.description.clone()).size(ui_size(14)),
+                        wrapped_text_owned(
+                            format!(
+                                "builtin={} enabled={} trusted={}",
+                                plugin.builtin, plugin.enabled, plugin.trusted
+                            ),
+                            14
+                        ),
+                        wrapped_text_owned(format!("author: {}", plugin.manifest.author), 14),
+                        wrapped_text_owned(
+                            format!("entrypoint: {}", plugin.manifest.entrypoint),
+                            14
+                        ),
+                        wrapped_text_owned(
+                            format!("permissions: {}", plugin.manifest.permissions.len()),
+                            14
+                        ),
+                        wrapped_text_owned(plugin.manifest.description.clone(), 14),
                     ]
                     .spacing(5),
                 ))
@@ -9501,14 +9809,14 @@ impl DesktopApp {
             .selected_plugin_detail_lines()
             .into_iter()
             .fold(column![].spacing(3), |column, line| {
-                column.push(text(line).size(ui_size(13)))
+                column.push(wrapped_text_owned(line, 13))
             });
         let micronplus_diagnostics = self
             .app
             .active_micronplus_diagnostic_lines()
             .into_iter()
             .fold(column![].spacing(3), |column, line| {
-                column.push(text(line).size(ui_size(13)))
+                column.push(wrapped_text_owned(line, 13))
             });
 
         app_scrollable(
@@ -9530,17 +9838,23 @@ impl DesktopApp {
                             ],
                             5,
                         ),
-                        text(format!(
-                            "installed={} manifests={} selected={}",
-                            self.app.plugins_state.installed.len(),
-                            self.app.plugins_state.manifests.len(),
-                            self.app
-                                .plugins_state
-                                .selected
-                                .map(|index| index.to_string())
-                                .unwrap_or_else(|| "none".into())
-                        )),
-                        text("MicronPlus Text UI is built in and still trust-gated by node trust."),
+                        wrapped_text_owned(
+                            format!(
+                                "installed={} manifests={} selected={}",
+                                self.app.plugins_state.installed.len(),
+                                self.app.plugins_state.manifests.len(),
+                                self.app
+                                    .plugins_state
+                                    .selected
+                                    .map(|index| index.to_string())
+                                    .unwrap_or_else(|| "none".into())
+                            ),
+                            14
+                        ),
+                        wrapped_text_owned(
+                            "MicronPlus Text UI is built in and still trust-gated by node trust.",
+                            14,
+                        ),
                     ]
                     .spacing(4),
                 ),
@@ -9549,7 +9863,8 @@ impl DesktopApp {
                 plugins,
                 section_card("Selected Plugin", details),
             ]
-            .spacing(12),
+            .spacing(12)
+            .width(Length::Fill),
         )
         .height(Length::Fill)
         .into()
@@ -9557,43 +9872,41 @@ impl DesktopApp {
 
     fn help_view(&self) -> Element<'_, Message> {
         let browser_help = column![
-            text("Open NomadNet pages with destination:/path.mu or paste a full destination hash into the address field. Use Request Path when the route/key is unknown, then retry after the path status returns pass.").size(ui_size(14)),
-            text("Back, Forward, Reload, Stop, Identify, Capture, and Diag act on the selected browser pane only. Diag opens diagnostics for that pane's current destination.").size(ui_size(14)),
-            text("Ctrl + mouse wheel zooms only the active Micron viewport. The Top button returns that viewport to the first rendered row.").size(ui_size(14)),
-            text("NomadNet non-.mu file links download through the configured downloads path. HTTP/HTTPS links open through the external browser prompt.").size(ui_size(14)),
+            wrapped_panel_text("Open NomadNet pages with destination:/path.mu or paste a full destination hash into the address field. Use Request Path when the route/key is unknown, then retry after the path status returns pass."),
+            wrapped_panel_text("Back, Forward, Reload, Stop, Identify, Capture, and Diag act on the selected browser pane only. Diag opens diagnostics for that pane's current destination."),
+            wrapped_panel_text("Ctrl + mouse wheel zooms only the active Micron viewport. The Top button returns that viewport to the first rendered row."),
+            wrapped_panel_text("NomadNet non-.mu file links download through the configured downloads path. HTTP/HTTPS links open through the external browser prompt; use Copy URL for Tor Browser."),
         ]
         .spacing(6);
 
         let micron_help = column![
-            text("Micron is rendered as a styled cell grid, so half-block art, true-color headers, links, forms, and focus order are preserved inside the viewport.").size(ui_size(14)),
-            text("Tab and Shift+Tab move focus through links and form fields in the active viewport. Enter activates the focused link or submits the focused form action.").size(ui_size(14)),
-            text("MicronPlus pages can expose live regions and UI controls. Live refreshes are quiet on success and report failures in the browser status/error surface.").size(ui_size(14)),
+            wrapped_panel_text("Micron is rendered as a styled cell grid, so half-block art, true-color headers, links, forms, and focus order are preserved inside the viewport."),
+            wrapped_panel_text("Tab and Shift+Tab move focus through links and form fields in the active viewport. Enter activates the focused link or submits the focused form action."),
+            wrapped_panel_text("MicronPlus pages can expose live regions and UI controls. Live refreshes are quiet on success and report failures in the browser status/error surface."),
         ]
         .spacing(6);
 
         let omenchat_commands = column![
-            text("/me <action> - send an action message").size(ui_size(14)),
-            text("/join <room> - switch to a room").size(ui_size(14)),
-            text("/part [room] - leave a room").size(ui_size(14)),
-            text("/rooms - list rooms advertised by the server").size(ui_size(14)),
-            text("/who - list visible users in the active room").size(ui_size(14)),
-            text("/upload <path> - offer a local file upload to the active room; the attach button opens a native file picker and sends the selected file").size(ui_size(14)),
-            text("/notice <text> - send a room notice; moderator/admin only").size(ui_size(14)),
-            text("/topic <text> - change the active room topic; moderator/admin only")
-                .size(ui_size(14)),
-            text("/create-room <room> [topic] - create a room; admin only; /create and /mkroom also work").size(ui_size(14)),
-            text("/kick <user>, /ban <user>, /unban <user> - moderation actions").size(ui_size(14)),
-            text("/mute <user>, /unmute <user> - moderation actions").size(ui_size(14)),
-            text("/role <user> <standard|trusted|mod|admin> - change a user role; admin only")
-                .size(ui_size(14)),
+            wrapped_text_owned("/me <action> - send an action message", 14),
+            wrapped_text_owned("/join <room> - switch to a room", 14),
+            wrapped_text_owned("/part [room] - leave a room", 14),
+            wrapped_text_owned("/rooms - list rooms advertised by the server", 14),
+            wrapped_text_owned("/who - list visible users in the active room", 14),
+            wrapped_text_owned("/upload <path> - offer a local file upload to the active room; the attach button opens a native file picker and sends the selected file", 14),
+            wrapped_text_owned("/notice <text> - send a room notice; moderator/admin only", 14),
+            wrapped_text_owned("/topic <text> - change the active room topic; moderator/admin only", 14),
+            wrapped_text_owned("/create-room <room> [topic] - create a room; admin only; /create and /mkroom also work", 14),
+            wrapped_text_owned("/kick <user>, /ban <user>, /unban <user> - moderation actions", 14),
+            wrapped_text_owned("/mute <user>, /unmute <user> - moderation actions", 14),
+            wrapped_text_owned("/role <user> <standard|trusted|mod|admin> - change a user role; admin only", 14),
         ]
         .spacing(4);
 
         let omenchat_help = column![
-            text("Open OMENchat with omenchat://<destination hash> from the Browser workspace, a NomadNet link, or the OMENchat quick open field.").size(ui_size(14)),
-            text("Path requests route to the selected OMENchat server. Reconnect restarts the live link and cancels stale reconnect attempts.").size(ui_size(14)),
-            text("Load Older asks the server/client cache for earlier room history. Room history is cached locally per identity and server.").size(ui_size(14)),
-            text("Enter sends the composer draft. The input clears after a successful send.").size(ui_size(14)),
+            wrapped_panel_text("Open OMENchat with omenchat://<destination hash> from the Browser workspace, a NomadNet link, or the OMENchat quick open field."),
+            wrapped_panel_text("Path requests route to the selected OMENchat server. Reconnect restarts the live link and cancels stale reconnect attempts."),
+            wrapped_panel_text("Load Older asks the server/client cache for earlier room history. Room history is cached locally per identity and server."),
+            wrapped_panel_text("Enter sends the composer draft. The input clears after a successful send."),
             section_card("OMENchat Slash Commands", omenchat_commands),
         ]
         .spacing(8);
@@ -9601,38 +9914,38 @@ impl DesktopApp {
         let omenchat_alpha_help = OMENCHAT_ALPHA_TEST_HELP_LINES
             .iter()
             .fold(column![].spacing(6), |column, line| {
-                column.push(text(*line).size(ui_size(14)))
+                column.push(wrapped_text_owned(*line, 14))
             });
 
         let omenchat_history_help = OMENCHAT_HISTORY_HELP_LINES
             .iter()
             .fold(column![].spacing(6), |column, line| {
-                column.push(text(*line).size(ui_size(14)))
+                column.push(wrapped_text_owned(*line, 14))
             });
 
         let omenchat_media_help = OMENCHAT_MEDIA_HELP_LINES
             .iter()
             .fold(column![].spacing(6), |column, line| {
-                column.push(text(*line).size(ui_size(14)))
+                column.push(wrapped_text_owned(*line, 14))
             });
 
         let omenchatd_help = OMENCHATD_OPERATOR_HELP_LINES
             .iter()
             .fold(column![].spacing(6), |column, line| {
-                column.push(text(*line).size(ui_size(14)))
+                column.push(wrapped_text_owned(*line, 14))
             });
 
         let lxmf_help = LXMF_HELP_LINES
             .iter()
             .fold(column![].spacing(6), |column, line| {
-                column.push(text(*line).size(ui_size(14)))
+                column.push(wrapped_text_owned(*line, 14))
             });
 
         let admin_help = column![
-            text("Directory remembers selected nodes, peers, and propagation nodes. Trust controls affect defaults and safe interaction choices.").size(ui_size(14)),
-            text("Identities create separate identity material and per-identity storage roots. Delete Active is the only destructive identity action and requires confirmation.").size(ui_size(14)),
-            text("Interfaces edits the active identity's Reticulum config. Diagnostics, Logs, and Monitoring are the places to inspect runtime behavior and traffic.").size(ui_size(14)),
-            text("omenchatd keeps its own server root under ~/.omenchatd by default and should not touch ~/.reticulum, ~/.nomadnetwork, or OMENbrowser_rs identity storage.").size(ui_size(14)),
+            wrapped_text_owned("Directory remembers selected nodes, peers, and propagation nodes. Trust controls affect defaults and safe interaction choices.", 14),
+            wrapped_text_owned("Identities create separate identity material and per-identity storage roots. Delete Active is the only destructive identity action and requires confirmation.", 14),
+            wrapped_text_owned("Interfaces edits the active identity's Reticulum config. Diagnostics, Logs, and Monitoring are the places to inspect runtime behavior and traffic.", 14),
+            wrapped_text_owned("omenchatd keeps its own server root under ~/.omenchatd by default and should not touch ~/.reticulum, ~/.nomadnetwork, or OMENbrowser_rs identity storage.", 14),
         ]
         .spacing(6);
 
@@ -9649,7 +9962,8 @@ impl DesktopApp {
                 section_card("LXMF Messages", lxmf_help),
                 section_card("Directory, Identities, And Admin", admin_help),
             ]
-            .spacing(12),
+            .spacing(12)
+            .width(Length::Fill),
         )
         .height(Length::Fill)
         .into()
@@ -9667,25 +9981,31 @@ impl DesktopApp {
                 .collect::<Vec<_>>()
         };
         let readiness_column = readiness_lines.into_iter().fold(
-            column![text(format!(
-                "native readiness: ready={} configured={} compiled={} | {}",
-                readiness.ready, readiness.configured, readiness.compiled, readiness.summary
-            ))]
+            column![wrapped_text_owned(
+                format!(
+                    "native readiness: ready={} configured={} compiled={} | {}",
+                    readiness.ready, readiness.configured, readiness.compiled, readiness.summary
+                ),
+                14
+            )]
             .spacing(4),
-            |column, line| column.push(text(line).size(ui_size(14))),
+            |column, line| column.push(wrapped_text_owned(line, 14)),
         );
         let interface_column = self.app.native_interface_readiness().into_iter().fold(
             column![text("Interfaces").size(ui_size(18))].spacing(4),
             |column, detail| {
-                column.push(text(format!(
-                    "{} | {} | enabled={} | supported={} | blocks={} | {}",
-                    detail.name,
-                    detail.kind,
-                    detail.enabled,
-                    detail.supported,
-                    detail.blocks_native_startup,
-                    detail.reason
-                )))
+                column.push(wrapped_text_owned(
+                    format!(
+                        "{} | {} | enabled={} | supported={} | blocks={} | {}",
+                        detail.name,
+                        detail.kind,
+                        detail.enabled,
+                        detail.supported,
+                        detail.blocks_native_startup,
+                        detail.reason
+                    ),
+                    14,
+                ))
             },
         );
         let interfaces = self.app.interfaces_state.profiles.iter().enumerate().fold(
@@ -9693,23 +10013,26 @@ impl DesktopApp {
             |column, (index, profile)| {
                 let summary = row![
                     subtle_button("Select", Message::SelectInterfaceProfile(index)),
-                    text(format!(
-                        "{} | {:?} | {}",
-                        profile.name,
-                        profile.kind,
-                        if profile.enabled {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        }
-                    )),
+                    wrapped_text_owned(
+                        format!(
+                            "{} | {:?} | {}",
+                            profile.name,
+                            profile.kind,
+                            if profile.enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                        ),
+                        14
+                    ),
                 ]
                 .spacing(8)
                 .wrap();
 
                 let column = column
                     .push(summary)
-                    .push(text(format!("profile index: {index}")).size(ui_size(12)));
+                    .push(wrapped_text_owned(format!("profile index: {index}"), 12));
 
                 if profile.kind == InterfaceKind::TcpClient {
                     let host_id = profile.profile_id.clone();
@@ -9829,7 +10152,7 @@ impl DesktopApp {
             })
             .wrap();
         let themes = column![
-            text(format!("Theme: {}", self.app.settings.ui.theme_name)),
+            wrapped_text_owned(format!("Theme: {}", self.app.settings.ui.theme_name), 14),
             theme_buttons,
         ]
         .spacing(8);
@@ -9838,7 +10161,7 @@ impl DesktopApp {
         let appearance = column![
             themes,
             row![
-                text(format!("Font size: {font_size}px")),
+                wrapped_text_owned(format!("Font size: {font_size}px"), 14),
                 subtle_button(
                     "-",
                     Message::SetFontSize(font_size.saturating_sub(1).max(10)),
@@ -9850,7 +10173,7 @@ impl DesktopApp {
             ]
             .spacing(8)
             .wrap(),
-            text("Font size applies on next launch.").size(ui_size(13)),
+            wrapped_text_owned("Font size applies on next launch.", 13),
         ]
         .spacing(8);
 
@@ -9880,9 +10203,9 @@ impl DesktopApp {
                 row![
                     omen_button(
                         if clearweb.socks_proxy_enabled {
-                            "Disable SOCKS5 Preference"
+                            "Disable SOCKS5"
                         } else {
-                            "Enable SOCKS5 Preference"
+                            "Enable SOCKS5"
                         },
                         Message::ToggleClearwebSocksProxy,
                     ),
@@ -9894,7 +10217,7 @@ impl DesktopApp {
                         },
                         Message::ToggleClearwebRemoteMedia,
                     ),
-                    subtle_button("Clear Browser Preference", Message::ClearPreferredExternalBrowser),
+                    subtle_button("Clear Browser", Message::ClearPreferredExternalBrowser),
                 ]
                 .spacing(8)
                 .wrap(),
@@ -9907,49 +10230,47 @@ impl DesktopApp {
                     } else {
                         "not detected"
                     }
-                )),
-                text(format!(
-                    "Tor Browser Bundle fallback: {}:9150 | active detected proxy: {}",
+                ))
+                .size(ui_size(14))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+                wrapped_text_owned(format!(
+                    "Tor proxy detection also checks {}:9150 for Tor Browser Bundle; active proxy: {}",
                     clearweb.socks_proxy_host,
                     self.clearweb_proxy_endpoint
                         .as_ref()
                         .map(|(host, port)| format!("{host}:{port}"))
                         .unwrap_or_else(|| "none".into())
-                ))
-                .size(ui_size(14)),
-                text(format!(
+                ), 14),
+                wrapped_text_owned(format!(
                     "preferred external browser: {}",
                     clearweb
                         .preferred_external_browser_command
                         .as_deref()
                         .unwrap_or("none; prompt decides per link")
-                ))
-                .size(ui_size(14)),
+                ), 14),
                 browser_choice_buttons.wrap(),
-                text("HTTP/HTTPS links from NomadNet and OMENchat are handed to an external browser prompt. Pick Tor Browser or another browser profile that you configured for SOCKS5/Tor.")
-                    .size(ui_size(14)),
-                text("Remote media remains off by default; rich media previews should use this SOCKS5 policy when OMENbrowser fetches bytes itself.")
-                    .size(ui_size(14)),
+                wrapped_panel_text("HTTP/HTTPS links from NomadNet and OMENchat are handed to an external browser prompt. Use Copy URL for Tor Browser. Launch buttons are for regular detected browsers or browser profiles you configured yourself."),
+                wrapped_panel_text("Remote media remains off by default; rich media previews should use this SOCKS5 policy when OMENbrowser fetches bytes itself."),
             ]
             .spacing(8),
         );
 
         let theme_card = section_card("Appearance", appearance);
+        let mut native_setup_actions = vec![
+            omen_button("Create Identity", Message::CreateIdentity),
+            omen_button("Add TCP Gateway", Message::CreateTcpClientInterface),
+        ];
+        native_setup_actions.extend(self.gateway_preset_buttons());
+        native_setup_actions.extend([
+            omen_button("Select Native Backend", Message::SelectNativeBackend),
+            omen_button("Start Native Runtime", Message::StartNativeRuntime),
+            omen_button("Full Quickstart", Message::NativeQuickstart),
+        ]);
         let native_card = section_card(
             "First Run / Native Setup",
             column![
-                action_grid(
-                    vec![
-                        omen_button("Create Identity", Message::CreateIdentity),
-                        omen_button("Add TCP Gateway", Message::CreateTcpClientInterface),
-                        subtle_button("Add RMAP Gateway", Message::CreateRmapGateway),
-                        subtle_button("Add WNS Gateway", Message::CreateWnsGateway),
-                        omen_button("Select Native Backend", Message::SelectNativeBackend),
-                        omen_button("Start Native Runtime", Message::StartNativeRuntime),
-                        omen_button("Full Quickstart", Message::NativeQuickstart),
-                    ],
-                    3,
-                ),
+                action_grid(native_setup_actions, 3),
                 action_grid(
                     vec![
                         subtle_button("Preview Config", Message::PreviewManagedConfig),
@@ -9968,31 +10289,43 @@ impl DesktopApp {
         let status_card = section_card(
             "Native Runtime Status",
             column![
-                text(format!("backend: {:?}", self.app.settings.runtime_backend)),
-                text(format!(
-                    "active runtime: {:?} | connected={} | {}",
-                    self.app.runtime_status.backend,
-                    self.app.runtime_status.connected,
-                    self.app.runtime_status.message
-                )),
-                text(format!(
-                    "identity: {}",
-                    self.app
-                        .settings
-                        .identity_path
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "none".into())
-                )),
-                text(format!(
-                    "Reticulum config: {}",
-                    self.app
-                        .settings
-                        .reticulum_config_path
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "managed default".into())
-                )),
+                wrapped_text_owned(
+                    format!("backend: {:?}", self.app.settings.runtime_backend),
+                    14
+                ),
+                wrapped_text_owned(
+                    format!(
+                        "active runtime: {:?} | connected={} | {}",
+                        self.app.runtime_status.backend,
+                        self.app.runtime_status.connected,
+                        self.app.runtime_status.message
+                    ),
+                    14
+                ),
+                wrapped_text_owned(
+                    format!(
+                        "identity: {}",
+                        self.app
+                            .settings
+                            .identity_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "none".into())
+                    ),
+                    14
+                ),
+                wrapped_text_owned(
+                    format!(
+                        "Reticulum config: {}",
+                        self.app
+                            .settings
+                            .reticulum_config_path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "managed default".into())
+                    ),
+                    14
+                ),
             ]
             .spacing(6),
         );
@@ -10015,14 +10348,18 @@ impl DesktopApp {
                 text(format!(
                     "auto after propagation-node accept: {}",
                     self.app.settings.auto_sync_after_propagation_accept
-                )),
+                ))
+                .size(ui_size(14))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
                 text(format!(
                     "throttle interval: {}s | sync limit: {}",
                     self.app.settings.lxmf_sync_interval, self.app.settings.lxmf_sync_limit
                 ))
-                .size(ui_size(14)),
-                text("Propagation-node acceptance is not peer delivery; auto sync only fetches/updates propagation state.")
-                    .size(ui_size(14)),
+                .size(ui_size(14))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+                wrapped_panel_text("Propagation-node acceptance is not peer delivery; auto sync only fetches/updates propagation state."),
             ]
             .spacing(6),
         );
@@ -10032,7 +10369,7 @@ impl DesktopApp {
         );
         let interface_card = section_card(
             "Configured Interface Profiles",
-            column![interfaces].spacing(8),
+            column![interfaces.width(Length::Fill)].spacing(8),
         );
 
         let setup = column![
@@ -10045,20 +10382,39 @@ impl DesktopApp {
             readiness_card,
             interface_card,
         ]
-        .spacing(10);
+        .spacing(10)
+        .width(Length::Fill);
 
         app_scrollable(setup).height(Length::Fill).into()
     }
 }
 
 fn app_scrollable<'a>(content: impl Into<Element<'a, Message>>) -> Scrollable<'a, Message> {
-    scrollable(content)
+    scrollable(scroll_gutter(content))
         .direction(ScrollableDirection::Vertical(compact_scrollbar()))
         .style(themed_scrollable_style)
+        .width(Length::Fill)
+}
+
+fn scroll_gutter<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .padding(Padding {
+            right: desktop_scroll_gutter_right(),
+            ..Padding::default()
+        })
+        .width(Length::Fill)
+        .into()
+}
+
+fn desktop_scroll_gutter_right() -> f32 {
+    f32::from(DESKTOP_SCROLLBAR_WIDTH + DESKTOP_SCROLLBAR_MARGIN + DESKTOP_SCROLL_GUTTER_EXTRA)
 }
 
 fn compact_scrollbar() -> Scrollbar {
-    Scrollbar::new().width(7).scroller_width(4).margin(1)
+    Scrollbar::new()
+        .width(DESKTOP_SCROLLBAR_WIDTH)
+        .scroller_width(DESKTOP_SCROLLBAR_SCROLLER_WIDTH)
+        .margin(DESKTOP_SCROLLBAR_MARGIN)
 }
 
 fn omen_button<'a>(label: &'a str, message: Message) -> Button<'a, Message> {
@@ -10071,6 +10427,20 @@ fn subtle_button<'a>(label: &'a str, message: Message) -> Button<'a, Message> {
     button(text(label))
         .on_press(message)
         .style(subtle_button_style)
+}
+
+fn wrapped_panel_text(content: &str) -> Text<'_> {
+    text(content)
+        .size(ui_size(14))
+        .wrapping(Wrapping::WordOrGlyph)
+        .width(Length::Fill)
+}
+
+fn wrapped_text_owned(content: impl Into<String>, size: u16) -> Text<'static> {
+    text(content.into())
+        .size(ui_size(size))
+        .wrapping(Wrapping::WordOrGlyph)
+        .width(Length::Fill)
 }
 
 fn tooltip_icon_button<'a>(
@@ -10876,11 +11246,382 @@ fn section_card<'a>(
     title: impl Into<String>,
     body: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    container(column![text(title.into()).size(ui_size(20)), body.into()].spacing(10))
-        .style(card_container_style)
-        .padding(14)
-        .width(Length::Fill)
-        .into()
+    container(
+        column![
+            text(title.into())
+                .size(ui_size(20))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+            body.into()
+        ]
+        .spacing(10),
+    )
+    .style(card_container_style)
+    .padding(14)
+    .width(Length::Fill)
+    .into()
+}
+
+fn interface_runtime_status_label(
+    profile: &crate::interfaces::ReticulumInterfaceProfile,
+    stats: Option<&crate::runtime::InterfaceStats>,
+) -> String {
+    let Some(stats) = stats else {
+        if !profile.enabled {
+            return "runtime: disabled by profile".into();
+        }
+        return "runtime: disconnected; waiting for native runtime status".into();
+    };
+    if !profile.enabled {
+        return "runtime: disabled by profile".into();
+    }
+    if !stats.available {
+        return format!(
+            "runtime: not running ({})",
+            stats
+                .reason
+                .as_deref()
+                .unwrap_or("interface stats unavailable")
+        );
+    }
+
+    if let Some(sample) = stats
+        .samples
+        .iter()
+        .find(|sample| sample.profile_id == profile.profile_id || sample.name == profile.name)
+    {
+        match sample.state {
+            crate::runtime::network::InterfaceSampleState::Disabled => {
+                return "runtime: disabled by profile".into();
+            }
+            crate::runtime::network::InterfaceSampleState::Unsupported => {
+                return "runtime: unsupported".into();
+            }
+            crate::runtime::network::InterfaceSampleState::Attached => {
+                return "runtime: connected".into();
+            }
+            crate::runtime::network::InterfaceSampleState::Configured
+            | crate::runtime::network::InterfaceSampleState::Unknown => {}
+        }
+        return "runtime: disconnected".into();
+    }
+
+    let profile_name = profile.name.to_ascii_lowercase();
+    let profile_host = profile.target_host.to_ascii_lowercase();
+    let profile_endpoint = if profile.target_host.is_empty() || profile.target_port == 0 {
+        String::new()
+    } else {
+        format!(
+            "{}:{}",
+            profile.target_host.to_ascii_lowercase(),
+            profile.target_port
+        )
+    };
+    let profile_kind = format!("{:?}", profile.kind).to_ascii_lowercase();
+    let attached = stats.interfaces.iter().find(|line| {
+        let line = line.to_ascii_lowercase();
+        line.starts_with("attached ")
+            && (line.contains(&profile_name)
+                || (!profile_endpoint.is_empty() && line.contains(&profile_endpoint))
+                || (!profile_host.is_empty() && line.contains(&profile_host)))
+    });
+    if let Some(line) = attached {
+        let _ = line;
+        return "runtime: connected".into();
+    }
+
+    let matched_plan = stats.interfaces.iter().find(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains(&profile_name)
+            || line.contains(&profile_kind) && line.contains(&profile_name)
+            || (!profile_host.is_empty() && line.contains(&profile_host))
+            || (!profile_endpoint.is_empty() && line.contains(&profile_endpoint))
+            || line.contains(&profile.profile_id.to_ascii_lowercase())
+    });
+
+    if let Some(_line) = matched_plan {
+        "runtime: disconnected".into()
+    } else {
+        "runtime: disconnected; enabled profile is not attached to the native runtime".into()
+    }
+}
+
+fn optional_interface_runtime_detail_line<'a>(
+    profile: &crate::interfaces::ReticulumInterfaceProfile,
+    stats: Option<&crate::runtime::InterfaceStats>,
+) -> Element<'a, Message> {
+    match interface_runtime_detail_line(profile, stats) {
+        Some(line) => text(line)
+            .size(ui_size(13))
+            .wrapping(Wrapping::WordOrGlyph)
+            .width(Length::Fill)
+            .into(),
+        None => container(column![]).into(),
+    }
+}
+
+fn interface_runtime_detail_line(
+    profile: &crate::interfaces::ReticulumInterfaceProfile,
+    stats: Option<&crate::runtime::InterfaceStats>,
+) -> Option<String> {
+    let stats = stats?;
+    if !profile.enabled {
+        return None;
+    }
+    if !stats.available {
+        return stats
+            .reason
+            .as_deref()
+            .map(|reason| format!("runtime detail: {reason}"));
+    }
+
+    if let Some(sample) = stats
+        .samples
+        .iter()
+        .find(|sample| sample.profile_id == profile.profile_id || sample.name == profile.name)
+    {
+        return match sample.state {
+            crate::runtime::network::InterfaceSampleState::Disabled => None,
+            crate::runtime::network::InterfaceSampleState::Unsupported => Some(format!(
+                "runtime detail: {}",
+                sample
+                    .detail
+                    .as_deref()
+                    .unwrap_or("native startup is not implemented for this interface")
+            )),
+            crate::runtime::network::InterfaceSampleState::Attached
+            | crate::runtime::network::InterfaceSampleState::Configured
+            | crate::runtime::network::InterfaceSampleState::Unknown => Some(format!(
+                "runtime detail: {}",
+                sample
+                    .detail
+                    .as_deref()
+                    .or(sample.endpoint.as_deref())
+                    .unwrap_or("configured, but not attached to the native runtime")
+            )),
+        };
+    }
+
+    let profile_name = profile.name.to_ascii_lowercase();
+    let profile_host = profile.target_host.to_ascii_lowercase();
+    let profile_endpoint = if profile.target_host.is_empty() || profile.target_port == 0 {
+        String::new()
+    } else {
+        format!(
+            "{}:{}",
+            profile.target_host.to_ascii_lowercase(),
+            profile.target_port
+        )
+    };
+    let profile_kind = format!("{:?}", profile.kind).to_ascii_lowercase();
+    let attached = stats.interfaces.iter().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("attached ")
+            && (lower.contains(&profile_name)
+                || (!profile_endpoint.is_empty() && lower.contains(&profile_endpoint))
+                || (!profile_host.is_empty() && lower.contains(&profile_host)))
+    });
+    if let Some(line) = attached {
+        return Some(format!("runtime detail: {line}"));
+    }
+
+    stats
+        .interfaces
+        .iter()
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains(&profile_name)
+                || lower.contains(&profile_kind) && lower.contains(&profile_name)
+                || (!profile_host.is_empty() && lower.contains(&profile_host))
+                || (!profile_endpoint.is_empty() && lower.contains(&profile_endpoint))
+                || lower.contains(&profile.profile_id.to_ascii_lowercase())
+        })
+        .map(|line| format!("runtime detail: {line}"))
+}
+
+fn interface_runtime_state_line(
+    profile: &crate::interfaces::ReticulumInterfaceProfile,
+    stats: Option<&crate::runtime::InterfaceStats>,
+) -> String {
+    let endpoint = if profile.target_host.is_empty() || profile.target_port == 0 {
+        "no endpoint".to_string()
+    } else {
+        format!("{}:{}", profile.target_host, profile.target_port)
+    };
+    let Some(stats) = stats else {
+        return format!("state: disconnected | endpoint: {endpoint}");
+    };
+    if !profile.enabled {
+        return format!("state: disabled | endpoint: {endpoint}");
+    }
+    if !stats.available {
+        let reason = stats
+            .reason
+            .as_deref()
+            .unwrap_or("interface stats unavailable");
+        return format!("state: runtime unavailable | {reason}");
+    }
+
+    if let Some(sample) = stats
+        .samples
+        .iter()
+        .find(|sample| sample.profile_id == profile.profile_id || sample.name == profile.name)
+    {
+        let endpoint = sample.endpoint.as_deref().unwrap_or(endpoint.as_str());
+        let state = interface_sample_state_label(&sample.state);
+        return format!("state: {state} | endpoint: {endpoint}");
+    }
+
+    let profile_name = profile.name.to_ascii_lowercase();
+    let profile_host = profile.target_host.to_ascii_lowercase();
+    let profile_endpoint = if profile.target_host.is_empty() || profile.target_port == 0 {
+        String::new()
+    } else {
+        format!(
+            "{}:{}",
+            profile.target_host.to_ascii_lowercase(),
+            profile.target_port
+        )
+    };
+    let attached = stats.interfaces.iter().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.starts_with("attached ")
+            && (line.contains(&profile_name)
+                || (!profile_endpoint.is_empty() && line.contains(&profile_endpoint))
+                || (!profile_host.is_empty() && line.contains(&profile_host)))
+    });
+    if attached {
+        return format!(
+            "state: {} | endpoint: {endpoint}",
+            interface_sample_state_label(&crate::runtime::network::InterfaceSampleState::Attached)
+        );
+    }
+
+    format!("state: disconnected | endpoint: {endpoint}")
+}
+
+fn section_needs_runtime_interface_sample(section: WorkspaceSection) -> bool {
+    matches!(
+        section,
+        WorkspaceSection::Interfaces | WorkspaceSection::Monitoring
+    )
+}
+
+fn monitoring_interface_status_lines(stats: &crate::runtime::InterfaceStats) -> Vec<String> {
+    let mut lines = vec![format!(
+        "runtime: {} | {}",
+        if stats.available {
+            "available"
+        } else {
+            "unavailable"
+        },
+        stats
+            .reason
+            .as_deref()
+            .unwrap_or("interface stats available")
+    )];
+
+    if !stats.samples.is_empty() {
+        lines.extend(stats.samples.iter().map(|sample| {
+            let state = interface_sample_state_label(&sample.state);
+            let endpoint = sample.endpoint.as_deref().unwrap_or("no endpoint");
+            let detail = sample
+                .detail
+                .as_deref()
+                .filter(|detail| !detail.is_empty())
+                .unwrap_or("");
+            if detail.is_empty() {
+                format!(
+                    "{} | {} | {} | {}",
+                    sample.name, sample.kind, state, endpoint
+                )
+            } else {
+                format!(
+                    "{} | {} | {} | {} | {}",
+                    sample.name, sample.kind, state, endpoint, detail
+                )
+            }
+        }));
+        return lines;
+    }
+
+    if stats.interfaces.is_empty() {
+        lines.push("interfaces: none reported".into());
+    } else {
+        lines.extend(
+            stats
+                .interfaces
+                .iter()
+                .map(|line| format!("interface: {line}")),
+        );
+    }
+    lines
+}
+
+fn interface_sample_state_label(
+    state: &crate::runtime::network::InterfaceSampleState,
+) -> &'static str {
+    match state {
+        crate::runtime::network::InterfaceSampleState::Disabled => "disabled",
+        crate::runtime::network::InterfaceSampleState::Unsupported => "unsupported",
+        crate::runtime::network::InterfaceSampleState::Attached => "connected; auto-retry enabled",
+        crate::runtime::network::InterfaceSampleState::Configured => "disconnected",
+        crate::runtime::network::InterfaceSampleState::Unknown => "unknown",
+    }
+}
+
+fn monitoring_interface_reconnect_line(stats: Option<&crate::runtime::InterfaceStats>) -> String {
+    let Some(stats) = stats else {
+        return "interface reconnect: waiting for native interface status".into();
+    };
+    if !stats.available {
+        return format!(
+            "interface reconnect: stats unavailable ({})",
+            stats
+                .reason
+                .as_deref()
+                .unwrap_or("runtime has not reported interface stats")
+        );
+    }
+    if stats.interfaces.is_empty() && stats.samples.is_empty() {
+        return "interface reconnect: no interfaces reported; configure or enable a gateway".into();
+    }
+
+    if stats
+        .samples
+        .iter()
+        .any(|sample| sample.state == crate::runtime::network::InterfaceSampleState::Attached)
+    {
+        return "interface reconnect: connected; TCP gateways retry automatically after drops"
+            .into();
+    }
+    if stats
+        .samples
+        .iter()
+        .any(|sample| sample.state == crate::runtime::network::InterfaceSampleState::Configured)
+    {
+        return "interface reconnect: enabled gateway disconnected; restart runtime after interface edits".into();
+    }
+
+    let joined = stats.interfaces.join("\n").to_ascii_lowercase();
+    if joined.contains("connected=true")
+        || joined.contains("connected=yes")
+        || joined.contains("connected=connected")
+        || joined.contains("connected=online")
+    {
+        return "interface reconnect: connected; TCP gateways retry automatically after drops"
+            .into();
+    }
+    if joined.contains("connected=false")
+        || joined.contains("disconnected")
+        || joined.contains("couldn't connect")
+        || joined.contains("connection error")
+        || joined.contains("connection closed")
+    {
+        return "interface reconnect: gateway appears offline/retrying; TCP clients retry automatically".into();
+    }
+
+    "interface reconnect: interfaces reported; verify connected=true in detailed lines".into()
 }
 
 fn monitoring_metric_card<'a>(
@@ -13516,6 +14257,22 @@ fn desktop_interface_detail_lines(
     }
 }
 
+fn interface_config_preview_lines(preview: &str) -> Vec<String> {
+    if preview.is_empty() {
+        return vec![String::new()];
+    }
+    preview
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                " ".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect()
+}
+
 const DESKTOP_THEME_CHOICES: &[&str] = &[
     "default",
     "omen",
@@ -14068,6 +14825,26 @@ mod tests {
             "OMENbrowser_dev"
         );
         assert_eq!(compact_identity_status_label("OMENTest"), "OMENTest");
+    }
+
+    #[test]
+    fn shared_scroll_gutter_clears_scrollbar_rail() {
+        let scrollbar_footprint = DESKTOP_SCROLLBAR_WIDTH + DESKTOP_SCROLLBAR_MARGIN;
+        assert_eq!(
+            desktop_scroll_gutter_right(),
+            f32::from(scrollbar_footprint + DESKTOP_SCROLL_GUTTER_EXTRA)
+        );
+        assert!(desktop_scroll_gutter_right() >= f32::from(scrollbar_footprint + 10));
+        assert!(DESKTOP_SCROLLBAR_SCROLLER_WIDTH <= DESKTOP_SCROLLBAR_WIDTH);
+    }
+
+    #[test]
+    fn desktop_shell_spacing_keeps_scrollbars_clear_of_panel_borders() {
+        let scrollbar_footprint = DESKTOP_SCROLLBAR_WIDTH + DESKTOP_SCROLLBAR_MARGIN;
+
+        assert!(DESKTOP_SCROLL_GUTTER_EXTRA >= DESKTOP_PANEL_PADDING);
+        assert!(desktop_scroll_gutter_right() > f32::from(scrollbar_footprint));
+        assert!(DESKTOP_SHELL_PADDING >= DESKTOP_PANEL_PADDING);
     }
 
     #[test]
@@ -15123,6 +15900,116 @@ mod tests {
         assert_eq!(
             desktop.workspace_pane_title(&DesktopPane::Browser(tab_id)),
             "Node Home - Browser"
+        );
+    }
+
+    #[test]
+    fn focused_clearweb_micron_link_prompts_external_browser() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-desktop-clearweb-focused-link-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::config::AppPaths::from_root(root);
+        paths.ensure().expect("paths");
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+        let tab_id = desktop.app.active_browser_tab().id;
+        desktop.app.active_browser_tab_mut().focused_link = Some(crate::app::FocusedLink {
+            target: "https://example.org/news".into(),
+            fields: Vec::new(),
+            region_index: 0,
+        });
+
+        assert!(desktop.prompt_focused_external_link_if_needed());
+
+        let prompt = desktop.external_link_prompt.expect("external prompt");
+        assert_eq!(prompt.url, "https://example.org/news");
+        assert_eq!(prompt.source_tab, Some(tab_id));
+    }
+
+    #[test]
+    fn external_browser_choices_do_not_launch_tor_browser() {
+        let choices = detect_external_browsers(None);
+        let commands = choices
+            .iter()
+            .map(|choice| choice.command.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !commands.iter().any(|command| {
+                command.contains("torbrowser-launcher")
+                    || command.contains("tor-browser")
+                    || command.contains("start-tor-browser")
+            }),
+            "Tor Browser should use the Copy URL flow, not a launcher button: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn external_browser_choices_keep_one_entry_per_browser_label() {
+        let candidates = [
+            ("Default browser", "xdg-open"),
+            ("Chrome", "google-chrome"),
+            ("Chrome", "google-chrome-stable"),
+            ("Brave", "brave-browser"),
+            ("Brave", "brave"),
+        ];
+
+        let choices = detect_external_browsers_from_candidates(None, &candidates, |_| true);
+
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| (choice.label.as_str(), choice.command.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Default browser", "xdg-open"),
+                ("Chrome", "google-chrome"),
+                ("Brave", "brave-browser"),
+            ]
+        );
+    }
+
+    #[test]
+    fn external_browser_choices_preserve_preferred_duplicate_command() {
+        let candidates = [
+            ("Chrome", "google-chrome"),
+            ("Chrome", "google-chrome-stable"),
+            ("Brave", "brave-browser"),
+        ];
+
+        let choices = detect_external_browsers_from_candidates(
+            Some("google-chrome-stable"),
+            &candidates,
+            |_| true,
+        );
+
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| (choice.label.as_str(), choice.command.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Chrome", "google-chrome-stable"),
+                ("Brave", "brave-browser"),
+            ]
+        );
+    }
+
+    #[test]
+    fn standard_external_browser_candidate_uses_url_argument_only() {
+        let choice = ExternalBrowserChoice {
+            label: "Default browser".into(),
+            command: "xdg-open".into(),
+            kind: ExternalBrowserKind::Default,
+        };
+
+        assert_eq!(
+            external_browser_open_candidates(&choice, "https://example.org"),
+            vec![("xdg-open".into(), vec!["https://example.org".into()])]
         );
     }
 
@@ -18301,6 +19188,37 @@ mod tests {
     }
 
     #[test]
+    fn identity_hash_copy_action_reports_status() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-desktop-copy-identity-hash-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::config::AppPaths::from_root(root);
+        paths.ensure().expect("paths");
+        let app = App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        });
+        let mut desktop = DesktopApp::new(app);
+
+        let _ = desktop.update(Message::CopyActiveIdentityHash);
+        assert_eq!(desktop.app.status.task, "no active identity hash to copy");
+
+        desktop.app.runtime_status.active_identity = Some(crate::identity::IdentityProfile {
+            label: "tester".into(),
+            path: desktop.app.paths.root.join("identity"),
+            hash_hex: "0123456789abcdef0123456789abcdef".into(),
+            managed: true,
+        });
+        let _ = desktop.update(Message::CopyActiveIdentityHash);
+        assert_eq!(
+            desktop.app.status.task,
+            "copied active identity hash to clipboard"
+        );
+    }
+
+    #[test]
     fn browser_request_preview_path_actions_follow_retry_state() {
         let root = std::env::temp_dir().join(format!(
             "omenbrowser-rs-desktop-request-preview-path-actions-{}",
@@ -18496,6 +19414,22 @@ mod tests {
     }
 
     #[test]
+    fn runtime_interface_sampling_runs_for_interfaces_and_monitoring() {
+        assert!(section_needs_runtime_interface_sample(
+            WorkspaceSection::Interfaces
+        ));
+        assert!(section_needs_runtime_interface_sample(
+            WorkspaceSection::Monitoring
+        ));
+        assert!(!section_needs_runtime_interface_sample(
+            WorkspaceSection::Browser
+        ));
+        assert!(!section_needs_runtime_interface_sample(
+            WorkspaceSection::Logs
+        ));
+    }
+
+    #[test]
     fn monitoring_runtime_attribution_lines_group_runtime_traffic() {
         let monitoring = crate::app::MonitoringPanelState {
             runtime_events_total: 120,
@@ -18550,6 +19484,194 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains("activity: idle; no runtime traffic recorded yet")));
+    }
+
+    #[test]
+    fn interface_runtime_status_label_reports_sample_visibility() {
+        let mut profile =
+            crate::interfaces::ReticulumInterfaceProfile::tcp_client("iface_test", "GatewayOne");
+        profile.target_host = "10.0.0.7".into();
+
+        assert!(interface_runtime_status_label(&profile, None).contains("disconnected"));
+        assert_eq!(
+            interface_runtime_state_line(&profile, None),
+            "state: disconnected | endpoint: 10.0.0.7:4242"
+        );
+
+        profile.enabled = false;
+        let running_stats = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: vec!["GatewayOne [TcpClient supported enabled]".into()],
+            samples: Vec::new(),
+        };
+        assert!(
+            interface_runtime_status_label(&profile, Some(&running_stats))
+                .contains("disabled by profile")
+        );
+        assert_eq!(
+            interface_runtime_state_line(&profile, Some(&running_stats)),
+            "state: disabled | endpoint: 10.0.0.7:4242"
+        );
+
+        profile.enabled = true;
+        let configured = interface_runtime_status_label(&profile, Some(&running_stats));
+        assert!(configured.contains("disconnected"));
+        assert_eq!(
+            interface_runtime_detail_line(&profile, Some(&running_stats)).as_deref(),
+            Some("runtime detail: GatewayOne [TcpClient supported enabled]")
+        );
+        assert_eq!(
+            interface_runtime_state_line(&profile, Some(&running_stats)),
+            "state: disconnected | endpoint: 10.0.0.7:4242"
+        );
+
+        let attached_stats = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: vec![
+                "GatewayOne [TcpClient supported enabled]".into(),
+                "attached GatewayOne tcp_client 10.0.0.7:4242 ifac=none".into(),
+            ],
+            samples: Vec::new(),
+        };
+        let attached = interface_runtime_status_label(&profile, Some(&attached_stats));
+        assert_eq!(attached, "runtime: connected");
+        assert_eq!(
+            interface_runtime_detail_line(&profile, Some(&attached_stats)).as_deref(),
+            Some("runtime detail: attached GatewayOne tcp_client 10.0.0.7:4242 ifac=none")
+        );
+        assert_eq!(
+            interface_runtime_state_line(&profile, Some(&attached_stats)),
+            "state: connected; auto-retry enabled | endpoint: 10.0.0.7:4242"
+        );
+
+        let structured_attached = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: Vec::new(),
+            samples: vec![crate::runtime::network::InterfaceSample {
+                profile_id: profile.profile_id.clone(),
+                name: "GatewayOne".into(),
+                kind: "tcp_client".into(),
+                state: crate::runtime::network::InterfaceSampleState::Attached,
+                enabled: true,
+                supported: true,
+                attached: true,
+                endpoint: Some("10.0.0.7:4242".into()),
+                detail: Some("GatewayOne tcp_client 10.0.0.7:4242 ifac=none".into()),
+            }],
+        };
+        let attached = interface_runtime_status_label(&profile, Some(&structured_attached));
+        assert_eq!(attached, "runtime: connected");
+        assert_eq!(
+            interface_runtime_detail_line(&profile, Some(&structured_attached)).as_deref(),
+            Some("runtime detail: GatewayOne tcp_client 10.0.0.7:4242 ifac=none")
+        );
+        assert_eq!(
+            interface_runtime_state_line(&profile, Some(&structured_attached)),
+            "state: connected; auto-retry enabled | endpoint: 10.0.0.7:4242"
+        );
+
+        let missing_stats = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: vec!["OtherGateway [TcpClient supported enabled]".into()],
+            samples: Vec::new(),
+        };
+        assert!(
+            interface_runtime_status_label(&profile, Some(&missing_stats)).contains("disconnected")
+        );
+
+        let stopped_stats = crate::runtime::InterfaceStats {
+            available: false,
+            reason: Some("runtime stopped".into()),
+            interfaces: Vec::new(),
+            samples: Vec::new(),
+        };
+        assert!(
+            interface_runtime_status_label(&profile, Some(&stopped_stats)).contains("not running")
+        );
+    }
+
+    #[test]
+    fn monitoring_interface_reconnect_line_summarizes_native_samples() {
+        assert!(monitoring_interface_reconnect_line(None).contains("waiting"));
+
+        let unavailable = crate::runtime::InterfaceStats {
+            available: false,
+            reason: Some("runtime stopped".into()),
+            interfaces: Vec::new(),
+            samples: Vec::new(),
+        };
+        assert!(monitoring_interface_reconnect_line(Some(&unavailable)).contains("unavailable"));
+
+        let no_interfaces = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: Vec::new(),
+            samples: Vec::new(),
+        };
+        assert!(monitoring_interface_reconnect_line(Some(&no_interfaces)).contains("no interfaces"));
+
+        let connected = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: vec!["Gateway [1] TCPClientInterface | connected=true".into()],
+            samples: Vec::new(),
+        };
+        assert!(monitoring_interface_reconnect_line(Some(&connected)).contains("connected"));
+
+        let retrying = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: vec!["Gateway [1] TCPClientInterface | connected=false".into()],
+            samples: Vec::new(),
+        };
+        assert!(monitoring_interface_reconnect_line(Some(&retrying)).contains("retrying"));
+    }
+
+    #[test]
+    fn monitoring_interface_status_lines_prefer_structured_samples() {
+        let stats = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: vec!["legacy raw line".into()],
+            samples: vec![
+                crate::runtime::network::InterfaceSample {
+                    profile_id: "gw1".into(),
+                    name: "GatewayOne".into(),
+                    kind: "tcp_client".into(),
+                    state: crate::runtime::network::InterfaceSampleState::Attached,
+                    enabled: true,
+                    supported: true,
+                    attached: true,
+                    endpoint: Some("10.0.0.7:4242".into()),
+                    detail: Some("GatewayOne tcp_client 10.0.0.7:4242 ifac=none".into()),
+                },
+                crate::runtime::network::InterfaceSample {
+                    profile_id: "i2p".into(),
+                    name: "I2P".into(),
+                    kind: "i2p".into(),
+                    state: crate::runtime::network::InterfaceSampleState::Unsupported,
+                    enabled: true,
+                    supported: false,
+                    attached: false,
+                    endpoint: None,
+                    detail: Some("native interface startup is not implemented".into()),
+                },
+            ],
+        };
+
+        let lines = monitoring_interface_status_lines(&stats);
+
+        assert!(lines.iter().any(|line| line.contains("runtime: available")));
+        assert!(lines.iter().any(|line| line
+            .contains("GatewayOne | tcp_client | connected; auto-retry enabled | 10.0.0.7:4242")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("I2P | i2p | unsupported | no endpoint")));
+        assert!(!lines.iter().any(|line| line.contains("legacy raw line")));
     }
 
     #[test]
@@ -19260,6 +20382,19 @@ mod tests {
         assert!(desktop_interface_detail_lines(&rnode)
             .iter()
             .any(|line| line.contains("radio: frequency=")));
+    }
+
+    #[test]
+    fn interface_config_preview_lines_preserve_blank_rows() {
+        assert_eq!(interface_config_preview_lines(""), vec!["".to_string()]);
+        assert_eq!(
+            interface_config_preview_lines("[interfaces]\n\n  enabled = true"),
+            vec![
+                "[interfaces]".to_string(),
+                " ".to_string(),
+                "  enabled = true".to_string(),
+            ]
+        );
     }
 
     #[test]

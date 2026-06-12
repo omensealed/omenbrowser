@@ -7826,11 +7826,26 @@ impl App {
     }
 
     pub fn create_rmap_gateway_interface_profile(&mut self) -> bool {
-        self.create_gateway_interface_profile("rmap", "RMAP gateway")
+        self.create_gateway_interface_profile_by_id("rmap", "RMAP gateway")
     }
 
     pub fn create_wns_gateway_interface_profile(&mut self) -> bool {
-        self.create_gateway_interface_profile("wns", "WNS gateway")
+        self.create_gateway_interface_profile_by_id("wns", "WNS gateway")
+    }
+
+    pub fn create_gateway_interface_profile(&mut self, gateway_id: &str) -> bool {
+        let label = self
+            .interface_service
+            .gateway_presets()
+            .ok()
+            .and_then(|presets| {
+                presets
+                    .into_iter()
+                    .find(|preset| preset.id == gateway_id)
+                    .map(|preset| format!("{} gateway", preset.name))
+            })
+            .unwrap_or_else(|| format!("{gateway_id} gateway"));
+        self.create_gateway_interface_profile_by_id(gateway_id, &label)
     }
 
     pub fn create_tcp_server_interface_profile(&mut self) -> bool {
@@ -9553,7 +9568,7 @@ impl App {
         }
     }
 
-    fn create_gateway_interface_profile(&mut self, gateway_id: &str, label: &str) -> bool {
+    fn create_gateway_interface_profile_by_id(&mut self, gateway_id: &str, label: &str) -> bool {
         match self.interface_service.create_gateway_profile(gateway_id) {
             Ok(Some(profile)) => match self.interface_service.apply() {
                 Ok(_) => {

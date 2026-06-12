@@ -111,6 +111,8 @@ Start the admin TUI:
 In the TUI:
 
 - `g` starts the live server.
+- Use **Announce Now** in Setup, Overview, Interfaces, or Portal to announce
+  immediately after the live server is running.
 - `w` writes a Connect To Gateway config.
 - `c` opens Monitoring.
 - `l` opens Logs.
@@ -209,6 +211,8 @@ Add `--second-client-launcher` for the second isolated browser launcher. Add
   may preview through SOCKS/Tor automatically when remote media is enabled;
   untrusted servers should require explicit Load and still use SOCKS/Tor rather
   than direct TCP.
+- Click a non-image HTTP/HTTPS link and confirm the external-link prompt offers
+  Copy URL for Tor Browser instead of trying to launch a locked Tor profile.
 - Delete an LXMF conversation and confirm it does not return after restart.
 
 ## Stop And Report These First

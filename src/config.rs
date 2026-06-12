@@ -60,7 +60,7 @@ impl AppPaths {
             logs_dir: root.join("logs"),
             diagnostics_dir: root.join("diagnostics"),
             interfaces_file: root.join("interfaces.json"),
-            gateways_file: root.join("gateways.json"),
+            gateways_file: root.join("interface_gateways.json"),
             browser_form_state_file: root.join("browser_form_state.json"),
             legacy_python_conversations_dir: None,
             root,

@@ -77,11 +77,11 @@ use crate::runtime::native::rns_net::{
 use crate::runtime::native::NativePageFetchFailureStage;
 use crate::runtime::native::{NativeRuntimeConfig, NativeRuntimeError};
 use crate::runtime::network::{
-    AnnouncePayload, CancellationToken, DestinationInspection, DirectoryCandidate, InterfaceStats,
-    LxmfCorrelationRecovery, LxmfDeliveryProbeReport, LxmfDeliveryProbeStage,
-    LxmfDeliveryProbeStep, NetworkRuntime, NetworkSnapshot, NetworkStatus, PageFetchProbeReport,
-    PageFetchProbeStage, PageFetchProbeStep, PropagationDebugSnapshot, PropagationMessageSnapshot,
-    PropagationStatus, RuntimeBackendName,
+    AnnouncePayload, CancellationToken, DestinationInspection, DirectoryCandidate, InterfaceSample,
+    InterfaceSampleState, InterfaceStats, LxmfCorrelationRecovery, LxmfDeliveryProbeReport,
+    LxmfDeliveryProbeStage, LxmfDeliveryProbeStep, NetworkRuntime, NetworkSnapshot, NetworkStatus,
+    PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep, PropagationDebugSnapshot,
+    PropagationMessageSnapshot, PropagationStatus, RuntimeBackendName,
 };
 #[cfg(feature = "native-rns-net")]
 use crate::runtime::network::{
@@ -764,16 +764,14 @@ impl NativeNetworkRuntime {
             tokio::spawn(async move {
                 while let Some(event) = link_closed_rx.recv().await {
                     #[cfg(feature = "native-rns-net")]
-                    active_omenchat_links
-                        .lock()
-                        .expect("native active OMENchat link lock")
-                        .remove(&event.link_id);
-                    let _ = link_closed_events.send(RuntimeBusEvent::OmenChatLinkClosed(
-                        OmenChatLinkClosed {
-                            link_id: event.link_id,
-                            reason: event.reason,
-                        },
-                    ));
+                    if let Some(closed) = take_active_omenchat_link_close(
+                        &active_omenchat_links,
+                        event.link_id,
+                        event.reason,
+                    ) {
+                        let _ =
+                            link_closed_events.send(RuntimeBusEvent::OmenChatLinkClosed(closed));
+                    }
                 }
             });
         }
@@ -3907,6 +3905,19 @@ impl NetworkRuntime for NativeNetworkRuntime {
         let state = self.state_snapshot();
         #[cfg(feature = "native-rns-net")]
         let rns_net_started = state.rns_net_started;
+        #[cfg(feature = "native-rns-net")]
+        let live_rns_net_stats = self
+            .rns_net
+            .lock()
+            .expect("native rns-net lock")
+            .as_ref()
+            .map(|handle| handle.client.clone());
+        #[cfg(feature = "native-rns-net")]
+        let live_rns_net_stats = if let Some(client) = live_rns_net_stats {
+            client.interface_stats().await.ok()
+        } else {
+            None
+        };
         let (transport_detail, attached_interfaces) = {
             let guard = self.transport.lock().expect("native transport lock");
             guard
@@ -3923,6 +3934,120 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 })
                 .unwrap_or_else(|| (String::new(), Vec::new()))
         };
+        let attached_samples = attached_interfaces.clone();
+        #[cfg(feature = "native-rns-net")]
+        let live_tcp_interfaces = live_rns_net_stats
+            .as_ref()
+            .map(|stats| {
+                stats
+                    .interfaces
+                    .iter()
+                    .filter(|interface| {
+                        interface
+                            .interface_type
+                            .to_ascii_lowercase()
+                            .contains("tcpclient")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        #[cfg(feature = "native-rns-net")]
+        let mut live_tcp_index = 0usize;
+        let samples = state
+            .interfaces
+            .iter()
+            .map(|plan| {
+                let endpoint = plan
+                    .endpoint
+                    .as_ref()
+                    .map(|endpoint| format!("{}:{}", endpoint.host, endpoint.port));
+                #[cfg(feature = "native-rns-net")]
+                let matched_live_interface = live_rns_net_stats.as_ref().and_then(|stats| {
+                    find_live_rns_net_interface(stats, plan, endpoint.as_deref())
+                });
+                #[cfg(feature = "native-rns-net")]
+                let ordered_live_interface =
+                    if plan.enabled && plan.supported && plan.kind == "tcp_client" {
+                        let interface = live_tcp_interfaces.get(live_tcp_index).copied();
+                        live_tcp_index = live_tcp_index.saturating_add(1);
+                        interface
+                    } else {
+                        None
+                    };
+                #[cfg(feature = "native-rns-net")]
+                let live_interface =
+                    select_live_rns_net_interface(matched_live_interface, ordered_live_interface);
+                let attached = attached_samples.iter().any(|line| {
+                    line.contains(&plan.name)
+                        || endpoint
+                            .as_ref()
+                            .is_some_and(|endpoint| line.contains(endpoint))
+                }) || {
+                    #[cfg(feature = "native-rns-net")]
+                    {
+                        live_interface.is_some_and(|interface| interface.status)
+                    }
+                    #[cfg(not(feature = "native-rns-net"))]
+                    {
+                        false
+                    }
+                };
+                let detail = if attached {
+                    #[cfg(feature = "native-rns-net")]
+                    if let Some(interface) = live_interface {
+                        Some(format_live_rns_net_interface_detail(interface))
+                    } else {
+                        attached_samples
+                            .iter()
+                            .find(|line| {
+                                line.contains(&plan.name)
+                                    || endpoint
+                                        .as_ref()
+                                        .is_some_and(|endpoint| line.contains(endpoint))
+                            })
+                            .cloned()
+                    }
+                    #[cfg(not(feature = "native-rns-net"))]
+                    attached_samples
+                        .iter()
+                        .find(|line| {
+                            line.contains(&plan.name)
+                                || endpoint
+                                    .as_ref()
+                                    .is_some_and(|endpoint| line.contains(endpoint))
+                        })
+                        .cloned()
+                } else {
+                    #[cfg(feature = "native-rns-net")]
+                    if let Some(interface) = live_interface {
+                        Some(format_live_rns_net_interface_detail(interface))
+                    } else {
+                        plan.reason.clone()
+                    }
+                    #[cfg(not(feature = "native-rns-net"))]
+                    plan.reason.clone()
+                };
+                InterfaceSample {
+                    profile_id: plan.profile_id.clone(),
+                    name: plan.name.clone(),
+                    kind: plan.kind.clone(),
+                    state: if !plan.enabled {
+                        InterfaceSampleState::Disabled
+                    } else if !plan.supported {
+                        InterfaceSampleState::Unsupported
+                    } else if attached {
+                        InterfaceSampleState::Attached
+                    } else {
+                        InterfaceSampleState::Configured
+                    },
+                    enabled: plan.enabled,
+                    supported: plan.supported,
+                    attached,
+                    endpoint,
+                    detail,
+                }
+            })
+            .collect::<Vec<_>>();
         let mut interfaces = state
             .interfaces
             .iter()
@@ -3941,6 +4066,15 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .into_iter()
                 .map(|interface| format!("attached {interface}")),
         );
+        #[cfg(feature = "native-rns-net")]
+        if let Some(stats) = &live_rns_net_stats {
+            interfaces.extend(
+                stats
+                    .interfaces
+                    .iter()
+                    .map(format_live_rns_net_interface_detail),
+            );
+        }
         #[cfg(feature = "native-rns-net")]
         if rns_net_started {
             interfaces.push("attached rns-net primary runtime".into());
@@ -3983,6 +4117,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 transport_detail
             }),
             interfaces,
+            samples,
         })
     }
 
@@ -4990,6 +5125,80 @@ fn parse_transport_destination_hash(
     }
     rns_transport::hash::AddressHash::new_from_hex_string(destination_hash)
         .map_err(|_| AppError::from(NativeRuntimeError::InvalidAddress(destination_hash.into())))
+}
+
+#[cfg(feature = "native-rns-net")]
+fn find_live_rns_net_interface<'a>(
+    stats: &'a rns_net::InterfaceStatsResponse,
+    plan: &NativeInterfacePlan,
+    endpoint: Option<&str>,
+) -> Option<&'a rns_net::SingleInterfaceStat> {
+    let plan_name = plan.name.to_ascii_lowercase();
+    let endpoint = endpoint.map(str::to_ascii_lowercase);
+    stats.interfaces.iter().find(|interface| {
+        let interface_name = interface.name.to_ascii_lowercase();
+        interface_name == plan_name
+            || interface_name.contains(&plan_name)
+            || endpoint
+                .as_ref()
+                .is_some_and(|endpoint| interface_name.contains(endpoint))
+    })
+}
+
+#[cfg(feature = "native-rns-net")]
+fn format_live_rns_net_interface_detail(interface: &rns_net::SingleInterfaceStat) -> String {
+    format!(
+        "{} [{}] {} | connected={} | rx={} in {} pkt | tx={} in {} pkt | ifac={}",
+        interface.name,
+        interface.id,
+        interface.interface_type,
+        interface.status,
+        human_bytes(interface.rxb),
+        interface.rx_packets,
+        human_bytes(interface.txb),
+        interface.tx_packets,
+        interface
+            .ifac_size
+            .map(|size| human_bytes(size as u64))
+            .unwrap_or_else(|| "none".into())
+    )
+}
+
+#[cfg(feature = "native-rns-net")]
+fn select_live_rns_net_interface<'a>(
+    matched: Option<&'a rns_net::SingleInterfaceStat>,
+    ordered: Option<&'a rns_net::SingleInterfaceStat>,
+) -> Option<&'a rns_net::SingleInterfaceStat> {
+    matched.or(ordered)
+}
+
+#[cfg(feature = "native-rns-net")]
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+#[cfg(feature = "native-rns-net")]
+fn take_active_omenchat_link_close(
+    active_omenchat_links: &Arc<Mutex<BTreeSet<[u8; 16]>>>,
+    link_id: [u8; 16],
+    reason: Option<String>,
+) -> Option<OmenChatLinkClosed> {
+    let was_active = active_omenchat_links
+        .lock()
+        .expect("native active OMENchat link lock")
+        .remove(&link_id);
+    was_active.then_some(OmenChatLinkClosed { link_id, reason })
 }
 
 #[cfg(feature = "native-rns-net")]
@@ -6350,6 +6559,125 @@ mod tests {
 
     #[cfg(feature = "native-rns-net")]
     #[test]
+    fn omenchat_link_close_events_only_emit_for_active_omenchat_links() {
+        let active = Arc::new(Mutex::new(BTreeSet::from([[0x4f; 16]])));
+
+        assert!(
+            take_active_omenchat_link_close(&active, [0x11; 16], Some("Timeout".into())).is_none()
+        );
+        assert!(active.lock().expect("active").contains(&[0x4f; 16]));
+
+        let closed = take_active_omenchat_link_close(&active, [0x4f; 16], Some("Timeout".into()))
+            .expect("active OMENchat close");
+        assert_eq!(closed.link_id, [0x4f; 16]);
+        assert_eq!(closed.reason.as_deref(), Some("Timeout"));
+        assert!(!active.lock().expect("active").contains(&[0x4f; 16]));
+
+        assert!(
+            take_active_omenchat_link_close(&active, [0x4f; 16], Some("Timeout".into())).is_none()
+        );
+    }
+
+    #[cfg(feature = "native-rns-net")]
+    #[test]
+    fn live_rns_net_interface_stats_match_profiles_and_format_connection_state() {
+        let mut interface =
+            crate::interfaces::ReticulumInterfaceProfile::tcp_client("tcp", "GatewayOne");
+        interface.target_host = "10.0.0.7".into();
+        interface.target_port = 4242;
+        let plan = plan_interfaces(&[interface])
+            .into_iter()
+            .next()
+            .expect("interface plan");
+        let stats = rns_net::InterfaceStatsResponse {
+            interfaces: vec![rns_net::SingleInterfaceStat {
+                id: 7,
+                name: "GatewayOne".into(),
+                status: true,
+                mode: 0,
+                rxb: 2048,
+                txb: 4096,
+                rx_packets: 2,
+                tx_packets: 4,
+                bitrate: None,
+                ifac_size: None,
+                started: 0.0,
+                ia_freq: 0.0,
+                oa_freq: 0.0,
+                ip_freq: 0.0,
+                op_freq: 0.0,
+                op_samples: 0,
+                burst_active: false,
+                burst_activated: 0.0,
+                pr_burst_active: false,
+                pr_burst_activated: 0.0,
+                clients: None,
+                announce_rate_target: None,
+                announce_rate_grace: 0,
+                announce_rate_penalty: 0.0,
+                interface_type: "TCPClientInterface".into(),
+            }],
+            transport_id: None,
+            transport_enabled: true,
+            transport_uptime: 1.0,
+            total_rxb: 2048,
+            total_txb: 4096,
+            probe_responder: None,
+            backbone_peer_pool: None,
+        };
+
+        let live = find_live_rns_net_interface(&stats, &plan, Some("10.0.0.7:4242"))
+            .expect("matched live interface");
+
+        assert!(live.status);
+        assert_eq!(
+            format_live_rns_net_interface_detail(live),
+            "GatewayOne [7] TCPClientInterface | connected=true | rx=2.00 KiB in 2 pkt | tx=4.00 KiB in 4 pkt | ifac=none"
+        );
+        let ordered_fallback = rns_net::SingleInterfaceStat {
+            id: 8,
+            name: "tcp-client-0".into(),
+            status: true,
+            mode: 0,
+            rxb: 1,
+            txb: 2,
+            rx_packets: 1,
+            tx_packets: 1,
+            bitrate: None,
+            ifac_size: None,
+            started: 0.0,
+            ia_freq: 0.0,
+            oa_freq: 0.0,
+            ip_freq: 0.0,
+            op_freq: 0.0,
+            op_samples: 0,
+            burst_active: false,
+            burst_activated: 0.0,
+            pr_burst_active: false,
+            pr_burst_activated: 0.0,
+            clients: None,
+            announce_rate_target: None,
+            announce_rate_grace: 0,
+            announce_rate_penalty: 0.0,
+            interface_type: "TCPClientInterface".into(),
+        };
+
+        assert_eq!(
+            select_live_rns_net_interface(None, Some(&ordered_fallback))
+                .expect("ordered fallback")
+                .id,
+            8
+        );
+        assert_eq!(
+            select_live_rns_net_interface(Some(live), Some(&ordered_fallback))
+                .expect("matched live interface")
+                .id,
+            7
+        );
+    }
+
+    #[cfg(feature = "native-rns-net")]
+    #[test]
     fn reused_page_link_failure_detection_covers_send_and_response_failures() {
         let reused = PageFetchProbeStep::ok(
             PageFetchProbeStage::LinkSetup,
@@ -6638,12 +6966,30 @@ mod tests {
                 .interfaces
                 .iter()
                 .any(|line| line.contains("attached Gateway tcp_client 127.0.0.1:4242")));
+            let sample = stats
+                .samples
+                .iter()
+                .find(|sample| sample.profile_id == "tcp")
+                .expect("structured interface sample");
+            assert_eq!(sample.endpoint.as_deref(), Some("127.0.0.1:4242"));
+            assert!(sample.attached);
+            assert_eq!(sample.state, InterfaceSampleState::Attached);
         }
         #[cfg(feature = "native-rns-net")]
-        assert!(stats
-            .interfaces
-            .iter()
-            .any(|line| line.contains("attached rns-net primary runtime")));
+        {
+            assert!(stats
+                .interfaces
+                .iter()
+                .any(|line| line.contains("attached rns-net primary runtime")));
+            let sample = stats
+                .samples
+                .iter()
+                .find(|sample| sample.profile_id == "tcp")
+                .expect("structured interface sample");
+            assert_eq!(sample.endpoint.as_deref(), Some("127.0.0.1:4242"));
+            assert!(!sample.attached);
+            assert_eq!(sample.state, InterfaceSampleState::Configured);
+        }
     }
 
     #[cfg(feature = "native-rns-net")]

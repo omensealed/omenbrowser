@@ -61,6 +61,10 @@ omenchat://<destination_hash>
 The Directory also lists announced OMENchat servers when their announces are
 seen.
 
+In `omenchatd tui`, use **Announce Now** after the live server is running to
+send the OMENchat and NomadNet portal announces immediately. This is useful for
+testing discovery without waiting for the configured announce interval.
+
 ## Uploads And Media
 
 - Default per-file upload limit: `512 KiB`.
@@ -69,7 +73,8 @@ seen.
 - NomadNet/Reticulum images can be loaded inline.
 - Clearweb image loading is gated by media privacy settings and SOCKS5/Tor
   detection.
-- Non-image clearweb links open through the external browser flow.
+- Non-image clearweb links open through the external browser prompt. Use Copy
+  URL for Tor Browser and paste into the running Tor Browser window.
 
 ## Expected Client Behavior
 

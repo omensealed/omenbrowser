@@ -440,18 +440,6 @@ pub(crate) fn server_limits_text(config: &ServerConfig) -> String {
             "large batch threshold: {}",
             human_bytes(limits.large_batch_threshold_bytes as u64)
         ),
-        format!(
-            "upload quota per identity: {}",
-            if config.upload_quota_bytes == 0 {
-                "disabled".into()
-            } else {
-                human_bytes(config.upload_quota_bytes)
-            }
-        ),
-        format!(
-            "upload max per file: {}",
-            human_bytes(config.upload_max_file_bytes)
-        ),
         upload_policy_hint(config),
         format!("ping interval: {}s", config.ping_interval_seconds),
         format!("message rate: {} / minute", limits.rate_messages_per_minute),
@@ -463,10 +451,10 @@ pub(crate) fn server_limits_text(config: &ServerConfig) -> String {
 
 pub(crate) fn upload_policy_hint(config: &ServerConfig) -> String {
     if config.upload_quota_bytes == 0 {
-        "upload policy: disabled; upload offers are rejected".into()
+        "uploads: disabled; upload offers are rejected".into()
     } else {
         format!(
-            "upload policy: reject files over {}; rotate cache above {} per identity",
+            "uploads: max file {}; quota {} per identity",
             human_bytes(config.upload_max_file_bytes),
             human_bytes(config.upload_quota_bytes)
         )
@@ -494,7 +482,7 @@ pub(crate) fn announce_interval_update_text(minutes: u64) -> String {
 }
 
 pub(crate) fn max_message_bytes_update_text(bytes: usize) -> String {
-    format!("max message bytes updated: {bytes}")
+    format!("max message size updated: {}", human_bytes(bytes as u64))
 }
 
 pub(crate) fn history_batch_size_update_text(count: usize) -> String {
@@ -506,7 +494,10 @@ pub(crate) fn join_backlog_events_update_text(count: usize) -> String {
 }
 
 pub(crate) fn large_batch_threshold_update_text(bytes: usize) -> String {
-    format!("large batch threshold bytes updated: {bytes}")
+    format!(
+        "large batch threshold updated: {}",
+        human_bytes(bytes as u64)
+    )
 }
 
 pub(crate) fn message_rate_update_text(count: usize) -> String {
@@ -938,7 +929,7 @@ pub(crate) fn traffic_delta_text(
                 .saturating_sub(previous.protocol_errors),
         );
     format!(
-        "{} sampled | rx {}/s ({}) | tx {}/s ({}) | resources {}/s ({})\nframes {} in / {} out | session {} room {} chat {} history {} ping {} upload_fetch {} inline_upload {} problems {}",
+        "{} sample | rate rx {}/s ({}) / tx {}/s ({}) / resources {}/s ({})\nframes: {} in / {} out | requests: session {} room {} chat {} history {} ping {} | uploads: fetch {} inline {} | problems: {}",
         human_duration(elapsed_secs),
         human_bytes_per_second(bytes_in, elapsed_secs),
         human_bytes(bytes_in),
@@ -1050,7 +1041,7 @@ pub(crate) fn monitoring_operator_summary_text(
 #[cfg(any(test, feature = "live-rns-net"))]
 pub(crate) fn active_link_monitoring_line(link: &ActiveLinkMonitoringText) -> String {
     format!(
-        "  {name} ({identity}) in {room}; session {age}; {activity}; from client {frames} frame(s), {bytes}; requests history={history} ping={ping} chat={chat} command={command} upload={upload}; link {link_id}",
+        "  {name} [{identity}] {room} | age {age} | {activity} | rx {frames} frame(s), {bytes} | req h={history} p={ping} chat={chat} cmd={command} up={upload} | link {link_id}",
         name = link.name,
         identity = link.identity,
         room = link.room,
@@ -1070,7 +1061,7 @@ pub(crate) fn active_link_monitoring_line(link: &ActiveLinkMonitoringText) -> St
 #[cfg(any(test, feature = "live-rns-net"))]
 pub(crate) fn closed_link_monitoring_line(link: &ClosedLinkMonitoringText) -> String {
     format!(
-        "  {name} ({identity}) left {room}; {status}; session {connected_for}; ended {closed_ago} ago; link {link_id}; reason={reason}",
+        "  {name} [{identity}] {room} | {status} | connected {connected_for} | closed {closed_ago} ago | reason {reason} | link {link_id}",
         name = link.name,
         identity = link.identity,
         room = link.room,
@@ -1157,39 +1148,33 @@ pub(crate) fn setup_next_steps_text(setup: &SetupNextStepsText<'_>) -> String {
     steps.push(setup.launch_status.to_string());
     steps.push(String::new());
     if setup.all_ready {
-        steps.push("1. Start Live Server or press g.".to_string());
-        steps.push("2. Open Monitoring and confirm the interface is connected.".to_string());
-        steps.push("3. Copy the omenchat:// URI or NomadNet portal URL from Portal.".to_string());
-        steps.push(
-            "4. Test with a second OMENbrowser_rs app root before inviting outside users."
-                .to_string(),
-        );
-        steps.push(format!(
-            "5. Confirm upload policy: {}.",
-            setup.upload_policy
-        ));
-        steps.push(format!("Reticulum mode: {}", setup.reticulum_summary));
+        steps.push("Start: Live Server or press g.".to_string());
+        steps.push("Verify: Monitoring shows a connected interface and fresh traffic.".to_string());
+        steps.push("Share: copy the omenchat:// URI or Portal URL from Portal.".to_string());
+        steps.push("Test: join from a second isolated OMENbrowser_rs app root.".to_string());
+        steps.push(format!("Limits: {}.", setup.upload_policy));
+        steps.push(format!("Network: {}", setup.reticulum_summary));
         return steps.join("\n");
     }
 
-    steps.push("Work these in order:".to_string());
+    steps.push("Fix first:".to_string());
     for label in &setup.missing_labels {
         let advice = setup_advice_for_label(label);
         let action = setup_action_for_label(label);
-        steps.push(format!("- {label}: {advice} {action}"));
+        steps.push(format!("- {label}: {action} {advice}"));
     }
     steps.push(String::new());
-    steps.push("Storage rule: all default files stay under this omenchatd home.".to_string());
+    steps.push("Storage: default files stay under this omenchatd home.".to_string());
     steps.push(format!("home: {}", setup.storage_root));
     steps.push(String::new());
-    steps.push(format!("Reticulum mode: {}", setup.reticulum_summary));
+    steps.push(format!("Network: {}", setup.reticulum_summary));
     steps.push(String::new());
     steps.push(
-        "Address rule: the chat service always announces as omenchat.node; do not edit that service type. Users join with the omenchat:// hash or the NomadNet portal link."
+        "Addresses: OMENchat announces as omenchat.node; users join with omenchat:// or the NomadNet portal link."
             .to_string(),
     );
     steps.push(String::new());
-    steps.push(format!("Upload rule: {}.", setup.upload_policy));
+    steps.push(format!("Limits: {}.", setup.upload_policy));
     steps.join("\n")
 }
 
@@ -1252,7 +1237,7 @@ pub(crate) fn overview_operator_summary_text(summary: &OverviewOperatorSummaryTe
 
 pub(crate) fn portal_panel_text(portal: &PortalPanelText<'_>) -> String {
     format!(
-        "copy/paste:\n  chat invite: client uri\n  quiet MOTD/rules page: portal url\npurpose: MOTD, rules, help, launch link; not chat traffic\npage: reticulum/storage/pages/index.mu served as /page/index.mu\ncreation: template is created only when missing\n\n{checklist}\n\n{destination}\nportal file: {page_state}\n\nOperator-owned after creation; omenchatd serves this file from disk for every NomadNet page request.\n\nMOTD: {motd}",
+        "Share:\n  chat: omenchat:// URI\n  portal: NomadNet /page/index.mu URL\n\nPurpose: MOTD, rules, help, and launch link. Chat traffic stays on OMENchat.\nEdit: reticulum/storage/pages/index.mu is served as /page/index.mu; the template is created only when missing.\n\n{checklist}\n\n{destination}\nportal file: {page_state}\nMOTD: {motd}",
         checklist = portal.checklist,
         destination = portal.destination,
         page_state = portal.page_state,
@@ -1400,10 +1385,7 @@ mod tests {
         assert!(text.contains("history batch: 25 event(s)"));
         assert!(text.contains("join backlog: 12 event(s)"));
         assert!(text.contains("large batch threshold: 8.00 KiB"));
-        assert!(text.contains("upload quota per identity: 50.0 MiB"));
-        assert!(text.contains("upload max per file: 512.0 KiB"));
-        assert!(text.contains("reject files over 512.0 KiB"));
-        assert!(text.contains("rotate cache above 50.0 MiB per identity"));
+        assert!(text.contains("uploads: max file 512.0 KiB; quota 50.0 MiB per identity"));
         assert!(text.contains("message rate: 33 / minute"));
         assert!(text.contains("command rate: 17 / minute"));
     }
@@ -1417,7 +1399,7 @@ mod tests {
 
         let text = upload_policy_hint(&config);
 
-        assert_eq!(text, "upload policy: disabled; upload offers are rejected");
+        assert_eq!(text, "uploads: disabled; upload offers are rejected");
     }
 
     #[test]
@@ -1457,10 +1439,10 @@ mod tests {
     }
 
     #[test]
-    fn max_message_bytes_update_text_reports_raw_limit() {
+    fn max_message_bytes_update_text_reports_human_limit() {
         assert_eq!(
             max_message_bytes_update_text(4096),
-            "max message bytes updated: 4096"
+            "max message size updated: 4.00 KiB"
         );
     }
 
@@ -1481,10 +1463,10 @@ mod tests {
     }
 
     #[test]
-    fn large_batch_threshold_update_text_reports_bytes() {
+    fn large_batch_threshold_update_text_reports_human_bytes() {
         assert_eq!(
             large_batch_threshold_update_text(8192),
-            "large batch threshold bytes updated: 8192"
+            "large batch threshold updated: 8.00 KiB"
         );
     }
 
@@ -1876,12 +1858,12 @@ mod tests {
 
         let text = traffic_delta_text(&previous, &current, 2.0);
 
-        assert!(text.contains("2.0s sampled"));
-        assert!(text.contains("rx 1.00 KiB/s (2.00 KiB)"));
+        assert!(text.contains("2.0s sample"));
+        assert!(text.contains("rate rx 1.00 KiB/s (2.00 KiB)"));
         assert!(text.contains("tx 1.00 KiB/s (2.00 KiB)"));
         assert!(text.contains("resources 512 B/s (1.00 KiB)"));
         assert!(text.contains(
-            "session 1 room 2 chat 3 history 1 ping 3 upload_fetch 0 inline_upload 0 B problems 1"
+            "requests: session 1 room 2 chat 3 history 1 ping 3 | uploads: fetch 0 inline 0 B | problems: 1"
         ));
     }
 
@@ -1952,7 +1934,7 @@ mod tests {
                 "interfaces: 1 | transport: false | received: 2.00 KiB | sent: 4.00 KiB".into(),
                 "Gateway [1] TCPClientInterface | connected=true | rx=2.00 KiB in 2 pkt | tx=4.00 KiB in 4 pkt | ifac=none".into(),
             ],
-            "5.0s sampled | rx 1 B/s (5 B)",
+            "5.0s sample | rate rx 1 B/s (5 B)",
             &[],
         );
 
@@ -2005,11 +1987,11 @@ mod tests {
             link_id: "aaaaaaaa".into(),
         });
 
-        assert!(line.contains("Alice (70656572) in #lobby"));
-        assert!(line.contains("session 1m"));
+        assert!(line.contains("Alice [70656572] #lobby"));
+        assert!(line.contains("age 1m"));
         assert!(line.contains("inbound rate:"));
-        assert!(line.contains("from client 12 frame(s), 4.00 KiB"));
-        assert!(line.contains("requests history=2 ping=3 chat=4 command=5 upload=6"));
+        assert!(line.contains("rx 12 frame(s), 4.00 KiB"));
+        assert!(line.contains("req h=2 p=3 chat=4 cmd=5 up=6"));
         assert!(line.contains("link aaaaaaaa"));
     }
 
@@ -2027,12 +2009,12 @@ mod tests {
             reason: "duplicate identity link replaced".into(),
         });
 
-        assert!(line.contains("Alice (70656572) left #lobby"));
+        assert!(line.contains("Alice [70656572] #lobby"));
         assert!(line.contains("normal reconnect"));
-        assert!(line.contains("session 1m"));
-        assert!(line.contains("ended 1m ago"));
+        assert!(line.contains("connected 1m"));
+        assert!(line.contains("closed 1m ago"));
         assert!(line.contains("link bbbbbbbb"));
-        assert!(line.contains("reason=duplicate identity link replaced"));
+        assert!(line.contains("reason duplicate identity link replaced"));
     }
 
     #[test]
@@ -2106,15 +2088,15 @@ mod tests {
             missing_labels: Vec::new(),
             storage_root: "/tmp/omenchatd",
             reticulum_summary: "TCP gateway client -> gateway.example:42420",
-            upload_policy: "upload policy: reject files over 512.0 KiB; rotate cache above 50.0 MiB per identity",
+            upload_policy: "uploads: max file 512.0 KiB; quota 50.0 MiB per identity",
         });
 
         assert!(text.contains("Launch status: READY for live testing"));
-        assert!(text.contains("1. Start Live Server or press g."));
-        assert!(text.contains("Copy the omenchat:// URI or NomadNet portal URL"));
-        assert!(text.contains("Confirm upload policy: upload policy: reject files over 512.0 KiB"));
-        assert!(text.contains("Reticulum mode: TCP gateway client -> gateway.example:42420"));
-        assert!(!text.contains("Work these in order:"));
+        assert!(text.contains("Start: Live Server or press g."));
+        assert!(text.contains("Share: copy the omenchat:// URI or Portal URL"));
+        assert!(text.contains("Limits: uploads: max file 512.0 KiB"));
+        assert!(text.contains("Network: TCP gateway client -> gateway.example:42420"));
+        assert!(!text.contains("Fix first:"));
     }
 
     #[test]
@@ -2125,17 +2107,17 @@ mod tests {
             missing_labels: vec!["reticulum", "operator"],
             storage_root: "/tmp/omenchatd",
             reticulum_summary: "no active interface configured",
-            upload_policy: "upload policy: disabled; upload offers are rejected",
+            upload_policy: "uploads: disabled; upload offers are rejected",
         });
 
         assert!(text.contains("Launch status: NEEDS SETUP (6/8 ready)"));
-        assert!(text.contains("Work these in order:"));
-        assert!(text.contains("- reticulum: Use Connect To Gateway"));
-        assert!(text.contains("- operator: Edit Operator Label"));
-        assert!(text.contains("Storage rule: all default files stay under this omenchatd home."));
+        assert!(text.contains("Fix first:"));
+        assert!(text.contains("- reticulum: Use: Connect To Gateway"));
+        assert!(text.contains("- operator: Use: Edit Operator Label"));
+        assert!(text.contains("Storage: default files stay under this omenchatd home."));
         assert!(text.contains("home: /tmp/omenchatd"));
-        assert!(text.contains("Address rule: the chat service always announces as omenchat.node"));
-        assert!(text.contains("Upload rule: upload policy: disabled; upload offers are rejected."));
+        assert!(text.contains("Addresses: OMENchat announces as omenchat.node"));
+        assert!(text.contains("Limits: uploads: disabled; upload offers are rejected."));
     }
 
     #[test]
@@ -2223,15 +2205,14 @@ mod tests {
             motd: "Read the rules",
         });
 
-        assert!(text.contains("copy/paste:"));
-        assert!(text.contains("chat invite: client uri"));
-        assert!(text.contains("quiet MOTD/rules page: portal url"));
-        assert!(text.contains("purpose: MOTD, rules, help, launch link"));
-        assert!(text.contains("page: reticulum/storage/pages/index.mu"));
+        assert!(text.contains("Share:"));
+        assert!(text.contains("chat: omenchat:// URI"));
+        assert!(text.contains("portal: NomadNet /page/index.mu URL"));
+        assert!(text.contains("Purpose: MOTD, rules, help, and launch link"));
+        assert!(text.contains("Edit: reticulum/storage/pages/index.mu"));
         assert!(text.contains("portal readiness:"));
         assert!(text.contains("destination: omenchat.node abc123"));
         assert!(text.contains("portal file: /tmp/omenchatd/reticulum/storage/pages/index.mu"));
-        assert!(text.contains("Operator-owned after creation"));
         assert!(text.contains("MOTD: Read the rules"));
     }
 

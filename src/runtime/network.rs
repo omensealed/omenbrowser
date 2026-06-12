@@ -222,6 +222,35 @@ pub struct InterfaceStats {
     pub available: bool,
     pub reason: Option<String>,
     pub interfaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub samples: Vec<InterfaceSample>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InterfaceSample {
+    pub profile_id: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(default)]
+    pub state: InterfaceSampleState,
+    pub enabled: bool,
+    pub supported: bool,
+    pub attached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InterfaceSampleState {
+    #[default]
+    Unknown,
+    Disabled,
+    Unsupported,
+    Configured,
+    Attached,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -900,6 +929,7 @@ impl NetworkRuntime for MockNetworkRuntime {
             available: false,
             reason: Some("rnstatus is only available with the Reticulum backend".into()),
             interfaces: Vec::new(),
+            samples: Vec::new(),
         })
     }
 

@@ -302,6 +302,7 @@ pub fn configured_destination_status(config: &ServerConfig) -> ServerResult<Stri
 }
 
 pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
+    const LIVE_RUNTIME_RESTART_BACKOFF: Duration = Duration::from_secs(5);
     append_server_log(
         &config,
         format!(
@@ -393,20 +394,81 @@ pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                append_server_log(&config, "live event channel disconnected");
-                break;
+                append_server_log(
+                    &config,
+                    format!(
+                        "live event channel disconnected; restarting rns-net runtime after {}s",
+                        LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
+                    ),
+                );
+                println!(
+                    "live event channel disconnected; restarting rns-net runtime after {}s",
+                    LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
+                );
+                std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
+                runtime = match start_live_server(&config) {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        append_server_log(&config, format!("live runtime restart failed: {error}"));
+                        return Err(error);
+                    }
+                };
+                append_server_log(
+                    &config,
+                    format!(
+                        "live runtime restarted destination={} hash={} nomadnet_portal={} nomadnet_hash={}",
+                        runtime.destination_name,
+                        hex_lower(&runtime.destination_hash),
+                        runtime.nomadnet_destination_name,
+                        hex_lower(&runtime.nomadnet_destination_hash),
+                    ),
+                );
+                next_announce = Instant::now() + announce_interval;
+                next_stats = Instant::now() + stats_interval;
+                next_interface_stats = Instant::now() + interface_stats_interval;
+                last_reported_stats = runtime.live_server.stats().clone();
+                last_interface_stats = emit_interface_stats(&config, &runtime, true);
+                continue;
             }
         }
         if Instant::now() >= next_announce {
-            runtime.announce()?;
-            append_server_log(
-                &config,
-                format!(
-                    "announced destination={} hash={}",
-                    runtime.destination_name,
-                    hex_lower(&runtime.destination_hash)
-                ),
-            );
+            match runtime.announce() {
+                Ok(()) => {
+                    append_server_log(
+                        &config,
+                        format!(
+                            "announced destination={} hash={}",
+                            runtime.destination_name,
+                            hex_lower(&runtime.destination_hash)
+                        ),
+                    );
+                }
+                Err(error) => {
+                    append_server_log(
+                        &config,
+                        format!(
+                            "announce failed: {error}; restarting rns-net runtime after {}s",
+                            LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
+                        ),
+                    );
+                    println!(
+                        "announce failed: {error}; restarting rns-net runtime after {}s",
+                        LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
+                    );
+                    std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
+                    runtime = start_live_server(&config)?;
+                    append_server_log(
+                        &config,
+                        format!(
+                            "live runtime restarted after announce failure destination={} hash={}",
+                            runtime.destination_name,
+                            hex_lower(&runtime.destination_hash),
+                        ),
+                    );
+                    last_reported_stats = runtime.live_server.stats().clone();
+                    last_interface_stats = emit_interface_stats(&config, &runtime, true);
+                }
+            }
             next_announce = Instant::now() + announce_interval;
         }
         if Instant::now() >= next_stats {
@@ -434,7 +496,6 @@ pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
             next_interface_stats = Instant::now() + interface_stats_interval;
         }
     }
-    Ok(())
 }
 
 fn emit_interface_stats(

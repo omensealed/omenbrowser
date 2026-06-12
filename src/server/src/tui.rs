@@ -41,7 +41,8 @@ use crate::tui_text::traffic_delta_text;
 #[cfg(feature = "live-rns-net")]
 use crate::tui_text::{
     active_link_activity_label, active_link_monitoring_line, closed_link_monitoring_line,
-    closed_link_status_label, ActiveLinkMonitoringText, ClosedLinkMonitoringText,
+    closed_link_status_label, interface_health_label, ActiveLinkMonitoringText,
+    ClosedLinkMonitoringText,
 };
 use crate::tui_text::{
     admin_help_text, announce_interval_update_text, audit_summary_text, command_help_text,
@@ -73,7 +74,7 @@ use crate::{parse_tcp_server_override, TcpClientOverride};
 #[cfg(feature = "live-rns-net")]
 use crate::rns_net_live::{self, RnsNetLiveRuntime};
 
-const SETUP_ACTION_PANEL_HEIGHT: u16 = 13;
+const SETUP_ACTION_PANEL_HEIGHT: u16 = 14;
 
 pub fn run_admin_console(config: ServerConfig) -> ServerResult<()> {
     if io::stdout().is_terminal() && io::stdin().is_terminal() {
@@ -280,6 +281,7 @@ impl InputMode {
 pub(crate) enum AdminAction {
     StartLive,
     StopLive,
+    AnnounceNow,
     EditServerName,
     EditOperator,
     EditMotd,
@@ -462,7 +464,36 @@ impl AdminTui {
     }
 
     #[cfg(feature = "live-rns-net")]
+    fn announce_live_now(&mut self) {
+        let Some(live) = self.live.as_mut() else {
+            self.status = "live server is not running; start live before announcing".into();
+            return;
+        };
+        match live.runtime.announce() {
+            Ok(()) => {
+                let destination = hex_lower_local(&live.runtime.destination_hash);
+                self.next_live_announce = Instant::now()
+                    + Duration::from_secs(self.config.announce_interval_minutes.max(1) * 60);
+                self.live_status =
+                    format!("live server running destination={destination} | announce sent");
+                self.status = format!("announce sent now: omenchat://{destination}");
+            }
+            Err(error) => {
+                self.live_status = format!("live announce failed: {error}");
+                self.status = self.live_status.clone();
+            }
+        }
+    }
+
+    #[cfg(not(feature = "live-rns-net"))]
+    fn announce_live_now(&mut self) {
+        self.status =
+            "live announce unavailable: rebuild omenchatd with --features live-rns-net".into();
+    }
+
+    #[cfg(feature = "live-rns-net")]
     fn tick_live_runtime(&mut self) {
+        const LIVE_RUNTIME_RESTART_BACKOFF: Duration = Duration::from_secs(5);
         let Some(live) = self.live.as_mut() else {
             return;
         };
@@ -475,8 +506,38 @@ impl AdminTui {
             }
             Ok(_) => {}
             Err(error) => {
-                self.live_status = format!("live event handling failed: {error}");
+                self.live_status = format!(
+                    "live event handling failed: {error}; restarting rns-net runtime after {}s",
+                    LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
+                );
                 self.status = self.live_status.clone();
+                std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
+                match rns_net_live::start_live_server(&self.config) {
+                    Ok(runtime) => {
+                        let destination = hex_lower_local(&runtime.destination_hash);
+                        live.runtime = runtime;
+                        live.last_stats = live.runtime.live_server.stats().summary_line();
+                        live.last_stats_snapshot = live.runtime.live_server.stats().clone();
+                        live.last_stats_at = Instant::now();
+                        live.recent_stats = "runtime restarted; waiting for next sample".into();
+                        live.last_interface_stats = live.runtime.interface_stats_lines();
+                        self.next_live_announce = Instant::now()
+                            + Duration::from_secs(
+                                self.config.announce_interval_minutes.max(1) * 60,
+                            );
+                        self.next_live_stats = Instant::now() + Duration::from_secs(5);
+                        self.live_status =
+                            format!("live runtime restarted destination={destination}");
+                        self.status = format!(
+                            "live runtime restarted: omenchat://{destination}; verify Monitoring"
+                        );
+                    }
+                    Err(restart_error) => {
+                        self.live_status = format!("live runtime restart failed: {restart_error}");
+                        self.status = self.live_status.clone();
+                    }
+                }
+                return;
             }
         }
 
@@ -491,8 +552,32 @@ impl AdminTui {
                     );
                 }
                 Err(error) => {
-                    self.live_status = format!("live announce failed: {error}");
+                    self.live_status = format!(
+                        "live announce failed: {error}; restarting rns-net runtime after {}s",
+                        LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
+                    );
                     self.status = self.live_status.clone();
+                    std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
+                    match rns_net_live::start_live_server(&self.config) {
+                        Ok(runtime) => {
+                            let destination = hex_lower_local(&runtime.destination_hash);
+                            live.runtime = runtime;
+                            live.last_stats = live.runtime.live_server.stats().summary_line();
+                            live.last_stats_snapshot = live.runtime.live_server.stats().clone();
+                            live.last_stats_at = Instant::now();
+                            live.recent_stats = "runtime restarted after announce failure".into();
+                            live.last_interface_stats = live.runtime.interface_stats_lines();
+                            self.live_status = format!(
+                                "live runtime restarted after announce failure destination={destination}"
+                            );
+                            self.status = self.live_status.clone();
+                        }
+                        Err(restart_error) => {
+                            self.live_status =
+                                format!("live runtime restart failed: {restart_error}");
+                            self.status = self.live_status.clone();
+                        }
+                    }
                 }
             }
             self.next_live_announce =
@@ -547,6 +632,10 @@ impl AdminTui {
         {
             let mut lines = vec![format!("runtime: {}", self.live_status)];
             if let Some(live) = self.live.as_ref() {
+                lines.push(format!(
+                    "interface: {}",
+                    interface_health_label(&live.last_interface_stats)
+                ));
                 lines.push(format!(
                     "identity: {}",
                     hex_lower_local(&live.runtime.identity_hash)
@@ -763,6 +852,7 @@ impl AdminTui {
         let actions = [
             (AdminAction::StartLive, "Start Live Server"),
             (AdminAction::StopLive, "Stop Live Server"),
+            (AdminAction::AnnounceNow, "Announce Now"),
             (AdminAction::EditServerName, "Edit Server Name"),
             (AdminAction::EditOperator, "Edit Operator Label"),
             (AdminAction::EditMotd, "Edit Server MOTD"),
@@ -1093,6 +1183,7 @@ impl AdminTui {
             (AdminAction::EditTcpClient, "Connect To Gateway"),
             (AdminAction::StartLive, "Start Live Server"),
             (AdminAction::StopLive, "Stop Live Server"),
+            (AdminAction::AnnounceNow, "Announce Now"),
             (AdminAction::SelectTab(AdminTab::Monitoring), "Monitoring"),
             (AdminAction::SaveConfig, "Save Config"),
         ];
@@ -1133,6 +1224,7 @@ impl AdminTui {
         );
         let actions = [
             (AdminAction::EditMotd, "Edit Server MOTD"),
+            (AdminAction::AnnounceNow, "Announce Now"),
             (AdminAction::SelectTab(AdminTab::Rooms), "Rooms"),
             (AdminAction::SelectTab(AdminTab::Identity), "Identity"),
         ];
@@ -1461,6 +1553,7 @@ impl AdminTui {
         match action {
             AdminAction::StartLive => self.start_live_runtime(),
             AdminAction::StopLive => self.stop_live_runtime(),
+            AdminAction::AnnounceNow => self.announce_live_now(),
             AdminAction::EditServerName => {
                 self.start_input(InputMode::EditName, self.config.name.clone())
             }
@@ -1609,10 +1702,8 @@ impl AdminTui {
 
     fn save_config_with_status(&mut self) -> ServerResult<()> {
         self.config.save()?;
-        self.status = format!(
-            "config saved: {}; restart live server if runtime-facing values changed",
-            self.config.config_path.display()
-        );
+        self.status =
+            "config saved; restart live server only if network or limit settings changed".into();
         Ok(())
     }
 
@@ -1737,10 +1828,7 @@ impl AdminTui {
                         self.config.limits.max_message_bytes
                     ),
                 );
-                self.status = format!(
-                    "max message bytes saved: {}",
-                    self.config.limits.max_message_bytes
-                );
+                self.status = max_message_bytes_update_text(self.config.limits.max_message_bytes);
                 self.input_mode = InputMode::Navigate;
             }
             InputMode::EditHistoryBatchSize => {
@@ -1788,9 +1876,8 @@ impl AdminTui {
                         self.config.limits.large_batch_threshold_bytes
                     ),
                 );
-                self.status = format!(
-                    "large batch threshold saved: {}",
-                    self.config.limits.large_batch_threshold_bytes
+                self.status = large_batch_threshold_update_text(
+                    self.config.limits.large_batch_threshold_bytes,
                 );
                 self.input_mode = InputMode::Navigate;
             }
@@ -1840,10 +1927,8 @@ impl AdminTui {
                     ),
                 );
                 self.status = format!(
-                    "wrote local TCP listener {}:{} to {}; restart live server to bind it",
-                    tcp_server.listen_ip,
-                    tcp_server.listen_port,
-                    self.config.reticulum_config_file().display()
+                    "local listener saved: {}:{}; restart live server to bind it",
+                    tcp_server.listen_ip, tcp_server.listen_port
                 );
                 self.input_mode = InputMode::Navigate;
             }
@@ -1859,10 +1944,8 @@ impl AdminTui {
                     ),
                 );
                 self.status = format!(
-                    "wrote gateway {}:{} to {}; restart live server and verify Monitoring",
-                    tcp_client.target_host,
-                    tcp_client.target_port,
-                    self.config.reticulum_config_file().display()
+                    "gateway saved: {}:{}; restart live server, then check Monitoring",
+                    tcp_client.target_host, tcp_client.target_port
                 );
                 self.input_mode = InputMode::Navigate;
             }
@@ -2626,11 +2709,12 @@ fn setup_addresses_text(config: &ServerConfig) -> String {
     })
 }
 
-fn setup_action_specs() -> [(AdminAction, &'static str); 11] {
+fn setup_action_specs() -> [(AdminAction, &'static str); 12] {
     [
         (AdminAction::EditTcpClient, "Connect Gateway"),
         (AdminAction::EditTcpServer, "Local Listener"),
         (AdminAction::StartLive, "Start Live"),
+        (AdminAction::AnnounceNow, "Announce Now"),
         (
             AdminAction::SelectTab(AdminTab::Monitoring),
             "Open Monitoring",
@@ -4093,10 +4177,10 @@ mod tests {
 
         let text = setup_next_steps_text(&config);
 
-        assert!(text.contains("chat service always announces as omenchat.node"));
-        assert!(text.contains("Users join with the omenchat:// hash"));
+        assert!(text.contains("OMENchat announces as omenchat.node"));
+        assert!(text.contains("users join with omenchat://"));
         assert!(text.contains("NomadNet portal link"));
-        assert!(text.contains("Upload rule: upload policy: reject files over 512.0 KiB"));
+        assert!(text.contains("Limits: uploads: max file 512.0 KiB"));
         assert!(
             text.contains("Use: Connect To Gateway for normal hosting")
                 || text.contains("Use: Start Live Server or run init/status")
@@ -4124,10 +4208,10 @@ mod tests {
         let text = setup_next_steps_text(&config);
 
         assert!(text.contains("Launch status: READY for live testing"));
-        assert!(text.contains("Next action: start the live server"));
-        assert!(text.contains("Confirm upload policy"));
-        assert!(text.contains("reject files over 512.0 KiB"));
-        assert!(text.contains("Reticulum mode: TCP gateway client -> gateway.example:42420"));
+        assert!(text.contains("Start: Live Server or press g."));
+        assert!(text.contains("Limits:"));
+        assert!(text.contains("max file 512.0 KiB"));
+        assert!(text.contains("Network: TCP gateway client -> gateway.example:42420"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4161,11 +4245,13 @@ mod tests {
         assert_eq!(labels[0], "Connect Gateway");
         assert_eq!(labels[1], "Local Listener");
         assert_eq!(labels[2], "Start Live");
-        assert_eq!(labels[3], "Open Monitoring");
+        assert_eq!(labels[3], "Announce Now");
+        assert_eq!(labels[4], "Open Monitoring");
         assert!(labels.contains(&"Total Upload Quota"));
         assert!(labels.contains(&"Max File Size"));
         assert!(labels.contains(&"Ping Interval"));
         assert!(labels.contains(&"Portal Addresses"));
+        assert!(action_kinds.contains(&AdminAction::AnnounceNow));
         assert!(action_kinds.contains(&AdminAction::EditUploadQuotaBytes));
         assert!(action_kinds.contains(&AdminAction::EditUploadMaxFileBytes));
         assert!(action_kinds.contains(&AdminAction::EditPingIntervalSeconds));
@@ -4231,10 +4317,10 @@ mod tests {
         assert!(text.contains("Next action:"));
         assert!(text.contains("Connect To Gateway"));
         assert!(text.contains("Use: Connect To Gateway for normal hosting"));
-        assert!(text.contains("Work these in order:"));
-        assert!(text.contains("Storage rule: all default files stay under this omenchatd home"));
-        assert!(text.contains("Address rule: the chat service always announces as omenchat.node"));
-        assert!(text.contains("Upload rule: upload policy: reject files over 512.0 KiB"));
+        assert!(text.contains("Fix first:"));
+        assert!(text.contains("Storage: default files stay under this omenchatd home"));
+        assert!(text.contains("Addresses: OMENchat announces as omenchat.node"));
+        assert!(text.contains("Limits: uploads: max file 512.0 KiB"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4721,7 +4807,7 @@ mod tests {
         app.handle_click(5, 6).expect("click rooms");
         assert_eq!(app.tab, AdminTab::Rooms);
         app.handle_click(5, 7).expect("click save");
-        assert!(app.status.contains("config saved:"));
+        assert!(app.status.contains("config saved"));
         assert!(app.status.contains("restart live server"));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4743,15 +4829,13 @@ mod tests {
 
         app.start_input(InputMode::EditTcpClient, "gateway.example:42420".into());
         app.commit_input().expect("tcp client");
-        assert!(app.status.contains("wrote gateway gateway.example:42420"));
+        assert!(app.status.contains("gateway saved: gateway.example:42420"));
         assert!(app.status.contains("restart live server"));
-        assert!(app.status.contains("verify Monitoring"));
+        assert!(app.status.contains("check Monitoring"));
 
         app.start_input(InputMode::EditTcpServer, "127.0.0.1:42420".into());
         app.commit_input().expect("tcp server");
-        assert!(app
-            .status
-            .contains("wrote local TCP listener 127.0.0.1:42420"));
+        assert!(app.status.contains("local listener saved: 127.0.0.1:42420"));
         assert!(app.status.contains("restart live server"));
 
         let _ = std::fs::remove_dir_all(root);
@@ -4765,7 +4849,7 @@ mod tests {
         let mut app = AdminTui::new(config);
 
         app.save_config_with_status().expect("save");
-        assert!(app.status.contains("config saved:"));
+        assert!(app.status.contains("config saved"));
         assert!(app.status.contains("restart live server"));
 
         #[cfg(not(feature = "live-rns-net"))]
@@ -4803,7 +4887,7 @@ mod tests {
         ];
 
         app.handle_click(5, 4).expect("click save");
-        assert!(app.status.contains("config saved:"));
+        assert!(app.status.contains("config saved"));
         assert!(app.status.contains("restart live server"));
 
         app.handle_click(5, 5).expect("click start live");
@@ -4833,6 +4917,24 @@ mod tests {
                     || app.status.contains("live server is not running")
             );
         }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dashboard_announce_now_reports_when_live_is_stopped() {
+        let root = temp_root("announce-now-stopped");
+        let config = ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("init");
+        let mut app = AdminTui::new(config);
+
+        app.handle_admin_action(AdminAction::AnnounceNow)
+            .expect("announce now");
+
+        #[cfg(feature = "live-rns-net")]
+        assert!(app.status.contains("live server is not running"));
+        #[cfg(not(feature = "live-rns-net"))]
+        assert!(app.status.contains("live announce unavailable"));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5512,16 +5614,16 @@ mod tests {
 
         let text = portal_panel_text(&config);
 
-        assert!(text.contains("copy/paste:"));
-        assert!(text.contains("chat invite: client uri"));
-        assert!(text.contains("quiet MOTD/rules page: portal url"));
-        assert!(text.contains("purpose: MOTD, rules, help, launch link"));
+        assert!(text.contains("Share:"));
+        assert!(text.contains("chat: omenchat:// URI"));
+        assert!(text.contains("portal: NomadNet /page/index.mu URL"));
+        assert!(text.contains("Purpose: MOTD, rules, help, and launch link"));
         assert!(text.contains("portal readiness:"));
         assert!(text.contains("page: portal page exists; edit it directly for rules/help"));
         assert!(text.contains("motd: MOTD is set"));
         assert!(text.contains("publish: verify Monitoring before sharing either address"));
-        assert!(text.contains("page: reticulum/storage/pages/index.mu"));
-        assert!(text.contains("creation: template is created only when missing"));
+        assert!(text.contains("Edit: reticulum/storage/pages/index.mu"));
+        assert!(text.contains("template is created only when missing"));
         assert!(text.contains("portal file:"));
         assert!(text.contains("MOTD: Read the rules"));
         let _ = std::fs::remove_dir_all(root);

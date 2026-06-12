@@ -170,6 +170,10 @@ portal url: <nomadnet-portal-destination-hash>:/page/index.mu
 Use `client uri` in OMENbrowser_rs's OMENchat opener. Use `portal url` in the
 NomadNet browser to view the quiet MOTD/rules/launch page.
 
+When running `omenchatd tui`, use **Announce Now** after the live server is
+started to publish both addresses immediately instead of waiting for the
+configured announce interval.
+
 The OMENchat protocol destination always announces as:
 
 ```text

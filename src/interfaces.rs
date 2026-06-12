@@ -362,6 +362,15 @@ impl InterfaceConfigService {
         if self.gateways_path.exists() {
             return Ok(());
         }
+        if let Some(legacy_path) = legacy_gateways_path(&self.gateways_path) {
+            if legacy_path.exists() {
+                if let Some(parent) = self.gateways_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&legacy_path, &self.gateways_path)?;
+                return Ok(());
+            }
+        }
         if let Some(parent) = self.gateways_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -387,6 +396,14 @@ impl InterfaceConfigService {
         )?;
         Ok(())
     }
+}
+
+fn legacy_gateways_path(path: &std::path::Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    if file_name != "interface_gateways.json" {
+        return None;
+    }
+    Some(path.with_file_name("gateways.json"))
 }
 
 pub fn render_config(profiles: &[ReticulumInterfaceProfile]) -> String {

@@ -52,8 +52,9 @@ OMENbrowser_rs detects common local SOCKS5 Tor ports:
 ```
 
 When enabled, clearweb image loading can use SOCKS5. External HTTP/HTTPS links
-open through the configured browser flow; users are responsible for choosing a
-browser profile with the privacy properties they want.
+open through a browser prompt. Use **Copy URL** for Tor Browser and paste into
+the already-running Tor Browser window; launch buttons are for regular detected
+browsers or browser profiles you configured yourself.
 
 ## Identity Safety
 

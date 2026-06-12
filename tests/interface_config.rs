@@ -137,6 +137,65 @@ fn gateway_profile_uses_presets() {
 }
 
 #[test]
+fn gateway_profile_reads_user_interface_gateways_file() {
+    let root = temp_dir("interface-gateway-presets");
+    std::fs::write(
+        root.join("interface_gateways.json"),
+        r#"{
+  "gateways": [
+    { "id": "chi_no", "name": "CHI-NO", "host": "rns.chicagonomad.net", "port": 4242 },
+    { "id": "lwh", "name": "LWH", "host": "lazyworkhorse.net", "port": 4242 }
+  ]
+}"#,
+    )
+    .expect("write user presets");
+    let mut service = InterfaceConfigService::new(
+        root.join("interfaces.json"),
+        root.join("reticulum"),
+        root.join("interface_gateways.json"),
+    )
+    .expect("service");
+
+    let presets = service.gateway_presets().expect("presets");
+    assert_eq!(presets.len(), 2);
+    assert!(presets.iter().any(|preset| preset.id == "chi_no"));
+
+    let profile = service
+        .create_gateway_profile("lwh")
+        .expect("gateway")
+        .expect("profile");
+
+    assert_eq!(profile.name, "LWH");
+    assert_eq!(profile.target_host, "lazyworkhorse.net");
+    assert_eq!(profile.target_port, 4242);
+}
+
+#[test]
+fn gateway_presets_migrate_legacy_gateways_file() {
+    let root = temp_dir("legacy-gateway-presets");
+    std::fs::write(
+        root.join("gateways.json"),
+        r#"{
+  "gateways": [
+    { "id": "custom", "name": "Custom", "host": "gateway.example", "port": 42420 }
+  ]
+}"#,
+    )
+    .expect("write legacy presets");
+    let service = InterfaceConfigService::new(
+        root.join("interfaces.json"),
+        root.join("reticulum"),
+        root.join("interface_gateways.json"),
+    )
+    .expect("service");
+
+    let presets = service.gateway_presets().expect("presets");
+    assert_eq!(presets.len(), 1);
+    assert_eq!(presets[0].id, "custom");
+    assert!(root.join("interface_gateways.json").exists());
+}
+
+#[test]
 fn render_config_disambiguates_duplicate_section_names() {
     let first = ReticulumInterfaceProfile::tcp_client("first", "Gateway");
     let second = ReticulumInterfaceProfile::tcp_client("second", "Gateway");

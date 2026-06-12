@@ -646,6 +646,22 @@ impl RnsNetPageRequestClient {
         )
     }
 
+    pub async fn interface_stats(&self) -> AppResult<rns_net::InterfaceStatsResponse> {
+        let node = self.node.clone();
+        tokio::task::spawn_blocking(move || node.query(rns_net::QueryRequest::InterfaceStats))
+            .await
+            .map_err(|error| AppError::Runtime(format!("rns-net interface query failed: {error}")))?
+            .map_err(|error| {
+                AppError::Runtime(format!("rns-net interface query failed: {error:?}"))
+            })
+            .and_then(|response| match response {
+                rns_net::QueryResponse::InterfaceStats(stats) => Ok(stats),
+                other => Err(AppError::Runtime(format!(
+                    "rns-net interface query returned unexpected response: {other:?}"
+                ))),
+            })
+    }
+
     pub async fn fetch_page(
         &self,
         plan: &NativeFetchPlan,

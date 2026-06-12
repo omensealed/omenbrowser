@@ -3390,6 +3390,7 @@ fn preflight_runtime_event_summary(
             "available": stats.available,
             "reason": stats.reason,
             "interfaces": stats.interfaces,
+            "samples": stats.samples,
         }),
         omenbrowser_rs::runtime::RuntimeBusEvent::Announce(payload) => serde_json::json!({
             "event": "announce",

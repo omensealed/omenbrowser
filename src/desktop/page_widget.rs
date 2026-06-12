@@ -15,6 +15,7 @@ const CELL_WIDTH: f32 = 9.0;
 const CELL_HEIGHT: f32 = 18.0;
 const FONT_SIZE: f32 = 15.0;
 const PADDING: f32 = 10.0;
+const RIGHT_SCROLL_GUTTER: f32 = 14.0;
 
 #[derive(Clone, Debug)]
 pub enum PageMessage {
@@ -267,6 +268,7 @@ impl<'a> canvas::Program<PageMessage> for NomadNetPageProgram<'a> {
             .and_then(|document| document.metadata.get("fg"))
             .and_then(|color| color_from_style(Some(color.as_str())));
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), page_bg);
+        let content_width = metrics.content_width_for_bounds(bounds);
 
         for (visible_row_index, row) in rows.iter().skip(self.scroll_offset).enumerate() {
             let y = PADDING + visible_row_index as f32 * metrics.cell_height;
@@ -276,16 +278,13 @@ impl<'a> canvas::Program<PageMessage> for NomadNetPageProgram<'a> {
             if let Some(bg) = color_from_style(row.base_style.bg.as_deref()) {
                 frame.fill_rectangle(
                     Point::new(PADDING, y),
-                    Size::new(
-                        metrics.width_cells_for_bounds(bounds) as f32 * metrics.cell_width,
-                        metrics.cell_height,
-                    ),
+                    Size::new(content_width, metrics.cell_height),
                     bg,
                 );
             }
             for (col_index, cell) in row.cells.iter().enumerate() {
                 let x = PADDING + col_index as f32 * metrics.cell_width;
-                if x > bounds.width {
+                if x >= PADDING + content_width {
                     break;
                 }
                 draw_cell(
@@ -376,9 +375,13 @@ impl PageMetrics {
     }
 
     fn width_cells_for_bounds(self, bounds: Rectangle) -> usize {
-        ((bounds.width - PADDING * 2.0) / self.cell_width)
+        (self.content_width_for_bounds(bounds) / self.cell_width)
             .floor()
             .max(1.0) as usize
+    }
+
+    fn content_width_for_bounds(self, bounds: Rectangle) -> f32 {
+        (bounds.width - PADDING * 2.0 - RIGHT_SCROLL_GUTTER).max(self.cell_width)
     }
 
     fn height_rows_for_bounds(self, bounds: Rectangle) -> usize {
@@ -509,7 +512,7 @@ fn is_focused(
 }
 
 fn width_cells_for_bounds(bounds: Rectangle) -> usize {
-    ((bounds.width - PADDING * 2.0) / CELL_WIDTH)
+    ((bounds.width - PADDING * 2.0 - RIGHT_SCROLL_GUTTER).max(CELL_WIDTH) / CELL_WIDTH)
         .floor()
         .max(1.0) as usize
 }
@@ -603,11 +606,23 @@ mod tests {
         let bounds = Rectangle {
             x: 0.0,
             y: 0.0,
-            width: PADDING * 2.0 + CELL_WIDTH * 42.0,
+            width: PADDING * 2.0 + RIGHT_SCROLL_GUTTER + CELL_WIDTH * 42.0,
             height: PADDING * 2.0 + CELL_HEIGHT * 12.0,
         };
         assert_eq!(width_cells_for_bounds(bounds), 42);
         assert_eq!(height_rows_for_bounds(bounds), 12);
+    }
+
+    #[test]
+    fn canvas_width_reserves_right_scroll_gutter() {
+        let without_gutter = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: PADDING * 2.0 + CELL_WIDTH * 42.0,
+            height: PADDING * 2.0 + CELL_HEIGHT * 12.0,
+        };
+
+        assert!(width_cells_for_bounds(without_gutter) < 42);
     }
 
     #[test]
