@@ -49,7 +49,10 @@ if [[ "$mode" == "package" ]]; then
 
   echo "== Package checksum =="
   if [[ -f "${package_archive}.sha256" ]]; then
-    sha256sum -c "${package_archive}.sha256"
+    (
+      cd "$(dirname "$package_archive")"
+      sha256sum -c "$(basename "$package_archive").sha256"
+    )
   else
     echo "warning: checksum file missing: ${package_archive}.sha256" >&2
   fi
