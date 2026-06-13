@@ -33,6 +33,7 @@ install -m 0644 TESTERS.md "$appdir/usr/share/doc/omenbrowser-rs/TESTERS.md"
 install -m 0644 docs/QUICKSTART.md "$appdir/usr/share/doc/omenbrowser-rs/QUICKSTART.md"
 install -m 0644 docs/TESTING.md "$appdir/usr/share/doc/omenbrowser-rs/TESTING.md"
 install -m 0644 docs/OMENCHAT.md "$appdir/usr/share/doc/omenbrowser-rs/OMENCHAT.md"
+install -m 0644 assets/fonts/adwaita/OFL.txt "$appdir/usr/share/doc/omenbrowser-rs/ADWAITA_MONO_OFL.txt"
 
 install -m 0644 packaging/linux/omenbrowser-rs.desktop "$appdir/omenbrowser-rs.desktop"
 install -m 0644 packaging/linux/omenbrowser-rs.desktop "$appdir/usr/share/applications/omenbrowser-rs.desktop"

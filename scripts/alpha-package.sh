@@ -26,6 +26,7 @@ cp docs/OMENCHAT.md "$target_dir/docs/"
 cp docs/OMENCHAT_PROTOCOL.md "$target_dir/docs/"
 cp docs/CONFIGURATION.md "$target_dir/docs/"
 cp docs/TROUBLESHOOTING.md "$target_dir/docs/"
+cp assets/fonts/adwaita/OFL.txt "$target_dir/docs/ADWAITA_MONO_OFL.txt"
 cp scripts/alpha-collect.sh "$target_dir/scripts/"
 cp scripts/alpha-omenchat-smoke.sh "$target_dir/scripts/"
 cp scripts/alpha-root-sanity.sh "$target_dir/scripts/"
@@ -206,6 +207,7 @@ rm -rf "$selfcheck_home"
     docs/OMENCHAT_PROTOCOL.md \
     docs/CONFIGURATION.md \
     docs/TROUBLESHOOTING.md \
+    docs/ADWAITA_MONO_OFL.txt \
     scripts/alpha-collect.sh \
     scripts/alpha-omenchat-smoke.sh \
     scripts/alpha-root-sanity.sh \

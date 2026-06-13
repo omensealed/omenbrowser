@@ -28,6 +28,17 @@ bash scripts/check-glibc-floor.sh 2.31 \
 If that check fails, rebuild on the compatibility builder before uploading
 `.deb`, AppImage, or tarball artifacts.
 
+On rolling or very new distributions, do not use `scripts/package-deb.sh` for
+packages that need to run on older machines. Use the containerized compatibility
+builder instead:
+
+```sh
+bash scripts/package-deb-compat.sh dist-compat
+```
+
+That script requires Docker or Podman and builds inside the same Debian 11 /
+glibc 2.31 baseline used by GitHub Actions.
+
 ## Alpha Tarball
 
 ```sh
@@ -44,8 +55,16 @@ The tarball is the current public-alpha distribution format. It includes:
 
 ## Debian Package
 
+Same-machine build:
+
 ```sh
 bash scripts/package-deb.sh dist
+```
+
+Compatibility build for testers:
+
+```sh
+bash scripts/package-deb-compat.sh dist-compat
 ```
 
 This creates:

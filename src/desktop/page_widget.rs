@@ -494,7 +494,7 @@ fn cell_colors(cell: &Cell, focused: bool, default_fg: Option<Color>) -> (Color,
 }
 
 fn micron_canvas_font() -> Font {
-    Font::MONOSPACE
+    Font::with_name("Adwaita Mono")
 }
 
 fn is_focused(

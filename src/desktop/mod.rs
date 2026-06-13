@@ -1,6 +1,8 @@
 mod message_status;
 mod page_widget;
 
+use std::borrow::Cow;
+
 #[cfg(feature = "chat-client")]
 use iced::font::Style as FontStyle;
 use iced::theme::Palette;
@@ -183,6 +185,9 @@ const OMENCHATD_OPERATOR_HELP_LINES: &[&str] = &[
 static NERD_FONT_FAMILY: OnceLock<Option<&'static str>> = OnceLock::new();
 static EMOJI_FONT_FAMILY: OnceLock<Option<&'static str>> = OnceLock::new();
 static DESKTOP_FONT_SIZE: AtomicU16 = AtomicU16::new(16);
+
+const MICRON_VIEWPORT_FONT_BYTES: &[u8] =
+    include_bytes!("../../assets/fonts/adwaita/AdwaitaMono-Regular.ttf");
 
 fn desktop_ui_font() -> Font {
     Font::MONOSPACE
@@ -471,6 +476,7 @@ pub fn run(app: App) -> iced::Result {
         .settings(Settings {
             default_font: desktop_ui_font(),
             default_text_size: Pixels(default_text_size),
+            fonts: vec![Cow::Borrowed(MICRON_VIEWPORT_FONT_BYTES)],
             ..Settings::default()
         })
         .theme(DesktopApp::theme)

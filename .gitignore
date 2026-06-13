@@ -5,6 +5,8 @@
 
 # Local alpha/release artifacts
 /dist/
+/dist-*/
+/dist_*/
 /*.tar.gz
 /*.tar.gz.sha256
 /*.deb
