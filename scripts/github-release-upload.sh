@@ -99,7 +99,7 @@ for path in "${assets[@]}"; do
     curl -fsS -X DELETE "${auth_headers[@]}" "${api}/releases/assets/${existing_id}" >/dev/null
   fi
 
-  encoded_name="$(python -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$name")"
+  encoded_name="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$name")"
   echo "uploading release asset: $name"
   curl -fsS -X POST \
     "${auth_headers[@]}" \
