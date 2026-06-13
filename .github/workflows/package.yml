@@ -1,5 +1,8 @@
 name: Package
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -50,6 +53,7 @@ jobs:
             curl \
             dpkg-dev \
             file \
+            jq \
             libxkbcommon-dev \
             libwayland-dev \
             libx11-dev \
@@ -109,3 +113,11 @@ jobs:
             dist/OMENbrowser_rs-*.AppImage.sha256
             dist/release-artifacts.sha256
           if-no-files-found: error
+
+      - name: Publish release downloads
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: bash scripts/github-release-upload.sh dist
