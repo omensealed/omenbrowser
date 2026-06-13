@@ -84,7 +84,44 @@ layout.
 default. It keeps identity material, Reticulum config/storage, SQLite data, logs,
 and NomadNet portal pages under its own home.
 
+## Install From Release
+
+For normal testing, use the packaged release instead of building from source:
+
+<https://github.com/omensealed/omenbrowser/releases/latest>
+
+The current release publishes:
+
+- `omenbrowser-rs_0.1.0_amd64.deb` for Debian-family systems.
+- `OMENbrowser_rs-0.1.0-x86_64.AppImage` for general Linux testing.
+- `OMENbrowser_rs-alpha-latest.tar.gz` for testers who prefer unpacked
+  binaries and helper scripts.
+- Matching `.sha256` checksum files.
+
+On Debian, Ubuntu, Linux Mint, and related distributions, the `.deb` is the
+preferred install path:
+
+```bash
+sudo apt install ./omenbrowser-rs_0.1.0_amd64.deb
+omenbrowser_rs --desktop
+```
+
+The release `.deb` is built in a Debian 11 compatible container with an older
+glibc floor, so it is intended to run on Debian 11, 12, 13+, and distributions
+based on them. Very old or heavily customized systems may still need missing
+desktop/graphics libraries installed by the distro package manager.
+
+If package installation is not a good fit, make the AppImage executable and run
+it directly:
+
+```bash
+chmod +x OMENbrowser_rs-0.1.0-x86_64.AppImage
+./OMENbrowser_rs-0.1.0-x86_64.AppImage --desktop
+```
+
 ## Build
+
+These commands are for developers working from a source checkout.
 
 Browser with desktop UI, native network, and OMENchat client:
 
@@ -314,6 +351,8 @@ and [docs/OMENCHAT.md](docs/OMENCHAT.md) for chat server/client setup.
 - OMENchat rich media/uploads are usable for alpha testing, including inline
   images/GIFs, Tor/SOCKS-gated clearweb image fetches, a 512 KiB per-file cap,
   and server-side rotating quota. Expect UI/progress polish to continue.
-- `.deb` and AppImage packaging helpers exist, but need broader distro testing.
+- `.deb` and AppImage packaging helpers exist. The compatible `.deb` has been
+  tested on Linux Mint 21.3; broader Debian/Ubuntu derivative testing is still
+  useful.
 - Some Reticulum behavior depends on what the Rust RNS/LXMF crates currently
   expose.
