@@ -48,6 +48,7 @@ jobs:
           bash -n scripts/alpha-package.sh
           bash -n scripts/package-deb.sh
           bash -n scripts/package-appimage.sh
+          bash -n scripts/check-glibc-floor.sh
           bash -n scripts/install-alpha.sh
           bash -n scripts/install-omenbrowser-user-launchers.sh
           bash -n scripts/install-omenchatd-user-service.sh

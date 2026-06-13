@@ -6,6 +6,28 @@ These scripts build local packages from the current source tree. They do not
 delete or overwrite user identities, Reticulum storage, message history, or
 OMENchat server homes.
 
+Linux packages must be built on the oldest glibc baseline we intend to
+support. Building on a newer rolling distro can produce binaries that fail on
+older but still-supported systems with errors like `GLIBC_2.39 not found` or
+`GLIBC_2.43 not found`.
+
+The GitHub package workflow builds inside a Debian 11 (`bullseye`) Rust
+container so the release binaries target `GLIBC_2.31`. That is a practical
+compatibility floor for systems in the Ubuntu 20.04 / Debian 11 / Linux Mint 20
+era and newer, without changing the OMENbrowser_rs source code or statically
+linking glibc.
+
+Before publishing Linux artifacts, run:
+
+```sh
+bash scripts/check-glibc-floor.sh 2.31 \
+  target/release/omenbrowser_rs \
+  src/server/target/release/omenchatd
+```
+
+If that check fails, rebuild on the compatibility builder before uploading
+`.deb`, AppImage, or tarball artifacts.
+
 ## Alpha Tarball
 
 ```sh

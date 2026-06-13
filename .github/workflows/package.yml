@@ -16,6 +16,7 @@ jobs:
   package:
     name: Build release artifacts
     runs-on: ubuntu-24.04
+    container: rust:1-bullseye
     timeout-minutes: 90
 
     steps:
@@ -34,10 +35,12 @@ jobs:
 
       - name: Install Linux package dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt-get update
+          apt-get install -y \
             appstream \
+            binutils \
             build-essential \
+            ca-certificates \
             curl \
             dpkg-dev \
             file \
@@ -55,12 +58,18 @@ jobs:
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x /tmp/appimagetool
           /tmp/appimagetool --appimage-extract >/dev/null
-          sudo mv squashfs-root /opt/appimagetool
-          sudo ln -sf /opt/appimagetool/AppRun /usr/local/bin/appimagetool
+          mv squashfs-root /opt/appimagetool
+          ln -sf /opt/appimagetool/AppRun /usr/local/bin/appimagetool
           appimagetool --version || true
 
       - name: Build alpha tarball
         run: bash scripts/alpha-package.sh dist
+
+      - name: Check conservative Linux glibc compatibility
+        run: |
+          bash scripts/check-glibc-floor.sh 2.31 \
+            target/release/omenbrowser_rs \
+            src/server/target/release/omenchatd
 
       - name: Package alpha gate
         if: ${{ inputs.run_package_smoke == 'true' }}

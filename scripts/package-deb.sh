@@ -48,7 +48,7 @@ Priority: optional
 Architecture: $arch
 Maintainer: OMENbrowser_rs maintainers
 Installed-Size: $installed_size
-Depends: libc6
+Depends: libc6 (>= 2.31), libx11-6, libxi6, libxkbcommon0, libwayland-client0, libgl1
 Description: Reticulum/NomadNet/LXMF browser and OMENchat client/server
  OMENbrowser_rs is a native Rust browser/client for Reticulum, NomadNet,
  LXMF messaging, and OMENchat. The package includes the desktop browser and
