@@ -16321,6 +16321,51 @@ mod tests {
     }
 
     #[test]
+    fn external_url_prompt_does_not_arm_workspace_scroll_restore() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-desktop-external-scroll-stable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::config::AppPaths::from_root(root);
+        paths.ensure().expect("paths");
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+        let conversation_id = desktop.app.active_conversation().id;
+        desktop.ensure_pane_for_active_conversation();
+        desktop
+            .conversation_scroll_offsets
+            .insert(conversation_id, RelativeOffset { x: 0.0, y: 0.72 });
+        desktop.restore_workspace_scrolls_pending = false;
+        desktop.restore_workspace_scrolls_remaining = 0;
+        desktop.restore_workspace_scroll_locks_release_pending = false;
+        desktop.conversation_scroll_restore_locks.clear();
+
+        assert!(desktop.prompt_external_url_if_needed("https://example.org/news".into(), None));
+        assert!(!desktop.restore_workspace_scrolls_pending);
+        assert_eq!(desktop.restore_workspace_scrolls_remaining, 0);
+        assert!(!desktop.restore_workspace_scroll_locks_release_pending);
+        assert!(desktop.conversation_scroll_restore_locks.is_empty());
+        assert_eq!(
+            desktop.conversation_scroll_offsets.get(&conversation_id),
+            Some(&RelativeOffset { x: 0.0, y: 0.72 })
+        );
+
+        let _ = desktop.update(Message::CopyExternalLinkUrl);
+
+        assert!(!desktop.restore_workspace_scrolls_pending);
+        assert_eq!(desktop.restore_workspace_scrolls_remaining, 0);
+        assert!(!desktop.restore_workspace_scroll_locks_release_pending);
+        assert!(desktop.conversation_scroll_restore_locks.is_empty());
+        assert_eq!(
+            desktop.conversation_scroll_offsets.get(&conversation_id),
+            Some(&RelativeOffset { x: 0.0, y: 0.72 })
+        );
+    }
+
+    #[test]
     fn external_url_browser_choice_dismisses_prompt_after_selection() {
         let root = std::env::temp_dir().join(format!(
             "omenbrowser-rs-desktop-external-open-dismiss-{}",
