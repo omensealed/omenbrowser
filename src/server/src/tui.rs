@@ -706,6 +706,21 @@ impl AdminTui {
         }
     }
 
+    fn live_is_running(&self) -> bool {
+        #[cfg(feature = "live-rns-net")]
+        {
+            self.live.is_some()
+        }
+        #[cfg(not(feature = "live-rns-net"))]
+        {
+            false
+        }
+    }
+
+    fn stateful_actions(&self, actions: &[(AdminAction, &str)]) -> Vec<(AdminAction, String)> {
+        string_actions_for_live_state(actions, self.live_is_running())
+    }
+
     fn monitoring_counter_text(&self) -> String {
         #[cfg(feature = "live-rns-net")]
         {
@@ -898,7 +913,7 @@ impl AdminTui {
             frame,
             right[0],
             "Operator Actions",
-            &string_actions(&overview_action_specs()),
+            &self.stateful_actions(&overview_action_specs()),
         );
 
         frame.render_widget(
@@ -971,7 +986,7 @@ impl AdminTui {
             frame,
             right[2],
             "Setup Actions",
-            &string_actions(&setup_action_specs()),
+            &self.stateful_actions(&setup_action_specs()),
         );
     }
 
@@ -1212,7 +1227,7 @@ impl AdminTui {
             frame,
             rows[0],
             "Interface Actions",
-            &string_actions(&actions),
+            &self.stateful_actions(&actions),
         );
         frame.render_widget(
             Paragraph::new(interface_operator_summary_text(&preview, &config_path))
@@ -1249,7 +1264,7 @@ impl AdminTui {
             (AdminAction::SelectTab(AdminTab::Rooms), "Rooms"),
             (AdminAction::SelectTab(AdminTab::Identity), "Identity"),
         ];
-        self.render_action_list(frame, left[1], "Portal Actions", &string_actions(&actions));
+        self.render_action_list(frame, left[1], "Portal Actions", &self.stateful_actions(&actions));
 
         let page = std::fs::read_to_string(self.config.nomadnet_index_page_path())
             .unwrap_or_else(|_| "No portal page exists yet. Start the live server once, or run status/doctor with live-rns-net support, to create the first template after the OMENchat destination hash is available.".into());
@@ -2943,11 +2958,26 @@ fn moderation_actions(
     actions
 }
 
-fn string_actions(actions: &[(AdminAction, &str)]) -> Vec<(AdminAction, String)> {
+fn string_actions_for_live_state(
+    actions: &[(AdminAction, &str)],
+    live_running: bool,
+) -> Vec<(AdminAction, String)> {
     actions
         .iter()
-        .map(|(action, label)| (*action, (*label).to_string()))
+        .map(|(action, label)| (*action, stateful_action_label(*action, label, live_running)))
         .collect()
+}
+
+fn stateful_action_label(action: AdminAction, label: &str, live_running: bool) -> String {
+    match action {
+        AdminAction::StartLive if live_running => "Live Running".into(),
+        AdminAction::StartLive => label.to_string(),
+        AdminAction::StopLive if live_running => label.to_string(),
+        AdminAction::StopLive => "Stop Live (stopped)".into(),
+        AdminAction::AnnounceNow if live_running => label.to_string(),
+        AdminAction::AnnounceNow => "Announce Now (start live first)".into(),
+        _ => label.to_string(),
+    }
 }
 
 fn title_case_role(role: &str) -> &'static str {
@@ -4333,6 +4363,34 @@ mod tests {
     }
 
     #[test]
+    fn live_dependent_action_labels_explain_current_state() {
+        let actions = [
+            (AdminAction::StartLive, "Start Live"),
+            (AdminAction::AnnounceNow, "Announce Now"),
+            (AdminAction::StopLive, "Stop Live"),
+            (AdminAction::SelectTab(AdminTab::Monitoring), "Monitoring"),
+        ];
+
+        let stopped = string_actions_for_live_state(&actions, false)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        assert_eq!(stopped[0], "Start Live");
+        assert_eq!(stopped[1], "Announce Now (start live first)");
+        assert_eq!(stopped[2], "Stop Live (stopped)");
+        assert_eq!(stopped[3], "Monitoring");
+
+        let running = string_actions_for_live_state(&actions, true)
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        assert_eq!(running[0], "Live Running");
+        assert_eq!(running[1], "Announce Now");
+        assert_eq!(running[2], "Stop Live");
+        assert_eq!(running[3], "Monitoring");
+    }
+
+    #[test]
     fn setup_checklist_names_reticulum_interface_mode() {
         let root = temp_root("setup-interface-mode");
         let config = ServerConfig::for_root(root.clone());
@@ -4359,7 +4417,7 @@ mod tests {
 
     #[test]
     fn setup_action_hitboxes_cover_every_visible_action() {
-        let actions = string_actions(&setup_action_specs());
+        let actions = string_actions_for_live_state(&setup_action_specs(), false);
         let panel = Rect::new(10, 5, 40, SETUP_ACTION_PANEL_HEIGHT);
         let hitboxes = action_hitboxes(inner_rect(panel), &actions);
 
