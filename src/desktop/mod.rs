@@ -2794,8 +2794,10 @@ impl DesktopApp {
             }
             Message::CopyExternalLinkUrl => {
                 if let Some(prompt) = &self.external_link_prompt {
+                    let url = prompt.url.clone();
+                    self.external_link_prompt = None;
                     self.app.status.task = "copied external URL to clipboard".into();
-                    return iced::clipboard::write(prompt.url.clone());
+                    return iced::clipboard::write(url);
                 }
             }
             Message::CopyActiveIdentityHash => {
@@ -3132,13 +3134,13 @@ impl DesktopApp {
         let Some(prompt) = self.external_link_prompt.clone() else {
             return;
         };
+        self.external_link_prompt = None;
         let Some(choice) = self.external_browsers.get(index).cloned() else {
             self.app.status.task = "selected external browser is no longer available".into();
             return;
         };
         match open_external_url_with_choice(&choice, &prompt.url) {
             Ok(_) => {
-                self.external_link_prompt = None;
                 self.app.status.task =
                     format!("opened external URL in {}: {}", choice.label, prompt.url);
             }
@@ -6310,22 +6312,24 @@ impl DesktopApp {
         .height(Length::Fill)
         .into();
 
-        if let Some(prompt) = &self.external_link_prompt {
-            let overlay: Element<'_, Message> =
-                container(opaque(self.external_link_prompt_view(prompt)))
-                    .padding(Padding {
-                        right: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
-                        bottom: f32::from(ui_size(60)),
-                        left: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
-                        ..Padding::default()
-                    })
-                    .align_right(Length::Fill)
-                    .align_bottom(Length::Fill)
-                    .into();
-            stack([shell, overlay]).into()
+        let overlay: Element<'_, Message> = if let Some(prompt) = &self.external_link_prompt {
+            container(opaque(self.external_link_prompt_view(prompt)))
+                .padding(Padding {
+                    right: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
+                    bottom: f32::from(ui_size(60)),
+                    left: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
+                    ..Padding::default()
+                })
+                .align_right(Length::Fill)
+                .align_bottom(Length::Fill)
+                .into()
         } else {
-            shell
-        }
+            container(text(""))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        };
+        stack([shell, overlay]).into()
     }
 
     fn footer_lxmf_unread_counts(&self) -> (u32, u32) {
