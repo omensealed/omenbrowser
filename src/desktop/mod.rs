@@ -1600,7 +1600,7 @@ impl DesktopApp {
                 self.app.new_browser_tab();
                 self.ensure_pane_for_active_browser();
                 self.persist_workspace_panes("workspace panes");
-                return self.anchor_visible_workspace_scrolls_to_bottom_now(2);
+                return self.restore_visible_workspace_scrolls();
             }
             Message::CloseBrowserTab => {
                 let closing_id = self.app.active_browser_tab().id;
@@ -1622,14 +1622,14 @@ impl DesktopApp {
                 self.app.new_conversation();
                 self.ensure_pane_for_active_conversation();
                 self.persist_workspace_panes("workspace panes");
-                return self.anchor_visible_workspace_scrolls_to_bottom_now(2);
+                return self.restore_visible_workspace_scrolls();
             }
             #[cfg(feature = "chat-client")]
             Message::NewOmenChatPane => {
                 let session_id = self.create_blank_omenchat_session();
                 self.ensure_pane_for_omenchat(session_id);
                 self.persist_workspace_panes("workspace panes");
-                return self.anchor_visible_workspace_scrolls_to_bottom_now(2);
+                return self.restore_visible_workspace_scrolls();
             }
             #[cfg(feature = "chat-client")]
             Message::OmenChatServerEntryChanged(value) => {
@@ -2279,6 +2279,7 @@ impl DesktopApp {
                     self.app.open_selected_directory_entry();
                     self.ensure_pane_for_active_browser();
                     self.persist_workspace_panes("workspace panes");
+                    return self.restore_visible_workspace_scrolls();
                 }
             }
             Message::OpenPeerChat(index) => {
@@ -2286,6 +2287,7 @@ impl DesktopApp {
                     self.app.message_selected_directory_peer();
                     self.ensure_pane_for_active_conversation();
                     self.persist_workspace_panes("workspace panes");
+                    return self.restore_visible_workspace_scrolls();
                 }
             }
             #[cfg(feature = "chat-client")]
@@ -2760,7 +2762,7 @@ impl DesktopApp {
             Message::WorkspacePaneResized(event) => {
                 self.workspace_panes.resize(event.split, event.ratio);
                 self.schedule_workspace_panes_persist("workspace panes");
-                self.schedule_visible_workspace_bottom_anchor(2);
+                self.schedule_visible_workspace_scroll_restore(2);
             }
             Message::WorkspacePaneMaximize(pane) => {
                 self.workspace_panes.maximize(pane);
@@ -2774,7 +2776,7 @@ impl DesktopApp {
             Message::WorkspacePaneClose(pane) => {
                 self.close_workspace_pane(pane);
                 self.persist_workspace_panes("workspace panes");
-                return self.anchor_visible_workspace_scrolls_to_bottom_now(2);
+                return self.restore_visible_workspace_scrolls();
             }
             Message::RestoreDesktopPane(kind) => {
                 let restore_scroll = self.restore_desktop_pane(kind);
@@ -6075,7 +6077,6 @@ impl DesktopApp {
             .split(pane_grid::Axis::Vertical, target, kind)
         {
             self.active_workspace_pane = pane;
-            self.remember_visible_workspace_scroll_bottoms();
         }
     }
 
@@ -6093,7 +6094,6 @@ impl DesktopApp {
         if let Some((_, sibling)) = self.workspace_panes.close(pane) {
             self.active_workspace_pane = sibling;
             self.focus_workspace_pane(sibling);
-            self.remember_visible_workspace_scroll_bottoms();
         }
     }
 
@@ -6282,20 +6282,17 @@ impl DesktopApp {
             WorkspaceSection::Help => self.help_view(),
         };
 
-        let content = if let Some(prompt) = &self.external_link_prompt {
-            column![self.external_link_prompt_view(prompt), content]
-                .spacing(10)
-                .into()
-        } else {
-            content
-        };
-
         let content_card = container(content)
             .style(card_container_style)
             .padding(DESKTOP_PANEL_PADDING)
             .width(Length::Fill)
             .height(Length::Fill);
-        let status_strip = container(status)
+        let status_content = if let Some(prompt) = &self.external_link_prompt {
+            self.external_link_prompt_view(prompt)
+        } else {
+            status.into()
+        };
+        let status_strip = container(status_content)
             .style(status_container_style)
             .padding(8)
             .width(Length::Fill)
@@ -6381,75 +6378,44 @@ impl DesktopApp {
                 } else {
                     browser.label.clone()
                 };
-                row.push(subtle_button_owned(
-                    label,
-                    Message::OpenExternalLinkWith(index),
-                ))
+                let width = external_prompt_button_width(&label);
+                row.push(
+                    subtle_button_owned(label, Message::OpenExternalLinkWith(index))
+                        .width(Length::Fixed(width)),
+                )
             },
         );
-        let browser_commands =
-            self.external_browsers
-                .iter()
-                .fold(column![].spacing(3), |column, browser| {
-                    let label = if Some(browser.command.as_str())
-                        == self
-                            .app
-                            .settings
-                            .clearweb
-                            .preferred_external_browser_command
-                            .as_deref()
-                    {
-                        format!("{} *", browser.label)
-                    } else {
-                        browser.label.clone()
-                    };
-                    column.push(
-                        text(format!("{label}: {}", browser.command))
-                            .size(ui_size(12))
-                            .wrapping(Wrapping::WordOrGlyph)
-                            .width(Length::Fill),
-                    )
-                });
-        let source = prompt
-            .source_tab
-            .map(|tab| format!("tab {tab}"))
-            .unwrap_or_else(|| "active tab".into());
         let proxy_status = if self.app.settings.clearweb.socks_proxy_enabled {
             if let Some((host, port)) = &self.clearweb_proxy_endpoint {
-                format!("SOCKS5 preference: {host}:{port} (proxy detected)")
+                format!("SOCKS5 {host}:{port}")
             } else {
-                format!(
-                    "SOCKS5 preference: {}:{} or :9150 (proxy not detected)",
-                    self.app.settings.clearweb.socks_proxy_host,
-                    self.app.settings.clearweb.socks_proxy_port
-                )
+                "SOCKS5 not detected".into()
             }
         } else {
-            "SOCKS5 preference: disabled".into()
+            "SOCKS5 off".into()
         };
+        let url = container(
+            text(prompt.url.clone())
+                .size(ui_size(12))
+                .wrapping(Wrapping::None)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .clip(true);
 
         container(
-            column![
-                row![
-                    text("Open external URL").size(ui_size(16)),
-                    omen_button("Copy URL", Message::CopyExternalLinkUrl),
-                    subtle_button("X", Message::DismissExternalLinkPrompt)
-                ]
-                .spacing(12)
-                .wrap(),
-                wrapped_text_owned(format!("from {source}: {}", prompt.url), 13),
-                wrapped_text_owned(proxy_status, 13),
-                wrapped_text_owned(
-                    "Tor Browser is handled by Copy URL so an already-running Tor profile is not disturbed. Other detected browsers can be launched below.",
-                    13,
-                ),
-                browsers.wrap(),
-                browser_commands,
+            row![
+                text("External URL").size(ui_size(13)),
+                text(proxy_status).size(ui_size(12)),
+                browsers,
+                omen_button("Copy URL", Message::CopyExternalLinkUrl).width(Length::Fixed(90.0)),
+                subtle_button("X", Message::DismissExternalLinkPrompt).width(Length::Fixed(38.0)),
+                url,
             ]
-            .spacing(8),
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill),
         )
-        .style(status_container_style)
-        .padding(10)
         .width(Length::Fill)
         .into()
     }
@@ -10784,6 +10750,11 @@ fn subtle_button_owned(label: String, message: Message) -> Button<'static, Messa
     button(text(label))
         .on_press(message)
         .style(subtle_button_style)
+}
+
+fn external_prompt_button_width(label: &str) -> f32 {
+    let label_units = label.chars().count().clamp(5, 18) as f32;
+    28.0 + label_units * 9.0
 }
 
 fn warning_button<'a>(label: &'a str, message: Message) -> Button<'a, Message> {
@@ -16211,6 +16182,32 @@ mod tests {
     }
 
     #[test]
+    fn clicked_clearweb_micron_link_prompts_external_browser() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-desktop-clearweb-clicked-link-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::config::AppPaths::from_root(root);
+        paths.ensure().expect("paths");
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+        let tab_id = desktop.app.active_browser_tab().id;
+        let action = HitAction::Link(crate::micron::LinkAction {
+            target: "https://example.org/news".into(),
+            fields: Vec::new(),
+        });
+
+        assert!(desktop.prompt_external_hit_action_if_needed(&action, Some(tab_id)));
+
+        let prompt = desktop.external_link_prompt.expect("external prompt");
+        assert_eq!(prompt.url, "https://example.org/news");
+        assert_eq!(prompt.source_tab, Some(tab_id));
+    }
+
+    #[test]
     fn external_browser_choices_do_not_launch_tor_browser() {
         let choices = detect_external_browsers(None);
         let commands = choices
@@ -16702,7 +16699,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_workspace_pane_anchors_existing_chat_scroll_to_bottom() {
+    fn adding_workspace_pane_preserves_existing_chat_scrollback_position() {
         let root = std::env::temp_dir().join(format!(
             "omenbrowser-rs-desktop-add-pane-scroll-lock-{}",
             std::process::id()
@@ -16733,12 +16730,12 @@ mod tests {
 
         assert_eq!(
             desktop.conversation_scroll_offsets.get(&conversation_id),
-            Some(&RelativeOffset { x: 0.0, y: 1.0 })
+            Some(&RelativeOffset { x: 0.0, y: 0.61 })
         );
     }
 
     #[test]
-    fn closing_workspace_pane_anchors_existing_chat_scroll_to_bottom() {
+    fn closing_workspace_pane_preserves_existing_chat_scrollback_position() {
         let root = std::env::temp_dir().join(format!(
             "omenbrowser-rs-desktop-close-pane-scroll-lock-{}",
             std::process::id()
@@ -16774,7 +16771,7 @@ mod tests {
 
         assert_eq!(
             desktop.conversation_scroll_offsets.get(&conversation_id),
-            Some(&RelativeOffset { x: 0.0, y: 1.0 })
+            Some(&RelativeOffset { x: 0.0, y: 0.74 })
         );
     }
 
@@ -18332,7 +18329,7 @@ mod tests {
     }
 
     #[test]
-    fn resizing_workspace_pane_anchors_visible_chat_scroll_to_bottom() {
+    fn resizing_workspace_pane_preserves_visible_chat_scrollback_position() {
         let root = std::env::temp_dir().join(format!(
             "omenbrowser-rs-desktop-resize-scroll-bottom-{}",
             std::process::id()
@@ -18365,6 +18362,51 @@ mod tests {
             split,
             ratio: 0.42,
         }));
+
+        assert_eq!(
+            desktop.conversation_scroll_offsets.get(&conversation_id),
+            Some(&RelativeOffset { x: 0.0, y: 0.38 })
+        );
+    }
+
+    #[test]
+    fn resizing_workspace_pane_keeps_bottom_anchored_chat_at_bottom() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-desktop-resize-scroll-bottom-anchor-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::config::AppPaths::from_root(root);
+        paths.ensure().expect("paths");
+        let app = App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        });
+        let mut desktop = DesktopApp::new(app);
+        let conversation_id = desktop.app.active_conversation().id;
+        desktop.ensure_pane_for_active_conversation();
+        desktop
+            .conversation_scroll_offsets
+            .insert(conversation_id, RelativeOffset { x: 0.0, y: 1.0 });
+        desktop.restore_workspace_scrolls_pending = false;
+        desktop.restore_workspace_scrolls_remaining = 0;
+        desktop.restore_workspace_scroll_locks_release_pending = false;
+        desktop.conversation_scroll_restore_locks.clear();
+        let split = *desktop
+            .workspace_panes
+            .layout()
+            .splits()
+            .next()
+            .expect("conversation split");
+
+        let _ = desktop.update(Message::WorkspacePaneResized(pane_grid::ResizeEvent {
+            split,
+            ratio: 0.42,
+        }));
+        let _ = desktop.update(Message::ConversationScrolled {
+            conversation_id,
+            offset: RelativeOffset { x: 0.0, y: 0.0 },
+        });
 
         assert_eq!(
             desktop.conversation_scroll_offsets.get(&conversation_id),
