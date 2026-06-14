@@ -6750,7 +6750,6 @@ impl DesktopApp {
             let title_bar = pane_grid::TitleBar::new(title_content)
                 .controls(pane_grid::Controls::dynamic(controls, compact_controls))
                 .padding(8)
-                .always_show_controls()
                 .style(pane_title_container_style);
 
             pane_grid::Content::new(
