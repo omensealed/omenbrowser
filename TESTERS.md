@@ -247,7 +247,9 @@ Useful notes to include with a report:
 - OMENchat rich media/uploads are usable for alpha testing: inline images,
   animated GIFs, Tor/SOCKS clearweb fetches, a 512 KiB per-file upload cap, and
   rotating server quota exist. Sizing/progress polish may still change.
-- Distro-native installers are not available yet.
+- `.deb` and AppImage release artifacts are available. The compatible `.deb`
+  has been tested on Linux Mint 21.3; broader Debian/Ubuntu derivative testing
+  is still useful.
 - Some Reticulum behavior depends on what the current Rust RNS/LXMF crates
   expose.
 
