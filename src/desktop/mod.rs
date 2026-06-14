@@ -16298,6 +16298,61 @@ mod tests {
     }
 
     #[test]
+    fn external_url_copy_dismisses_prompt() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-desktop-external-copy-dismiss-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::config::AppPaths::from_root(root);
+        paths.ensure().expect("paths");
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+
+        assert!(desktop.prompt_external_url_if_needed("https://example.org/news".into(), None));
+        assert!(desktop.external_link_prompt.is_some());
+
+        let _ = desktop.update(Message::CopyExternalLinkUrl);
+
+        assert!(desktop.external_link_prompt.is_none());
+        assert_eq!(desktop.app.status.task, "copied external URL to clipboard");
+    }
+
+    #[test]
+    fn external_url_browser_choice_dismisses_prompt_after_selection() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-desktop-external-open-dismiss-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::config::AppPaths::from_root(root);
+        paths.ensure().expect("paths");
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+        desktop.external_browsers = vec![ExternalBrowserChoice {
+            label: "Missing browser".into(),
+            command: "omenbrowser-rs-missing-browser-command".into(),
+            kind: ExternalBrowserKind::Standard,
+        }];
+
+        assert!(desktop.prompt_external_url_if_needed("https://example.org/news".into(), None));
+        assert!(desktop.external_link_prompt.is_some());
+
+        let _ = desktop.update(Message::OpenExternalLinkWith(0));
+
+        assert!(desktop.external_link_prompt.is_none());
+        assert!(desktop
+            .app
+            .status
+            .task
+            .starts_with("failed to open external URL with Missing browser:"));
+    }
+
+    #[test]
     fn external_browser_choices_do_not_launch_tor_browser() {
         let choices = detect_external_browsers(None);
         let commands = choices
