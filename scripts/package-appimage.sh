@@ -7,6 +7,10 @@ version="${version:-0.1.0}"
 arch="$(uname -m)"
 appdir="${out_root%/}/AppDir"
 appimagetool="${APPIMAGETOOL:-appimagetool}"
+appimagetool_args=()
+if [[ "${APPIMAGE_VALIDATE_APPSTREAM:-0}" != "1" ]]; then
+  appimagetool_args+=(--no-appstream)
+fi
 
 if ! command -v "$appimagetool" >/dev/null 2>&1; then
   echo "appimagetool not found. Install it or set APPIMAGETOOL=/path/to/appimagetool." >&2
@@ -52,7 +56,7 @@ chmod 0755 "$appdir/AppRun"
 echo "== Building AppImage =="
 mkdir -p "${out_root%/}"
 appimage_path="${out_root%/}/OMENbrowser_rs-${version}-${arch}.AppImage"
-"$appimagetool" "$appdir" "$appimage_path"
+"$appimagetool" "${appimagetool_args[@]}" "$appdir" "$appimage_path"
 (
   cd "$(dirname "$appimage_path")"
   sha256sum "$(basename "$appimage_path")" > "$(basename "$appimage_path").sha256"
