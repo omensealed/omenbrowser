@@ -10769,12 +10769,25 @@ fn warning_button_owned(label: String, message: Message) -> Button<'static, Mess
         .style(warning_button_style)
 }
 
-fn action_grid<'a>(actions: Vec<Button<'a, Message>>, _max_per_row: usize) -> Element<'a, Message> {
-    actions
-        .into_iter()
-        .fold(row![].spacing(8), |row, action| row.push(action))
-        .wrap()
-        .into()
+fn action_grid<'a>(actions: Vec<Button<'a, Message>>, max_per_row: usize) -> Element<'a, Message> {
+    let max_per_row = max_per_row.max(1);
+    let mut rows = column![].spacing(8).width(Length::Fill);
+    let mut current_row = row![].spacing(8);
+    let mut current_count = 0usize;
+
+    for action in actions {
+        if current_count >= max_per_row {
+            rows = rows.push(current_row.wrap());
+            current_row = row![].spacing(8);
+            current_count = 0;
+        }
+        current_row = current_row.push(action);
+        current_count += 1;
+    }
+    if current_count > 0 {
+        rows = rows.push(current_row.wrap());
+    }
+    rows.into()
 }
 
 fn conversation_editor_text(editor: &text_editor::Content) -> String {
