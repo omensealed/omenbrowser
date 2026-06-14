@@ -132,6 +132,7 @@ const DESKTOP_SCROLLBAR_WIDTH: u16 = 7;
 const DESKTOP_SCROLLBAR_SCROLLER_WIDTH: u16 = 4;
 const DESKTOP_SCROLLBAR_MARGIN: u16 = 4;
 const DESKTOP_SCROLL_GUTTER_EXTRA: u16 = 12;
+const DESKTOP_SCROLL_OUTER_INSET: u16 = 6;
 const DESKTOP_PANEL_PADDING: u16 = 12;
 const DESKTOP_SHELL_PADDING: u16 = 16;
 
@@ -10505,10 +10506,20 @@ impl DesktopApp {
 }
 
 fn app_scrollable<'a>(content: impl Into<Element<'a, Message>>) -> Scrollable<'a, Message> {
-    scrollable(scroll_gutter(content))
+    scrollable(scroll_outer_inset(scroll_gutter(content)))
         .direction(ScrollableDirection::Vertical(compact_scrollbar()))
         .style(themed_scrollable_style)
         .width(Length::Fill)
+}
+
+fn scroll_outer_inset<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .padding(Padding {
+            right: f32::from(DESKTOP_SCROLL_OUTER_INSET),
+            ..Padding::default()
+        })
+        .width(Length::Fill)
+        .into()
 }
 
 fn scroll_gutter<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
@@ -15111,6 +15122,7 @@ mod tests {
         let scrollbar_footprint = DESKTOP_SCROLLBAR_WIDTH + DESKTOP_SCROLLBAR_MARGIN;
 
         assert!(DESKTOP_SCROLL_GUTTER_EXTRA >= DESKTOP_PANEL_PADDING);
+        assert!(DESKTOP_SCROLL_OUTER_INSET >= DESKTOP_SCROLLBAR_SCROLLER_WIDTH);
         assert!(desktop_scroll_gutter_right() > f32::from(scrollbar_footprint));
         assert!(DESKTOP_SHELL_PADDING >= DESKTOP_PANEL_PADDING);
     }
