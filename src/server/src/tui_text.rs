@@ -844,6 +844,50 @@ pub(crate) fn closed_link_status_label(reason: &str) -> &'static str {
 }
 
 #[cfg(any(test, feature = "live-rns-net"))]
+pub(crate) fn closed_link_churn_summary(recent_close_reasons: &[&str]) -> String {
+    if recent_close_reasons.is_empty() {
+        return "recent close summary: none".into();
+    }
+
+    let mut normal = 0usize;
+    let mut moderation = 0usize;
+    let mut peer_runtime = 0usize;
+    let mut timeout = 0usize;
+    let mut investigate = 0usize;
+    for reason in recent_close_reasons {
+        match closed_link_status_label(reason) {
+            "normal reconnect" => normal += 1,
+            "moderation close" => moderation += 1,
+            "peer/runtime closed" => peer_runtime += 1,
+            "timeout; watch if repeated" => timeout += 1,
+            _ => investigate += 1,
+        }
+    }
+
+    let mut parts = Vec::new();
+    if normal > 0 {
+        parts.push(format!("normal reconnect {normal}"));
+    }
+    if peer_runtime > 0 {
+        parts.push(format!("peer/runtime {peer_runtime}"));
+    }
+    if moderation > 0 {
+        parts.push(format!("moderation {moderation}"));
+    }
+    if timeout > 0 {
+        parts.push(format!("timeout {timeout}"));
+    }
+    if investigate > 0 {
+        parts.push(format!("investigate {investigate}"));
+    }
+    format!(
+        "recent close summary: {} total | {}",
+        recent_close_reasons.len(),
+        parts.join(" | ")
+    )
+}
+
+#[cfg(any(test, feature = "live-rns-net"))]
 pub(crate) fn active_link_activity_label(
     link: &ActiveLinkSummary,
     now_unix: i64,
@@ -1808,6 +1852,30 @@ mod tests {
         );
         assert_eq!(closed_link_status_label("unspecified"), "unknown close");
         assert_eq!(closed_link_status_label("decode failed"), "check logs");
+    }
+
+    #[cfg(any(test, feature = "live-rns-net"))]
+    #[test]
+    fn closed_link_churn_summary_groups_operator_reasons() {
+        assert_eq!(
+            closed_link_churn_summary(&[]),
+            "recent close summary: none"
+        );
+
+        let summary = closed_link_churn_summary(&[
+            "duplicate identity link replaced",
+            "DestinationClosed",
+            "admin kick active link",
+            "Timeout",
+            "decode failed",
+        ]);
+
+        assert!(summary.contains("5 total"));
+        assert!(summary.contains("normal reconnect 1"));
+        assert!(summary.contains("peer/runtime 1"));
+        assert!(summary.contains("moderation 1"));
+        assert!(summary.contains("timeout 1"));
+        assert!(summary.contains("investigate 1"));
     }
 
     #[cfg(any(test, feature = "live-rns-net"))]

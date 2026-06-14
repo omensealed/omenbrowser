@@ -48,10 +48,9 @@ use crate::tui_text::{
     admin_help_text, announce_interval_update_text, audit_summary_text, command_help_text,
     command_rate_update_text, history_batch_size_update_text,
     identity_panel_text as format_identity_panel_text, interface_operator_summary_text,
-    join_backlog_events_update_text, large_batch_threshold_update_text,
-    max_message_bytes_update_text, message_rate_update_text, moderation_action_guide_text,
-    moderation_selected_user_text, moderation_user_list_label, motd_update_text,
-    operator_label_update_text,
+    join_backlog_events_update_text, large_batch_threshold_update_text, max_message_bytes_update_text,
+    message_rate_update_text, moderation_action_guide_text, moderation_selected_user_text,
+    moderation_user_list_label, motd_update_text, operator_label_update_text,
     overview_operator_summary_text as format_overview_operator_summary_text,
     ping_interval_update_text, portal_panel_text as format_portal_panel_text,
     reticulum_interface_summary, room_action_guide_text, room_archived_update_text,
@@ -67,6 +66,8 @@ use crate::tui_text::{
     RoomConsoleRowText, RoomListLabelText, SetupAddressesText, SetupChecklistLineText,
     SetupConsoleText, SetupLaunchText, SetupNextStepsText, UserConsoleRowText,
 };
+#[cfg(feature = "live-rns-net")]
+use crate::tui_text::closed_link_churn_summary;
 #[cfg(feature = "live-rns-net")]
 use crate::tui_text::{monitoring_operator_summary_text, upload_transfer_summary};
 use crate::{parse_tcp_server_override, TcpClientOverride};
@@ -872,6 +873,7 @@ impl AdminTui {
             }
             lines.push(String::new());
             lines.push("recent closed links:".into());
+            lines.push(format!("  {}", closed_link_churn_summary(&close_reasons)));
             if closed_links.is_empty() {
                 lines.push("  none".into());
             } else {
