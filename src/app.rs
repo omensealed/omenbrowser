@@ -19,7 +19,9 @@ use crate::directory::{
 use crate::error::AppResult;
 use crate::identity::IdentityManager;
 use crate::input::{InputState, InputTarget, InterfaceEditField};
-use crate::interfaces::{InterfaceConfigService, InterfaceKind, ReticulumInterfaceProfile};
+use crate::interfaces::{
+    GatewayProfileCreateOutcome, InterfaceConfigService, InterfaceKind, ReticulumInterfaceProfile,
+};
 use crate::messaging::{
     Conversation, ConversationThread, DeliveryMode, MessageSendState, MessageStore, MessageSummary,
     MessagingService, TransportMethod,
@@ -68,6 +70,7 @@ const LXMF_PROPAGATION_RECONCILE_INTERVAL_MS: u64 = 5_000;
 const MICRONPLUS_COLUMN_PREVIEW_MIN_WIDTH: usize = 48;
 const MICRONPLUS_NODE_WARNING_HISTORY_LIMIT: usize = 20;
 const RESTORE_BROWSER_CACHE_ON_STARTUP: bool = true;
+const INTERFACE_RESTART_RECOMMENDED: &str = "restart recommended";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScrollState {
@@ -7570,7 +7573,7 @@ impl App {
                 Ok(_) => {
                     self.refresh_interface_state_preserving_selection(&profile_id);
                     self.status.task = format!(
-                        "interface '{}' {}",
+                        "interface '{}' {} | {INTERFACE_RESTART_RECOMMENDED}",
                         updated.name,
                         if updated.enabled {
                             "enabled"
@@ -7826,11 +7829,11 @@ impl App {
     }
 
     pub fn create_rmap_gateway_interface_profile(&mut self) -> bool {
-        self.create_gateway_interface_profile_by_id("rmap", "RMAP gateway")
+        self.create_gateway_interface_profile_by_id("rmap", "RMAP")
     }
 
     pub fn create_wns_gateway_interface_profile(&mut self) -> bool {
-        self.create_gateway_interface_profile_by_id("wns", "WNS gateway")
+        self.create_gateway_interface_profile_by_id("wns", "WNS")
     }
 
     pub fn create_gateway_interface_profile(&mut self, gateway_id: &str) -> bool {
@@ -7842,9 +7845,9 @@ impl App {
                 presets
                     .into_iter()
                     .find(|preset| preset.id == gateway_id)
-                    .map(|preset| format!("{} gateway", preset.name))
+                    .map(|preset| preset.name)
             })
-            .unwrap_or_else(|| format!("{gateway_id} gateway"));
+            .unwrap_or_else(|| gateway_id.to_string());
         self.create_gateway_interface_profile_by_id(gateway_id, &label)
     }
 
@@ -9542,7 +9545,10 @@ impl App {
                 Ok(_) => {
                     self.refresh_interface_state_preserving_selection(&profile.profile_id);
                     self.workspace.active_section = WorkspaceSection::Interfaces;
-                    self.status.task = format!("created {label} interface '{}'", profile.name);
+                    self.status.task = format!(
+                        "created {label} interface '{}' | {INTERFACE_RESTART_RECOMMENDED}",
+                        profile.name
+                    );
                     self.refresh_diagnostics_summary();
                     true
                 }
@@ -9570,14 +9576,25 @@ impl App {
 
     fn create_gateway_interface_profile_by_id(&mut self, gateway_id: &str, label: &str) -> bool {
         match self.interface_service.create_gateway_profile(gateway_id) {
-            Ok(Some(profile)) => match self.interface_service.apply() {
+            Ok(Some(outcome)) => match self.interface_service.apply() {
                 Ok(_) => {
+                    let profile = outcome.profile();
                     self.refresh_interface_state_preserving_selection(&profile.profile_id);
                     self.workspace.active_section = WorkspaceSection::Interfaces;
-                    self.status.task = format!(
-                        "created {label} TCP gateway '{}:{}'",
-                        profile.target_host, profile.target_port
-                    );
+                    self.status.task = match outcome {
+                        GatewayProfileCreateOutcome::Created(profile) => format!(
+                            "created {label} gateway '{}:{}' | {INTERFACE_RESTART_RECOMMENDED}",
+                            profile.target_host, profile.target_port
+                        ),
+                        GatewayProfileCreateOutcome::Enabled(profile) => format!(
+                            "enabled {label} gateway '{}:{}' | {INTERFACE_RESTART_RECOMMENDED}",
+                            profile.target_host, profile.target_port
+                        ),
+                        GatewayProfileCreateOutcome::AlreadyEnabled(profile) => format!(
+                            "{label} gateway already enabled '{}:{}'",
+                            profile.target_host, profile.target_port
+                        ),
+                    };
                     self.refresh_diagnostics_summary();
                     true
                 }
@@ -10347,7 +10364,9 @@ impl App {
                         )
                     };
                     self.refresh_diagnostics_summary();
-                    self.status.task = format!("deleted interface '{profile_name}'");
+                    self.status.task = format!(
+                        "deleted interface '{profile_name}' | {INTERFACE_RESTART_RECOMMENDED}"
+                    );
                     true
                 }
                 Err(error) => {
@@ -10571,7 +10590,7 @@ impl App {
                 Ok(_) => {
                     self.refresh_interface_state_preserving_selection(&profile_id);
                     self.refresh_diagnostics_summary();
-                    self.status.task =
+                    let status =
                         match field {
                             InterfaceEditField::ProfileName => {
                                 format!("renamed interface to '{profile_name}'")
@@ -10624,6 +10643,7 @@ impl App {
                                 format!("updated RNode coding rate for '{profile_name}'")
                             }
                         };
+                    self.status.task = format!("{status} | {INTERFACE_RESTART_RECOMMENDED}");
                     true
                 }
                 Err(error) => {
@@ -24082,6 +24102,20 @@ side
         assert!(rendered.contains("target_host = rmap.world"));
         assert!(rendered.contains("[[WNS]]"));
         assert!(rendered.contains("target_host = 107.175.67.46"));
+
+        let len_after_presets = app.interfaces_state.profiles.len();
+        assert!(app.toggle_selected_interface_enabled());
+        assert!(!app.interfaces_state.profiles[0].enabled);
+        assert!(app.status.task.contains("restart recommended"));
+
+        assert!(app.create_wns_gateway_interface_profile());
+        assert_eq!(app.interfaces_state.profiles.len(), len_after_presets);
+        assert!(app.interfaces_state.profiles[0].enabled);
+        assert!(app.status.task.contains("enabled WNS gateway"));
+
+        assert!(app.create_wns_gateway_interface_profile());
+        assert_eq!(app.interfaces_state.profiles.len(), len_after_presets);
+        assert!(app.status.task.contains("already enabled"));
     }
 
     #[cfg(not(feature = "native-reticulum"))]

@@ -121,6 +121,31 @@ pub struct GatewayPreset {
     pub port: u16,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GatewayProfileCreateOutcome {
+    Created(ReticulumInterfaceProfile),
+    Enabled(ReticulumInterfaceProfile),
+    AlreadyEnabled(ReticulumInterfaceProfile),
+}
+
+impl GatewayProfileCreateOutcome {
+    pub fn profile(&self) -> &ReticulumInterfaceProfile {
+        match self {
+            Self::Created(profile) | Self::Enabled(profile) | Self::AlreadyEnabled(profile) => {
+                profile
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for GatewayProfileCreateOutcome {
+    type Target = ReticulumInterfaceProfile;
+
+    fn deref(&self) -> &Self::Target {
+        self.profile()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 struct InterfaceProfilesFile {
     profiles: Vec<ReticulumInterfaceProfile>,
@@ -317,7 +342,7 @@ impl InterfaceConfigService {
     pub fn create_gateway_profile(
         &mut self,
         gateway_id: &str,
-    ) -> crate::error::AppResult<Option<ReticulumInterfaceProfile>> {
+    ) -> crate::error::AppResult<Option<GatewayProfileCreateOutcome>> {
         let Some(preset) = self
             .gateway_presets()?
             .into_iter()
@@ -325,13 +350,28 @@ impl InterfaceConfigService {
         else {
             return Ok(None);
         };
+        if let Some(existing) = self.profiles.iter_mut().find(|profile| {
+            profile.kind == InterfaceKind::TcpClient
+                && profile.target_host == preset.host
+                && profile.target_port == preset.port
+        }) {
+            if existing.enabled {
+                return Ok(Some(GatewayProfileCreateOutcome::AlreadyEnabled(
+                    existing.clone(),
+                )));
+            }
+            existing.enabled = true;
+            let profile = existing.clone();
+            self.persist()?;
+            return Ok(Some(GatewayProfileCreateOutcome::Enabled(profile)));
+        }
         let mut profile =
             ReticulumInterfaceProfile::tcp_client(unique_profile_id(&self.profiles), preset.name);
         profile.target_host = preset.host;
         profile.target_port = preset.port;
         self.profiles.insert(0, profile.clone());
         self.persist()?;
-        Ok(Some(profile))
+        Ok(Some(GatewayProfileCreateOutcome::Created(profile)))
     }
 
     fn load_profiles(&self) -> crate::error::AppResult<Vec<ReticulumInterfaceProfile>> {

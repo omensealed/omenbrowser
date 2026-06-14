@@ -7,6 +7,8 @@ Start here:
 
 - [Quickstart](QUICKSTART.md) - build and start the browser or an isolated test
   profile.
+- [Getting Online Fast](GETTING_ONLINE.md) - first-run interface and identity
+  setup for seeing Directory entries and OMEN development activity.
 - [Testing Guide](TESTING.md) - safe alpha testing with separate identities and
   storage roots.
 - [OMENchat](OMENCHAT.md) - using the built-in chat client and running

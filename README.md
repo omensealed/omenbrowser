@@ -119,6 +119,26 @@ chmod +x OMENbrowser_rs-0.1.0-x86_64.AppImage
 ./OMENbrowser_rs-0.1.0-x86_64.AppImage --desktop
 ```
 
+## First Run Network Setup
+
+To start seeing real Directory entries, NomadNet pages, LXMF peers, propagation
+nodes, and OMENchat servers:
+
+1. Open `Interfaces`.
+2. Add or enable the `WNS` and `RMAP` gateway presets.
+3. Add any private gateway or RNode/LoRa interface you personally use.
+4. Open `Identities` and give your identity a recognizable label.
+5. Restart OMENbrowser_rs so the selected interfaces and identity load cleanly
+   at startup.
+
+For people following official OMEN development, `WNS` and `RMAP` are the
+recommended public presets because OMEN test nodes and services are expected to
+stay reachable there. If the preferred gateways change, the docs will be
+updated.
+
+See [Getting Online Fast](docs/GETTING_ONLINE.md) for the fuller first-run
+path.
+
 ## Build
 
 These commands are for developers working from a source checkout.
@@ -244,6 +264,11 @@ Start the admin TUI:
 
 Inside the TUI, press `g` to start the live server, `c` for Monitoring, `l` for
 Logs, and `q` to quit.
+
+While running, `omenchatd` watches Reticulum interface health. If every
+configured interface repeatedly reports disconnected after a gateway restart,
+the server rebuilds its live runtime and announces again. Check Monitoring or
+`~/.omenchatd/omenchatd.log` for `interface watchdog` lines.
 
 Run the live server:
 

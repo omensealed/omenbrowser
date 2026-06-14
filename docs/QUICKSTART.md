@@ -31,6 +31,20 @@ Isolated test profile:
 Use a different `--app-root` for every test client. Separate roots prevent
 identity, Reticulum config, message, cache, and pane-layout collisions.
 
+## Get Onto RNS
+
+For a new normal profile:
+
+1. Open `Interfaces`.
+2. Add or enable `WNS` and `RMAP`.
+3. Add your private gateway or RNode/LoRa interface if you use one.
+4. Open `Identities` and rename the identity label.
+5. Restart OMENbrowser_rs.
+
+That gives the browser a clean startup with the selected Reticulum interfaces
+and usually gets Directory/announce traffic moving quickly. See
+[Getting Online Fast](GETTING_ONLINE.md) for the fuller note.
+
 ## Start omenchatd
 
 Initialize a server home:

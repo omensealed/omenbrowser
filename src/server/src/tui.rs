@@ -74,7 +74,7 @@ use crate::{parse_tcp_server_override, TcpClientOverride};
 #[cfg(feature = "live-rns-net")]
 use crate::rns_net_live::{self, RnsNetLiveRuntime};
 
-const SETUP_ACTION_PANEL_HEIGHT: u16 = 14;
+const SETUP_ACTION_PANEL_HEIGHT: u16 = 21;
 
 pub fn run_admin_console(config: ServerConfig) -> ServerResult<()> {
     if io::stdout().is_terminal() && io::stdin().is_terminal() {
@@ -346,6 +346,7 @@ struct TuiLiveRuntime {
     last_stats_at: Instant,
     recent_stats: String,
     last_interface_stats: Vec<String>,
+    interface_recovery_samples: u8,
 }
 
 impl AdminTui {
@@ -425,6 +426,7 @@ impl AdminTui {
                     last_stats_at: Instant::now(),
                     recent_stats: "waiting for next sample".into(),
                     last_interface_stats,
+                    interface_recovery_samples: 0,
                 });
                 self.next_live_announce = Instant::now()
                     + Duration::from_secs(self.config.announce_interval_minutes.max(1) * 60);
@@ -494,6 +496,7 @@ impl AdminTui {
     #[cfg(feature = "live-rns-net")]
     fn tick_live_runtime(&mut self) {
         const LIVE_RUNTIME_RESTART_BACKOFF: Duration = Duration::from_secs(5);
+        const INTERFACE_RECOVERY_SAMPLES: u8 = 3;
         let Some(live) = self.live.as_mut() else {
             return;
         };
@@ -521,6 +524,7 @@ impl AdminTui {
                         live.last_stats_at = Instant::now();
                         live.recent_stats = "runtime restarted; waiting for next sample".into();
                         live.last_interface_stats = live.runtime.interface_stats_lines();
+                        live.interface_recovery_samples = 0;
                         self.next_live_announce = Instant::now()
                             + Duration::from_secs(
                                 self.config.announce_interval_minutes.max(1) * 60,
@@ -567,6 +571,7 @@ impl AdminTui {
                             live.last_stats_at = Instant::now();
                             live.recent_stats = "runtime restarted after announce failure".into();
                             live.last_interface_stats = live.runtime.interface_stats_lines();
+                            live.interface_recovery_samples = 0;
                             self.live_status = format!(
                                 "live runtime restarted after announce failure destination={destination}"
                             );
@@ -588,6 +593,7 @@ impl AdminTui {
             let stats_snapshot = live.runtime.live_server.stats().clone();
             let stats = stats_snapshot.summary_line();
             let interface_stats = live.runtime.interface_stats_lines();
+            let interface_health = live.runtime.interface_health();
             if stats != live.last_stats || interface_stats != live.last_interface_stats {
                 self.live_status = format!("live server running | {stats}");
                 let elapsed = now
@@ -600,6 +606,49 @@ impl AdminTui {
                 live.last_stats_at = now;
                 live.last_stats = stats;
                 live.last_interface_stats = interface_stats;
+            }
+            if interface_health.needs_runtime_restart() {
+                live.interface_recovery_samples = live.interface_recovery_samples.saturating_add(1);
+                self.live_status = format!(
+                    "live interface watchdog {}/{}: {}",
+                    live.interface_recovery_samples,
+                    INTERFACE_RECOVERY_SAMPLES,
+                    interface_health.label()
+                );
+                if live.interface_recovery_samples >= INTERFACE_RECOVERY_SAMPLES {
+                    self.status = format!(
+                        "interface watchdog restarting live runtime: {}",
+                        interface_health.label()
+                    );
+                    std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
+                    match rns_net_live::start_live_server(&self.config) {
+                        Ok(runtime) => {
+                            let destination = hex_lower_local(&runtime.destination_hash);
+                            live.runtime = runtime;
+                            live.last_stats = live.runtime.live_server.stats().summary_line();
+                            live.last_stats_snapshot = live.runtime.live_server.stats().clone();
+                            live.last_stats_at = Instant::now();
+                            live.recent_stats = "runtime restarted by interface watchdog".into();
+                            live.last_interface_stats = live.runtime.interface_stats_lines();
+                            live.interface_recovery_samples = 0;
+                            self.next_live_announce = Instant::now()
+                                + Duration::from_secs(
+                                    self.config.announce_interval_minutes.max(1) * 60,
+                                );
+                            self.live_status = format!(
+                                "live runtime restarted after interface watchdog destination={destination}"
+                            );
+                            self.status = self.live_status.clone();
+                        }
+                        Err(restart_error) => {
+                            self.live_status =
+                                format!("live runtime restart failed: {restart_error}");
+                            self.status = self.live_status.clone();
+                        }
+                    }
+                }
+            } else {
+                live.interface_recovery_samples = 0;
             }
             self.next_live_stats = now + Duration::from_secs(5);
         }
@@ -839,46 +888,18 @@ impl AdminTui {
             ])
             .split(columns[1]);
         let live_status = self.live_status_text();
-        let status = config::render_status(&self.config);
         frame.render_widget(
-            Paragraph::new(format!(
-                "{}\n\nconfiguration:\n{status}\n\nlive detail:\n{live_status}",
-                overview_operator_summary_text(&self.config, &live_status)
-            ))
-            .block(admin_block("Server"))
-            .wrap(Wrap { trim: false }),
+            Paragraph::new(overview_operator_summary_text(&self.config, &live_status))
+                .block(admin_block("Server Overview"))
+                .wrap(Wrap { trim: false }),
             columns[0],
         );
-        let actions = [
-            (AdminAction::StartLive, "Start Live Server"),
-            (AdminAction::StopLive, "Stop Live Server"),
-            (AdminAction::AnnounceNow, "Announce Now"),
-            (AdminAction::EditServerName, "Edit Server Name"),
-            (AdminAction::EditOperator, "Edit Operator Label"),
-            (AdminAction::EditMotd, "Edit Server MOTD"),
-            (AdminAction::EditAnnounceInterval, "Edit Announce Interval"),
-            (AdminAction::EditPingIntervalSeconds, "Edit Ping Interval"),
-            (AdminAction::EditUploadQuotaBytes, "Set Total Upload Quota"),
-            (AdminAction::EditUploadMaxFileBytes, "Set Max File Size"),
-            (AdminAction::EditMaxMessageBytes, "Edit Max Message Bytes"),
-            (AdminAction::EditHistoryBatchSize, "Edit History Batch"),
-            (AdminAction::EditJoinBacklogEvents, "Edit Join Backlog"),
-            (
-                AdminAction::EditLargeBatchThresholdBytes,
-                "Edit Large Batch Threshold",
-            ),
-            (AdminAction::EditMessageRate, "Edit Message Rate"),
-            (AdminAction::EditCommandRate, "Edit Command Rate"),
-            (AdminAction::EditTcpServer, "Local TCP Listener"),
-            (AdminAction::EditTcpClient, "Connect To Gateway"),
-            (AdminAction::SelectTab(AdminTab::Setup), "Setup Guide"),
-            (AdminAction::SelectTab(AdminTab::Rooms), "Rooms"),
-            (AdminAction::SelectTab(AdminTab::Moderation), "Moderation"),
-            (AdminAction::SelectTab(AdminTab::Monitoring), "Monitoring"),
-            (AdminAction::SelectTab(AdminTab::Audit), "Audit History"),
-            (AdminAction::SaveConfig, "Save Config"),
-        ];
-        self.render_action_list(frame, right[0], "Quick Actions", &string_actions(&actions));
+        self.render_action_list(
+            frame,
+            right[0],
+            "Operator Actions",
+            &string_actions(&overview_action_specs()),
+        );
 
         frame.render_widget(
             Paragraph::new(server_limits_text(&self.config))
@@ -1128,19 +1149,19 @@ impl AdminTui {
 
         frame.render_widget(
             Paragraph::new(self.monitoring_counter_text())
-                .block(admin_block("Live Traffic"))
+                .block(admin_block("Server Health"))
                 .wrap(Wrap { trim: false }),
             columns[0],
         );
         frame.render_widget(
             Paragraph::new(self.monitoring_interface_text())
-                .block(admin_block("Reticulum Interfaces"))
+                .block(admin_block("Interface Status"))
                 .wrap(Wrap { trim: false }),
             right[0],
         );
         frame.render_widget(
             Paragraph::new(self.monitoring_log_text(right[1].height.saturating_sub(4) as usize))
-                .block(admin_block("Recent Activity"))
+                .block(admin_block("Runtime Log Tail"))
                 .wrap(Wrap { trim: false }),
             right[1],
         );
@@ -1179,12 +1200,12 @@ impl AdminTui {
             ])
             .split(area);
         let actions = [
-            (AdminAction::EditTcpServer, "Local TCP Listener"),
             (AdminAction::EditTcpClient, "Connect To Gateway"),
-            (AdminAction::StartLive, "Start Live Server"),
-            (AdminAction::StopLive, "Stop Live Server"),
+            (AdminAction::EditTcpServer, "Local TCP Listener"),
+            (AdminAction::StartLive, "Start Live"),
             (AdminAction::AnnounceNow, "Announce Now"),
             (AdminAction::SelectTab(AdminTab::Monitoring), "Monitoring"),
+            (AdminAction::StopLive, "Stop Live"),
             (AdminAction::SaveConfig, "Save Config"),
         ];
         self.render_action_list(
@@ -2709,7 +2730,7 @@ fn setup_addresses_text(config: &ServerConfig) -> String {
     })
 }
 
-fn setup_action_specs() -> [(AdminAction, &'static str); 12] {
+fn setup_action_specs() -> [(AdminAction, &'static str); 19] {
     [
         (AdminAction::EditTcpClient, "Connect Gateway"),
         (AdminAction::EditTcpServer, "Local Listener"),
@@ -2726,6 +2747,34 @@ fn setup_action_specs() -> [(AdminAction, &'static str); 12] {
         (AdminAction::EditUploadMaxFileBytes, "Max File Size"),
         (AdminAction::EditUploadQuotaBytes, "Total Upload Quota"),
         (AdminAction::EditPingIntervalSeconds, "Ping Interval"),
+        (AdminAction::EditAnnounceInterval, "Announce Interval"),
+        (AdminAction::EditMaxMessageBytes, "Max Message Bytes"),
+        (AdminAction::EditHistoryBatchSize, "History Batch"),
+        (AdminAction::EditJoinBacklogEvents, "Join Backlog"),
+        (
+            AdminAction::EditLargeBatchThresholdBytes,
+            "Large Batch Threshold",
+        ),
+        (AdminAction::EditMessageRate, "Message Rate"),
+        (AdminAction::EditCommandRate, "Command Rate"),
+    ]
+}
+
+fn overview_action_specs() -> [(AdminAction, &'static str); 13] {
+    [
+        (AdminAction::StartLive, "Start Live"),
+        (AdminAction::AnnounceNow, "Announce Now"),
+        (AdminAction::SelectTab(AdminTab::Monitoring), "Monitoring"),
+        (AdminAction::EditTcpClient, "Connect Gateway"),
+        (AdminAction::SelectTab(AdminTab::Portal), "Copy Addresses"),
+        (AdminAction::EditMotd, "Edit MOTD"),
+        (AdminAction::SelectTab(AdminTab::Rooms), "Rooms"),
+        (AdminAction::SelectTab(AdminTab::Moderation), "Moderation"),
+        (AdminAction::EditServerName, "Server Name"),
+        (AdminAction::EditOperator, "Operator Label"),
+        (AdminAction::SelectTab(AdminTab::Setup), "Setup + Limits"),
+        (AdminAction::SaveConfig, "Save Config"),
+        (AdminAction::StopLive, "Stop Live"),
     ]
 }
 
@@ -4156,15 +4205,15 @@ mod tests {
 
         let text = overview_operator_summary_text(&config, "runtime: live server running");
 
-        assert!(text.contains("operator dashboard:"));
+        assert!(text.contains("overview:"));
         assert!(text.contains("launch: needs setup"));
         assert!(text.contains("live: runtime: live server running"));
-        assert!(text.contains("interface:"));
+        assert!(text.contains("network:"));
         assert!(text.contains("reticulum/config"));
         assert!(text.contains("rooms:"));
         assert!(text.contains("uploads: max 512.0 KiB, quota 50.0 MiB"));
-        assert!(text.contains("addresses: Portal tab"));
-        assert!(text.contains("next: fix"));
+        assert!(text.contains("share: Portal tab"));
+        assert!(text.contains("next:"));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4178,8 +4227,8 @@ mod tests {
         let text = setup_next_steps_text(&config);
 
         assert!(text.contains("OMENchat announces as omenchat.node"));
-        assert!(text.contains("users join with omenchat://"));
-        assert!(text.contains("NomadNet portal link"));
+        assert!(text.contains("share omenchat:// for chat"));
+        assert!(text.contains("NomadNet portal URL"));
         assert!(text.contains("Limits: uploads: max file 512.0 KiB"));
         assert!(
             text.contains("Use: Connect To Gateway for normal hosting")
@@ -4208,7 +4257,7 @@ mod tests {
         let text = setup_next_steps_text(&config);
 
         assert!(text.contains("Launch status: READY for live testing"));
-        assert!(text.contains("Start: Live Server or press g."));
+        assert!(text.contains("1. Start Live or press g."));
         assert!(text.contains("Limits:"));
         assert!(text.contains("max file 512.0 KiB"));
         assert!(text.contains("Network: TCP gateway client -> gateway.example:42420"));
@@ -4222,9 +4271,9 @@ mod tests {
 
         let text = setup_addresses_text(&config);
 
-        assert!(text.contains("copy/paste:"));
-        assert!(text.contains("chat invite: client uri"));
-        assert!(text.contains("quiet MOTD/rules page: portal url"));
+        assert!(text.contains("Share after Monitoring shows connected:"));
+        assert!(text.contains("OMENchat invite: client uri"));
+        assert!(text.contains("MOTD/rules page: portal url"));
         assert!(text.contains("destination:"));
         assert!(text.contains("portal page file:"));
         assert!(text.contains("reticulum/storage/pages/index.mu"));
@@ -4258,6 +4307,29 @@ mod tests {
         assert!(action_kinds.contains(&AdminAction::EditTcpClient));
         assert!(action_kinds.contains(&AdminAction::EditTcpServer));
         assert!(action_kinds.contains(&AdminAction::SelectTab(AdminTab::Portal)));
+    }
+
+    #[test]
+    fn overview_actions_prioritize_operator_launch_flow() {
+        let actions = overview_action_specs();
+        let labels = actions.iter().map(|(_, label)| *label).collect::<Vec<_>>();
+        let action_kinds = actions
+            .iter()
+            .map(|(action, _)| *action)
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels[0], "Start Live");
+        assert_eq!(labels[1], "Announce Now");
+        assert_eq!(labels[2], "Monitoring");
+        assert!(labels.contains(&"Connect Gateway"));
+        assert!(labels.contains(&"Copy Addresses"));
+        assert!(labels.contains(&"Setup + Limits"));
+        assert!(labels.contains(&"Stop Live"));
+        assert!(action_kinds.contains(&AdminAction::SelectTab(AdminTab::Rooms)));
+        assert!(action_kinds.contains(&AdminAction::SelectTab(AdminTab::Moderation)));
+        assert!(!action_kinds.contains(&AdminAction::EditMaxMessageBytes));
+        assert!(!action_kinds.contains(&AdminAction::EditHistoryBatchSize));
+        assert!(!action_kinds.contains(&AdminAction::EditCommandRate));
     }
 
     #[test]
@@ -4317,9 +4389,9 @@ mod tests {
         assert!(text.contains("Next action:"));
         assert!(text.contains("Connect To Gateway"));
         assert!(text.contains("Use: Connect To Gateway for normal hosting"));
-        assert!(text.contains("Fix first:"));
-        assert!(text.contains("Storage: default files stay under this omenchatd home"));
-        assert!(text.contains("Addresses: OMENchat announces as omenchat.node"));
+        assert!(text.contains("Fix first, then Start Live:"));
+        assert!(text.contains("Storage: server files stay under this omenchatd home"));
+        assert!(text.contains("share omenchat:// for chat"));
         assert!(text.contains("Limits: uploads: max file 512.0 KiB"));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5542,15 +5614,16 @@ mod tests {
 
         let text = identity_panel_text(&config);
 
-        assert!(text.contains("identity file:"));
+        assert!(text.contains("identity:"));
+        assert!(text.contains("file:"));
         assert!(text.contains("identity safety:"));
-        assert!(text.contains("backup target: copy the identity file before public testing"));
+        assert!(text.contains("backup: copy this file before public testing"));
         assert!(text.contains(&format!(
             "backup now: copy {} to offline/private storage",
             config.identity_path.display()
         )));
-        assert!(text.contains("data isolation: standalone omenchatd storage"));
-        assert!(text.contains("safety: never overwrite identities"));
+        assert!(text.contains("isolation: standalone omenchatd storage"));
+        assert!(text.contains("safety: never overwrite identity material"));
         assert!(text.contains("identity exists; back it up before public testing"));
         assert!(
             text.contains("losing this file changes the OMENchat and NomadNet portal addresses")
@@ -5614,17 +5687,17 @@ mod tests {
 
         let text = portal_panel_text(&config);
 
-        assert!(text.contains("Share:"));
-        assert!(text.contains("chat: omenchat:// URI"));
-        assert!(text.contains("portal: NomadNet /page/index.mu URL"));
-        assert!(text.contains("Purpose: MOTD, rules, help, and launch link"));
+        assert!(text.contains("share:"));
+        assert!(text.contains("chat invite: omenchat:// URI"));
+        assert!(text.contains("portal page: NomadNet /page/index.mu URL"));
+        assert!(text.contains("use portal for: MOTD, rules, help, launch links"));
         assert!(text.contains("portal readiness:"));
         assert!(text.contains("page: portal page exists; edit it directly for rules/help"));
         assert!(text.contains("motd: MOTD is set"));
         assert!(text.contains("publish: verify Monitoring before sharing either address"));
-        assert!(text.contains("Edit: reticulum/storage/pages/index.mu"));
-        assert!(text.contains("template is created only when missing"));
-        assert!(text.contains("portal file:"));
+        assert!(text.contains("edit file: reticulum/storage/pages/index.mu"));
+        assert!(text.contains("served path: /page/index.mu"));
+        assert!(text.contains("page file:"));
         assert!(text.contains("MOTD: Read the rules"));
         let _ = std::fs::remove_dir_all(root);
     }

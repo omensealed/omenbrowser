@@ -65,6 +65,18 @@ In `omenchatd tui`, use **Announce Now** after the live server is running to
 send the OMENchat and NomadNet portal announces immediately. This is useful for
 testing discovery without waiting for the configured announce interval.
 
+## Interface Recovery
+
+`omenchatd` watches live Reticulum interface stats while the server is running.
+If configured interfaces repeatedly report disconnected, or interface stats stop
+responding, the server rebuilds its live `rns-net` runtime and announces again.
+This is intended to recover after a TCP gateway, private gateway, or local RNS
+instance restarts without requiring an `omenchatd` process restart.
+
+Check the TUI Monitoring panel or `~/.omenchatd/omenchatd.log` for lines that
+include `interface watchdog` and `live runtime restarted after interface
+watchdog`.
+
 ## Uploads And Media
 
 - Default per-file upload limit: `512 KiB`.

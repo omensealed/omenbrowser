@@ -53,7 +53,7 @@ use crate::chat::{
     ChatClient, ChatClientEvent, ChatClientRequest, ChatEvent, ChatEventKind, ChatSessionId,
     ChatSessionView, ChatUserSummary, OmenChatDescriptor,
 };
-use crate::interfaces::InterfaceKind;
+use crate::interfaces::{GatewayPreset, InterfaceKind};
 #[cfg(feature = "chat-client")]
 use crate::media::{
     decide_remote_media, extract_link_candidates, RemoteMediaContext, RemoteMediaDecision,
@@ -134,6 +134,13 @@ const DESKTOP_SCROLLBAR_MARGIN: u16 = 4;
 const DESKTOP_SCROLL_GUTTER_EXTRA: u16 = 12;
 const DESKTOP_PANEL_PADDING: u16 = 12;
 const DESKTOP_SHELL_PADDING: u16 = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayPresetButtonState {
+    Missing,
+    Disabled,
+    Enabled,
+}
 const CONVERSATION_VISIBLE_MESSAGES: usize = 8;
 const CONVERSATION_PREVIEW_CHARS: usize = 220;
 const CONVERSATION_PREVIEW_LINES: usize = 5;
@@ -8390,12 +8397,17 @@ impl DesktopApp {
                     .spacing(8)
                     .wrap(),
                     row![
-                        text(format!("{:?}", profile.kind)).size(ui_size(14)),
-                        text(format!("enabled: {}", profile.enabled)).size(ui_size(14)),
+                        text(interface_kind_display_label(&profile.kind)).size(ui_size(14)),
+                        text(if profile.enabled {
+                            "profile: enabled"
+                        } else {
+                            "profile: disabled"
+                        })
+                        .size(ui_size(14)),
                     ]
                     .spacing(8)
                     .wrap(),
-                    text(format!("profile id: {}", profile.profile_id))
+                    text(format!("id: {}", profile.profile_id))
                         .size(ui_size(14))
                         .wrapping(Wrapping::WordOrGlyph)
                         .width(Length::Fill),
@@ -8732,56 +8744,80 @@ impl DesktopApp {
             Message::SwitchSection(WorkspaceSection::Settings),
         ));
 
+        let mut native_runtime_body = column![
+            wrapped_panel_text(
+                "First run: add or enable WNS/RMAP, add any private gateway or RNode, rename your identity, then restart so Directory announces and OMEN services start cleanly.",
+            ),
+            action_grid(interface_setup_actions, 3),
+            text(self.gateway_preset_status_line())
+                .size(ui_size(14))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+        ]
+        .spacing(6);
+        if let Some(restart_line) = interface_restart_recommendation_line(
+            &self.app.interfaces_state.profiles,
+            runtime_interface_stats,
+        ) {
+            native_runtime_body = native_runtime_body.push(
+                text(restart_line)
+                    .size(ui_size(14))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
+            );
+        }
+        native_runtime_body = native_runtime_body
+            .push(action_grid(
+                vec![
+                    omen_button("Start Native Runtime", Message::StartNativeRuntime),
+                    subtle_button("Preview Config", Message::PreviewManagedConfig),
+                    subtle_button("Export Config", Message::ExportManagedConfig),
+                    subtle_button("Preflight", Message::NativePreflight),
+                    subtle_button("Dry Smoke", Message::NativeSmokeDryRun),
+                    subtle_button("Live Probe", Message::NativeSmokeLiveProbe),
+                    omen_button("Live Fetch", Message::NativeLiveFetchValidate),
+                ],
+                4,
+            ))
+            .push(
+                text(format!(
+                    "profiles={} selected={}",
+                    self.app.interfaces_state.profiles.len(),
+                    selected
+                        .map(|index| index.to_string())
+                        .unwrap_or_else(|| "none".into())
+                ))
+                .size(ui_size(14))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+            )
+            .push(
+                text(format!(
+                    "export: {}",
+                    self.app
+                        .interfaces_state
+                        .last_config_export_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "none".into())
+                ))
+                .size(ui_size(14))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+            )
+            .push(
+                text(format!(
+                    "config: {}",
+                    self.app.interface_service.config_path().display()
+                ))
+                .size(ui_size(13))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+            );
+
         let mut content = column![
             text("Interfaces").size(ui_size(28)),
-            section_card(
-                "Native Runtime Interfaces",
-                column![
-                    action_grid(interface_setup_actions, 3),
-                    action_grid(
-                        vec![
-                            omen_button("Start Native Runtime", Message::StartNativeRuntime),
-                            subtle_button("Preview Config", Message::PreviewManagedConfig),
-                            subtle_button("Export Config", Message::ExportManagedConfig),
-                            subtle_button("Preflight", Message::NativePreflight),
-                            subtle_button("Dry Smoke", Message::NativeSmokeDryRun),
-                            subtle_button("Live Probe", Message::NativeSmokeLiveProbe),
-                            omen_button("Live Fetch", Message::NativeLiveFetchValidate),
-                        ],
-                        4,
-                    ),
-                    text(format!(
-                        "profiles={} selected={}",
-                        self.app.interfaces_state.profiles.len(),
-                        selected
-                            .map(|index| index.to_string())
-                            .unwrap_or_else(|| "none".into())
-                    ))
-                    .size(ui_size(14))
-                    .wrapping(Wrapping::WordOrGlyph)
-                    .width(Length::Fill),
-                    text(format!(
-                        "last export: {}",
-                        self.app
-                            .interfaces_state
-                            .last_config_export_path
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| "none".into())
-                    ))
-                    .size(ui_size(14))
-                    .wrapping(Wrapping::WordOrGlyph)
-                    .width(Length::Fill),
-                    text(format!(
-                        "config path: {}",
-                        self.app.interface_service.config_path().display()
-                    ))
-                    .size(ui_size(13))
-                    .wrapping(Wrapping::WordOrGlyph)
-                    .width(Length::Fill),
-                ]
-                .spacing(6),
-            ),
+            section_card("Native Runtime Interfaces", native_runtime_body),
         ]
         .spacing(12);
         if let Some(profile) = self.app.pending_interface_delete_profile() {
@@ -8805,6 +8841,16 @@ impl DesktopApp {
                 .spacing(8),
             ));
         }
+        let preview_summary = interface_config_summary_lines(&self.app.interfaces_state.profiles)
+            .into_iter()
+            .fold(column![].spacing(2), |column, line| {
+                column.push(
+                    text(line)
+                        .size(ui_size(13))
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
+                )
+            });
         let preview_lines = interface_config_preview_lines(&preview).into_iter().fold(
             column![].spacing(2),
             |column, line| {
@@ -8816,9 +8862,10 @@ impl DesktopApp {
                 )
             },
         );
+        let preview_body = column![preview_summary, preview_lines].spacing(8);
         content = content
             .push(profiles)
-            .push(section_card("Generated Config Preview", preview_lines));
+            .push(section_card("Config Preview", preview_body));
 
         app_scrollable(content.width(Length::Fill))
             .height(Length::Fill)
@@ -8832,12 +8879,75 @@ impl DesktopApp {
             .unwrap_or_default()
             .into_iter()
             .map(|preset| {
-                subtle_button_owned(
-                    format!("Add {} Gateway", preset.name),
-                    Message::CreateGatewayPreset(preset.id),
-                )
+                let state = self.gateway_preset_button_state(&preset);
+                let message = Message::CreateGatewayPreset(preset.id);
+                match state {
+                    GatewayPresetButtonState::Missing => {
+                        subtle_button_owned(format!("Add {}", preset.name), message)
+                    }
+                    GatewayPresetButtonState::Disabled => {
+                        warning_button_owned(format!("Enable {}", preset.name), message)
+                    }
+                    GatewayPresetButtonState::Enabled => {
+                        omen_button_owned(format!("{} Enabled", preset.name), message)
+                    }
+                }
             })
             .collect()
+    }
+
+    fn gateway_preset_button_state(&self, preset: &GatewayPreset) -> GatewayPresetButtonState {
+        let mut has_disabled = false;
+        for profile in &self.app.interfaces_state.profiles {
+            if profile.kind == InterfaceKind::TcpClient
+                && profile.target_host == preset.host
+                && profile.target_port == preset.port
+            {
+                if profile.enabled {
+                    return GatewayPresetButtonState::Enabled;
+                }
+                has_disabled = true;
+            }
+        }
+        if has_disabled {
+            GatewayPresetButtonState::Disabled
+        } else {
+            GatewayPresetButtonState::Missing
+        }
+    }
+
+    fn gateway_preset_status_line(&self) -> String {
+        let presets = self
+            .app
+            .interface_service
+            .gateway_presets()
+            .unwrap_or_default();
+        if presets.is_empty() {
+            return "gateway presets: none configured".into();
+        }
+        let parts = presets
+            .iter()
+            .map(|preset| {
+                let state = match self.gateway_preset_button_state(preset) {
+                    GatewayPresetButtonState::Missing => "missing",
+                    GatewayPresetButtonState::Disabled => "disabled",
+                    GatewayPresetButtonState::Enabled => "enabled",
+                };
+                format!("{}={state}", preset.name)
+            })
+            .collect::<Vec<_>>();
+        let all_enabled = presets.iter().all(|preset| {
+            matches!(
+                self.gateway_preset_button_state(preset),
+                GatewayPresetButtonState::Enabled
+            )
+        });
+        let next = if all_enabled {
+            "restart if you just changed interfaces"
+        } else {
+            "add or enable WNS/RMAP, then restart"
+        };
+        format!("gateway presets: {} | next: {next}", parts.join(" | "))
     }
 
     fn diagnostics_view(&self) -> Element<'_, Message> {
@@ -9500,8 +9610,8 @@ impl DesktopApp {
                     let last_disconnect = self
                         .omenchat_live_last_disconnect_reason
                         .get(&session.session_id)
-                        .map(|reason| format!("last_disconnect={reason}"))
-                        .unwrap_or_else(|| "last_disconnect=none".into());
+                        .map(|reason| format!("last disconnect: {reason}"))
+                        .unwrap_or_else(|| "last disconnect: none".into());
                     let transport = self.omenchat_live_transports.get(&session.session_id);
                     let history_sync_line =
                         self.omenchat_recent_sync_monitor_label(session.session_id, now);
@@ -9527,7 +9637,7 @@ impl DesktopApp {
                         });
                     let link_line = if let Some(transport) = transport {
                         format!(
-                            "live link {} | up {} | last rx {} | last tx {} | awaiting_pong={}",
+                            "link {} | up {} | rx {} ago | tx {} ago | pong wait={}",
                             short_destination_hash(&hex_bytes(&transport.link_id)),
                             compact_elapsed_ms(
                                 now.saturating_sub(transport.connected_since_epoch_ms)
@@ -9543,7 +9653,7 @@ impl DesktopApp {
                     };
                     let traffic_line = if let Some(transport) = transport {
                         format!(
-                            "frames {} in / {} out | wire {} rx / {} tx | resources {} ({}) | pending resources {}",
+                            "traffic: frames {} in / {} out | wire {} rx / {} tx | resources {} ({}) | pending {}",
                             transport.frames_in,
                             transport.frames_out,
                             human_bytes(transport.bytes_in),
@@ -9553,11 +9663,11 @@ impl DesktopApp {
                             transport.pending_resource_offer_count()
                         )
                     } else {
-                        "frames 0 in / 0 out | wire 0 B rx / 0 B tx".into()
+                        "traffic: disconnected".into()
                     };
                     let mix_line = if let Some(transport) = transport {
                         format!(
-                            "mix: history {} in / {} out | room events {} | chat sends {} | userlists {} | resource offers {} | ping {} out / pong {} in",
+                            "frames: history {} in / {} out | room {} | chat sends {} | userlists {} | offers {} | ping {} / pong {}",
                             transport.history_frames_in,
                             transport.history_frames_out,
                             transport.room_events_in,
@@ -9568,7 +9678,7 @@ impl DesktopApp {
                             transport.pongs_in
                         )
                     } else {
-                        "mix: disconnected".into()
+                        "frames: disconnected".into()
                     };
                     let upload_line = if let Some(transport) = transport {
                         format!(
@@ -9631,15 +9741,15 @@ impl DesktopApp {
                             ),
                             wrapped_text_owned(
                                 format!(
-                                "{} | connects={} disconnects={} retry_attempts={} | {} | {} | {}",
-                                link_line,
-                                connects,
-                                disconnects,
-                                retry_attempts,
-                                reconnect_line,
-                                last_disconnect,
-                                session.status
-                            ),
+                                    "{} | connects {} | disconnects {} | retries {} | {} | {} | {}",
+                                    link_line,
+                                    connects,
+                                    disconnects,
+                                    retry_attempts,
+                                    reconnect_line,
+                                    last_disconnect,
+                                    session.status
+                                ),
                                 13
                             ),
                             wrapped_text_owned(attention_line, 13),
@@ -11352,6 +11462,38 @@ fn interface_runtime_status_label(
     }
 }
 
+fn interface_kind_display_label(kind: &InterfaceKind) -> String {
+    match kind {
+        InterfaceKind::Auto => "kind: auto".into(),
+        InterfaceKind::TcpClient => "kind: TCP gateway".into(),
+        InterfaceKind::TcpServer => "kind: TCP listener".into(),
+        InterfaceKind::I2p => "kind: I2P".into(),
+        InterfaceKind::RNode => "kind: RNode/LoRa".into(),
+        InterfaceKind::Unknown(kind) => format!("kind: {kind}"),
+    }
+}
+
+fn interface_restart_recommendation_line(
+    profiles: &[crate::interfaces::ReticulumInterfaceProfile],
+    stats: Option<&crate::runtime::InterfaceStats>,
+) -> Option<String> {
+    let stats = stats?;
+    if !stats.available {
+        return None;
+    }
+    let stale_enabled = profiles
+        .iter()
+        .filter(|profile| profile.enabled)
+        .any(|profile| {
+            interface_runtime_status_label(profile, Some(stats)) != "runtime: connected"
+        });
+    if stale_enabled {
+        Some("restart recommended: enabled interface changes are not active in the running native runtime".into())
+    } else {
+        None
+    }
+}
+
 fn optional_interface_runtime_detail_line<'a>(
     profile: &crate::interfaces::ReticulumInterfaceProfile,
     stats: Option<&crate::runtime::InterfaceStats>,
@@ -11378,7 +11520,7 @@ fn interface_runtime_detail_line(
         return stats
             .reason
             .as_deref()
-            .map(|reason| format!("runtime detail: {reason}"));
+            .map(|reason| format!("detail: {reason}"));
     }
 
     if let Some(sample) = stats
@@ -11389,7 +11531,7 @@ fn interface_runtime_detail_line(
         return match sample.state {
             crate::runtime::network::InterfaceSampleState::Disabled => None,
             crate::runtime::network::InterfaceSampleState::Unsupported => Some(format!(
-                "runtime detail: {}",
+                "detail: {}",
                 sample
                     .detail
                     .as_deref()
@@ -11398,7 +11540,7 @@ fn interface_runtime_detail_line(
             crate::runtime::network::InterfaceSampleState::Attached
             | crate::runtime::network::InterfaceSampleState::Configured
             | crate::runtime::network::InterfaceSampleState::Unknown => Some(format!(
-                "runtime detail: {}",
+                "detail: {}",
                 sample
                     .detail
                     .as_deref()
@@ -11428,7 +11570,7 @@ fn interface_runtime_detail_line(
                 || (!profile_host.is_empty() && lower.contains(&profile_host)))
     });
     if let Some(line) = attached {
-        return Some(format!("runtime detail: {line}"));
+        return Some(format!("detail: {line}"));
     }
 
     stats
@@ -11442,7 +11584,7 @@ fn interface_runtime_detail_line(
                 || (!profile_endpoint.is_empty() && lower.contains(&profile_endpoint))
                 || lower.contains(&profile.profile_id.to_ascii_lowercase())
         })
-        .map(|line| format!("runtime detail: {line}"))
+        .map(|line| format!("detail: {line}"))
 }
 
 fn interface_runtime_state_line(
@@ -11526,8 +11668,40 @@ fn monitoring_interface_status_lines(stats: &crate::runtime::InterfaceStats) -> 
             .as_deref()
             .unwrap_or("interface stats available")
     )];
+    lines.push(monitoring_interface_health_line(stats));
 
     if !stats.samples.is_empty() {
+        let connected = stats
+            .samples
+            .iter()
+            .filter(|sample| {
+                sample.state == crate::runtime::network::InterfaceSampleState::Attached
+            })
+            .count();
+        let retrying = stats
+            .samples
+            .iter()
+            .filter(|sample| {
+                sample.state == crate::runtime::network::InterfaceSampleState::Configured
+            })
+            .count();
+        let disabled = stats
+            .samples
+            .iter()
+            .filter(|sample| {
+                sample.state == crate::runtime::network::InterfaceSampleState::Disabled
+            })
+            .count();
+        let unsupported = stats
+            .samples
+            .iter()
+            .filter(|sample| {
+                sample.state == crate::runtime::network::InterfaceSampleState::Unsupported
+            })
+            .count();
+        lines.push(format!(
+            "interfaces: connected={connected} retrying={retrying} disabled={disabled} unsupported={unsupported}"
+        ));
         lines.extend(stats.samples.iter().map(|sample| {
             let state = interface_sample_state_label(&sample.state);
             let endpoint = sample.endpoint.as_deref().unwrap_or("no endpoint");
@@ -11564,13 +11738,67 @@ fn monitoring_interface_status_lines(stats: &crate::runtime::InterfaceStats) -> 
     lines
 }
 
+fn monitoring_interface_health_line(stats: &crate::runtime::InterfaceStats) -> String {
+    if !stats.available {
+        return "health: runtime unavailable".into();
+    }
+    if !stats.samples.is_empty() {
+        let total = stats.samples.len();
+        let connected = stats
+            .samples
+            .iter()
+            .filter(|sample| {
+                sample.state == crate::runtime::network::InterfaceSampleState::Attached
+            })
+            .count();
+        let retrying = stats
+            .samples
+            .iter()
+            .filter(|sample| {
+                sample.state == crate::runtime::network::InterfaceSampleState::Configured
+            })
+            .count();
+        if connected > 0 {
+            return format!("health: online ({connected}/{total} connected)");
+        }
+        if retrying > 0 {
+            return format!(
+                "health: retrying ({retrying}/{total} enabled gateway(s) disconnected)"
+            );
+        }
+        return format!("health: offline ({total} interface sample(s), none connected)");
+    }
+
+    if stats.interfaces.is_empty() {
+        return "health: no interfaces reported".into();
+    }
+    let joined = stats.interfaces.join("\n").to_ascii_lowercase();
+    if joined.contains("connected=true")
+        || joined.contains("connected=yes")
+        || joined.contains("connected=connected")
+        || joined.contains("connected=online")
+        || joined.contains("attached ")
+    {
+        return "health: online".into();
+    }
+    if joined.contains("connected=false")
+        || joined.contains("disconnected")
+        || joined.contains("retry")
+        || joined.contains("connection error")
+        || joined.contains("connection closed")
+    {
+        return "health: retrying/offline".into();
+    }
+    "health: reported".into()
+}
+
 fn interface_sample_state_label(
     state: &crate::runtime::network::InterfaceSampleState,
 ) -> &'static str {
     match state {
         crate::runtime::network::InterfaceSampleState::Disabled => "disabled",
         crate::runtime::network::InterfaceSampleState::Unsupported => "unsupported",
-        crate::runtime::network::InterfaceSampleState::Attached => "connected; auto-retry enabled",
+        crate::runtime::network::InterfaceSampleState::Attached => "connected; auto-retry",
         crate::runtime::network::InterfaceSampleState::Configured => "disconnected",
         crate::runtime::network::InterfaceSampleState::Unknown => "unknown",
     }
@@ -11578,7 +11806,7 @@ fn interface_sample_state_label(
 
 fn monitoring_interface_reconnect_line(stats: Option<&crate::runtime::InterfaceStats>) -> String {
     let Some(stats) = stats else {
-        return "interface reconnect: waiting for native interface status".into();
+        return "interface reconnect: waiting for native status".into();
     };
     if !stats.available {
         return format!(
@@ -11598,15 +11826,15 @@ fn monitoring_interface_reconnect_line(stats: Option<&crate::runtime::InterfaceS
         .iter()
         .any(|sample| sample.state == crate::runtime::network::InterfaceSampleState::Attached)
     {
-        return "interface reconnect: connected; TCP gateways retry automatically after drops"
-            .into();
+        return "interface reconnect: connected; TCP gateways auto-retry after drops".into();
     }
     if stats
         .samples
         .iter()
         .any(|sample| sample.state == crate::runtime::network::InterfaceSampleState::Configured)
     {
-        return "interface reconnect: enabled gateway disconnected; restart runtime after interface edits".into();
+        return "interface reconnect: enabled gateway disconnected; restart after interface edits"
+            .into();
     }
 
     let joined = stats.interfaces.join("\n").to_ascii_lowercase();
@@ -11615,8 +11843,7 @@ fn monitoring_interface_reconnect_line(stats: Option<&crate::runtime::InterfaceS
         || joined.contains("connected=connected")
         || joined.contains("connected=online")
     {
-        return "interface reconnect: connected; TCP gateways retry automatically after drops"
-            .into();
+        return "interface reconnect: connected; TCP gateways auto-retry after drops".into();
     }
     if joined.contains("connected=false")
         || joined.contains("disconnected")
@@ -11624,7 +11851,7 @@ fn monitoring_interface_reconnect_line(stats: Option<&crate::runtime::InterfaceS
         || joined.contains("connection error")
         || joined.contains("connection closed")
     {
-        return "interface reconnect: gateway appears offline/retrying; TCP clients retry automatically".into();
+        return "interface reconnect: gateway offline/retrying; TCP clients auto-retry".into();
     }
 
     "interface reconnect: interfaces reported; verify connected=true in detailed lines".into()
@@ -11891,6 +12118,18 @@ fn omenchat_monitor_health_line(totals: &OmenChatLiveMonitorTotals) -> String {
         return format!(
             "health: reconnect/opening activity visible ({} opening, {} timer(s))",
             totals.opening, totals.reconnect_timers
+        );
+    }
+    if totals.connected == 0 {
+        return format!(
+            "health: disconnected (0/{} session(s) connected); use Reconnect after path is known",
+            totals.sessions
+        );
+    }
+    if totals.connected < totals.sessions {
+        return format!(
+            "health: partial ({}/{} session(s) connected); check disconnected session rows",
+            totals.connected, totals.sessions
         );
     }
     if totals.awaiting_pongs > 0 {
@@ -14277,6 +14516,30 @@ fn interface_config_preview_lines(preview: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn interface_config_summary_lines(
+    profiles: &[crate::interfaces::ReticulumInterfaceProfile],
+) -> Vec<String> {
+    let total = profiles.len();
+    let enabled = profiles.iter().filter(|profile| profile.enabled).count();
+    let disabled = total.saturating_sub(enabled);
+    let tcp_gateways = profiles
+        .iter()
+        .filter(|profile| profile.kind == InterfaceKind::TcpClient)
+        .count();
+    let rnodes = profiles
+        .iter()
+        .filter(|profile| profile.kind == InterfaceKind::RNode)
+        .count();
+    let i2p = profiles
+        .iter()
+        .filter(|profile| profile.kind == InterfaceKind::I2p)
+        .count();
+    vec![
+        format!("summary: {enabled}/{total} enabled, {disabled} disabled"),
+        format!("types: TCP gateways={tcp_gateways} RNode/LoRa={rnodes} I2P={i2p}"),
+    ]
 }
 
 const DESKTOP_THEME_CHOICES: &[&str] = &[
@@ -16862,6 +17125,20 @@ mod tests {
         };
         assert!(omenchat_monitor_health_line(&reconnecting)
             .contains("reconnect/opening activity visible"));
+
+        let disconnected = OmenChatLiveMonitorTotals {
+            sessions: 2,
+            connected: 0,
+            ..OmenChatLiveMonitorTotals::default()
+        };
+        assert!(omenchat_monitor_health_line(&disconnected).contains("disconnected"));
+
+        let partial = OmenChatLiveMonitorTotals {
+            sessions: 2,
+            connected: 1,
+            ..OmenChatLiveMonitorTotals::default()
+        };
+        assert!(omenchat_monitor_health_line(&partial).contains("partial"));
 
         let waiting_pong = OmenChatLiveMonitorTotals {
             sessions: 1,
@@ -19525,7 +19802,7 @@ mod tests {
         assert!(configured.contains("disconnected"));
         assert_eq!(
             interface_runtime_detail_line(&profile, Some(&running_stats)).as_deref(),
-            Some("runtime detail: GatewayOne [TcpClient supported enabled]")
+            Some("detail: GatewayOne [TcpClient supported enabled]")
         );
         assert_eq!(
             interface_runtime_state_line(&profile, Some(&running_stats)),
@@ -19545,11 +19822,11 @@ mod tests {
         assert_eq!(attached, "runtime: connected");
         assert_eq!(
             interface_runtime_detail_line(&profile, Some(&attached_stats)).as_deref(),
-            Some("runtime detail: attached GatewayOne tcp_client 10.0.0.7:4242 ifac=none")
+            Some("detail: attached GatewayOne tcp_client 10.0.0.7:4242 ifac=none")
         );
         assert_eq!(
             interface_runtime_state_line(&profile, Some(&attached_stats)),
-            "state: connected; auto-retry enabled | endpoint: 10.0.0.7:4242"
+            "state: connected; auto-retry | endpoint: 10.0.0.7:4242"
         );
 
         let structured_attached = crate::runtime::InterfaceStats {
@@ -19572,11 +19849,11 @@ mod tests {
         assert_eq!(attached, "runtime: connected");
         assert_eq!(
             interface_runtime_detail_line(&profile, Some(&structured_attached)).as_deref(),
-            Some("runtime detail: GatewayOne tcp_client 10.0.0.7:4242 ifac=none")
+            Some("detail: GatewayOne tcp_client 10.0.0.7:4242 ifac=none")
         );
         assert_eq!(
             interface_runtime_state_line(&profile, Some(&structured_attached)),
-            "state: connected; auto-retry enabled | endpoint: 10.0.0.7:4242"
+            "state: connected; auto-retry | endpoint: 10.0.0.7:4242"
         );
 
         let missing_stats = crate::runtime::InterfaceStats {
@@ -19598,6 +19875,69 @@ mod tests {
         assert!(
             interface_runtime_status_label(&profile, Some(&stopped_stats)).contains("not running")
         );
+    }
+
+    #[test]
+    fn interface_kind_display_labels_are_user_facing() {
+        assert_eq!(
+            interface_kind_display_label(&InterfaceKind::TcpClient),
+            "kind: TCP gateway"
+        );
+        assert_eq!(
+            interface_kind_display_label(&InterfaceKind::TcpServer),
+            "kind: TCP listener"
+        );
+        assert_eq!(
+            interface_kind_display_label(&InterfaceKind::RNode),
+            "kind: RNode/LoRa"
+        );
+        assert_eq!(
+            interface_kind_display_label(&InterfaceKind::Unknown("custom".into())),
+            "kind: custom"
+        );
+    }
+
+    #[test]
+    fn interface_restart_recommendation_only_flags_stale_runtime_samples() {
+        let mut profile =
+            crate::interfaces::ReticulumInterfaceProfile::tcp_client("iface_test", "GatewayOne");
+        profile.target_host = "10.0.0.7".into();
+
+        assert!(interface_restart_recommendation_line(&[profile.clone()], None).is_none());
+
+        let attached_stats = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: Vec::new(),
+            samples: vec![crate::runtime::network::InterfaceSample {
+                profile_id: profile.profile_id.clone(),
+                name: profile.name.clone(),
+                kind: "tcp_client".into(),
+                state: crate::runtime::network::InterfaceSampleState::Attached,
+                enabled: true,
+                supported: true,
+                attached: true,
+                endpoint: Some("10.0.0.7:4242".into()),
+                detail: None,
+            }],
+        };
+        assert!(
+            interface_restart_recommendation_line(&[profile.clone()], Some(&attached_stats))
+                .is_none()
+        );
+
+        let stale_stats = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: vec!["GatewayOne [TcpClient supported enabled]".into()],
+            samples: Vec::new(),
+        };
+        assert!(
+            interface_restart_recommendation_line(&[profile.clone()], Some(&stale_stats)).is_some()
+        );
+
+        profile.enabled = false;
+        assert!(interface_restart_recommendation_line(&[profile], Some(&stale_stats)).is_none());
     }
 
     #[test]
@@ -19672,12 +20012,55 @@ mod tests {
         let lines = monitoring_interface_status_lines(&stats);
 
         assert!(lines.iter().any(|line| line.contains("runtime: available")));
-        assert!(lines.iter().any(|line| line
-            .contains("GatewayOne | tcp_client | connected; auto-retry enabled | 10.0.0.7:4242")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("health: online (1/2 connected)")));
+        assert!(lines.iter().any(|line| {
+            line.contains("interfaces: connected=1 retrying=0 disabled=0 unsupported=1")
+        }));
+        assert!(lines
+            .iter()
+            .any(|line| line
+                .contains("GatewayOne | tcp_client | connected; auto-retry | 10.0.0.7:4242")));
         assert!(lines
             .iter()
             .any(|line| line.contains("I2P | i2p | unsupported | no endpoint")));
         assert!(!lines.iter().any(|line| line.contains("legacy raw line")));
+    }
+
+    #[test]
+    fn monitoring_interface_health_line_summarizes_disconnected_samples() {
+        let retrying = crate::runtime::InterfaceStats {
+            available: true,
+            reason: Some("sampled".into()),
+            interfaces: Vec::new(),
+            samples: vec![crate::runtime::network::InterfaceSample {
+                profile_id: "gw1".into(),
+                name: "GatewayOne".into(),
+                kind: "tcp_client".into(),
+                state: crate::runtime::network::InterfaceSampleState::Configured,
+                enabled: true,
+                supported: true,
+                attached: false,
+                endpoint: Some("10.0.0.7:4242".into()),
+                detail: None,
+            }],
+        };
+        assert_eq!(
+            monitoring_interface_health_line(&retrying),
+            "health: retrying (1/1 enabled gateway(s) disconnected)"
+        );
+
+        let unavailable = crate::runtime::InterfaceStats {
+            available: false,
+            reason: Some("runtime stopped".into()),
+            interfaces: Vec::new(),
+            samples: Vec::new(),
+        };
+        assert_eq!(
+            monitoring_interface_health_line(&unavailable),
+            "health: runtime unavailable"
+        );
     }
 
     #[test]
@@ -20401,6 +20784,19 @@ mod tests {
                 "  enabled = true".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn interface_config_summary_lines_count_enabled_profiles_by_kind() {
+        let tcp = crate::interfaces::ReticulumInterfaceProfile::tcp_client("tcp", "Gateway");
+        let mut rnode = crate::interfaces::ReticulumInterfaceProfile::rnode("rnode", "Radio");
+        rnode.enabled = false;
+        let i2p = crate::interfaces::ReticulumInterfaceProfile::i2p("i2p", "I2P");
+
+        let lines = interface_config_summary_lines(&[tcp, rnode, i2p]);
+
+        assert_eq!(lines[0], "summary: 2/3 enabled, 1 disabled");
+        assert_eq!(lines[1], "types: TCP gateways=1 RNode/LoRa=1 I2P=1");
     }
 
     #[test]

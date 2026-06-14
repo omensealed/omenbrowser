@@ -327,23 +327,23 @@ pub(crate) fn interface_operator_summary_text(contents: &str, path: &std::path::
     let lower = contents.to_ascii_lowercase();
     let ifac = interface_ifac_summary(contents);
     let next = if lower.contains("tcpclientinterface") {
-        "use this for wider-network hosting through a gateway; start live server, then verify Monitoring shows connected=true"
+        "Start Live, then verify Monitoring shows the gateway connected"
     } else if lower.contains("tcpserverinterface") {
-        "use this for local smoke tests or a listener other peers can dial; start live server, then verify Monitoring shows incoming clients"
+        "Start Live, then verify Monitoring shows incoming clients"
     } else if lower.contains("type")
         && (lower.contains("enabled = yes") || lower.contains("interface_enabled = true"))
     {
-        "custom enabled interface; start live server and verify Monitoring before publishing addresses"
+        "Start Live and verify Monitoring before publishing addresses"
     } else {
-        "choose Connect To Gateway for normal backbone use, or Local TCP Listener for local/direct testing"
+        "choose Connect Gateway for normal use, or Local TCP Listener for local/direct tests"
     };
     [
-        "operator summary:".to_string(),
-        format!("  current mode: {mode}"),
+        "interface setup:".to_string(),
+        format!("  mode: {mode}"),
         format!("  IFAC: {ifac}"),
         format!("  next: {next}"),
-        "  storage: config stays inside this omenchatd server root".to_string(),
-        "  safety: editing interfaces never overwrites the server identity".to_string(),
+        "  storage: config stays inside this server root".to_string(),
+        "  identity: interface edits do not overwrite the server identity".to_string(),
     ]
     .join("\n")
 }
@@ -565,22 +565,21 @@ pub(crate) fn selected_room_text(room_id: i64, name: &str, topic: Option<&str>) 
         .filter(|topic| !topic.trim().is_empty())
         .unwrap_or("(no topic)");
     let archive = if room_id == 1 {
-        "protected: #lobby cannot be archived"
+        "protected; #lobby stays available"
     } else {
-        "available: admins can archive this room after confirmation"
+        "admin archive available after confirmation"
     };
     [
         format!("room: #{name}"),
         format!("topic: {topic}"),
         format!("archive: {archive}"),
-        "topic edits: moderator or admin".to_string(),
-        "room creation: admin only".to_string(),
+        "topic: mod/admin".to_string(),
+        "create/archive: admin".to_string(),
         String::new(),
         format!("id: {room_id}"),
-        "listed in /rooms and the OMENchat room sidebar while active".to_string(),
+        "active rooms appear in /rooms and client sidebars".to_string(),
         String::new(),
-        "Up/Down or mouse wheel: select room".to_string(),
-        "Click a room row to select it.".to_string(),
+        "select: click row, Up/Down, or mouse wheel".to_string(),
     ]
     .join("\n")
 }
@@ -610,27 +609,27 @@ pub(crate) fn room_action_guide_text(
     pending_archive_room_id: Option<i64>,
 ) -> String {
     let Some((room_id, name, topic)) = selected else {
-        return "Add Room creates or unarchives a room.\nEdit Topic needs a selected room.\nArchive Room needs a selected non-lobby room.\n\nPermissions: admins manage rooms; mods/admins edit topics.".into();
+        return "Select a room or Add Room.\n\nAdmin: create/archive rooms.\nMod/Admin: edit topics.\n#lobby cannot be archived.".into();
     };
     let topic_state = if topic.map(|topic| !topic.trim().is_empty()).unwrap_or(false) {
-        "Edit Topic updates the room topic shown in clients."
+        "Edit Topic changes the topic shown in clients."
     } else {
-        "Edit Topic sets the empty topic shown in clients."
+        "Edit Topic sets the missing topic."
     };
     let archive_state = if room_id == 1 {
-        "Archive is disabled for #lobby; the default room is required."
+        "Archive disabled: #lobby is required."
     } else if pending_archive_room_id == Some(room_id) {
-        "Confirm Archive hides this room from room lists; history stays in the database."
+        "Confirm Archive hides the room; history stays stored."
     } else {
-        "Archive Room requires a second click before hiding this room."
+        "Archive Room asks for one confirmation click."
     };
 
     [
         format!("Selected: #{name}"),
-        "Add Room creates a new public room or restores an archived room.".to_string(),
+        "Add Room creates or restores a public room.".to_string(),
         topic_state.to_string(),
         archive_state.to_string(),
-        "Permissions: admins create/archive; mods/admins edit topics.".to_string(),
+        "Permissions: admin create/archive; mod/admin topic.".to_string(),
     ]
     .join("\n")
 }
@@ -682,46 +681,47 @@ pub(crate) fn moderation_action_guide_text(
     pending_prune_stale_users: bool,
 ) -> String {
     let Some(user) = user else {
-        return "Select a known user to see what each moderation action will do.\n\nUsers appear here after they connect to this server.".into();
+        return "Select a user to moderate.\n\nUsers appear after they connect to this server."
+            .into();
     };
     let ban = if user.banned {
-        "Unban allows future sessions again; it does not reconnect the user."
+        "Unban allows future sessions; it does not reconnect them."
     } else if active_links > 0 {
-        "Ban blocks future sessions and closes this user's active links."
+        "Ban blocks future sessions and closes active links."
     } else {
         "Ban blocks future sessions for this identity."
     };
     let mute = if user.muted {
-        "Unmute restores message sending; reading stays allowed either way."
+        "Unmute restores sending; reading was still allowed."
     } else {
-        "Mute keeps read access but blocks room messages/actions."
+        "Mute keeps read access but blocks sends/actions."
     };
     let trust = if user.trusted {
-        "Untrust removes trusted-media affordances for this identity."
+        "Untrust removes trusted-media handling."
     } else {
-        "Trust enables trusted-media affordances for this identity."
+        "Trust enables trusted-media handling."
     };
     let role = match user.role_label {
-        "admin" => "Role: admin can manage roles, rooms, and moderation.",
+        "admin" => "Role: admin manages roles, rooms, and moderation.",
         "mod" => "Role: moderator can topic/kick/ban/mute/trust/notice.",
-        "trusted" => "Role: trusted is a member with trusted-media affordances.",
-        _ => "Role: standard can read and send unless muted or banned.",
+        "trusted" => "Role: trusted member with trusted-media handling.",
+        _ => "Role: standard can read/send unless muted or banned.",
     };
     let delete = if active_links > 0 {
-        "Delete stale record is blocked while active links exist."
+        "Delete stale record blocked while active."
     } else if pending_delete_user_id == Some(user.user_id) {
-        "Confirm Delete Record removes this inactive known-user row from the database only."
+        "Confirm Delete removes only this known-user record."
     } else {
-        "Delete stale record is only available after 24h since last seen and no active links."
+        "Delete stale record needs 24h inactive and no links."
     };
     let prune = if pending_prune_stale_users {
-        "Confirm Prune Records removes all inactive stale known-user rows from the database only."
+        "Confirm Prune removes all inactive stale records."
     } else {
-        "Prune Inactive Stale removes every inactive known-user row older than 24h."
+        "Prune removes all inactive records older than 24h."
     };
     [
         ban.to_string(),
-        format!("Kick closes active links only; bans/mutes are unchanged. active={active_links}"),
+        format!("Kick closes current links only; active={active_links}"),
         mute.to_string(),
         trust.to_string(),
         role.to_string(),
@@ -787,7 +787,7 @@ pub(crate) fn upload_transfer_summary(stats: &LiveServerStats) -> String {
         return "idle".into();
     }
     format!(
-        "{} offer(s), {} download request(s), {} accepted upload(s) ({}), {} inline chunk(s) sent ({}), {} resource offer(s) sent",
+        "offer {} | fetch {} | stored {} ({}) | inline {} ({}) | resource offers {}",
         stats.upload_offers_in,
         stats.upload_fetches_in,
         stats.upload_resources_in,
@@ -815,9 +815,9 @@ pub(crate) fn interface_health_label(interface_lines: &[String]) -> String {
         || joined.contains("connected=connected")
         || joined.contains("connected=online")
     {
-        return "connected".into();
+        return "connected; server can publish and receive".into();
     }
-    "interfaces visible; verify connected=true before publishing".into()
+    "disconnected; watchdog will rebuild runtime after repeated samples".into()
 }
 
 #[cfg(any(test, feature = "live-rns-net"))]
@@ -1023,17 +1023,24 @@ pub(crate) fn monitoring_operator_summary_text(
     };
 
     [
-        "operator summary:".to_string(),
-        format!("  {}", server_health_label(stats, recent_close_reasons)),
+        "monitoring:".to_string(),
         format!(
-            "  clients: {} active, {} opened, {} closed",
+            "  clients active={} opened={} closed={} | interface: {interface}",
             stats.active_links, stats.links_opened, stats.links_closed
         ),
-        format!("  interface: {interface}"),
         format!("  {traffic}"),
-        format!("  uploads: {}", upload_transfer_summary(stats)),
-        format!("  recent: {recent}"),
-        format!("  {health}"),
+        format!(
+            "  requests session={} room={} chat={} history={} ping={} command={}",
+            stats.session_requests_in,
+            stats.room_navigation_in,
+            stats.chat_messages_in,
+            stats.history_requests_in,
+            stats.pings_in,
+            stats.commands_in
+        ),
+        format!("  uploads {}", upload_transfer_summary(stats)),
+        format!("  {}", server_health_label(stats, recent_close_reasons)),
+        format!("  {health} | recent: {recent}"),
     ]
     .join("\n")
 }
@@ -1129,7 +1136,7 @@ pub(crate) fn setup_launch_status_text(launch: &SetupLaunchText<'_>) -> String {
 
 pub(crate) fn setup_addresses_text(addresses: &SetupAddressesText<'_>) -> String {
     let mut text = String::from(
-        "copy/paste:\n  chat invite: client uri\n  quiet MOTD/rules page: portal url\n\n",
+        "Share after Monitoring shows connected:\n  OMENchat invite: client uri\n  MOTD/rules page: portal url\n\n",
     );
     text.push_str(addresses.public_addresses);
     if !text.ends_with('\n') {
@@ -1148,29 +1155,33 @@ pub(crate) fn setup_next_steps_text(setup: &SetupNextStepsText<'_>) -> String {
     steps.push(setup.launch_status.to_string());
     steps.push(String::new());
     if setup.all_ready {
-        steps.push("Start: Live Server or press g.".to_string());
-        steps.push("Verify: Monitoring shows a connected interface and fresh traffic.".to_string());
-        steps.push("Share: copy the omenchat:// URI or Portal URL from Portal.".to_string());
-        steps.push("Test: join from a second isolated OMENbrowser_rs app root.".to_string());
+        steps.push("1. Start Live or press g.".to_string());
+        steps
+            .push("2. Open Monitoring and verify at least one interface is connected.".to_string());
+        steps.push("3. Announce Now if you do not want to wait for the interval.".to_string());
+        steps.push(
+            "4. Share the omenchat:// invite or NomadNet portal URL from Portal.".to_string(),
+        );
+        steps.push("5. Test with a second isolated OMENbrowser_rs app root.".to_string());
         steps.push(format!("Limits: {}.", setup.upload_policy));
         steps.push(format!("Network: {}", setup.reticulum_summary));
         return steps.join("\n");
     }
 
-    steps.push("Fix first:".to_string());
+    steps.push("Fix first, then Start Live:".to_string());
     for label in &setup.missing_labels {
         let advice = setup_advice_for_label(label);
         let action = setup_action_for_label(label);
         steps.push(format!("- {label}: {action} {advice}"));
     }
     steps.push(String::new());
-    steps.push("Storage: default files stay under this omenchatd home.".to_string());
+    steps.push("Storage: server files stay under this omenchatd home.".to_string());
     steps.push(format!("home: {}", setup.storage_root));
     steps.push(String::new());
     steps.push(format!("Network: {}", setup.reticulum_summary));
     steps.push(String::new());
     steps.push(
-        "Addresses: OMENchat announces as omenchat.node; users join with omenchat:// or the NomadNet portal link."
+        "Addresses: OMENchat announces as omenchat.node; share omenchat:// for chat or the NomadNet portal URL for MOTD/rules."
             .to_string(),
     );
     steps.push(String::new());
@@ -1217,19 +1228,19 @@ pub(crate) fn overview_operator_summary_text(summary: &OverviewOperatorSummaryTe
     };
     let next = summary
         .first_missing_label
-        .map(|label| format!("fix {label}"))
-        .unwrap_or_else(|| "verify Monitoring, then share Portal addresses".into());
+        .map(|label| format!("{label}: {}", setup_action_for_label(label)))
+        .unwrap_or_else(|| "verify Monitoring, then copy invite/portal from Portal".into());
     [
-        "operator dashboard:".to_string(),
+        "overview:".to_string(),
         format!("  launch: {launch}"),
         format!("  live: {}", summary.live_line),
-        format!("  interface: {}", summary.interface_summary),
+        format!("  network: {}", summary.interface_summary),
         format!("  rooms: {} active", summary.room_count),
         format!(
             "  uploads: max {}, quota {}",
             summary.upload_max, summary.upload_quota
         ),
-        "  addresses: Portal tab".to_string(),
+        "  share: Portal tab has the omenchat:// invite and NomadNet URL".to_string(),
         format!("  next: {next}"),
     ]
     .join("\n")
@@ -1237,7 +1248,7 @@ pub(crate) fn overview_operator_summary_text(summary: &OverviewOperatorSummaryTe
 
 pub(crate) fn portal_panel_text(portal: &PortalPanelText<'_>) -> String {
     format!(
-        "Share:\n  chat: omenchat:// URI\n  portal: NomadNet /page/index.mu URL\n\nPurpose: MOTD, rules, help, and launch link. Chat traffic stays on OMENchat.\nEdit: reticulum/storage/pages/index.mu is served as /page/index.mu; the template is created only when missing.\n\n{checklist}\n\n{destination}\nportal file: {page_state}\nMOTD: {motd}",
+        "share:\n  chat invite: omenchat:// URI\n  portal page: NomadNet /page/index.mu URL\n\nuse portal for: MOTD, rules, help, launch links\nchat traffic: stays on OMENchat\nedit file: reticulum/storage/pages/index.mu\nserved path: /page/index.mu\n\n{checklist}\n\naddresses:\n{destination}\npage file: {page_state}\nMOTD: {motd}",
         checklist = portal.checklist,
         destination = portal.destination,
         page_state = portal.page_state,
@@ -1247,7 +1258,7 @@ pub(crate) fn portal_panel_text(portal: &PortalPanelText<'_>) -> String {
 
 pub(crate) fn identity_panel_text(identity: &IdentityPanelText<'_>) -> String {
     format!(
-        "identity file: {identity_file}\nbackup target: copy the identity file before public testing\nstorage root: {storage_root}\ndata isolation: standalone omenchatd storage\nsafety: never overwrite identities; delete only by explicit admin action\n\n{checklist}\n\ndestinations:\n{destinations}\n\npaths:\n  identity: {identity_file}\n  database: {database_path}\n  reticulum: {reticulum_path}\n  reticulum config: {reticulum_config_path}\n\nomenchatd owns this storage root. It does not use ~/.reticulum, ~/.nomadnetwork, or ~/.lxmd unless an admin explicitly points paths elsewhere.",
+        "identity:\n  file: {identity_file}\n  backup: copy this file before public testing\n  storage root: {storage_root}\n  isolation: standalone omenchatd storage\n  safety: never overwrite identity material\n\n{checklist}\n\ndestinations:\n{destinations}\n\npaths:\n  identity: {identity_file}\n  database: {database_path}\n  reticulum: {reticulum_path}\n  reticulum config: {reticulum_config_path}\n\nstorage rule: omenchatd owns this root and does not use ~/.reticulum, ~/.nomadnetwork, or ~/.lxmd unless configured explicitly.",
         identity_file = identity.identity_file,
         storage_root = identity.storage_root,
         checklist = identity.checklist,
@@ -1346,24 +1357,23 @@ mod tests {
             "[interfaces]\n[[interfaces.gateway]]\ntype = TCPClientInterface\ntarget_host = example.net\ntarget_port = 42420\ninterface_enabled = true\nnetwork_name = private_ret\npassphrase = test-passphrase\n",
             path,
         );
-        assert!(gateway.contains("operator summary"));
+        assert!(gateway.contains("interface setup"));
         assert!(gateway.contains("TCP gateway client -> example.net:42420"));
         assert!(gateway.contains("IFAC: network_name=private_ret; passphrase set"));
         assert!(!gateway.contains("test-passphrase"));
-        assert!(gateway.contains("wider-network hosting through a gateway"));
-        assert!(gateway.contains("verify Monitoring shows connected=true"));
+        assert!(gateway.contains("verify Monitoring shows the gateway connected"));
 
         let local = interface_operator_summary_text(
             "[interfaces]\n[[interfaces.local]]\ntype = TCPServerInterface\nlisten_ip = 127.0.0.1\nlisten_port = 42420\ninterface_enabled = true\n",
             path,
         );
         assert!(local.contains("local TCP server listener -> 127.0.0.1:42420"));
-        assert!(local.contains("local smoke tests"));
+        assert!(local.contains("verify Monitoring shows incoming clients"));
         assert!(local.contains("IFAC: not configured"));
 
         let empty = interface_operator_summary_text("", path);
-        assert!(empty.contains("Connect To Gateway"));
-        assert!(empty.contains("editing interfaces never overwrites the server identity"));
+        assert!(empty.contains("Connect Gateway"));
+        assert!(empty.contains("interface edits do not overwrite the server identity"));
     }
 
     #[test]
@@ -1527,35 +1537,35 @@ mod tests {
         let lobby = selected_room_text(1, "lobby", Some("Default OMENchat lobby"));
         assert!(lobby.contains("room: #lobby"));
         assert!(lobby.contains("topic: Default OMENchat lobby"));
-        assert!(lobby.contains("topic edits: moderator or admin"));
-        assert!(lobby.contains("protected: #lobby cannot be archived"));
+        assert!(lobby.contains("topic: mod/admin"));
+        assert!(lobby.contains("protected; #lobby stays available"));
 
         let ops = selected_room_text(2, "ops", None);
         assert!(ops.contains("topic: (no topic)"));
-        assert!(ops.contains("available: admins can archive this room after confirmation"));
-        assert!(ops.contains("listed in /rooms"));
+        assert!(ops.contains("admin archive available after confirmation"));
+        assert!(ops.contains("active rooms appear in /rooms"));
     }
 
     #[test]
     fn room_action_guide_explains_selected_room_actions() {
         let empty = room_action_guide_text(None, None);
-        assert!(empty.contains("Add Room creates or unarchives a room"));
-        assert!(empty.contains("admins manage rooms"));
+        assert!(empty.contains("Select a room or Add Room"));
+        assert!(empty.contains("Admin: create/archive rooms"));
 
         let lobby =
             room_action_guide_text(Some((1, "lobby", Some("Default OMENchat lobby"))), None);
         assert!(lobby.contains("Selected: #lobby"));
-        assert!(lobby.contains("Edit Topic updates the room topic"));
-        assert!(lobby.contains("Archive is disabled for #lobby"));
-        assert!(lobby.contains("admins create/archive; mods/admins edit topics"));
+        assert!(lobby.contains("Edit Topic changes the topic"));
+        assert!(lobby.contains("Archive disabled: #lobby"));
+        assert!(lobby.contains("admin create/archive; mod/admin topic"));
 
         let room = room_action_guide_text(Some((2, "ops", None)), None);
-        assert!(room.contains("Edit Topic sets the empty topic"));
-        assert!(room.contains("requires a second click"));
+        assert!(room.contains("Edit Topic sets the missing topic"));
+        assert!(room.contains("asks for one confirmation click"));
 
         let confirm = room_action_guide_text(Some((2, "ops", Some("Ops room"))), Some(2));
-        assert!(confirm.contains("Confirm Archive hides this room"));
-        assert!(confirm.contains("history stays in the database"));
+        assert!(confirm.contains("Confirm Archive hides the room"));
+        assert!(confirm.contains("history stays stored"));
     }
 
     #[test]
@@ -1652,24 +1662,24 @@ mod tests {
         };
 
         let text = moderation_action_guide_text(Some(&user), 2, None, false);
-        assert!(text.contains("Ban blocks future sessions and closes this user's active links"));
-        assert!(text.contains("Kick closes active links only"));
+        assert!(text.contains("Ban blocks future sessions and closes active links"));
+        assert!(text.contains("Kick closes current links only"));
         assert!(text.contains("Mute keeps read access"));
-        assert!(text.contains("Untrust removes trusted-media"));
+        assert!(text.contains("Untrust removes trusted-media handling"));
         assert!(text.contains("Role: moderator"));
-        assert!(text.contains("Delete stale record is blocked while active links exist"));
+        assert!(text.contains("Delete stale record blocked while active"));
 
         user.banned = true;
         user.muted = true;
         user.status_label = "banned";
         let text = moderation_action_guide_text(Some(&user), 0, Some(user.user_id), true);
-        assert!(text.contains("Unban allows future sessions again"));
-        assert!(text.contains("Unmute restores message sending"));
-        assert!(text.contains("Confirm Delete Record removes this inactive known-user row"));
-        assert!(text.contains("Confirm Prune Records removes all inactive stale"));
+        assert!(text.contains("Unban allows future sessions"));
+        assert!(text.contains("Unmute restores sending"));
+        assert!(text.contains("Confirm Delete removes only this known-user record"));
+        assert!(text.contains("Confirm Prune removes all inactive stale"));
 
         let empty = moderation_action_guide_text(None, 0, None, false);
-        assert!(empty.contains("Select a known user"));
+        assert!(empty.contains("Select a user to moderate"));
     }
 
     #[test]
@@ -1745,11 +1755,11 @@ mod tests {
 
         let text = upload_transfer_summary(&stats);
 
-        assert!(text.contains("2 offer(s)"));
-        assert!(text.contains("3 download request(s)"));
-        assert!(text.contains("1 accepted upload(s) (2.00 KiB)"));
-        assert!(text.contains("4 inline chunk(s) sent (4.00 KiB)"));
-        assert!(text.contains("5 resource offer(s) sent"));
+        assert!(text.contains("offer 2"));
+        assert!(text.contains("fetch 3"));
+        assert!(text.contains("stored 1 (2.00 KiB)"));
+        assert!(text.contains("inline 4 (4.00 KiB)"));
+        assert!(text.contains("resource offers 5"));
     }
 
     #[cfg(any(test, feature = "live-rns-net"))]
@@ -1765,7 +1775,7 @@ mod tests {
         );
         assert_eq!(
             interface_health_label(&["Gateway | connected=true | rx=1 KiB".into()]),
-            "connected"
+            "connected; server can publish and receive"
         );
         assert_eq!(
             interface_health_label(&["query failed: timeout".into()]),
@@ -1773,7 +1783,7 @@ mod tests {
         );
         assert_eq!(
             interface_health_label(&["Gateway | connected=false".into()]),
-            "interfaces visible; verify connected=true before publishing"
+            "disconnected; watchdog will rebuild runtime after repeated samples"
         );
     }
 
@@ -1939,11 +1949,16 @@ mod tests {
         );
 
         assert!(text.contains("server health: ok"));
-        assert!(text.contains("clients: 2 active, 3 opened, 1 closed"));
-        assert!(text.contains("interface: connected"));
+        assert!(text.contains("monitoring:"));
+        assert!(text.contains(
+            "clients active=2 opened=3 closed=1 | interface: connected; server can publish and receive"
+        ));
+        assert!(text.contains("server can publish and receive"));
         assert!(text.contains("traffic: 10 frame(s) in / 12 out"));
-        assert!(text
-            .contains("uploads: 1 offer(s), 2 download request(s), 1 accepted upload(s) (512 B), 3 inline chunk(s) sent (1.50 KiB), 4 resource offer(s) sent"));
+        assert!(text.contains("requests session=0 room=0 chat=0 history=0 ping=0 command=0"));
+        assert!(text.contains(
+            "uploads offer 1 | fetch 2 | stored 1 (512 B) | inline 3 (1.50 KiB) | resource offers 4"
+        ));
         assert!(text.contains("health: ok"));
     }
 
@@ -2061,9 +2076,9 @@ mod tests {
             portal_page_file: "/tmp/omenchatd/reticulum/storage/pages/index.mu",
         });
 
-        assert!(text.contains("copy/paste:"));
-        assert!(text.contains("chat invite: client uri"));
-        assert!(text.contains("quiet MOTD/rules page: portal url"));
+        assert!(text.contains("Share after Monitoring shows connected:"));
+        assert!(text.contains("OMENchat invite: client uri"));
+        assert!(text.contains("MOTD/rules page: portal url"));
         assert!(text.contains("destination: omenchat.node (abc123)"));
         assert!(text.contains("client uri: omenchat://abc123"));
         assert!(text.contains("portal page file: /tmp/omenchatd/reticulum/storage/pages/index.mu"));
@@ -2092,11 +2107,12 @@ mod tests {
         });
 
         assert!(text.contains("Launch status: READY for live testing"));
-        assert!(text.contains("Start: Live Server or press g."));
-        assert!(text.contains("Share: copy the omenchat:// URI or Portal URL"));
+        assert!(text.contains("1. Start Live or press g."));
+        assert!(text.contains("3. Announce Now"));
+        assert!(text.contains("4. Share the omenchat:// invite or NomadNet portal URL"));
         assert!(text.contains("Limits: uploads: max file 512.0 KiB"));
         assert!(text.contains("Network: TCP gateway client -> gateway.example:42420"));
-        assert!(!text.contains("Fix first:"));
+        assert!(!text.contains("Fix first, then Start Live:"));
     }
 
     #[test]
@@ -2111,12 +2127,12 @@ mod tests {
         });
 
         assert!(text.contains("Launch status: NEEDS SETUP (6/8 ready)"));
-        assert!(text.contains("Fix first:"));
+        assert!(text.contains("Fix first, then Start Live:"));
         assert!(text.contains("- reticulum: Use: Connect To Gateway"));
         assert!(text.contains("- operator: Use: Edit Operator Label"));
-        assert!(text.contains("Storage: default files stay under this omenchatd home."));
+        assert!(text.contains("Storage: server files stay under this omenchatd home."));
         assert!(text.contains("home: /tmp/omenchatd"));
-        assert!(text.contains("Addresses: OMENchat announces as omenchat.node"));
+        assert!(text.contains("share omenchat:// for chat"));
         assert!(text.contains("Limits: uploads: disabled; upload offers are rejected."));
     }
 
@@ -2173,13 +2189,13 @@ mod tests {
             upload_quota: "50.0 MiB".into(),
         });
 
-        assert!(text.contains("operator dashboard:"));
+        assert!(text.contains("overview:"));
         assert!(text.contains("launch: needs setup (5/8 ready)"));
         assert!(text.contains("live: runtime: live server running"));
-        assert!(text.contains("interface: TCP gateway client"));
+        assert!(text.contains("network: TCP gateway client"));
         assert!(text.contains("rooms: 2 active"));
         assert!(text.contains("uploads: max 512.0 KiB, quota 50.0 MiB"));
-        assert!(text.contains("next: fix reticulum"));
+        assert!(text.contains("next: reticulum: Use: Connect To Gateway"));
 
         let ready = overview_operator_summary_text(&OverviewOperatorSummaryText {
             ready: 8,
@@ -2192,7 +2208,7 @@ mod tests {
             upload_quota: "disabled".into(),
         });
         assert!(ready.contains("ready for live testing"));
-        assert!(ready.contains("next: verify Monitoring, then share Portal addresses"));
+        assert!(ready.contains("next: verify Monitoring, then copy invite/portal from Portal"));
     }
 
     #[test]
@@ -2205,14 +2221,15 @@ mod tests {
             motd: "Read the rules",
         });
 
-        assert!(text.contains("Share:"));
-        assert!(text.contains("chat: omenchat:// URI"));
-        assert!(text.contains("portal: NomadNet /page/index.mu URL"));
-        assert!(text.contains("Purpose: MOTD, rules, help, and launch link"));
-        assert!(text.contains("Edit: reticulum/storage/pages/index.mu"));
+        assert!(text.contains("share:"));
+        assert!(text.contains("chat invite: omenchat:// URI"));
+        assert!(text.contains("portal page: NomadNet /page/index.mu URL"));
+        assert!(text.contains("use portal for: MOTD, rules, help, launch links"));
+        assert!(text.contains("edit file: reticulum/storage/pages/index.mu"));
+        assert!(text.contains("served path: /page/index.mu"));
         assert!(text.contains("portal readiness:"));
         assert!(text.contains("destination: omenchat.node abc123"));
-        assert!(text.contains("portal file: /tmp/omenchatd/reticulum/storage/pages/index.mu"));
+        assert!(text.contains("page file: /tmp/omenchatd/reticulum/storage/pages/index.mu"));
         assert!(text.contains("MOTD: Read the rules"));
     }
 
@@ -2228,11 +2245,12 @@ mod tests {
             reticulum_config_path: "/tmp/omenchatd/reticulum/config",
         });
 
-        assert!(text.contains("identity file: /tmp/omenchatd/identity"));
-        assert!(text.contains("backup target: copy the identity file before public testing"));
+        assert!(text.contains("identity:"));
+        assert!(text.contains("file: /tmp/omenchatd/identity"));
+        assert!(text.contains("backup: copy this file before public testing"));
         assert!(text.contains("storage root: /tmp/omenchatd"));
-        assert!(text.contains("data isolation: standalone omenchatd storage"));
-        assert!(text.contains("safety: never overwrite identities"));
+        assert!(text.contains("isolation: standalone omenchatd storage"));
+        assert!(text.contains("safety: never overwrite identity material"));
         assert!(text.contains("identity safety:"));
         assert!(text.contains("destinations:"));
         assert!(text.contains("destination: omenchat.node (def456)"));

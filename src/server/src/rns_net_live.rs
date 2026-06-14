@@ -38,6 +38,29 @@ pub struct RnsNetOmenchatTransport {
     offered_resource_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InterfaceHealth {
+    Connected,
+    NoInterfaces,
+    Disconnected,
+    QueryFailed,
+}
+
+impl InterfaceHealth {
+    pub fn needs_runtime_restart(self) -> bool {
+        matches!(self, Self::Disconnected | Self::QueryFailed)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::NoInterfaces => "no interfaces configured",
+            Self::Disconnected => "all interfaces disconnected",
+            Self::QueryFailed => "interface stats unavailable",
+        }
+    }
+}
+
 impl RnsNetOmenchatTransport {
     pub fn new(node: rns_net::RnsNode) -> Self {
         Self {
@@ -99,6 +122,15 @@ impl RnsNetOmenchatTransport {
                 "interface stats unavailable: unexpected response {other:?}"
             )],
             Err(_) => vec!["interface stats unavailable: query failed".into()],
+        }
+    }
+
+    fn interface_health(&self) -> InterfaceHealth {
+        match self.node.query(rns_net::QueryRequest::InterfaceStats) {
+            Ok(rns_net::QueryResponse::InterfaceStats(stats)) => {
+                interface_health_from_stats(&stats)
+            }
+            Ok(_) | Err(_) => InterfaceHealth::QueryFailed,
         }
     }
 
@@ -303,6 +335,7 @@ pub fn configured_destination_status(config: &ServerConfig) -> ServerResult<Stri
 
 pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
     const LIVE_RUNTIME_RESTART_BACKOFF: Duration = Duration::from_secs(5);
+    const INTERFACE_RECOVERY_SAMPLES: u8 = 3;
     append_server_log(
         &config,
         format!(
@@ -326,6 +359,7 @@ pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
     let mut next_stats = Instant::now() + stats_interval;
     let mut next_interface_stats = Instant::now() + interface_stats_interval;
     let mut last_reported_stats = runtime.live_server.stats().clone();
+    let mut interface_recovery_samples = 0u8;
     println!("omenchatd live server ready");
     println!("identity: {}", hex_lower(&runtime.identity_hash));
     println!(
@@ -428,6 +462,7 @@ pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
                 next_interface_stats = Instant::now() + interface_stats_interval;
                 last_reported_stats = runtime.live_server.stats().clone();
                 last_interface_stats = emit_interface_stats(&config, &runtime, true);
+                interface_recovery_samples = 0;
                 continue;
             }
         }
@@ -467,6 +502,7 @@ pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
                     );
                     last_reported_stats = runtime.live_server.stats().clone();
                     last_interface_stats = emit_interface_stats(&config, &runtime, true);
+                    interface_recovery_samples = 0;
                 }
             }
             next_announce = Instant::now() + announce_interval;
@@ -486,12 +522,57 @@ pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
         }
         if Instant::now() >= next_interface_stats {
             let interface_stats = runtime.live_server.transport().interface_stats_lines();
+            let interface_health = runtime.interface_health();
             if interface_stats != last_interface_stats {
                 for line in &interface_stats {
                     println!("{line}");
                     append_server_log(&config, line);
                 }
                 last_interface_stats = interface_stats;
+            }
+            if interface_health.needs_runtime_restart() {
+                interface_recovery_samples = interface_recovery_samples.saturating_add(1);
+                append_server_log(
+                    &config,
+                    format!(
+                        "interface watchdog sample {}/{}: {}; restarting after repeated failures",
+                        interface_recovery_samples,
+                        INTERFACE_RECOVERY_SAMPLES,
+                        interface_health.label()
+                    ),
+                );
+                if interface_recovery_samples >= INTERFACE_RECOVERY_SAMPLES {
+                    append_server_log(
+                        &config,
+                        format!(
+                            "interface watchdog restarting rns-net runtime after {}s: {}",
+                            LIVE_RUNTIME_RESTART_BACKOFF.as_secs(),
+                            interface_health.label()
+                        ),
+                    );
+                    println!(
+                        "interface watchdog restarting rns-net runtime after {}s: {}",
+                        LIVE_RUNTIME_RESTART_BACKOFF.as_secs(),
+                        interface_health.label()
+                    );
+                    std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
+                    runtime = start_live_server(&config)?;
+                    append_server_log(
+                        &config,
+                        format!(
+                            "live runtime restarted after interface watchdog destination={} hash={}",
+                            runtime.destination_name,
+                            hex_lower(&runtime.destination_hash),
+                        ),
+                    );
+                    next_announce = Instant::now() + announce_interval;
+                    next_stats = Instant::now() + stats_interval;
+                    last_reported_stats = runtime.live_server.stats().clone();
+                    last_interface_stats = emit_interface_stats(&config, &runtime, true);
+                    interface_recovery_samples = 0;
+                }
+            } else {
+                interface_recovery_samples = 0;
             }
             next_interface_stats = Instant::now() + interface_stats_interval;
         }
@@ -529,6 +610,21 @@ impl RnsNetLiveRuntime {
 
     pub fn interface_stats_lines(&self) -> Vec<String> {
         self.live_server.transport().interface_stats_lines()
+    }
+
+    pub fn interface_health(&self) -> InterfaceHealth {
+        self.live_server.transport().interface_health()
+    }
+}
+
+fn interface_health_from_stats(stats: &rns_net::InterfaceStatsResponse) -> InterfaceHealth {
+    if stats.interfaces.is_empty() {
+        return InterfaceHealth::NoInterfaces;
+    }
+    if stats.interfaces.iter().any(|interface| interface.status) {
+        InterfaceHealth::Connected
+    } else {
+        InterfaceHealth::Disconnected
     }
 }
 
@@ -1031,5 +1127,69 @@ mod tests {
     fn live_log_timestamps_are_readable_utc() {
         assert_eq!(unix_to_utc_string(0), "1970-01-01 00:00:00 UTC");
         assert_eq!(unix_to_utc_string(1_700_000_000), "2023-11-14 22:13:20 UTC");
+    }
+
+    #[test]
+    fn interface_health_classifies_stats_for_watchdog() {
+        let empty = rns_net::InterfaceStatsResponse {
+            interfaces: vec![],
+            transport_id: None,
+            transport_enabled: false,
+            transport_uptime: 0.0,
+            total_rxb: 0,
+            total_txb: 0,
+            probe_responder: None,
+            backbone_peer_pool: None,
+        };
+        assert_eq!(
+            interface_health_from_stats(&empty),
+            InterfaceHealth::NoInterfaces
+        );
+
+        let mut disconnected = empty.clone();
+        disconnected.interfaces.push(test_interface_stat(false));
+        assert_eq!(
+            interface_health_from_stats(&disconnected),
+            InterfaceHealth::Disconnected
+        );
+        assert!(interface_health_from_stats(&disconnected).needs_runtime_restart());
+
+        let mut connected = disconnected;
+        connected.interfaces.push(test_interface_stat(true));
+        assert_eq!(
+            interface_health_from_stats(&connected),
+            InterfaceHealth::Connected
+        );
+        assert!(!interface_health_from_stats(&connected).needs_runtime_restart());
+    }
+
+    fn test_interface_stat(status: bool) -> rns_net::SingleInterfaceStat {
+        rns_net::SingleInterfaceStat {
+            id: if status { 2 } else { 1 },
+            name: if status { "up" } else { "down" }.into(),
+            status,
+            mode: 0,
+            rxb: 0,
+            txb: 0,
+            rx_packets: 0,
+            tx_packets: 0,
+            bitrate: None,
+            ifac_size: None,
+            started: 0.0,
+            ia_freq: 0.0,
+            oa_freq: 0.0,
+            ip_freq: 0.0,
+            op_freq: 0.0,
+            op_samples: 0,
+            burst_active: false,
+            burst_activated: 0.0,
+            pr_burst_active: false,
+            pr_burst_activated: 0.0,
+            clients: None,
+            announce_rate_target: None,
+            announce_rate_grace: 0,
+            announce_rate_penalty: 0.0,
+            interface_type: "TCPClientInterface".into(),
+        }
     }
 }
