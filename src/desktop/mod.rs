@@ -12,8 +12,8 @@ use iced::widget::scrollable::{
 };
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    button, column, container, image, pane_grid, row, scrollable, text, text_editor, text_input,
-    tooltip, Button, Scrollable, Text,
+    button, column, container, image, opaque, pane_grid, row, scrollable, stack, text, text_editor,
+    text_input, tooltip, Button, Scrollable, Text,
 };
 use iced::{
     event, keyboard, time, window, Background, Border, Color, ContentFit, Element, Font, Length,
@@ -6287,12 +6287,7 @@ impl DesktopApp {
             .padding(DESKTOP_PANEL_PADDING)
             .width(Length::Fill)
             .height(Length::Fill);
-        let status_content = if let Some(prompt) = &self.external_link_prompt {
-            self.external_link_prompt_view(prompt)
-        } else {
-            status.into()
-        };
-        let status_strip = container(status_content)
+        let status_strip = container(status)
             .style(status_container_style)
             .padding(8)
             .width(Length::Fill)
@@ -6315,7 +6310,22 @@ impl DesktopApp {
         .height(Length::Fill)
         .into();
 
-        shell
+        if let Some(prompt) = &self.external_link_prompt {
+            let overlay: Element<'_, Message> =
+                container(opaque(self.external_link_prompt_view(prompt)))
+                    .padding(Padding {
+                        right: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
+                        bottom: f32::from(ui_size(60)),
+                        left: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
+                        ..Padding::default()
+                    })
+                    .align_right(Length::Fill)
+                    .align_bottom(Length::Fill)
+                    .into();
+            stack([shell, overlay]).into()
+        } else {
+            shell
+        }
     }
 
     fn footer_lxmf_unread_counts(&self) -> (u32, u32) {
@@ -6363,62 +6373,71 @@ impl DesktopApp {
     }
 
     fn external_link_prompt_view(&self, prompt: &ExternalLinkPrompt) -> Element<'_, Message> {
-        let browsers = self.external_browsers.iter().enumerate().fold(
-            row![].spacing(8),
-            |row, (index, browser)| {
-                let label = if Some(browser.command.as_str())
-                    == self
-                        .app
-                        .settings
-                        .clearweb
-                        .preferred_external_browser_command
-                        .as_deref()
-                {
-                    format!("{} *", browser.label)
-                } else {
-                    browser.label.clone()
-                };
-                let width = external_prompt_button_width(&label);
-                row.push(
-                    external_prompt_subtle_button(label, Message::OpenExternalLinkWith(index))
-                        .width(Length::Fixed(width)),
-                )
-            },
+        let actions = self
+            .external_browsers
+            .iter()
+            .enumerate()
+            .fold(
+                row![].spacing(8).align_y(iced::Alignment::Center),
+                |row, (index, browser)| {
+                    let label = if Some(browser.command.as_str())
+                        == self
+                            .app
+                            .settings
+                            .clearweb
+                            .preferred_external_browser_command
+                            .as_deref()
+                    {
+                        format!("{} *", browser.label)
+                    } else {
+                        browser.label.clone()
+                    };
+                    let width = external_prompt_button_width(&label);
+                    row.push(
+                        external_prompt_subtle_button(label, Message::OpenExternalLinkWith(index))
+                            .width(Length::Fixed(width)),
+                    )
+                },
+            )
+            .push(
+                external_prompt_omen_button("Copy URL", Message::CopyExternalLinkUrl)
+                    .width(Length::Fixed(90.0)),
+            )
+            .push(
+                external_prompt_subtle_button("X", Message::DismissExternalLinkPrompt)
+                    .width(Length::Fixed(38.0)),
+            )
+            .wrap();
+        let proxy_status = external_prompt_proxy_status(
+            self.app.settings.clearweb.socks_proxy_enabled,
+            self.clearweb_proxy_endpoint.as_ref(),
         );
-        let proxy_status = if self.app.settings.clearweb.socks_proxy_enabled {
-            if let Some((host, port)) = &self.clearweb_proxy_endpoint {
-                format!("SOCKS5 {host}:{port}")
-            } else {
-                "SOCKS5 not detected".into()
-            }
-        } else {
-            "SOCKS5 off".into()
-        };
         let url = container(
             text(prompt.url.clone())
                 .size(ui_size(12))
-                .wrapping(Wrapping::None)
+                .wrapping(Wrapping::WordOrGlyph)
                 .width(Length::Fill),
         )
         .width(Length::Fill)
         .clip(true);
-
         container(
-            row![
-                text("External URL").size(ui_size(13)),
-                text(proxy_status).size(ui_size(12)),
-                browsers,
-                external_prompt_omen_button("Copy URL", Message::CopyExternalLinkUrl)
-                    .width(Length::Fixed(90.0)),
-                external_prompt_subtle_button("X", Message::DismissExternalLinkPrompt)
-                    .width(Length::Fixed(38.0)),
+            column![
+                row![
+                    text("Open external URL").size(ui_size(14)),
+                    text(proxy_status).size(ui_size(12)).width(Length::Fill),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                actions,
                 url,
             ]
             .spacing(8)
-            .align_y(iced::Alignment::Center)
             .width(Length::Fill),
         )
+        .style(status_container_style)
+        .padding(10)
         .width(Length::Fill)
+        .max_width(860.0)
         .into()
     }
 
@@ -10790,6 +10809,20 @@ fn external_prompt_button_label(label: impl Into<String>) -> Element<'static, Me
 
 fn external_prompt_button_height() -> f32 {
     f32::from(ui_size(26)).max(26.0)
+}
+
+fn external_prompt_proxy_status(
+    socks_proxy_enabled: bool,
+    proxy_endpoint: Option<&(String, u16)>,
+) -> String {
+    if !socks_proxy_enabled {
+        return "SOCKS5 off".into();
+    }
+    if let Some((host, port)) = proxy_endpoint {
+        format!("SOCKS5 {host}:{port}")
+    } else {
+        "SOCKS5 not detected".into()
+    }
 }
 
 fn external_prompt_button_width(label: &str) -> f32 {
