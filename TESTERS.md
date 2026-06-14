@@ -241,12 +241,16 @@ Useful notes to include with a report:
 - whether Monitoring showed browser/path, LXMF, OMENchat, or upload activity;
 - whether the same destination works in another NomadNet client.
 
+## Tested Alpha Paths
+
+Current tested paths include NomadNet browsing, multiple tiled panes, direct
+LXMF conversations with attachments, OMENchat reconnect/restart recovery, room
+history sync, inline images/GIFs, 512 KiB per-file upload rejection, and the
+external browser prompt for HTTP/HTTPS links.
+
 ## Known Alpha Gaps
 
 - Native LXMF ticket/stamp sending is not finished.
-- OMENchat rich media/uploads are usable for alpha testing: inline images,
-  animated GIFs, Tor/SOCKS clearweb fetches, a 512 KiB per-file upload cap, and
-  rotating server quota exist. Sizing/progress polish may still change.
 - `.deb` and AppImage release artifacts are available. The compatible `.deb`
   has been tested on Linux Mint 21.3; broader Debian/Ubuntu derivative testing
   is still useful.

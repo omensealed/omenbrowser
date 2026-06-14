@@ -370,14 +370,17 @@ OMENchat server setup, two-client OMENchat testing, and issue report bundles.
 Use [docs/QUICKSTART.md](docs/QUICKSTART.md) for the shortest build/run path
 and [docs/OMENCHAT.md](docs/OMENCHAT.md) for chat server/client setup.
 
+## Tested Alpha Paths
+
+Current tested paths include NomadNet browsing, multiple tiled panes, LXMF
+conversations with attachments, OMENchat reconnect/restart recovery, room
+history sync, inline image/GIF previews, upload rejection over the configured
+per-file cap, and the external browser prompt for HTTP/HTTPS links.
+
 ## Known Alpha Gaps
 
 - Native LXMF ticket/stamp sending is not finished.
-- OMENchat rich media/uploads are usable for alpha testing, including inline
-  images/GIFs, Tor/SOCKS-gated clearweb image fetches, a 512 KiB per-file cap,
-  and server-side rotating quota. Expect UI/progress polish to continue.
-- `.deb` and AppImage packaging helpers exist. The compatible `.deb` has been
-  tested on Linux Mint 21.3; broader Debian/Ubuntu derivative testing is still
-  useful.
+- The compatible `.deb` has been tested on Linux Mint 21.3; broader
+  Debian/Ubuntu derivative testing is still useful.
 - Some Reticulum behavior depends on what the Rust RNS/LXMF crates currently
   expose.
