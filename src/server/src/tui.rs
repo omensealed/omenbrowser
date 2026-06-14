@@ -3437,7 +3437,7 @@ fn log_panel_text(path: &std::path::Path, max_lines: usize) -> String {
         tail
     };
     format!(
-        "Logs: runtime/network events, announces, traffic, link closes, protocol errors\nfile: {}\nadmin changes: Audit tab\n\n{body}",
+        "Logs: runtime and network detail\nfile: {}\nnormal: startup/manual/automatic announces, ping/pong, duplicate identity reconnects\nwatch: repeated timeouts, protocol errors, interface watchdog restarts, announce failures\nadmin changes: Audit tab\n\n{body}",
         path.display()
     )
 }
@@ -5888,8 +5888,11 @@ mod tests {
         std::fs::remove_file(config.log_path()).expect("remove log");
 
         let empty = log_panel_text(&config.log_path(), 25);
-        assert!(empty.contains("Logs: runtime/network events"));
+        assert!(empty.contains("Logs: runtime and network detail"));
         assert!(empty.contains("file:"));
+        assert!(empty.contains("normal: startup/manual/automatic announces"));
+        assert!(empty.contains("watch: repeated timeouts"));
+        assert!(empty.contains("interface watchdog restarts"));
         assert!(empty.contains("admin changes: Audit tab"));
         assert!(empty.contains("No log entries yet"));
         assert!(config.log_path().is_file());
