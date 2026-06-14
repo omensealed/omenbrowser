@@ -6380,7 +6380,7 @@ impl DesktopApp {
                 };
                 let width = external_prompt_button_width(&label);
                 row.push(
-                    subtle_button_owned(label, Message::OpenExternalLinkWith(index))
+                    external_prompt_subtle_button(label, Message::OpenExternalLinkWith(index))
                         .width(Length::Fixed(width)),
                 )
             },
@@ -6408,8 +6408,10 @@ impl DesktopApp {
                 text("External URL").size(ui_size(13)),
                 text(proxy_status).size(ui_size(12)),
                 browsers,
-                omen_button("Copy URL", Message::CopyExternalLinkUrl).width(Length::Fixed(90.0)),
-                subtle_button("X", Message::DismissExternalLinkPrompt).width(Length::Fixed(38.0)),
+                external_prompt_omen_button("Copy URL", Message::CopyExternalLinkUrl)
+                    .width(Length::Fixed(90.0)),
+                external_prompt_subtle_button("X", Message::DismissExternalLinkPrompt)
+                    .width(Length::Fixed(38.0)),
                 url,
             ]
             .spacing(8)
@@ -10750,6 +10752,44 @@ fn subtle_button_owned(label: String, message: Message) -> Button<'static, Messa
     button(text(label))
         .on_press(message)
         .style(subtle_button_style)
+}
+
+fn external_prompt_subtle_button(
+    label: impl Into<String>,
+    message: Message,
+) -> Button<'static, Message> {
+    button(external_prompt_button_label(label))
+        .on_press(message)
+        .padding(0)
+        .height(Length::Fixed(external_prompt_button_height()))
+        .style(subtle_button_style)
+}
+
+fn external_prompt_omen_button(
+    label: impl Into<String>,
+    message: Message,
+) -> Button<'static, Message> {
+    button(external_prompt_button_label(label))
+        .on_press(message)
+        .padding(0)
+        .height(Length::Fixed(external_prompt_button_height()))
+        .style(omen_button_style)
+}
+
+fn external_prompt_button_label(label: impl Into<String>) -> Element<'static, Message> {
+    container(
+        text(label.into())
+            .size(ui_size(12))
+            .wrapping(Wrapping::None),
+    )
+    .center_x(Length::Fill)
+    .center_y(Length::Fixed(external_prompt_button_height()))
+    .clip(true)
+    .into()
+}
+
+fn external_prompt_button_height() -> f32 {
+    f32::from(ui_size(26)).max(26.0)
 }
 
 fn external_prompt_button_width(label: &str) -> f32 {
