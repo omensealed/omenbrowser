@@ -336,6 +336,7 @@ struct AdminTui {
     next_live_stats: Instant,
     #[cfg(feature = "live-rns-net")]
     live_status: String,
+    last_announce_event: String,
 }
 
 #[cfg(feature = "live-rns-net")]
@@ -376,6 +377,7 @@ impl AdminTui {
             next_live_stats: Instant::now(),
             #[cfg(feature = "live-rns-net")]
             live_status: "live server not started".into(),
+            last_announce_event: "none yet".into(),
         }
     }
 
@@ -432,6 +434,7 @@ impl AdminTui {
                     + Duration::from_secs(self.config.announce_interval_minutes.max(1) * 60);
                 self.next_live_stats = Instant::now() + Duration::from_secs(5);
                 self.live_status = format!("live server running destination={destination}");
+                self.last_announce_event = announce_event_text("startup", &destination);
                 self.status = format!(
                     "live server started: omenchat://{destination}; verify Monitoring before sharing"
                 );
@@ -478,6 +481,7 @@ impl AdminTui {
                     + Duration::from_secs(self.config.announce_interval_minutes.max(1) * 60);
                 self.live_status =
                     format!("live server running destination={destination} | announce sent");
+                self.last_announce_event = announce_event_text("manual", &destination);
                 self.status = format!("announce sent now: omenchat://{destination}");
             }
             Err(error) => {
@@ -532,6 +536,8 @@ impl AdminTui {
                         self.next_live_stats = Instant::now() + Duration::from_secs(5);
                         self.live_status =
                             format!("live runtime restarted destination={destination}");
+                        self.last_announce_event =
+                            announce_event_text("startup after runtime restart", &destination);
                         self.status = format!(
                             "live runtime restarted: omenchat://{destination}; verify Monitoring"
                         );
@@ -549,11 +555,13 @@ impl AdminTui {
         if now >= self.next_live_announce {
             match live.runtime.announce() {
                 Ok(()) => {
+                    let destination = hex_lower_local(&live.runtime.destination_hash);
                     self.status = "live destination announced".into();
                     self.live_status = format!(
                         "live server running destination={} | announce sent",
-                        hex_lower_local(&live.runtime.destination_hash)
+                        destination
                     );
+                    self.last_announce_event = announce_event_text("automatic", &destination);
                 }
                 Err(error) => {
                     self.live_status = format!(
@@ -575,6 +583,8 @@ impl AdminTui {
                             self.live_status = format!(
                                 "live runtime restarted after announce failure destination={destination}"
                             );
+                            self.last_announce_event =
+                                announce_event_text("startup after announce recovery", &destination);
                             self.status = self.live_status.clone();
                         }
                         Err(restart_error) => {
@@ -638,6 +648,8 @@ impl AdminTui {
                             self.live_status = format!(
                                 "live runtime restarted after interface watchdog destination={destination}"
                             );
+                            self.last_announce_event =
+                                announce_event_text("startup after interface watchdog", &destination);
                             self.status = self.live_status.clone();
                         }
                         Err(restart_error) => {
@@ -727,7 +739,8 @@ impl AdminTui {
         {
             let Some(_) = self.live.as_ref() else {
                 return format!(
-                    "announce: stopped | interval {interval}m | start live before Announce Now"
+                    "announce: stopped | interval {interval}m | last: {} | start live before Announce Now",
+                    self.last_announce_event
                 );
             };
             let remaining = self
@@ -736,13 +749,17 @@ impl AdminTui {
                 .as_secs()
                 .min(i64::MAX as u64) as i64;
             return format!(
-                "announce: next automatic in {} | interval {interval}m | Announce Now is immediate",
-                human_age_duration(remaining)
+                "announce: next automatic in {} | interval {interval}m | last: {} | Announce Now is immediate",
+                human_age_duration(remaining),
+                self.last_announce_event
             );
         }
         #[cfg(not(feature = "live-rns-net"))]
         {
-            format!("announce: unavailable without live-rns-net | interval {interval}m")
+            format!(
+                "announce: unavailable without live-rns-net | interval {interval}m | last: {}",
+                self.last_announce_event
+            )
         }
     }
 
@@ -3013,6 +3030,14 @@ fn stateful_action_label(action: AdminAction, label: &str, live_running: bool) -
     }
 }
 
+#[cfg(feature = "live-rns-net")]
+fn announce_event_text(kind: &str, destination: &str) -> String {
+    format!(
+        "{kind} announce at {} for omenchat://{destination}",
+        unix_to_utc_string(current_unix_secs())
+    )
+}
+
 fn title_case_role(role: &str) -> &'static str {
     match role {
         "standard" => "Standard",
@@ -4434,6 +4459,7 @@ mod tests {
 
         assert!(text.contains("announce:"));
         assert!(text.contains("interval 42m"));
+        assert!(text.contains("last: none yet"));
         #[cfg(feature = "live-rns-net")]
         assert!(text.contains("start live before Announce Now"));
         #[cfg(not(feature = "live-rns-net"))]
