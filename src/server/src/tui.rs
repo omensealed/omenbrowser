@@ -721,11 +721,40 @@ impl AdminTui {
         string_actions_for_live_state(actions, self.live_is_running())
     }
 
+    fn announce_schedule_text(&self) -> String {
+        let interval = self.config.announce_interval_minutes.max(1);
+        #[cfg(feature = "live-rns-net")]
+        {
+            let Some(_) = self.live.as_ref() else {
+                return format!(
+                    "announce: stopped | interval {interval}m | start live before Announce Now"
+                );
+            };
+            let remaining = self
+                .next_live_announce
+                .saturating_duration_since(Instant::now())
+                .as_secs()
+                .min(i64::MAX as u64) as i64;
+            return format!(
+                "announce: next automatic in {} | interval {interval}m | Announce Now is immediate",
+                human_age_duration(remaining)
+            );
+        }
+        #[cfg(not(feature = "live-rns-net"))]
+        {
+            format!("announce: unavailable without live-rns-net | interval {interval}m")
+        }
+    }
+
     fn monitoring_counter_text(&self) -> String {
         #[cfg(feature = "live-rns-net")]
         {
             let Some(live) = self.live.as_ref() else {
-                return monitoring_operator_summary_text(None, &[], "waiting for next sample", &[]);
+                return [
+                    monitoring_operator_summary_text(None, &[], "waiting for next sample", &[]),
+                    self.announce_schedule_text(),
+                ]
+                .join("\n");
             };
             let stats = live.runtime.live_server.stats();
             let closed_links = live.runtime.live_server.recent_closed_link_summaries();
@@ -740,6 +769,7 @@ impl AdminTui {
                     &live.recent_stats,
                     &close_reasons,
                 ),
+                self.announce_schedule_text(),
                 String::new(),
                 format!(
                     "destination: {}",
@@ -844,8 +874,11 @@ impl AdminTui {
         }
         #[cfg(not(feature = "live-rns-net"))]
         {
-            "operator summary:\n  live monitoring unavailable; rebuild omenchatd with --features live-rns-net"
-                .into()
+            [
+                "operator summary:\n  live monitoring unavailable; rebuild omenchatd with --features live-rns-net".to_string(),
+                self.announce_schedule_text(),
+            ]
+            .join("\n")
         }
     }
 
@@ -4388,6 +4421,24 @@ mod tests {
         assert_eq!(running[1], "Announce Now");
         assert_eq!(running[2], "Stop Live");
         assert_eq!(running[3], "Monitoring");
+    }
+
+    #[test]
+    fn monitoring_text_reports_announce_schedule() {
+        let root = temp_root("monitoring-announce-schedule");
+        let mut config = ServerConfig::for_root(root.clone());
+        config.announce_interval_minutes = 42;
+        let app = AdminTui::new(config);
+
+        let text = app.monitoring_counter_text();
+
+        assert!(text.contains("announce:"));
+        assert!(text.contains("interval 42m"));
+        #[cfg(feature = "live-rns-net")]
+        assert!(text.contains("start live before Announce Now"));
+        #[cfg(not(feature = "live-rns-net"))]
+        assert!(text.contains("unavailable without live-rns-net"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
