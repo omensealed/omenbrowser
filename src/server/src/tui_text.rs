@@ -1301,7 +1301,7 @@ fn overview_live_label(live_line: &str) -> &str {
 
 pub(crate) fn portal_panel_text(portal: &PortalPanelText<'_>) -> String {
     format!(
-        "share:\n  chat invite: omenchat:// URI\n  portal page: NomadNet /page/index.mu URL\n\nuse portal for: MOTD, rules, help, launch links\nchat traffic: stays on OMENchat\nedit file: reticulum/storage/pages/index.mu\nserved path: /page/index.mu\n\n{checklist}\n\naddresses:\n{destination}\npage file: {page_state}\nMOTD: {motd}",
+        "share:\n  chat: omenchat:// URI\n  portal: NomadNet /page/index.mu URL\n\nportal use: MOTD, rules, help, launch links\nchat traffic stays on OMENchat\n\n{checklist}\n\naddresses:\n{destination}\npage:\n  served: /page/index.mu\n  edit: reticulum/storage/pages/index.mu\n  file: {page_state}\nMOTD: {motd}",
         checklist = portal.checklist,
         destination = portal.destination,
         page_state = portal.page_state,
@@ -2298,14 +2298,15 @@ mod tests {
         });
 
         assert!(text.contains("share:"));
-        assert!(text.contains("chat invite: omenchat:// URI"));
-        assert!(text.contains("portal page: NomadNet /page/index.mu URL"));
-        assert!(text.contains("use portal for: MOTD, rules, help, launch links"));
-        assert!(text.contains("edit file: reticulum/storage/pages/index.mu"));
-        assert!(text.contains("served path: /page/index.mu"));
+        assert!(text.contains("chat: omenchat:// URI"));
+        assert!(text.contains("portal: NomadNet /page/index.mu URL"));
+        assert!(text.contains("portal use: MOTD, rules, help, launch links"));
+        assert!(text.contains("chat traffic stays on OMENchat"));
+        assert!(text.contains("served: /page/index.mu"));
+        assert!(text.contains("edit: reticulum/storage/pages/index.mu"));
         assert!(text.contains("portal readiness:"));
         assert!(text.contains("destination: omenchat.node abc123"));
-        assert!(text.contains("page file: /tmp/omenchatd/reticulum/storage/pages/index.mu"));
+        assert!(text.contains("file: /tmp/omenchatd/reticulum/storage/pages/index.mu"));
         assert!(text.contains("MOTD: Read the rules"));
     }
 

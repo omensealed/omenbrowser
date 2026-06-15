@@ -5836,16 +5836,17 @@ mod tests {
         let text = portal_panel_text(&config);
 
         assert!(text.contains("share:"));
-        assert!(text.contains("chat invite: omenchat:// URI"));
-        assert!(text.contains("portal page: NomadNet /page/index.mu URL"));
-        assert!(text.contains("use portal for: MOTD, rules, help, launch links"));
+        assert!(text.contains("chat: omenchat:// URI"));
+        assert!(text.contains("portal: NomadNet /page/index.mu URL"));
+        assert!(text.contains("portal use: MOTD, rules, help, launch links"));
+        assert!(text.contains("chat traffic stays on OMENchat"));
         assert!(text.contains("portal readiness:"));
         assert!(text.contains("page: portal page exists; edit it directly for rules/help"));
         assert!(text.contains("motd: MOTD is set"));
         assert!(text.contains("publish: verify Monitoring before sharing either address"));
-        assert!(text.contains("edit file: reticulum/storage/pages/index.mu"));
-        assert!(text.contains("served path: /page/index.mu"));
-        assert!(text.contains("page file:"));
+        assert!(text.contains("edit: reticulum/storage/pages/index.mu"));
+        assert!(text.contains("served: /page/index.mu"));
+        assert!(text.contains("file:"));
         assert!(text.contains("MOTD: Read the rules"));
         let _ = std::fs::remove_dir_all(root);
     }
