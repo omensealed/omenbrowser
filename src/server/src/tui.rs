@@ -2815,9 +2815,9 @@ fn setup_action_specs() -> [(AdminAction, &'static str); 19] {
         (AdminAction::AnnounceNow, "Announce Now"),
         (
             AdminAction::SelectTab(AdminTab::Monitoring),
-            "Open Monitoring",
+            "View Monitoring",
         ),
-        (AdminAction::SelectTab(AdminTab::Portal), "Portal Addresses"),
+        (AdminAction::SelectTab(AdminTab::Portal), "Portal / Invite"),
         (AdminAction::EditServerName, "Server Name"),
         (AdminAction::EditOperator, "Operator Label"),
         (AdminAction::EditMotd, "MOTD"),
@@ -2841,15 +2841,18 @@ fn overview_action_specs() -> [(AdminAction, &'static str); 13] {
     [
         (AdminAction::StartLive, "Start Live"),
         (AdminAction::AnnounceNow, "Announce Now"),
-        (AdminAction::SelectTab(AdminTab::Monitoring), "Monitoring"),
+        (
+            AdminAction::SelectTab(AdminTab::Monitoring),
+            "View Monitoring",
+        ),
         (AdminAction::EditTcpClient, "Connect Gateway"),
-        (AdminAction::SelectTab(AdminTab::Portal), "Copy Addresses"),
+        (AdminAction::SelectTab(AdminTab::Portal), "Portal / Invite"),
         (AdminAction::EditMotd, "Edit MOTD"),
         (AdminAction::SelectTab(AdminTab::Rooms), "Rooms"),
         (AdminAction::SelectTab(AdminTab::Moderation), "Moderation"),
         (AdminAction::EditServerName, "Server Name"),
         (AdminAction::EditOperator, "Operator Label"),
-        (AdminAction::SelectTab(AdminTab::Setup), "Setup + Limits"),
+        (AdminAction::SelectTab(AdminTab::Setup), "Setup & Limits"),
         (AdminAction::SaveConfig, "Save Config"),
         (AdminAction::StopLive, "Stop Live"),
     ]
@@ -4396,11 +4399,11 @@ mod tests {
         assert_eq!(labels[1], "Local Listener");
         assert_eq!(labels[2], "Start Live");
         assert_eq!(labels[3], "Announce Now");
-        assert_eq!(labels[4], "Open Monitoring");
+        assert_eq!(labels[4], "View Monitoring");
         assert!(labels.contains(&"Total Upload Quota"));
         assert!(labels.contains(&"Max File Size"));
         assert!(labels.contains(&"Ping Interval"));
-        assert!(labels.contains(&"Portal Addresses"));
+        assert!(labels.contains(&"Portal / Invite"));
         assert!(action_kinds.contains(&AdminAction::AnnounceNow));
         assert!(action_kinds.contains(&AdminAction::EditUploadQuotaBytes));
         assert!(action_kinds.contains(&AdminAction::EditUploadMaxFileBytes));
@@ -4421,10 +4424,10 @@ mod tests {
 
         assert_eq!(labels[0], "Start Live");
         assert_eq!(labels[1], "Announce Now");
-        assert_eq!(labels[2], "Monitoring");
+        assert_eq!(labels[2], "View Monitoring");
         assert!(labels.contains(&"Connect Gateway"));
-        assert!(labels.contains(&"Copy Addresses"));
-        assert!(labels.contains(&"Setup + Limits"));
+        assert!(labels.contains(&"Portal / Invite"));
+        assert!(labels.contains(&"Setup & Limits"));
         assert!(labels.contains(&"Stop Live"));
         assert!(action_kinds.contains(&AdminAction::SelectTab(AdminTab::Rooms)));
         assert!(action_kinds.contains(&AdminAction::SelectTab(AdminTab::Moderation)));
