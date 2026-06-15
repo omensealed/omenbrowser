@@ -5765,13 +5765,13 @@ mod tests {
         assert!(text.contains("identity:"));
         assert!(text.contains("file:"));
         assert!(text.contains("identity safety:"));
-        assert!(text.contains("backup: copy this file before public testing"));
+        assert!(text.contains("backup before public testing"));
+        assert!(text.contains("never overwrite active identity material"));
         assert!(text.contains(&format!(
             "backup now: copy {} to offline/private storage",
             config.identity_path.display()
         )));
-        assert!(text.contains("isolation: standalone omenchatd storage"));
-        assert!(text.contains("safety: never overwrite identity material"));
+        assert!(text.contains("isolation: omenchatd owns this home"));
         assert!(text.contains("identity exists; back it up before public testing"));
         assert!(
             text.contains("losing this file changes the OMENchat and NomadNet portal addresses")

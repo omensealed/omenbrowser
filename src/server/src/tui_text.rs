@@ -1311,7 +1311,7 @@ pub(crate) fn portal_panel_text(portal: &PortalPanelText<'_>) -> String {
 
 pub(crate) fn identity_panel_text(identity: &IdentityPanelText<'_>) -> String {
     format!(
-        "identity:\n  file: {identity_file}\n  backup: copy this file before public testing\n  storage root: {storage_root}\n  isolation: standalone omenchatd storage\n  safety: never overwrite identity material\n\n{checklist}\n\ndestinations:\n{destinations}\n\npaths:\n  identity: {identity_file}\n  database: {database_path}\n  reticulum: {reticulum_path}\n  reticulum config: {reticulum_config_path}\n\nstorage rule: omenchatd owns this root and does not use ~/.reticulum, ~/.nomadnetwork, or ~/.lxmd unless configured explicitly.",
+        "identity:\n  file: {identity_file}\n  home: {storage_root}\n  rule: backup before public testing; never overwrite active identity material\n\n{checklist}\n\ndestinations:\n{destinations}\n\npaths:\n  database: {database_path}\n  reticulum storage: {reticulum_path}\n  reticulum config: {reticulum_config_path}\n\nisolation: omenchatd owns this home and does not use ~/.reticulum, ~/.nomadnetwork, or ~/.lxmd unless configured explicitly.",
         identity_file = identity.identity_file,
         storage_root = identity.storage_root,
         checklist = identity.checklist,
@@ -2324,15 +2324,15 @@ mod tests {
 
         assert!(text.contains("identity:"));
         assert!(text.contains("file: /tmp/omenchatd/identity"));
-        assert!(text.contains("backup: copy this file before public testing"));
-        assert!(text.contains("storage root: /tmp/omenchatd"));
-        assert!(text.contains("isolation: standalone omenchatd storage"));
-        assert!(text.contains("safety: never overwrite identity material"));
+        assert!(text.contains("home: /tmp/omenchatd"));
+        assert!(text.contains("backup before public testing"));
+        assert!(text.contains("never overwrite active identity material"));
         assert!(text.contains("identity safety:"));
         assert!(text.contains("destinations:"));
         assert!(text.contains("destination: omenchat.node (def456)"));
         assert!(text.contains("database: /tmp/omenchatd/omenchat.sqlite"));
         assert!(text.contains("reticulum config: /tmp/omenchatd/reticulum/config"));
+        assert!(text.contains("isolation: omenchatd owns this home"));
         assert!(text.contains("does not use ~/.reticulum"));
     }
 }
