@@ -4372,13 +4372,13 @@ mod tests {
 
         let text = setup_addresses_text(&config);
 
-        assert!(text.contains("Share after Monitoring shows connected:"));
-        assert!(text.contains("OMENchat invite: client uri"));
-        assert!(text.contains("MOTD/rules page: portal url"));
+        assert!(text.contains("Share only after Monitoring shows a connected interface:"));
+        assert!(text.contains("Chat invite: omenchat:// URI"));
+        assert!(text.contains("Portal page: NomadNet /page/index.mu URL"));
         assert!(text.contains("destination:"));
-        assert!(text.contains("portal page file:"));
+        assert!(text.contains("Portal file:"));
         assert!(text.contains("reticulum/storage/pages/index.mu"));
-        assert!(text.contains("chat URI format: omenchat://<destination_hash>"));
+        assert!(text.contains("Invite format: omenchat://<destination_hash>"));
         let _ = std::fs::remove_dir_all(root);
     }
 

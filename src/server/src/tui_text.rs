@@ -1180,17 +1180,14 @@ pub(crate) fn setup_launch_status_text(launch: &SetupLaunchText<'_>) -> String {
 
 pub(crate) fn setup_addresses_text(addresses: &SetupAddressesText<'_>) -> String {
     let mut text = String::from(
-        "Share after Monitoring shows connected:\n  OMENchat invite: client uri\n  MOTD/rules page: portal url\n\n",
+        "Share only after Monitoring shows a connected interface:\n  Chat invite: omenchat:// URI\n  Portal page: NomadNet /page/index.mu URL\n\n",
     );
     text.push_str(addresses.public_addresses);
     if !text.ends_with('\n') {
         text.push('\n');
     }
-    text.push_str(&format!(
-        "portal page file: {}\n",
-        addresses.portal_page_file
-    ));
-    text.push_str("chat URI format: omenchat://<destination_hash>");
+    text.push_str(&format!("Portal file: {}\n", addresses.portal_page_file));
+    text.push_str("Invite format: omenchat://<destination_hash>");
     text
 }
 
@@ -2150,13 +2147,13 @@ mod tests {
             portal_page_file: "/tmp/omenchatd/reticulum/storage/pages/index.mu",
         });
 
-        assert!(text.contains("Share after Monitoring shows connected:"));
-        assert!(text.contains("OMENchat invite: client uri"));
-        assert!(text.contains("MOTD/rules page: portal url"));
+        assert!(text.contains("Share only after Monitoring shows a connected interface:"));
+        assert!(text.contains("Chat invite: omenchat:// URI"));
+        assert!(text.contains("Portal page: NomadNet /page/index.mu URL"));
         assert!(text.contains("destination: omenchat.node (abc123)"));
         assert!(text.contains("client uri: omenchat://abc123"));
-        assert!(text.contains("portal page file: /tmp/omenchatd/reticulum/storage/pages/index.mu"));
-        assert!(text.contains("chat URI format: omenchat://<destination_hash>"));
+        assert!(text.contains("Portal file: /tmp/omenchatd/reticulum/storage/pages/index.mu"));
+        assert!(text.contains("Invite format: omenchat://<destination_hash>"));
     }
 
     #[test]
@@ -2166,7 +2163,7 @@ mod tests {
             portal_page_file: "/tmp/index.mu",
         });
 
-        assert!(text.contains("destination: unavailable\nportal page file: /tmp/index.mu"));
+        assert!(text.contains("destination: unavailable\nPortal file: /tmp/index.mu"));
     }
 
     #[test]
