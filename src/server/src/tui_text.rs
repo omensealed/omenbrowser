@@ -1277,7 +1277,7 @@ pub(crate) fn overview_operator_summary_text(summary: &OverviewOperatorSummaryTe
     [
         "overview:".to_string(),
         format!("  launch: {launch}"),
-        format!("  live: {}", summary.live_line),
+        format!("  live: {}", overview_live_label(summary.live_line)),
         format!("  network: {}", summary.interface_summary),
         format!("  rooms: {} active", summary.room_count),
         format!(
@@ -1288,6 +1288,15 @@ pub(crate) fn overview_operator_summary_text(summary: &OverviewOperatorSummaryTe
         format!("  next: {next}"),
     ]
     .join("\n")
+}
+
+fn overview_live_label(live_line: &str) -> &str {
+    live_line
+        .trim()
+        .strip_prefix("runtime:")
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .unwrap_or_else(|| live_line.trim())
 }
 
 pub(crate) fn portal_panel_text(portal: &PortalPanelText<'_>) -> String {
@@ -1857,10 +1866,7 @@ mod tests {
     #[cfg(any(test, feature = "live-rns-net"))]
     #[test]
     fn closed_link_churn_summary_groups_operator_reasons() {
-        assert_eq!(
-            closed_link_churn_summary(&[]),
-            "recent close summary: none"
-        );
+        assert_eq!(closed_link_churn_summary(&[]), "recent close summary: none");
 
         let summary = closed_link_churn_summary(&[
             "duplicate identity link replaced",
@@ -2259,7 +2265,8 @@ mod tests {
 
         assert!(text.contains("overview:"));
         assert!(text.contains("launch: needs setup (5/8 ready)"));
-        assert!(text.contains("live: runtime: live server running"));
+        assert!(text.contains("live: live server running"));
+        assert!(!text.contains("live: runtime:"));
         assert!(text.contains("network: TCP gateway client"));
         assert!(text.contains("rooms: 2 active"));
         assert!(text.contains("uploads: max 512.0 KiB, quota 50.0 MiB"));
@@ -2276,6 +2283,7 @@ mod tests {
             upload_quota: "disabled".into(),
         });
         assert!(ready.contains("ready for live testing"));
+        assert!(ready.contains("live: stopped"));
         assert!(ready.contains("next: verify Monitoring, then copy invite/portal from Portal"));
     }
 

@@ -37,6 +37,8 @@ use crate::tui_layout::{
     tab_panel_height,
 };
 #[cfg(feature = "live-rns-net")]
+use crate::tui_text::closed_link_churn_summary;
+#[cfg(feature = "live-rns-net")]
 use crate::tui_text::traffic_delta_text;
 #[cfg(feature = "live-rns-net")]
 use crate::tui_text::{
@@ -48,9 +50,10 @@ use crate::tui_text::{
     admin_help_text, announce_interval_update_text, audit_summary_text, command_help_text,
     command_rate_update_text, history_batch_size_update_text,
     identity_panel_text as format_identity_panel_text, interface_operator_summary_text,
-    join_backlog_events_update_text, large_batch_threshold_update_text, max_message_bytes_update_text,
-    message_rate_update_text, moderation_action_guide_text, moderation_selected_user_text,
-    moderation_user_list_label, motd_update_text, operator_label_update_text,
+    join_backlog_events_update_text, large_batch_threshold_update_text,
+    max_message_bytes_update_text, message_rate_update_text, moderation_action_guide_text,
+    moderation_selected_user_text, moderation_user_list_label, motd_update_text,
+    operator_label_update_text,
     overview_operator_summary_text as format_overview_operator_summary_text,
     ping_interval_update_text, portal_panel_text as format_portal_panel_text,
     reticulum_interface_summary, room_action_guide_text, room_archived_update_text,
@@ -66,8 +69,6 @@ use crate::tui_text::{
     RoomConsoleRowText, RoomListLabelText, SetupAddressesText, SetupChecklistLineText,
     SetupConsoleText, SetupLaunchText, SetupNextStepsText, UserConsoleRowText,
 };
-#[cfg(feature = "live-rns-net")]
-use crate::tui_text::closed_link_churn_summary;
 #[cfg(feature = "live-rns-net")]
 use crate::tui_text::{monitoring_operator_summary_text, upload_transfer_summary};
 use crate::{parse_tcp_server_override, TcpClientOverride};
@@ -584,8 +585,10 @@ impl AdminTui {
                             self.live_status = format!(
                                 "live runtime restarted after announce failure destination={destination}"
                             );
-                            self.last_announce_event =
-                                announce_event_text("startup after announce recovery", &destination);
+                            self.last_announce_event = announce_event_text(
+                                "startup after announce recovery",
+                                &destination,
+                            );
                             self.status = self.live_status.clone();
                         }
                         Err(restart_error) => {
@@ -649,8 +652,10 @@ impl AdminTui {
                             self.live_status = format!(
                                 "live runtime restarted after interface watchdog destination={destination}"
                             );
-                            self.last_announce_event =
-                                announce_event_text("startup after interface watchdog", &destination);
+                            self.last_announce_event = announce_event_text(
+                                "startup after interface watchdog",
+                                &destination,
+                            );
                             self.status = self.live_status.clone();
                         }
                         Err(restart_error) => {
@@ -1316,7 +1321,12 @@ impl AdminTui {
             (AdminAction::SelectTab(AdminTab::Rooms), "Rooms"),
             (AdminAction::SelectTab(AdminTab::Identity), "Identity"),
         ];
-        self.render_action_list(frame, left[1], "Portal Actions", &self.stateful_actions(&actions));
+        self.render_action_list(
+            frame,
+            left[1],
+            "Portal Actions",
+            &self.stateful_actions(&actions),
+        );
 
         let page = std::fs::read_to_string(self.config.nomadnet_index_page_path())
             .unwrap_or_else(|_| "No portal page exists yet. Start the live server once, or run status/doctor with live-rns-net support, to create the first template after the OMENchat destination hash is available.".into());
@@ -4297,7 +4307,8 @@ mod tests {
 
         assert!(text.contains("overview:"));
         assert!(text.contains("launch: needs setup"));
-        assert!(text.contains("live: runtime: live server running"));
+        assert!(text.contains("live: live server running"));
+        assert!(!text.contains("live: runtime:"));
         assert!(text.contains("network:"));
         assert!(text.contains("reticulum/config"));
         assert!(text.contains("rooms:"));
