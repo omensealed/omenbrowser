@@ -112,6 +112,40 @@ fn directory_service_persists_material_announce_changes() {
 }
 
 #[test]
+fn directory_service_records_lxmf_stamp_cost_from_peer_announces() {
+    let path = temp_dir("lxmf-stamp-cost").join("directory.json");
+    let mut service = DirectoryService::new(path).expect("service");
+    service
+        .ingest_announce_with_metadata(
+            "peer.hash",
+            "Peer",
+            DirectoryKind::Peer,
+            None,
+            None,
+            Some(8),
+        )
+        .expect("announce with cost");
+
+    assert_eq!(
+        service
+            .find("peer.hash")
+            .and_then(|entry| entry.lxmf_stamp_cost),
+        Some(8)
+    );
+
+    service
+        .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+        .expect("announce without cost");
+
+    assert_eq!(
+        service
+            .find("peer.hash")
+            .and_then(|entry| entry.lxmf_stamp_cost),
+        Some(8)
+    );
+}
+
+#[test]
 fn directory_service_backs_up_corrupt_file() {
     let dir = temp_dir("corrupt");
     let path = dir.join("directory.json");

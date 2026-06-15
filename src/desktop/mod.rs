@@ -69,7 +69,8 @@ use crate::storage::settings::{
 use crate::workspace::WorkspaceSection;
 use message_status::{
     desktop_message_is_retry_candidate, desktop_message_propagation_sync_label,
-    desktop_message_retry_labels, lxmf_message_compact_status, lxmf_message_status_lines,
+    desktop_message_retry_labels, lxmf_message_compact_stamp_status, lxmf_message_compact_status,
+    lxmf_message_status_lines,
 };
 use page_widget::{
     color_from_style, nomadnet_page_with_row_renderer, NomadNetPageProps, PageMessage,
@@ -149,7 +150,8 @@ const LOG_VISIBLE_ENTRIES: usize = 48;
 const LXMF_HELP_LINES: &[&str] = &[
     "Messages can be direct or propagated. Direct sends use live paths; propagated sends hand the envelope to the selected propagation node.",
     "Sync Propagation checks the selected propagation node. Path/Diag buttons help inspect peer and path state without burying it in logs.",
-    "Native LXMF ticket/stamp sending is not implemented yet. Ticketed send state is disabled/downgraded before native sends so the UI does not claim a ticketed delivery path that cannot be honored.",
+    "Native ticketed sends include LXMF reply tickets. Propagation stamps are generated when the selected propagation node advertises a target stamp cost.",
+    "Remembered inbound reply tickets are reused for direct ticket stamps. If no valid ticket is available, peer-advertised direct stamp costs are honored before sending.",
     "Transport proof, propagation-node acceptance, and inbound peer activity are useful evidence, but they are not the same as a guaranteed peer-side LXMF receipt.",
     "Unread counts clear when the matching conversation becomes active. Delete removes local conversation history for that peer.",
 ];
@@ -5336,12 +5338,14 @@ impl DesktopApp {
                     .unwrap_or_else(|error| format!("decode_error {error}"));
                 match runtime.send_omenchat_frame(link_id, frame).await {
                     Ok(()) => {
-                        tracing::debug!(
-                            link_id = %hex_bytes(&link_id),
-                            bytes = byte_len,
-                            frame = %frame_summary,
-                            "OMENchat sent Link frame"
-                        );
+                        if !Self::omenchat_frame_summary_is_heartbeat(&frame_summary) {
+                            tracing::debug!(
+                                link_id = %hex_bytes(&link_id),
+                                bytes = byte_len,
+                                frame = %frame_summary,
+                                "OMENchat sent Link frame"
+                            );
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -5416,6 +5420,11 @@ impl DesktopApp {
     }
 
     #[cfg(feature = "chat-client-rns")]
+    fn omenchat_frame_summary_is_heartbeat(summary: &str) -> bool {
+        summary.starts_with("Ping ") || summary.starts_with("Pong ")
+    }
+
+    #[cfg(feature = "chat-client-rns")]
     fn drain_omenchat_runtime_events(&mut self) -> Task<Message> {
         let now = current_epoch_ms();
         let mut scroll_tasks = Vec::new();
@@ -5471,13 +5480,16 @@ impl DesktopApp {
             let Some(session_id) = self.omenchat_link_sessions.get(&data.link_id).copied() else {
                 continue;
             };
-            tracing::debug!(
-                session_id,
-                link_id = %hex_bytes(&data.link_id),
-                bytes = data.frame_bytes.len(),
-                frame = %Self::omenchat_frame_summary(&data.frame_bytes),
-                "OMENchat received Link frame"
-            );
+            let frame_summary = Self::omenchat_frame_summary(&data.frame_bytes);
+            if !Self::omenchat_frame_summary_is_heartbeat(&frame_summary) {
+                tracing::debug!(
+                    session_id,
+                    link_id = %hex_bytes(&data.link_id),
+                    bytes = data.frame_bytes.len(),
+                    frame = %frame_summary,
+                    "OMENchat received Link frame"
+                );
+            }
             let received_op = crate::chat::codec::decode_frame(&data.frame_bytes)
                 .ok()
                 .map(|frame| frame.op);
@@ -7584,18 +7596,12 @@ impl DesktopApp {
         &self,
         conversation: &crate::messaging::Conversation,
     ) -> Element<'a, Message> {
-        if self.app.active_conversation_uses_native_lxmf() {
-            text(format!("delivery: {:?}", conversation.delivery_mode))
-                .size(ui_size(14))
-                .into()
-        } else {
-            text(format!(
-                "delivery: {:?} | ticket: {}",
-                conversation.delivery_mode, conversation.include_ticket
-            ))
-            .size(ui_size(14))
-            .into()
-        }
+        text(format!(
+            "delivery: {:?} | ticket: {}",
+            conversation.delivery_mode, conversation.include_ticket
+        ))
+        .size(ui_size(14))
+        .into()
     }
 
     fn messages_view_for_conversation(&self, conversation_id: u64) -> Element<'_, Message> {
@@ -7692,32 +7698,32 @@ impl DesktopApp {
                             .style(subtle_button_style),
                         "Attach file",
                     ),
-                    action_grid(
-                        vec![
-                            subtle_button(
-                                "Delivery",
-                                Message::ToggleConversationPaneDeliveryMode(conversation_id)
-                            ),
-                            omen_button(
-                                "Send",
-                                Message::SendConversationPaneDraft(conversation_id)
-                            ),
-                            subtle_button(
-                                "Path",
-                                Message::RequestConversationPanePeerPath(conversation_id)
-                            ),
-                            subtle_button("Sync Propagation", Message::SyncPropagationNow),
-                            subtle_button("Sync", Message::SyncMessages),
-                            subtle_button(
-                                trust_label,
-                                Message::ToggleConversationPaneTrust(conversation_id)
-                            ),
-                            subtle_button(
-                                "Diag",
-                                Message::ConversationPaneDiagnostics(conversation_id)
-                            ),
-                        ],
-                        7,
+                    subtle_button(
+                        "Delivery",
+                        Message::ToggleConversationPaneDeliveryMode(conversation_id)
+                    ),
+                    subtle_button(
+                        if conversation.include_ticket {
+                            "Ticket On"
+                        } else {
+                            "Ticket Off"
+                        },
+                        Message::ToggleConversationPaneTicket(conversation_id)
+                    ),
+                    omen_button("Send", Message::SendConversationPaneDraft(conversation_id)),
+                    subtle_button(
+                        "Path",
+                        Message::RequestConversationPanePeerPath(conversation_id)
+                    ),
+                    subtle_button("Sync Propagation", Message::SyncPropagationNow),
+                    subtle_button("Sync", Message::SyncMessages),
+                    subtle_button(
+                        trust_label,
+                        Message::ToggleConversationPaneTrust(conversation_id)
+                    ),
+                    subtle_button(
+                        "Diag",
+                        Message::ConversationPaneDiagnostics(conversation_id)
                     ),
                 ]
                 .spacing(8)
@@ -12355,6 +12361,9 @@ fn message_bubble<'a>(
 
     if let Some(summary) = lxmf_message_compact_status(message) {
         content = content.push(text(summary).size(ui_size(13)));
+    }
+    if let Some(stamp_summary) = lxmf_message_compact_stamp_status(message) {
+        content = content.push(text(stamp_summary).size(ui_size(12)));
     }
 
     if !message.attachments.is_empty() {
@@ -20414,8 +20423,8 @@ mod tests {
         let help = LXMF_HELP_LINES.join("\n");
 
         assert!(help.contains("direct or propagated"));
-        assert!(help.contains("ticket/stamp sending is not implemented"));
-        assert!(help.contains("disabled/downgraded before native sends"));
+        assert!(help.contains("ticketed sends include LXMF reply tickets"));
+        assert!(help.contains("peer-advertised direct stamp costs are honored"));
         assert!(help.contains("not the same as a guaranteed peer-side LXMF receipt"));
     }
 

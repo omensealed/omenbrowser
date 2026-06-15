@@ -55,6 +55,7 @@ impl NativeAnnounceState {
                 associated_hash: announce.associated_hash.clone(),
                 node_associated_hash: announce.node_associated_hash.clone(),
                 has_ratchet: announce.has_ratchet,
+                lxmf_stamp_cost: announce.lxmf_stamp_cost,
             })
             .collect::<Vec<_>>();
         if let Some(limit) = limit {
@@ -74,6 +75,7 @@ pub async fn payload_from_announce_event(
     let app_data = event.app_data.as_slice();
     let display_name =
         display_name_for_kind(&kind, app_data).unwrap_or_else(|| destination_hash.clone());
+    let lxmf_stamp_cost = lxmf_delivery_stamp_cost(&kind, app_data);
     let (associated_hash, node_associated_hash) = match kind {
         DirectoryKind::Node => (Some(associated_hash(identity, "lxmf", "delivery")), None),
         DirectoryKind::Peer => (
@@ -95,6 +97,7 @@ pub async fn payload_from_announce_event(
         associated_hash,
         node_associated_hash,
         has_ratchet: event.ratchet.is_some(),
+        lxmf_stamp_cost,
     }
 }
 
@@ -140,6 +143,20 @@ fn lxmf_delivery_display_name(app_data: &[u8]) -> Option<String> {
 
 #[cfg(not(feature = "native-lxmf"))]
 fn lxmf_delivery_display_name(_app_data: &[u8]) -> Option<String> {
+    None
+}
+
+#[cfg(feature = "native-lxmf")]
+fn lxmf_delivery_stamp_cost(kind: &DirectoryKind, app_data: &[u8]) -> Option<u8> {
+    if *kind == DirectoryKind::Peer {
+        crate::runtime::native_lxmf::codec::delivery_announce_stamp_cost(app_data)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(feature = "native-lxmf"))]
+fn lxmf_delivery_stamp_cost(_kind: &DirectoryKind, _app_data: &[u8]) -> Option<u8> {
     None
 }
 
@@ -272,6 +289,7 @@ mod tests {
             associated_hash: Some("peer".into()),
             node_associated_hash: None,
             has_ratchet: false,
+            lxmf_stamp_cost: None,
         };
         let second = AnnouncePayload {
             display_name: "Node A Updated".into(),
@@ -299,6 +317,7 @@ mod tests {
             associated_hash: None,
             node_associated_hash: None,
             has_ratchet: true,
+            lxmf_stamp_cost: None,
         });
 
         let snapshot = state.snapshot();
@@ -330,6 +349,7 @@ mod tests {
             associated_hash: Some("peer".into()),
             node_associated_hash: Some("node".into()),
             has_ratchet: false,
+            lxmf_stamp_cost: None,
         });
 
         let candidates = state.candidates(None);

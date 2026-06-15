@@ -17,7 +17,7 @@ pub use lxmf_router::{
 #[allow(unused_imports)]
 pub use message::{
     AttachmentSummary, DeliveryMode, DeliveryState, MessageEnvelope, MessageSummary,
-    TransportMethod,
+    NativeLxmfReplyTicket, TransportMethod,
 };
 #[allow(unused_imports)]
 pub use service::MessagingService;

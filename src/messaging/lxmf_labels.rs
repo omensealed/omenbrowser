@@ -94,3 +94,23 @@ pub(crate) fn receipt_state(state: &str) -> &'static str {
         _ => "unrecognized native receipt state",
     }
 }
+
+pub(crate) fn fallback(fallback: &str) -> &'static str {
+    match fallback {
+        "direct_to_propagated" => "direct send failed; queued via propagation",
+        _ => "unrecognized fallback",
+    }
+}
+
+pub(crate) fn propagation_transfer(transfer: &str) -> &'static str {
+    match transfer {
+        "link_packet_sent" => "link packet sent to propagation node; peer unconfirmed",
+        "resource_completed" => "resource transfer complete; peer unconfirmed",
+        "resource_advertised" => "resource offered to propagation node; peer unconfirmed",
+        "resource_progress" => "resource transfer in progress",
+        "router_deferred" => "queued; waiting for propagation node readiness",
+        "link_timeout" => "link timed out",
+        "resource_advertise_failed" | "resource_failed" => "resource transfer failed",
+        _ => "unrecognized propagation transfer state",
+    }
+}

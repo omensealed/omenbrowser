@@ -1184,6 +1184,7 @@ async fn collect_native_lxmf_smoke_send_report(
             body: "OMENbrowser_rs native LXMF smoke-send test. This message was explicitly requested by the local user.".into(),
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
+            native_reply_ticket: None,
             attachments: Vec::new(),
         };
         runtime
@@ -1299,6 +1300,7 @@ async fn collect_native_lxmf_live_interop_report(
                 body: "OMENbrowser_rs native LXMF live interop test. This message was explicitly requested by the local user.".into(),
                 delivery_mode: DeliveryMode::Direct,
                 include_ticket: false,
+                native_reply_ticket: None,
                 attachments: Vec::new(),
             };
             runtime
@@ -4151,6 +4153,14 @@ fn lxmf_diagnostics_receipt_state_label(state: &str) -> &'static str {
     crate::messaging::lxmf_labels::receipt_state(state)
 }
 
+fn lxmf_diagnostics_fallback_label(fallback: &str) -> &'static str {
+    crate::messaging::lxmf_labels::fallback(fallback)
+}
+
+fn lxmf_diagnostics_propagation_transfer_label(transfer: &str) -> &'static str {
+    crate::messaging::lxmf_labels::propagation_transfer(transfer)
+}
+
 struct LatestLxmfOutboundState {
     state: String,
     evidence: Option<String>,
@@ -6882,11 +6892,17 @@ impl App {
                     ));
                 }
                 if let Some(transfer) = outbound.propagation_transfer_state {
-                    lines.push(format!("propagation transfer: {transfer}"));
+                    lines.push(format!(
+                        "propagation transfer: {}",
+                        lxmf_diagnostics_propagation_transfer_label(&transfer)
+                    ));
                 }
                 if let Some(fallback) = outbound.fallback {
                     severity = severity.max(LxmfMessagingDiagnosticsSeverity::Warning);
-                    lines.push(format!("fallback: {fallback}"));
+                    lines.push(format!(
+                        "fallback: {}",
+                        lxmf_diagnostics_fallback_label(&fallback)
+                    ));
                 }
                 if let Some(rtt) = outbound.rtt {
                     lines.push(format!("proof RTT: {rtt}s"));
@@ -10905,21 +10921,6 @@ impl App {
     }
 
     pub fn toggle_active_conversation_ticket(&mut self) {
-        if self.active_conversation_uses_native_lxmf() {
-            let conversation =
-                &mut self.workspace.conversations[self.workspace.active_conversation];
-            conversation.include_ticket = false;
-            self.workspace.active_section = WorkspaceSection::Messages;
-            self.status.task =
-                "native LXMF tickets are not implemented yet; sending without ticket".into();
-            self.logs.push_with_source(
-                LogSeverity::Info,
-                LogSource::Messaging,
-                "native LXMF ticket toggle ignored because native ticket send is not implemented",
-            );
-            self.persist_ui_preferences("workspace section");
-            return;
-        }
         let conversation = &mut self.workspace.conversations[self.workspace.active_conversation];
         conversation.include_ticket = !conversation.include_ticket;
         self.workspace.active_section = WorkspaceSection::Messages;
@@ -11955,8 +11956,6 @@ impl App {
 
         let generation = self.next_message_generation;
         self.next_message_generation += 1;
-        let disable_native_ticket = self.workspace.conversations[active].include_ticket
-            && self.active_conversation_uses_native_lxmf();
         let (
             conversation_id,
             peer_hash,
@@ -11968,9 +11967,6 @@ impl App {
             peer_label,
         ) = {
             let conversation = &mut self.workspace.conversations[active];
-            if disable_native_ticket {
-                conversation.include_ticket = false;
-            }
             conversation.pending_send = Some(MessageSendState { generation });
             if !message_pending_placeholder_present(conversation, generation) {
                 conversation.push_message(pending_outbound_message_from_conversation(
@@ -11989,13 +11985,6 @@ impl App {
                 conversation.peer_label.clone(),
             )
         };
-        if disable_native_ticket {
-            self.logs.push_with_source(
-                LogSeverity::Warn,
-                LogSource::Messaging,
-                "native LXMF ticket sending is not implemented yet; sending without ticket",
-            );
-        }
         let service = self.messaging_service.clone();
         let tx = self.event_tx.clone();
         self.workspace.active_section = WorkspaceSection::Messages;
@@ -15027,12 +15016,13 @@ impl App {
                     .estimated_inbound_bytes
                     .saturating_add(estimated_announce_bytes(&announce));
                 let announce_for_probe_summary = announce.clone();
-                let entry = self.directory_service.ingest_announce(
+                let entry = self.directory_service.ingest_announce_with_metadata(
                     announce.destination_hash,
                     announce.display_name,
                     announce.kind,
                     announce.associated_hash,
                     announce.node_associated_hash,
+                    announce.lxmf_stamp_cost,
                 );
                 match entry {
                     Ok(entry) => {
@@ -22115,7 +22105,10 @@ side
         assert!(diagnostics
             .lines
             .iter()
-            .any(|line| line == "fallback: direct_to_propagated"));
+            .any(|line| line == "fallback: direct send failed; queued via propagation"));
+        assert!(diagnostics.lines.iter().any(|line| {
+            line == "propagation transfer: queued; waiting for propagation node readiness"
+        }));
         assert!(diagnostics
             .lines
             .iter()
@@ -22266,6 +22259,7 @@ side
                     associated_hash: None,
                     node_associated_hash: None,
                     has_ratchet: false,
+                    lxmf_stamp_cost: None,
                 },
             ))
         );
@@ -22622,8 +22616,8 @@ side
     }
 
     #[tokio::test]
-    async fn native_lxmf_send_disables_unsupported_ticket_before_queueing() {
-        let mut app = make_native_send_ready_app("native-send-ticket-downgrade");
+    async fn native_lxmf_ticketed_send_preserves_ticket_state_before_queueing() {
+        let mut app = make_native_send_ready_app("native-send-ticket-preserved");
         let conversation_id = app.active_conversation().id;
         app.active_conversation_mut_for_test().include_ticket = true;
         app.lxmf_peer_inspection = Some(LxmfPeerInspectionState {
@@ -22646,12 +22640,7 @@ side
 
         app.send_active_conversation_draft();
         assert!(app.active_conversation().pending_send.is_some());
-        assert!(!app.active_conversation().include_ticket);
-        assert!(app
-            .logs
-            .lines
-            .iter()
-            .any(|line| line.contains("sending without ticket")));
+        assert!(app.active_conversation().include_ticket);
 
         assert!(app.wait_for_message_task_result().await);
         let message = app
@@ -22670,19 +22659,14 @@ side
     }
 
     #[test]
-    fn native_lxmf_ticket_toggle_is_ignored_until_supported() {
-        let mut app = make_native_send_ready_app("native-ticket-toggle-ignored");
-        app.active_conversation_mut_for_test().include_ticket = true;
+    fn native_lxmf_ticket_toggle_updates_conversation_state() {
+        let mut app = make_native_send_ready_app("native-ticket-toggle");
+        app.active_conversation_mut_for_test().include_ticket = false;
 
         app.toggle_active_conversation_ticket();
 
-        assert!(!app.active_conversation().include_ticket);
-        assert!(app.status.task.contains("tickets are not implemented"));
-        assert!(app
-            .logs
-            .lines
-            .iter()
-            .any(|line| { line.contains("native LXMF ticket toggle ignored") }));
+        assert!(app.active_conversation().include_ticket);
+        assert_eq!(app.status.task, "include ticket: true");
     }
 
     #[test]
@@ -27490,6 +27474,7 @@ side
                     associated_hash: None,
                     node_associated_hash: None,
                     has_ratchet: false,
+                    lxmf_stamp_cost: None,
                 },
             ))
         );
@@ -27527,6 +27512,7 @@ side
                     associated_hash: Some(node_destination.into()),
                     node_associated_hash: Some(node_destination.into()),
                     has_ratchet: false,
+                    lxmf_stamp_cost: None,
                 },
             ))
         );
@@ -27562,6 +27548,7 @@ side
                     associated_hash: None,
                     node_associated_hash: None,
                     has_ratchet: false,
+                    lxmf_stamp_cost: None,
                 },
             ))
         );
@@ -28733,6 +28720,7 @@ side
             associated_hash: None,
             node_associated_hash: None,
             has_ratchet: false,
+            lxmf_stamp_cost: None,
         };
 
         assert!(
@@ -28809,6 +28797,7 @@ side
                     associated_hash: None,
                     node_associated_hash: None,
                     has_ratchet: false,
+                    lxmf_stamp_cost: None,
                 },
             ))
             .expect("send runtime event");
@@ -28856,6 +28845,7 @@ side
                     associated_hash: Some("mock.node".into()),
                     node_associated_hash: None,
                     has_ratchet: false,
+                    lxmf_stamp_cost: None,
                 },
             ))
         );
@@ -28890,6 +28880,7 @@ side
                     associated_hash: None,
                     node_associated_hash: None,
                     has_ratchet: false,
+                    lxmf_stamp_cost: None,
                 }
             ))
         );
@@ -30004,7 +29995,7 @@ side
         assert!(app.apply_message_task_result(MessageTaskResult::Error {
             conversation_id: Some(conversation_id),
             generation: 7,
-            message: "native LXMF include-ticket sending is not implemented yet".into(),
+            message: "native LXMF send failed during link setup".into(),
         }));
 
         let conversation = app.active_conversation();
@@ -30022,7 +30013,7 @@ side
         assert!(failed
             .fields
             .get("native_lxmf_failure_reason")
-            .is_some_and(|reason| reason.contains("include-ticket")));
+            .is_some_and(|reason| reason.contains("link setup")));
         let stored = app
             .message_store
             .get_thread(FIXTURE_NODE_HASH)
@@ -30032,12 +30023,12 @@ side
         assert!(app
             .status
             .task
-            .contains("message send failed: native LXMF include-ticket"));
+            .contains("message send failed: native LXMF send failed"));
         let diagnostics = app.active_lxmf_messaging_diagnostics();
         assert!(diagnostics
             .lines
             .iter()
-            .any(|line| line.contains("failure reason: native LXMF include-ticket")));
+            .any(|line| line.contains("failure reason: native LXMF send failed")));
     }
 
     #[test]

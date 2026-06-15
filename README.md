@@ -379,7 +379,11 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
 
 ## Known Alpha Gaps
 
-- Native LXMF ticket/stamp sending is not finished.
+- Native LXMF ticketed sends now include reply tickets, inbound reply tickets
+  are captured from received messages, valid remembered reply tickets are reused
+  for outbound direct ticket stamps, and propagation stamps are generated when
+  the propagation node advertises a target cost. Direct peer stamp-cost
+  negotiation without a remembered ticket is still alpha work.
 - The compatible `.deb` has been tested on Linux Mint 21.3; broader
   Debian/Ubuntu derivative testing is still useful.
 - Some Reticulum behavior depends on what the Rust RNS/LXMF crates currently

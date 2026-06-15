@@ -1176,6 +1176,11 @@ impl NativeNetworkRuntime {
                         stamp.stamp_value,
                         stamp.attempts
                     )));
+                } else if target_stamp_cost.is_none() {
+                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native LXMF propagation stamp skipped peer={} propagation_node={} reason=no_advertised_target_cost",
+                        envelope.peer_hash, propagation_node
+                    )));
                 }
                 propagation_envelope_bytes = Some(package.envelope);
             }
@@ -1481,6 +1486,7 @@ impl NativeNetworkRuntime {
             ("native_lxmf_retry_guidance".to_string(), retry_guidance),
         ]);
         fields.extend(propagation_stamp_fields);
+        annotate_native_lxmf_stamp_fields(&mut fields, &outbound, None);
         if let Some(transient_id) = propagation_transient_id {
             fields.insert("native_lxmf_propagation_transient_id".into(), transient_id);
         }
@@ -2444,15 +2450,10 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         .into(),
                 )
             })?;
-            let outbound = crate::runtime::native_lxmf::codec::build_outbound_message(
+            let mut outbound = crate::runtime::native_lxmf::codec::build_outbound_message(
                 &envelope,
                 source_hash.as_str(),
             )?;
-            let wire_bytes = crate::runtime::native_lxmf::codec::encode_signed_wire_message(
-                &outbound,
-                &identity_bytes,
-            )?;
-            let wire_len = wire_bytes.len();
             let transport_method =
                 crate::runtime::native_lxmf::codec::app_transport_method(outbound.delivery.method);
             if !matches!(outbound.delivery.method, lxmf::TransportMethod::Direct) {
@@ -2485,6 +2486,20 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     key
                 }
             };
+            let direct_stamp_cost = destination_key
+                .app_data
+                .as_deref()
+                .and_then(crate::runtime::native_lxmf::codec::delivery_announce_stamp_cost);
+            let direct_stamp = crate::runtime::native_lxmf::codec::apply_direct_stamp_if_needed(
+                &mut outbound,
+                direct_stamp_cost,
+                crate::runtime::native_lxmf::codec::DEFAULT_DIRECT_STAMP_MAX_ATTEMPTS,
+            )?;
+            let wire_bytes = crate::runtime::native_lxmf::codec::encode_signed_wire_message(
+                &outbound,
+                &identity_bytes,
+            )?;
+            let wire_len = wire_bytes.len();
             let has_path = handle.client.has_path(peer_destination).await?;
             let has_cached_ratchet = native_lxmf_cached_ratchet_available(
                 self.config.reticulum_config_dir.as_path(),
@@ -2538,8 +2553,8 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     },
                 ));
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native LXMF opportunistic ratchet packet submitted peer={} message_id={} bytes={} state=submitted_to_rns_net",
-                    envelope.peer_hash, message_id, wire_len
+                    "native LXMF opportunistic ratchet packet submitted peer={} message_id={} bytes={} state=submitted_to_rns_net reply_ticket_stamp={} direct_stamp={}",
+                    envelope.peer_hash, message_id, wire_len, outbound.reply_ticket_used, direct_stamp.is_some()
                 )));
                 let mut fields = BTreeMap::from([
                     ("native_lxmf_state".into(), "submitted_to_rns_net".into()),
@@ -2583,6 +2598,22 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         "true".into(),
                     );
                     fields.insert("native_lxmf_propagation_node".into(), propagation_node);
+                }
+                annotate_native_lxmf_stamp_fields(&mut fields, &outbound, direct_stamp.as_ref());
+                if outbound.reply_ticket_used {
+                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native LXMF direct ticket stamp applied peer={} message_id={} path=opportunistic_ratchet",
+                        envelope.peer_hash, message_id
+                    )));
+                } else if let Some(stamp) = direct_stamp.as_ref() {
+                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native LXMF direct stamp generated peer={} message_id={} path=opportunistic_ratchet target_cost={} stamp_value={} attempts={}",
+                        envelope.peer_hash,
+                        message_id,
+                        stamp.target_cost,
+                        stamp.stamp_value,
+                        stamp.attempts
+                    )));
                 }
                 return Ok(MessageSummary {
                     peer_hash: envelope.peer_hash.clone(),
@@ -2701,11 +2732,13 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     },
                 ));
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native LXMF direct link packet sent peer={} message_id={} link_id={} bytes={} state=peer_unconfirmed",
+                    "native LXMF direct link packet sent peer={} message_id={} link_id={} bytes={} state=peer_unconfirmed reply_ticket_stamp={} direct_stamp={}",
                     envelope.peer_hash,
                     message_id,
                     link_hex,
-                    wire_len
+                    wire_len,
+                    outbound.reply_ticket_used,
+                    direct_stamp.is_some()
                 )));
                 let mut fields = BTreeMap::from([
                     ("native_lxmf_state".into(), "submitted_unconfirmed".into()),
@@ -2759,6 +2792,22 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         "true".into(),
                     );
                     fields.insert("native_lxmf_propagation_node".into(), propagation_node);
+                }
+                annotate_native_lxmf_stamp_fields(&mut fields, &outbound, direct_stamp.as_ref());
+                if outbound.reply_ticket_used {
+                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native LXMF direct ticket stamp applied peer={} message_id={} path=link_packet",
+                        envelope.peer_hash, message_id
+                    )));
+                } else if let Some(stamp) = direct_stamp.as_ref() {
+                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native LXMF direct stamp generated peer={} message_id={} path=link_packet target_cost={} stamp_value={} attempts={}",
+                        envelope.peer_hash,
+                        message_id,
+                        stamp.target_cost,
+                        stamp.stamp_value,
+                        stamp.attempts
+                    )));
                 }
                 return Ok(MessageSummary {
                     peer_hash: envelope.peer_hash.clone(),
@@ -2836,8 +2885,8 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 },
             ));
             let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                "native LXMF direct resource advertised peer={} message_id={} link_id={} state=submitted_to_rns_net",
-                envelope.peer_hash, message_id, link_hex
+                "native LXMF direct resource advertised peer={} message_id={} link_id={} state=submitted_to_rns_net reply_ticket_stamp={} direct_stamp={}",
+                envelope.peer_hash, message_id, link_hex, outbound.reply_ticket_used, direct_stamp.is_some()
             )));
             let mut fields = BTreeMap::from([
                 ("native_lxmf_state".into(), "submitted_to_rns_net".into()),
@@ -2887,6 +2936,22 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     "true".into(),
                 );
                 fields.insert("native_lxmf_propagation_node".into(), propagation_node);
+            }
+            annotate_native_lxmf_stamp_fields(&mut fields, &outbound, direct_stamp.as_ref());
+            if outbound.reply_ticket_used {
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native LXMF direct ticket stamp applied peer={} message_id={} path=resource",
+                    envelope.peer_hash, message_id
+                )));
+            } else if let Some(stamp) = direct_stamp.as_ref() {
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native LXMF direct stamp generated peer={} message_id={} path=resource target_cost={} stamp_value={} attempts={}",
+                    envelope.peer_hash,
+                    message_id,
+                    stamp.target_cost,
+                    stamp.stamp_value,
+                    stamp.attempts
+                )));
             }
             Ok(MessageSummary {
                 peer_hash: envelope.peer_hash.clone(),
@@ -4595,6 +4660,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 body: "OMENbrowser_rs native LXMF delivery smoke test".into(),
                 delivery_mode: DeliveryMode::Direct,
                 include_ticket: false,
+                native_reply_ticket: None,
                 attachments: Vec::new(),
             };
             let outbound = crate::runtime::native_lxmf::codec::build_outbound_message(
@@ -5389,6 +5455,7 @@ fn rns_net_announce_payload(key: &RnsNetAnnounceKey) -> AnnouncePayload {
     let app_data = key.app_data.as_deref().unwrap_or_default();
     let display_name = display_name_for_kind(&kind, app_data)
         .unwrap_or_else(|| destination_hash.chars().take(12).collect());
+    let lxmf_stamp_cost = rns_net_lxmf_delivery_stamp_cost(&kind, app_data);
     let associated_hash = match kind {
         DirectoryKind::Node => Some(rns_net_associated_hash(
             &key.identity_hash,
@@ -5418,6 +5485,7 @@ fn rns_net_announce_payload(key: &RnsNetAnnounceKey) -> AnnouncePayload {
         associated_hash,
         node_associated_hash,
         has_ratchet: false,
+        lxmf_stamp_cost,
     }
 }
 
@@ -5441,6 +5509,20 @@ fn rns_net_announce_kind(key: &RnsNetAnnounceKey) -> DirectoryKind {
     } else {
         DirectoryKind::Unknown
     }
+}
+
+#[cfg(all(feature = "native-rns-net", feature = "native-lxmf"))]
+fn rns_net_lxmf_delivery_stamp_cost(kind: &DirectoryKind, app_data: &[u8]) -> Option<u8> {
+    if *kind == DirectoryKind::Peer {
+        crate::runtime::native_lxmf::codec::delivery_announce_stamp_cost(app_data)
+    } else {
+        None
+    }
+}
+
+#[cfg(all(feature = "native-rns-net", not(feature = "native-lxmf")))]
+fn rns_net_lxmf_delivery_stamp_cost(_kind: &DirectoryKind, _app_data: &[u8]) -> Option<u8> {
+    None
 }
 
 #[cfg(feature = "native-rns-net")]
@@ -5696,6 +5778,35 @@ fn native_unix_timestamp() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+fn annotate_native_lxmf_stamp_fields(
+    fields: &mut BTreeMap<String, String>,
+    outbound: &crate::runtime::native_lxmf::codec::NativeLxmfOutbound,
+    direct_stamp: Option<&crate::runtime::native_lxmf::codec::GeneratedDirectStamp>,
+) {
+    if outbound.include_ticket {
+        fields.insert("native_lxmf_reply_ticket_offered".into(), "true".into());
+    }
+    if outbound.reply_ticket_used {
+        fields.insert("native_lxmf_reply_ticket_used".into(), "true".into());
+        fields.insert("native_lxmf_stamp_state".into(), "ticket_stamp".into());
+    } else if let Some(stamp) = direct_stamp {
+        fields.insert("native_lxmf_stamp_state".into(), "direct_stamp".into());
+        fields.insert(
+            "native_lxmf_direct_stamp_cost".into(),
+            stamp.target_cost.to_string(),
+        );
+        fields.insert(
+            "native_lxmf_direct_stamp_value".into(),
+            stamp.stamp_value.to_string(),
+        );
+        fields.insert(
+            "native_lxmf_direct_stamp_attempts".into(),
+            stamp.attempts.to_string(),
+        );
+    }
 }
 
 #[cfg(feature = "native-rns-net")]
@@ -6390,10 +6501,12 @@ fn native_lxmf_events_for_packet_proof(
             },
         ));
     }
-    events.push(RuntimeBusEvent::Debug(format!(
-        "native RNS packet proof received peer={} packet_hash={} proof_destination={} matched_pending={} rtt={:.3}",
-        peer_hash, packet_hash, proof_destination, matched_pending, proof.rtt
-    )));
+    if matched_pending {
+        events.push(RuntimeBusEvent::Debug(format!(
+            "native RNS packet proof received peer={} packet_hash={} proof_destination={} matched_pending=true rtt={:.3}",
+            peer_hash, packet_hash, proof_destination, proof.rtt
+        )));
+    }
     events
 }
 
@@ -6520,6 +6633,7 @@ fn _announce_payload_shape() -> AnnouncePayload {
         associated_hash: None,
         node_associated_hash: None,
         has_ratchet: false,
+        lxmf_stamp_cost: None,
     }
 }
 
@@ -7196,6 +7310,7 @@ enable_transport = No
             associated_hash: Some("ffeeddccbbaa99887766554433221100".into()),
             node_associated_hash: None,
             has_ratchet: false,
+            lxmf_stamp_cost: None,
         });
 
         let candidates = runtime
@@ -7225,6 +7340,7 @@ enable_transport = No
             associated_hash: None,
             node_associated_hash: None,
             has_ratchet: false,
+            lxmf_stamp_cost: None,
         });
 
         let event = events.recv().await.expect("runtime event");
@@ -7602,6 +7718,7 @@ enable_transport = No
                 body: "Body".into(),
                 delivery_mode: crate::messaging::DeliveryMode::Direct,
                 include_ticket: false,
+                native_reply_ticket: None,
                 attachments: Vec::new(),
             })
             .await
@@ -7647,6 +7764,7 @@ enable_transport = No
                 body: "Body".into(),
                 delivery_mode: crate::messaging::DeliveryMode::Propagated,
                 include_ticket: false,
+                native_reply_ticket: None,
                 attachments: Vec::new(),
             })
             .await
@@ -7742,6 +7860,7 @@ enable_transport = No
                 body: "Body".into(),
                 delivery_mode: crate::messaging::DeliveryMode::Direct,
                 include_ticket: false,
+                native_reply_ticket: None,
                 attachments: Vec::new(),
             })
             .await
@@ -8634,7 +8753,7 @@ enable_transport = No
 
     #[cfg(feature = "native-rns-net")]
     #[test]
-    fn unmatched_native_packet_proof_only_emits_debug_event() {
+    fn unmatched_native_packet_proof_emits_no_runtime_events() {
         let pending = Arc::new(Mutex::new(NativeDirectLxmfRouter::default()));
         let proof = RnsNetProof {
             destination_hash: [9u8; 16],
@@ -8644,8 +8763,7 @@ enable_transport = No
 
         let events = native_lxmf_events_for_packet_proof(&proof, &pending);
 
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], RuntimeBusEvent::Debug(_)));
+        assert!(events.is_empty());
     }
 
     #[cfg(feature = "native-rns-net")]
@@ -8827,6 +8945,7 @@ enable_transport = No
             body: "Hello".into(),
             delivery_mode: crate::messaging::DeliveryMode::Direct,
             include_ticket: false,
+            native_reply_ticket: None,
             attachments: Vec::new(),
         };
         let outbound =

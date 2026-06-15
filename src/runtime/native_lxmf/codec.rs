@@ -10,19 +10,29 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{AppError, AppResult};
 use crate::messaging::{
-    AttachmentSummary, DeliveryMode, MessageEnvelope, MessageSummary,
+    AttachmentSummary, DeliveryMode, MessageEnvelope, MessageSummary, NativeLxmfReplyTicket,
     TransportMethod as AppTransportMethod,
 };
 
 const FIELD_FILE_ATTACHMENTS: i64 = 0x05;
 #[cfg(feature = "native-rns-net")]
-const PROPAGATION_STAMP_SIZE: usize = 32;
+const FIELD_TICKET: i64 = 0x0C;
+#[cfg(feature = "native-rns-net")]
+const LXMF_TICKET_LENGTH: usize = 16;
+#[cfg(feature = "native-rns-net")]
+const LXMF_TICKET_EXPIRY_SECONDS: f64 = 21.0 * 24.0 * 60.0 * 60.0;
+#[cfg(feature = "native-rns-net")]
+const LXMF_STAMP_SIZE: usize = 32;
 #[cfg(feature = "native-rns-net")]
 const PROPAGATION_LXMF_OVERHEAD: usize = 112;
+#[cfg(feature = "native-rns-net")]
+const DIRECT_WORKBLOCK_EXPAND_ROUNDS: u32 = 3000;
 #[cfg(feature = "native-rns-net")]
 const PROPAGATION_WORKBLOCK_EXPAND_ROUNDS: u32 = 1000;
 #[cfg(feature = "native-rns-net")]
 pub const DEFAULT_PROPAGATION_STAMP_MAX_ATTEMPTS: u64 = 1 << 22;
+#[cfg(feature = "native-rns-net")]
+pub const DEFAULT_DIRECT_STAMP_MAX_ATTEMPTS: u64 = 1 << 22;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeLxmfWireApi {
@@ -36,6 +46,7 @@ pub struct NativeLxmfOutbound {
     pub message: lxmf::Message,
     pub delivery: lxmf::DeliveryDecision,
     pub include_ticket: bool,
+    pub reply_ticket_used: bool,
     pub attachments: Vec<AttachmentSummary>,
 }
 
@@ -60,7 +71,7 @@ pub fn native_lxmf_parity() -> NativeLxmfParity {
         payload_stamps_supported: true,
         stamp_validation_supported: cfg!(feature = "native-rns-net"),
         stamp_generation_supported: cfg!(feature = "native-rns-net"),
-        include_ticket_supported: false,
+        include_ticket_supported: cfg!(feature = "native-rns-net"),
     }
 }
 
@@ -70,6 +81,22 @@ pub fn native_delivery_type_name() -> &'static str {
 
 pub fn delivery_display_name_from_app_data(app_data: &[u8]) -> Option<String> {
     lxmf::wire::announce::display_name_from_delivery_app_data(app_data)
+}
+
+pub fn delivery_announce_stamp_cost(app_data: &[u8]) -> Option<u8> {
+    let mut cursor = std::io::Cursor::new(app_data);
+    let value = rmpv::decode::read_value(&mut cursor).ok()?;
+    if cursor.position() != app_data.len() as u64 {
+        return None;
+    }
+    let rmpv::Value::Array(items) = value else {
+        return None;
+    };
+    let cost = items.get(1).and_then(value_as_u64)?;
+    if cost == 0 || cost >= 255 {
+        return None;
+    }
+    u8::try_from(cost).ok()
 }
 
 pub fn encode_delivery_display_name_app_data(display_name: &str) -> AppResult<Vec<u8>> {
@@ -117,6 +144,15 @@ pub struct PropagationStampValidation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeneratedPropagationStamp {
     pub transient_id: [u8; 32],
+    pub stamp: Vec<u8>,
+    pub stamp_value: u32,
+    pub target_cost: u8,
+    pub attempts: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedDirectStamp {
+    pub message_id: [u8; 32],
     pub stamp: Vec<u8>,
     pub stamp_value: u32,
     pub target_cost: u8,
@@ -211,7 +247,7 @@ pub fn generate_propagation_stamp_for_transient(
 ) -> AppResult<GeneratedPropagationStamp> {
     let workblock =
         rns_core::stamp::stamp_workblock(&transient_id, PROPAGATION_WORKBLOCK_EXPAND_ROUNDS);
-    let mut stamp = vec![0u8; PROPAGATION_STAMP_SIZE];
+    let mut stamp = vec![0u8; LXMF_STAMP_SIZE];
     for attempt in 1..=max_attempts {
         rand_core::OsRng.fill_bytes(&mut stamp);
         if rns_core::stamp::stamp_valid(&stamp, target_cost, &workblock) {
@@ -243,10 +279,10 @@ fn validate_propagation_stamp(
     transient_data: &[u8],
     target_cost: u8,
 ) -> Option<([u8; 32], Vec<u8>, u32)> {
-    if transient_data.len() <= PROPAGATION_LXMF_OVERHEAD + PROPAGATION_STAMP_SIZE {
+    if transient_data.len() <= PROPAGATION_LXMF_OVERHEAD + LXMF_STAMP_SIZE {
         return None;
     }
-    let split = transient_data.len() - PROPAGATION_STAMP_SIZE;
+    let split = transient_data.len() - LXMF_STAMP_SIZE;
     let lxm_data = &transient_data[..split];
     let stamp = &transient_data[split..];
     let digest = Sha256::digest(lxm_data);
@@ -319,10 +355,10 @@ pub fn build_outbound_message(
     envelope: &MessageEnvelope,
     source_hash_hex: &str,
 ) -> AppResult<NativeLxmfOutbound> {
+    #[cfg(not(feature = "native-rns-net"))]
     if envelope.include_ticket {
         return Err(AppError::Unsupported(
-            "native LXMF include-ticket sending is not implemented yet; disable ticket for this send"
-                .into(),
+            "native LXMF include-ticket sending requires the native-rns-net feature".into(),
         ));
     }
 
@@ -342,15 +378,162 @@ pub fn build_outbound_message(
     message.set_title_from_string(&envelope.title);
     message.set_content_from_string(&envelope.body);
     message.set_state(lxmf::wire::message::State::Outbound);
-    let (fields, attachments) = attachment_fields_from_paths(&envelope.attachments)?;
+    let (mut fields, attachments) = attachment_fields_from_paths(&envelope.attachments)?;
+    #[cfg(feature = "native-rns-net")]
+    if envelope.include_ticket {
+        insert_lxmf_field(&mut fields, FIELD_TICKET, generate_lxmf_ticket_field());
+    }
     message.fields = fields;
+    let mut reply_ticket_used = false;
+    #[cfg(feature = "native-rns-net")]
+    if let Some(ticket) = envelope.native_reply_ticket.as_ref() {
+        if ticket.expires > current_unix_secs_f64() {
+            apply_reply_ticket_stamp(&mut message, ticket)?;
+            reply_ticket_used = true;
+        }
+    }
 
     Ok(NativeLxmfOutbound {
         message,
         delivery,
         include_ticket: envelope.include_ticket,
+        reply_ticket_used,
         attachments,
     })
+}
+
+#[cfg(feature = "native-rns-net")]
+fn apply_reply_ticket_stamp(
+    message: &mut lxmf::Message,
+    ticket: &NativeLxmfReplyTicket,
+) -> AppResult<()> {
+    let message_id = lxmf_message_id(message)?;
+    let stamp = ticket_stamp_for_message(&ticket.ticket, &message_id)?;
+    message.set_stamp_from_bytes(&stamp);
+    Ok(())
+}
+
+#[cfg(feature = "native-rns-net")]
+pub fn apply_direct_stamp_if_needed(
+    outbound: &mut NativeLxmfOutbound,
+    target_cost: Option<u8>,
+    max_attempts: u64,
+) -> AppResult<Option<GeneratedDirectStamp>> {
+    if outbound.reply_ticket_used || outbound.message.stamp.is_some() {
+        return Ok(None);
+    }
+    let Some(target_cost) = target_cost else {
+        return Ok(None);
+    };
+    if target_cost == 0 {
+        return Ok(None);
+    }
+    let message_id = lxmf_message_id(&mut outbound.message)?;
+    let generated = generate_direct_stamp_for_message(message_id, target_cost, max_attempts)?;
+    outbound.message.set_stamp_from_bytes(&generated.stamp);
+    Ok(Some(generated))
+}
+
+#[cfg(feature = "native-rns-net")]
+pub fn generate_direct_stamp_for_message(
+    message_id: [u8; 32],
+    target_cost: u8,
+    max_attempts: u64,
+) -> AppResult<GeneratedDirectStamp> {
+    let workblock = rns_core::stamp::stamp_workblock(&message_id, DIRECT_WORKBLOCK_EXPAND_ROUNDS);
+    let mut stamp = vec![0u8; LXMF_STAMP_SIZE];
+    for attempt in 1..=max_attempts {
+        rand_core::OsRng.fill_bytes(&mut stamp);
+        if rns_core::stamp::stamp_valid(&stamp, target_cost, &workblock) {
+            let stamp_value = rns_core::stamp::stamp_value(&workblock, &stamp);
+            return Ok(GeneratedDirectStamp {
+                message_id,
+                stamp,
+                stamp_value,
+                target_cost,
+                attempts: attempt,
+            });
+        }
+    }
+    Err(AppError::Runtime(format!(
+        "LXMF direct stamp generation did not find a cost {target_cost} stamp within {max_attempts} attempts"
+    )))
+}
+
+#[cfg(feature = "native-rns-net")]
+pub fn validate_direct_stamp(message_id: &[u8; 32], stamp: &[u8], target_cost: u8) -> Option<u32> {
+    let workblock = rns_core::stamp::stamp_workblock(message_id, DIRECT_WORKBLOCK_EXPAND_ROUNDS);
+    if rns_core::stamp::stamp_valid(stamp, target_cost, &workblock) {
+        Some(rns_core::stamp::stamp_value(&workblock, stamp))
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "native-rns-net")]
+fn lxmf_message_id(message: &mut lxmf::Message) -> AppResult<[u8; 32]> {
+    let destination = message
+        .destination_hash
+        .ok_or_else(|| AppError::Runtime("LXMF stamp requires destination hash".into()))?;
+    let source = message
+        .source_hash
+        .ok_or_else(|| AppError::Runtime("LXMF stamp requires source hash".into()))?;
+    let timestamp = message.timestamp.unwrap_or_else(current_unix_secs_f64);
+    message.timestamp = Some(timestamp);
+    let payload = lxmf::Payload::new(
+        timestamp,
+        Some(message.content.clone()),
+        Some(message.title.clone()),
+        message.fields.clone(),
+        None,
+    );
+    let wire = lxmf::WireMessage::new(destination, source, payload);
+    Ok(wire.message_id())
+}
+
+#[cfg(feature = "native-rns-net")]
+pub fn ticket_entry_from_fields(fields: Option<&rmpv::Value>) -> Option<(f64, Vec<u8>)> {
+    let rmpv::Value::Map(entries) = fields? else {
+        return None;
+    };
+    let value = entries.iter().find_map(|(key, value)| {
+        if field_key_matches_i64(key, FIELD_TICKET) {
+            Some(value)
+        } else {
+            None
+        }
+    })?;
+    let rmpv::Value::Array(items) = value else {
+        return None;
+    };
+    if items.len() < 2 {
+        return None;
+    }
+    let expires = items[0]
+        .as_f64()
+        .or_else(|| items[0].as_u64().map(|value| value as f64))
+        .or_else(|| items[0].as_i64().map(|value| value as f64))?;
+    let ticket = match &items[1] {
+        rmpv::Value::Binary(bytes) => bytes.clone(),
+        _ => return None,
+    };
+    Some((expires, ticket))
+}
+
+#[cfg(feature = "native-rns-net")]
+pub fn ticket_stamp_for_message(ticket: &[u8], message_id: &[u8; 32]) -> AppResult<[u8; 16]> {
+    if ticket.len() != LXMF_TICKET_LENGTH {
+        return Err(AppError::Runtime(format!(
+            "LXMF ticket must be {LXMF_TICKET_LENGTH} bytes"
+        )));
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(ticket);
+    hasher.update(message_id);
+    let digest = hasher.finalize();
+    let mut stamp = [0u8; 16];
+    stamp.copy_from_slice(&digest[..16]);
+    Ok(stamp)
 }
 
 pub fn encode_signed_wire_message(
@@ -388,6 +571,7 @@ fn decode_wire_message_inner(
     } else {
         attachment_summaries_from_fields(message.fields.as_ref())
     };
+    let fields = native_lxmf_summary_fields_from_message_fields(message.fields.as_ref());
 
     Ok(MessageSummary {
         peer_hash: peer_hash.clone(),
@@ -401,9 +585,33 @@ fn decode_wire_message_inner(
         incoming: true,
         unread: true,
         message_id: Some(message_id),
-        fields: BTreeMap::new(),
+        fields,
         attachments,
     })
+}
+
+fn native_lxmf_summary_fields_from_message_fields(
+    message_fields: Option<&rmpv::Value>,
+) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    #[cfg(feature = "native-rns-net")]
+    if let Some((expires, ticket)) = ticket_entry_from_fields(message_fields) {
+        fields.insert("native_lxmf_reply_ticket".into(), hex_bytes(&ticket));
+        fields.insert(
+            "native_lxmf_reply_ticket_expires".into(),
+            format!("{expires:.3}"),
+        );
+        fields.insert(
+            "native_lxmf_reply_ticket_state".into(),
+            if expires > current_unix_secs_f64() {
+                "valid"
+            } else {
+                "expired"
+            }
+            .into(),
+        );
+    }
+    fields
 }
 
 pub fn decode_propagated_lxmf_data(
@@ -519,6 +727,38 @@ fn attachment_fields_from_paths(
     ))
 }
 
+#[cfg(feature = "native-rns-net")]
+fn insert_lxmf_field(fields: &mut Option<rmpv::Value>, field: i64, value: rmpv::Value) {
+    match fields {
+        Some(rmpv::Value::Map(entries)) => {
+            entries.retain(|(key, _)| !field_key_matches_i64(key, field));
+            entries.push((rmpv::Value::Integer(field.into()), value));
+        }
+        _ => {
+            *fields = Some(rmpv::Value::Map(vec![(
+                rmpv::Value::Integer(field.into()),
+                value,
+            )]));
+        }
+    }
+}
+
+#[cfg(feature = "native-rns-net")]
+fn generate_lxmf_ticket_field() -> rmpv::Value {
+    let mut ticket = vec![0u8; LXMF_TICKET_LENGTH];
+    rand_core::OsRng.fill_bytes(&mut ticket);
+    let expires = current_unix_secs_f64() + LXMF_TICKET_EXPIRY_SECONDS;
+    rmpv::Value::Array(vec![rmpv::Value::F64(expires), rmpv::Value::Binary(ticket)])
+}
+
+#[cfg(feature = "native-rns-net")]
+fn current_unix_secs_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or_default()
+}
+
 fn attachment_file_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -595,9 +835,15 @@ fn attachment_entries_from_fields(fields: Option<&rmpv::Value>) -> Vec<Attachmen
 }
 
 fn field_key_matches_file_attachments(key: &rmpv::Value) -> bool {
+    field_key_matches_i64(key, FIELD_FILE_ATTACHMENTS)
+}
+
+fn field_key_matches_i64(key: &rmpv::Value, expected: i64) -> bool {
     match key {
-        rmpv::Value::Integer(value) => value.as_i64() == Some(FIELD_FILE_ATTACHMENTS),
-        rmpv::Value::String(value) => value.as_str() == Some("5"),
+        rmpv::Value::Integer(value) => value.as_i64() == Some(expected),
+        rmpv::Value::String(value) => {
+            value.as_str().and_then(|value| value.parse::<i64>().ok()) == Some(expected)
+        }
         _ => false,
     }
 }
@@ -750,6 +996,10 @@ fn hex32(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,7 +1026,10 @@ mod tests {
         assert!(parity.payload_stamps_supported);
         assert!(parity.stamp_validation_supported);
         assert!(parity.stamp_generation_supported);
-        assert!(!parity.include_ticket_supported);
+        assert_eq!(
+            parity.include_ticket_supported,
+            cfg!(feature = "native-rns-net")
+        );
     }
 
     #[test]
@@ -812,6 +1065,23 @@ mod tests {
             delivery_display_name_from_app_data(encoded.as_slice()).expect("display name");
 
         assert_eq!(display_name, "Alice Relay");
+        assert_eq!(delivery_announce_stamp_cost(encoded.as_slice()), None);
+    }
+
+    #[test]
+    fn delivery_announce_app_data_extracts_stamp_cost() {
+        let value = rmpv::Value::Array(vec![
+            rmpv::Value::Binary(b"Alice Relay".to_vec()),
+            rmpv::Value::from(8_u64),
+        ]);
+        let mut encoded = Vec::new();
+        rmpv::encode::write_value(&mut encoded, &value).expect("encode delivery announce");
+
+        assert_eq!(
+            delivery_display_name_from_app_data(encoded.as_slice()).as_deref(),
+            Some("Alice Relay")
+        );
+        assert_eq!(delivery_announce_stamp_cost(encoded.as_slice()), Some(8));
     }
 
     #[test]
@@ -878,6 +1148,7 @@ mod tests {
             body: "Body".into(),
             delivery_mode: DeliveryMode::Propagated,
             include_ticket: false,
+            native_reply_ticket: None,
             attachments: Vec::new(),
         };
         let outbound = build_outbound_message(&envelope, &sender.address_hash().to_hex_string())
@@ -912,6 +1183,61 @@ mod tests {
     }
 
     #[test]
+    fn direct_stamp_generation_applies_valid_lxmf_message_stamp() {
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            attachments: Vec::new(),
+        };
+        let mut outbound = build_outbound_message(&envelope, SRC).expect("outbound");
+
+        let stamp = apply_direct_stamp_if_needed(&mut outbound, Some(1), 512)
+            .expect("direct stamp")
+            .expect("stamp generated");
+
+        assert_eq!(stamp.target_cost, 1);
+        assert!(stamp.attempts <= 512);
+        assert_eq!(
+            validate_direct_stamp(&stamp.message_id, &stamp.stamp, stamp.target_cost),
+            Some(stamp.stamp_value)
+        );
+        assert_eq!(
+            outbound.message.stamp.as_ref().map(Vec::as_slice),
+            Some(stamp.stamp.as_slice())
+        );
+    }
+
+    #[test]
+    fn direct_stamp_generation_keeps_valid_reply_ticket_stamp() {
+        let ticket = NativeLxmfReplyTicket {
+            ticket: vec![0x42; 16],
+            expires: current_unix_secs_f64() + 60.0,
+        };
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: Some(ticket),
+            attachments: Vec::new(),
+        };
+        let mut outbound = build_outbound_message(&envelope, SRC).expect("outbound");
+        let ticket_stamp = outbound.message.stamp.clone().expect("ticket stamp");
+
+        let generated = apply_direct_stamp_if_needed(&mut outbound, Some(1), 512)
+            .expect("direct stamp skipped");
+
+        assert!(generated.is_none());
+        assert!(outbound.reply_ticket_used);
+        assert_eq!(outbound.message.stamp.as_ref(), Some(&ticket_stamp));
+    }
+
+    #[test]
     fn outbound_envelope_maps_to_lxmf_wire_message() {
         let envelope = MessageEnvelope {
             peer_hash: DEST.into(),
@@ -919,6 +1245,7 @@ mod tests {
             body: "Body".into(),
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
+            native_reply_ticket: None,
             attachments: Vec::new(),
         };
 
@@ -951,6 +1278,7 @@ mod tests {
             body: "Body".into(),
             delivery_mode: DeliveryMode::Propagated,
             include_ticket: false,
+            native_reply_ticket: None,
             attachments: Vec::new(),
         };
 
@@ -961,19 +1289,139 @@ mod tests {
     }
 
     #[test]
-    fn include_ticket_send_fails_clearly_until_native_ticket_api_is_verified() {
+    #[cfg(feature = "native-rns-net")]
+    fn include_ticket_send_adds_lxmf_ticket_field() {
         let envelope = MessageEnvelope {
             peer_hash: DEST.into(),
             title: "Subject".into(),
             body: "Body".into(),
             delivery_mode: DeliveryMode::Direct,
             include_ticket: true,
+            native_reply_ticket: None,
             attachments: Vec::new(),
         };
 
-        let error = build_outbound_message(&envelope, SRC).expect_err("ticket unsupported");
+        let outbound = build_outbound_message(&envelope, SRC).expect("ticketed outbound");
+        let (expires, ticket) =
+            ticket_entry_from_fields(outbound.message.fields.as_ref()).expect("ticket field");
 
-        assert!(error.to_string().contains("include-ticket"));
+        assert!(outbound.include_ticket);
+        assert_eq!(ticket.len(), LXMF_TICKET_LENGTH);
+        assert!(expires > 0.0);
+    }
+
+    #[test]
+    #[cfg(feature = "native-rns-net")]
+    fn signed_ticketed_wire_message_decodes_reply_ticket_metadata() {
+        let provider = NativeReticulumIdentityProvider;
+        let private = provider
+            .create_identity_material("sender")
+            .expect("native identity");
+        let signer = PrivateIdentity::from_private_key_bytes(&private).expect("signer");
+        let source = signer.address_hash().to_hex_string();
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Ticketed".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: true,
+            native_reply_ticket: None,
+            attachments: Vec::new(),
+        };
+        let outbound = build_outbound_message(&envelope, &source).expect("outbound");
+        let (_, ticket) =
+            ticket_entry_from_fields(outbound.message.fields.as_ref()).expect("ticket field");
+
+        let wire = encode_signed_wire_message(&outbound, &private).expect("encode");
+        let summary = decode_wire_message(&wire).expect("decode");
+        let expected_ticket = hex_bytes(&ticket);
+
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_reply_ticket")
+                .map(String::as_str),
+            Some(expected_ticket.as_str())
+        );
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_reply_ticket_state")
+                .map(String::as_str),
+            Some("valid")
+        );
+        assert!(summary
+            .fields
+            .get("native_lxmf_reply_ticket_expires")
+            .is_some());
+    }
+
+    #[test]
+    #[cfg(not(feature = "native-rns-net"))]
+    fn include_ticket_requires_native_rns_net_feature() {
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: true,
+            native_reply_ticket: None,
+            attachments: Vec::new(),
+        };
+
+        let error = build_outbound_message(&envelope, SRC).expect_err("ticket requires native");
+
+        assert!(error.to_string().contains("native-rns-net"));
+    }
+
+    #[test]
+    #[cfg(feature = "native-rns-net")]
+    fn ticket_stamp_uses_ticket_and_message_id_truncated_hash() {
+        let ticket = [0x11u8; LXMF_TICKET_LENGTH];
+        let message_id = [0x22u8; 32];
+
+        let stamp = ticket_stamp_for_message(&ticket, &message_id).expect("ticket stamp");
+        let repeat = ticket_stamp_for_message(&ticket, &message_id).expect("repeat stamp");
+
+        assert_eq!(stamp.len(), 16);
+        assert_eq!(stamp, repeat);
+    }
+
+    #[test]
+    #[cfg(feature = "native-rns-net")]
+    fn outbound_reply_ticket_sets_lxmf_ticket_stamp() {
+        let ticket = NativeLxmfReplyTicket {
+            ticket: vec![0x42; LXMF_TICKET_LENGTH],
+            expires: current_unix_secs_f64() + 60.0,
+        };
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: Some(ticket.clone()),
+            attachments: Vec::new(),
+        };
+
+        let outbound = build_outbound_message(&envelope, SRC).expect("outbound");
+        let payload = lxmf::Payload::new(
+            outbound.message.timestamp.expect("timestamp"),
+            Some(outbound.message.content.clone()),
+            Some(outbound.message.title.clone()),
+            outbound.message.fields.clone(),
+            None,
+        );
+        let wire = lxmf::WireMessage::new(
+            outbound.message.destination_hash.expect("destination"),
+            outbound.message.source_hash.expect("source"),
+            payload,
+        );
+        let expected =
+            ticket_stamp_for_message(&ticket.ticket, &wire.message_id()).expect("expected stamp");
+
+        assert!(outbound.reply_ticket_used);
+        assert_eq!(outbound.message.stamp.as_deref(), Some(expected.as_slice()));
     }
 
     #[test]
@@ -990,6 +1438,7 @@ mod tests {
             body: "Body".into(),
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
+            native_reply_ticket: None,
             attachments: Vec::new(),
         };
         let outbound = build_outbound_message(&envelope, &source).expect("outbound");
@@ -1023,6 +1472,7 @@ mod tests {
             body: "Body".into(),
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
+            native_reply_ticket: None,
             attachments: vec![attachment.clone()],
         };
 
@@ -1074,6 +1524,7 @@ mod tests {
             body: "Body".into(),
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
+            native_reply_ticket: None,
             attachments: vec![unique_test_path("omenbrowser-missing-attachment.bin")],
         };
 
@@ -1144,6 +1595,7 @@ mod tests {
             body: "Body".into(),
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
+            native_reply_ticket: None,
             attachments: Vec::new(),
         };
 

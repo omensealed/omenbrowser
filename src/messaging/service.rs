@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::directory::DirectoryService;
 use crate::error::AppResult;
@@ -107,12 +108,19 @@ impl MessagingService {
         include_ticket: bool,
         attachments: Vec<PathBuf>,
     ) -> AppResult<MessageSummary> {
+        let native_reply_ticket = match delivery_mode {
+            DeliveryMode::Direct => self
+                .store
+                .latest_valid_lxmf_reply_ticket(peer_hash, current_unix_secs_f64())?,
+            DeliveryMode::Propagated => None,
+        };
         let envelope = MessageEnvelope {
             peer_hash: peer_hash.into(),
             title: title.into(),
             body: content.into(),
             delivery_mode,
             include_ticket,
+            native_reply_ticket,
             attachments,
         };
         let mut sent = self.runtime.send_message(envelope).await?;
@@ -350,6 +358,13 @@ impl MessagingService {
             .map(str::to_string)
             .unwrap_or_else(|| peer_hash.chars().take(8).collect()))
     }
+}
+
+fn current_unix_secs_f64() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
 }
 
 fn extract_evidence_value<'a>(evidence: &'a str, key: &str) -> Option<&'a str> {

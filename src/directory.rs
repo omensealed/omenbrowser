@@ -76,6 +76,8 @@ pub struct DirectoryEntry {
     pub hosts_node: bool,
     pub associated_hash: Option<String>,
     pub node_associated_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lxmf_stamp_cost: Option<u8>,
     pub last_seen: f64,
 }
 
@@ -99,6 +101,7 @@ impl DirectoryEntry {
             hosts_node,
             associated_hash: None,
             node_associated_hash: None,
+            lxmf_stamp_cost: None,
             last_seen: 0.0,
         }
     }
@@ -157,6 +160,25 @@ impl DirectoryService {
         associated_hash: Option<String>,
         node_associated_hash: Option<String>,
     ) -> crate::error::AppResult<DirectoryEntry> {
+        self.ingest_announce_with_metadata(
+            destination_hash,
+            display_name,
+            kind,
+            associated_hash,
+            node_associated_hash,
+            None,
+        )
+    }
+
+    pub fn ingest_announce_with_metadata(
+        &mut self,
+        destination_hash: impl Into<String>,
+        display_name: impl Into<String>,
+        kind: DirectoryKind,
+        associated_hash: Option<String>,
+        node_associated_hash: Option<String>,
+        lxmf_stamp_cost: Option<u8>,
+    ) -> crate::error::AppResult<DirectoryEntry> {
         let destination_hash = destination_hash.into();
         let existing = self.entries.get(&destination_hash).cloned();
         let now = timestamp_secs();
@@ -180,9 +202,11 @@ impl DirectoryService {
             entry.associated_hash = associated_hash.or_else(|| existing.associated_hash.clone());
             entry.node_associated_hash =
                 node_associated_hash.or_else(|| existing.node_associated_hash.clone());
+            entry.lxmf_stamp_cost = lxmf_stamp_cost.or(existing.lxmf_stamp_cost);
         } else {
             entry.associated_hash = associated_hash;
             entry.node_associated_hash = node_associated_hash;
+            entry.lxmf_stamp_cost = lxmf_stamp_cost;
         }
         entry.last_seen = now;
         if kind == DirectoryKind::Node && entry.trust_level == TrustLevel::Trusted {
@@ -211,12 +235,13 @@ impl DirectoryService {
         let mut changed = Vec::new();
         for payload in payloads {
             let before = self.find(&payload.destination_hash);
-            let entry = self.ingest_announce(
+            let entry = self.ingest_announce_with_metadata(
                 payload.destination_hash.clone(),
                 payload.display_name.clone(),
                 payload.kind.clone(),
                 payload.associated_hash.clone(),
                 payload.node_associated_hash.clone(),
+                payload.lxmf_stamp_cost,
             )?;
             if before.as_ref() != Some(&entry) {
                 changed.push(entry);
@@ -641,6 +666,7 @@ fn directory_entries_match_ignoring_last_seen(
         && left.hosts_node == right.hosts_node
         && left.associated_hash == right.associated_hash
         && left.node_associated_hash == right.node_associated_hash
+        && left.lxmf_stamp_cost == right.lxmf_stamp_cost
 }
 
 fn merged_entry(primary: Option<&DirectoryEntry>, secondary: &DirectoryEntry) -> DirectoryEntry {
@@ -677,6 +703,7 @@ fn merged_entry(primary: Option<&DirectoryEntry>, secondary: &DirectoryEntry) ->
         .node_associated_hash
         .clone()
         .or_else(|| secondary.node_associated_hash.clone());
+    entry.lxmf_stamp_cost = primary.lxmf_stamp_cost.or(secondary.lxmf_stamp_cost);
     entry.last_seen = primary.last_seen.max(secondary.last_seen);
     entry
 }

@@ -202,6 +202,8 @@ pub struct AnnouncePayload {
     pub node_associated_hash: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_ratchet: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lxmf_stamp_cost: Option<u8>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -277,6 +279,8 @@ pub struct DirectoryCandidate {
     pub node_associated_hash: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_ratchet: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lxmf_stamp_cost: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1062,6 +1066,7 @@ fn mock_directory_candidates() -> Vec<DirectoryCandidate> {
             associated_hash: Some("0123456789abcdef".into()),
             node_associated_hash: None,
             has_ratchet: false,
+            lxmf_stamp_cost: None,
         },
         DirectoryCandidate {
             destination_hash: "0123456789abcdef".into(),
@@ -1070,6 +1075,7 @@ fn mock_directory_candidates() -> Vec<DirectoryCandidate> {
             associated_hash: Some("mock.node".into()),
             node_associated_hash: None,
             has_ratchet: false,
+            lxmf_stamp_cost: None,
         },
         DirectoryCandidate {
             destination_hash: "fedcba9876543210".into(),
@@ -1078,6 +1084,7 @@ fn mock_directory_candidates() -> Vec<DirectoryCandidate> {
             associated_hash: Some("0123456789abcdef".into()),
             node_associated_hash: Some("mock.node".into()),
             has_ratchet: false,
+            lxmf_stamp_cost: None,
         },
     ]
 }
@@ -1192,6 +1199,7 @@ mod tests {
         .expect("deserialize legacy announce payload");
 
         assert_eq!(announce.node_associated_hash, None);
+        assert_eq!(announce.lxmf_stamp_cost, None);
 
         let candidate: DirectoryCandidate = serde_json::from_value(serde_json::json!({
             "destination_hash": "prop",
@@ -1202,6 +1210,7 @@ mod tests {
         .expect("deserialize legacy directory candidate");
 
         assert_eq!(candidate.node_associated_hash, None);
+        assert_eq!(candidate.lxmf_stamp_cost, None);
     }
 
     #[tokio::test]
@@ -1274,6 +1283,7 @@ mod tests {
                 body: "Body".into(),
                 delivery_mode: DeliveryMode::Propagated,
                 include_ticket: true,
+                native_reply_ticket: None,
                 attachments: Vec::new(),
             })
             .await

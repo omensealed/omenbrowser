@@ -32,6 +32,48 @@ fn message(peer: &str, timestamp: f64, incoming: bool) -> MessageSummary {
 }
 
 #[test]
+fn message_store_returns_latest_valid_lxmf_reply_ticket() {
+    let store = MessageStore::new(temp_dir("reply-ticket")).expect("store");
+    let mut expired = message("peer-a", 1.0, true);
+    expired.message_id = Some("expired".into());
+    expired.fields.insert(
+        "native_lxmf_reply_ticket".into(),
+        "000102030405060708090a0b0c0d0e0f".into(),
+    );
+    expired
+        .fields
+        .insert("native_lxmf_reply_ticket_expires".into(), "90.0".into());
+    let mut invalid = message("peer-a", 2.0, true);
+    invalid.message_id = Some("invalid".into());
+    invalid
+        .fields
+        .insert("native_lxmf_reply_ticket".into(), "not-hex".into());
+    invalid
+        .fields
+        .insert("native_lxmf_reply_ticket_expires".into(), "200.0".into());
+    let mut valid = message("peer-a", 3.0, true);
+    valid.message_id = Some("valid".into());
+    valid.fields.insert(
+        "native_lxmf_reply_ticket".into(),
+        "101112131415161718191a1b1c1d1e1f".into(),
+    );
+    valid
+        .fields
+        .insert("native_lxmf_reply_ticket_expires".into(), "200.0".into());
+    store.append(expired).expect("append expired");
+    store.append(invalid).expect("append invalid");
+    store.append(valid).expect("append valid");
+
+    let ticket = store
+        .latest_valid_lxmf_reply_ticket("peer-a", 100.0)
+        .expect("ticket lookup")
+        .expect("valid ticket");
+
+    assert_eq!(ticket.expires, 200.0);
+    assert_eq!(ticket.ticket, (0x10u8..=0x1f).collect::<Vec<_>>());
+}
+
+#[test]
 fn message_store_appends_lists_marks_read_and_updates_delivery() {
     let store = MessageStore::new(temp_dir("basic")).expect("store");
     let outgoing = store.append(message("peer-a", 1.0, false)).expect("append");

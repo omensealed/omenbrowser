@@ -53,6 +53,7 @@ fn app_event_represents_runtime_browser_message_and_partial_paths() {
         associated_hash: None,
         node_associated_hash: None,
         has_ratchet: false,
+        lxmf_stamp_cost: None,
     }));
     let probe = AppEvent::Runtime(RuntimeBusEvent::PageFetchProbe(PageFetchProbeReport {
         backend: RuntimeBackendName::Reticulum,

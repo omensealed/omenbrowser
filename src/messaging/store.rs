@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::AppResult;
 use crate::messaging::{
-    direct_lxmf_timeout_transition, ConversationThread, MessageSummary, TransportMethod,
+    direct_lxmf_timeout_transition, ConversationThread, MessageSummary, NativeLxmfReplyTicket,
+    TransportMethod,
 };
 
 #[derive(Clone, Debug)]
@@ -105,6 +106,20 @@ impl MessageStore {
 
     pub fn get_thread(&self, peer_hash: &str) -> AppResult<ConversationThread> {
         self.load_thread(peer_hash, None)
+    }
+
+    pub fn latest_valid_lxmf_reply_ticket(
+        &self,
+        peer_hash: &str,
+        now: f64,
+    ) -> AppResult<Option<NativeLxmfReplyTicket>> {
+        let thread = self.load_thread(peer_hash, None)?;
+        Ok(thread
+            .messages
+            .iter()
+            .rev()
+            .filter_map(|message| reply_ticket_from_message(message, now))
+            .next())
     }
 
     pub fn ensure_thread(
@@ -428,6 +443,34 @@ impl MessageStore {
         std::fs::rename(temp, path)?;
         Ok(())
     }
+}
+
+fn reply_ticket_from_message(message: &MessageSummary, now: f64) -> Option<NativeLxmfReplyTicket> {
+    let expires = message
+        .fields
+        .get("native_lxmf_reply_ticket_expires")?
+        .parse::<f64>()
+        .ok()?;
+    if expires <= now {
+        return None;
+    }
+    let ticket = hex_to_bytes(message.fields.get("native_lxmf_reply_ticket")?)?;
+    if ticket.len() != 16 {
+        return None;
+    }
+    Some(NativeLxmfReplyTicket { ticket, expires })
+}
+
+fn hex_to_bytes(value: &str) -> Option<Vec<u8>> {
+    let value = value.trim();
+    if value.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for index in (0..value.len()).step_by(2) {
+        bytes.push(u8::from_str_radix(&value[index..index + 2], 16).ok()?);
+    }
+    Some(bytes)
 }
 
 fn merge_lxmf_fields_preserving_propagation_handoff(

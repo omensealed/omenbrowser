@@ -51,11 +51,19 @@ pub struct MessageSummary {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct NativeLxmfReplyTicket {
+    pub ticket: Vec<u8>,
+    pub expires: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MessageEnvelope {
     pub peer_hash: String,
     pub title: String,
     pub body: String,
     pub delivery_mode: DeliveryMode,
     pub include_ticket: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_reply_ticket: Option<NativeLxmfReplyTicket>,
     pub attachments: Vec<PathBuf>,
 }
