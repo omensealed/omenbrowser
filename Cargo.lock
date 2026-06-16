@@ -3239,6 +3239,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "x25519-dalek",
 ]
 
 [[package]]

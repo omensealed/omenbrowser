@@ -1523,6 +1523,7 @@ fn drain_propagation_sync_events(
             Ok(RuntimeBusEvent::MessageReceived(message)) => {
                 events.push(serde_json::json!({
                     "kind": "message_received",
+                    "message": message,
                     "peer_hash": message.peer_hash,
                     "peer_label": message.peer_label,
                     "message_id": message.message_id,
@@ -1549,6 +1550,29 @@ fn drain_propagation_sync_events(
         }
     }
     events
+}
+
+fn messages_from_propagation_sync_report(report: &serde_json::Value) -> Vec<MessageSummary> {
+    report
+        .get("sync_events")
+        .and_then(serde_json::Value::as_array)
+        .map(|events| {
+            events
+                .iter()
+                .filter_map(|event| {
+                    (event.get("kind").and_then(serde_json::Value::as_str)
+                        == Some("message_received"))
+                    .then(|| {
+                        event
+                            .get("message")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value::<MessageSummary>(value).ok())
+                    })
+                    .flatten()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn lxmf_delivery_evidence_from_propagation_sync_report(
@@ -16011,9 +16035,23 @@ impl App {
                     return false;
                 }
                 self.propagation_sync_pending = None;
+                let mut messages = messages;
+                messages.extend(messages_from_propagation_sync_report(&report));
+                deduplicate_message_summaries(&mut messages);
                 let message_count = messages.len();
                 for message in messages {
-                    self.merge_message_into_conversation(message);
+                    match self.messaging_service.ingest_runtime_message(message) {
+                        Ok(stored) => self.merge_message_into_conversation(stored),
+                        Err(error) => {
+                            self.logs.push_with_source(
+                                LogSeverity::Warn,
+                                LogSource::Messaging,
+                                format!(
+                                    "failed to persist propagation sync message before display: {error}"
+                                ),
+                            );
+                        }
+                    }
                 }
                 let sync_evidence = lxmf_delivery_evidence_from_propagation_sync_report(&report);
                 let sync_evidence_count = sync_evidence.len();
@@ -19228,6 +19266,11 @@ fn message_already_present(conversation: &Conversation, message: &MessageSummary
             }
         }
     })
+}
+
+fn deduplicate_message_summaries(messages: &mut Vec<MessageSummary>) {
+    let mut seen = BTreeSet::new();
+    messages.retain(|message| seen.insert(message_summary_key(message)));
 }
 
 fn pending_send_message_id(generation: u64) -> String {
@@ -28989,6 +29032,77 @@ side
             .task
             .contains("propagation sync complete: state=complete messages=1"));
         assert!(app.propagation_sync_pending.is_none());
+    }
+
+    #[test]
+    fn propagation_sync_report_message_event_merges_when_runtime_queue_drain_is_empty() {
+        let mut app = App::new(test_config("propagation-sync-report-message"));
+        app.propagation_sync_pending = Some(7);
+        let message = MessageSummary {
+            peer_hash: FIXTURE_PROPAGATION_PEER.into(),
+            peer_label: "Prop Peer".into(),
+            title: "Propagated".into(),
+            content: "Hello from the report event".into(),
+            timestamp: 2.0,
+            transport_method: TransportMethod::Propagated,
+            delivered: true,
+            failed: false,
+            incoming: true,
+            unread: true,
+            message_id: Some("prop-msg-report-only".into()),
+            fields: BTreeMap::new(),
+            attachments: Vec::new(),
+        };
+
+        assert!(
+            app.apply_message_task_result(MessageTaskResult::PropagationSynced {
+                generation: 7,
+                report: serde_json::json!({
+                    "report": "native_lxmf_propagation_diagnostics",
+                    "selected_node": FIXTURE_NODE_HASH,
+                    "sync": {"ok": true, "error": null},
+                    "after": {
+                        "has_path": true,
+                        "known_app_data": true,
+                        "transfer_state": "complete"
+                    },
+                    "sync_events": [
+                        {
+                            "kind": "message_received",
+                            "message": message,
+                            "peer_hash": FIXTURE_PROPAGATION_PEER,
+                            "message_id": "prop-msg-report-only"
+                        }
+                    ],
+                    "blocker": "no propagation blocker reported"
+                }),
+                messages: Vec::new(),
+            })
+        );
+
+        let conversation = app
+            .workspace
+            .conversations
+            .iter()
+            .find(|conversation| conversation.peer_hash == FIXTURE_PROPAGATION_PEER)
+            .expect("propagation conversation");
+        assert_eq!(conversation.thread.messages.len(), 1);
+        assert_eq!(
+            conversation.thread.messages[0].message_id.as_deref(),
+            Some("prop-msg-report-only")
+        );
+        assert_eq!(
+            app.messaging_service
+                .conversation(FIXTURE_PROPAGATION_PEER)
+                .expect("stored propagation thread")
+                .messages
+                .len(),
+            1
+        );
+        assert!(app
+            .status
+            .task
+            .contains("propagation sync complete: state=complete messages=1"));
     }
 
     #[test]

@@ -4,9 +4,11 @@ use std::path::Path;
 #[cfg(feature = "native-rns-net")]
 use rand_core::RngCore;
 use reticulum_rs::core::identity::PrivateIdentity;
-use reticulum_rs::core::ratchets::decrypt_with_identity;
+use reticulum_rs::core::ratchets::{decrypt_with_identity, encrypt_for_public_key};
 #[cfg(feature = "native-rns-net")]
 use sha2::{Digest, Sha256};
+#[cfg(feature = "native-rns-net")]
+use x25519_dalek::PublicKey;
 
 use crate::error::{AppError, AppResult};
 use crate::messaging::{
@@ -205,16 +207,9 @@ pub fn encode_signed_propagation_envelope(
     let wire = lxmf::WireMessage::unpack(wire_bytes.as_slice()).map_err(|err| {
         AppError::Runtime(format!("LXMF wire decode before propagation failed: {err}"))
     })?;
-    let recipient = lxmf::wire::identity::Identity::new_from_slices(
-        &recipient_public_key[..32],
-        &recipient_public_key[32..],
-    );
     let timestamp = wire.payload.timestamp;
-    let (lxm_data, transient_id) = wire
-        .pack_propagation_transient_with_rng(&recipient, rand_core::OsRng)
-        .map_err(|err| {
-            AppError::Runtime(format!("LXMF propagation transient encode failed: {err}"))
-        })?;
+    let (lxm_data, transient_id) =
+        pack_destination_salted_propagation_transient(&wire, recipient_public_key)?;
     let stamp = if let Some(target_cost) = target_stamp_cost {
         Some(generate_propagation_stamp_for_transient(
             &lxm_data,
@@ -236,6 +231,38 @@ pub fn encode_signed_propagation_envelope(
         transient_id,
         stamp,
     })
+}
+
+#[cfg(feature = "native-rns-net")]
+fn pack_destination_salted_propagation_transient(
+    wire: &lxmf::WireMessage,
+    recipient_public_key: [u8; 64],
+) -> AppResult<(Vec<u8>, [u8; 32])> {
+    let packed = wire.pack().map_err(|err| {
+        AppError::Runtime(format!("LXMF wire pack before propagation failed: {err}"))
+    })?;
+    if packed.len() <= 16 {
+        return Err(AppError::Runtime(
+            "LXMF wire payload is shorter than destination hash".into(),
+        ));
+    }
+    let mut public_key = [0u8; 32];
+    public_key.copy_from_slice(&recipient_public_key[..32]);
+    let encrypted = encrypt_for_public_key(
+        &PublicKey::from(public_key),
+        &packed[..16],
+        &packed[16..],
+        rand_core::OsRng,
+    )
+    .map_err(|_| AppError::Runtime("LXMF propagation transient encrypt failed".into()))?;
+
+    let mut lxm_data = Vec::with_capacity(16 + encrypted.len());
+    lxm_data.extend_from_slice(&packed[..16]);
+    lxm_data.extend_from_slice(&encrypted);
+    let digest = Sha256::digest(&lxm_data);
+    let mut transient_id = [0u8; 32];
+    transient_id.copy_from_slice(digest.as_slice());
+    Ok((lxm_data, transient_id))
 }
 
 #[cfg(feature = "native-rns-net")]
@@ -1010,6 +1037,18 @@ mod tests {
     const DEST: &str = "00112233445566778899aabbccddeeff";
     const SRC: &str = "ffeeddccbbaa99887766554433221100";
 
+    #[cfg(feature = "native-rns-net")]
+    fn lxmf_delivery_hash(identity: &PrivateIdentity) -> [u8; 16] {
+        let mut identity_hash = [0u8; 16];
+        identity_hash.copy_from_slice(identity.address_hash().as_slice());
+        rns_core::destination::destination_hash("lxmf", &["delivery"], Some(&identity_hash))
+    }
+
+    #[cfg(feature = "native-rns-net")]
+    fn hex16_bytes(bytes: &[u8; 16]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
     #[test]
     fn lxmf_umbrella_wire_types_are_available_without_sdk_assumptions() {
         let api = native_lxmf_wire_api();
@@ -1139,11 +1178,13 @@ mod tests {
         let sender = PrivateIdentity::from_private_key_bytes(&sender_private).expect("sender");
         let receiver = PrivateIdentity::new_from_rand(rand_core::OsRng);
         let receiver_identity = receiver.as_identity();
+        let receiver_lxmf_hash = lxmf_delivery_hash(&receiver);
+        let sender_lxmf_hash = lxmf_delivery_hash(&sender);
         let mut receiver_public = [0u8; 64];
         receiver_public[..32].copy_from_slice(receiver_identity.public_key_bytes());
         receiver_public[32..].copy_from_slice(receiver_identity.verifying_key_bytes());
         let envelope = MessageEnvelope {
-            peer_hash: receiver.address_hash().to_hex_string(),
+            peer_hash: hex16_bytes(&receiver_lxmf_hash),
             title: "Propagated".into(),
             body: "Body".into(),
             delivery_mode: DeliveryMode::Propagated,
@@ -1151,8 +1192,8 @@ mod tests {
             native_reply_ticket: None,
             attachments: Vec::new(),
         };
-        let outbound = build_outbound_message(&envelope, &sender.address_hash().to_hex_string())
-            .expect("outbound");
+        let outbound =
+            build_outbound_message(&envelope, &hex16_bytes(&sender_lxmf_hash)).expect("outbound");
 
         let package = encode_signed_propagation_envelope(
             &outbound,
@@ -1177,7 +1218,7 @@ mod tests {
             Some(0)
         );
         assert_eq!(stamped.transient_id, package.transient_id);
-        assert_eq!(summary.peer_hash, sender.address_hash().to_hex_string());
+        assert_eq!(summary.peer_hash, hex16_bytes(&sender_lxmf_hash));
         assert_eq!(summary.title, "Propagated");
         assert_eq!(summary.content, "Body");
     }
@@ -1538,10 +1579,8 @@ mod tests {
     fn propagated_lxmf_data_decrypts_to_message_summary() {
         let sender = PrivateIdentity::new_from_rand(rand_core::OsRng);
         let receiver = PrivateIdentity::new_from_rand(rand_core::OsRng);
-        let receiver_hash =
-            parse_lxmf_hash(&receiver.address_hash().to_hex_string()).expect("receiver hash");
-        let sender_hash =
-            parse_lxmf_hash(&sender.address_hash().to_hex_string()).expect("sender hash");
+        let receiver_hash = lxmf_delivery_hash(&receiver);
+        let sender_hash = lxmf_delivery_hash(&sender);
         let payload = lxmf::Payload::new(
             42.0,
             Some(b"Body".to_vec()),
@@ -1551,9 +1590,13 @@ mod tests {
         );
         let mut wire = lxmf::WireMessage::new(receiver_hash, sender_hash, payload);
         wire.sign(&sender).expect("sign");
-        let (lxmf_data, _transient_id) = wire
-            .pack_propagation_transient_with_rng(receiver.as_identity(), rand_core::OsRng)
-            .expect("propagation data");
+        let receiver_identity = receiver.as_identity();
+        let mut receiver_public = [0u8; 64];
+        receiver_public[..32].copy_from_slice(receiver_identity.public_key_bytes());
+        receiver_public[32..].copy_from_slice(receiver_identity.verifying_key_bytes());
+        let (lxmf_data, _transient_id) =
+            pack_destination_salted_propagation_transient(&wire, receiver_public)
+                .expect("propagation data");
 
         let summary = decode_propagated_lxmf_data(
             lxmf_data.as_slice(),
@@ -1561,7 +1604,7 @@ mod tests {
         )
         .expect("decode propagated");
 
-        assert_eq!(summary.peer_hash, sender.address_hash().to_hex_string());
+        assert_eq!(summary.peer_hash, hex16_bytes(&sender_hash));
         assert_eq!(summary.title, "Subject");
         assert_eq!(summary.content, "Body");
         assert_eq!(summary.transport_method, AppTransportMethod::Propagated);
