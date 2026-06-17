@@ -59,7 +59,8 @@ use crate::media::{
     decide_remote_media, extract_link_candidates, RemoteMediaContext, RemoteMediaDecision,
     RemoteMediaTransport,
 };
-use crate::micron::render::HitAction;
+use crate::micron::parse_micron;
+use crate::micron::render::{render_document, HitAction};
 #[cfg(feature = "chat-client")]
 use crate::storage::files::next_available_download_path;
 use crate::storage::settings::{
@@ -146,6 +147,7 @@ enum GatewayPresetButtonState {
 const CONVERSATION_VISIBLE_MESSAGES: usize = 8;
 const CONVERSATION_PREVIEW_CHARS: usize = 220;
 const CONVERSATION_PREVIEW_LINES: usize = 5;
+const CONVERSATION_MICRON_PREVIEW_WIDTH: usize = 80;
 const LOG_VISIBLE_ENTRIES: usize = 48;
 const LXMF_HELP_LINES: &[&str] = &[
     "Messages can be direct or propagated. Direct sends use live paths; propagated sends hand the envelope to the selected propagation node.",
@@ -1231,6 +1233,9 @@ enum Message {
         reverse: bool,
     },
     ActivateFocusedBrowserItem,
+    BrowserZoom {
+        direction: isize,
+    },
     ScrollBrowserPage {
         direction: isize,
     },
@@ -2143,7 +2148,7 @@ impl DesktopApp {
             Message::SendConversationPaneDraft(conversation_id) => {
                 if self.select_conversation_by_id(conversation_id) {
                     self.app.send_active_conversation_draft();
-                    self.clear_conversation_body_editor(conversation_id);
+                    self.sync_conversation_body_editor(conversation_id);
                 }
             }
             Message::PrepareLatestLxmfRetryForConversation(conversation_id) => {
@@ -2557,6 +2562,12 @@ impl DesktopApp {
                         .scroll_active_browser_page(self.app.browser_viewport_height(), direction);
                 }
             }
+            Message::BrowserZoom { direction } => {
+                if self.app.workspace.active_section == WorkspaceSection::Browser {
+                    let active = self.app.active_browser_tab().id;
+                    self.app.zoom_browser_tab(active, direction);
+                }
+            }
             Message::Page(PageMessage::Activate {
                 row,
                 col,
@@ -2672,6 +2683,9 @@ impl DesktopApp {
                 let omenchat_reconnect = self.reconnect_restored_omenchat_sessions_if_ready();
                 let browser_tasks = self.app.drain_browser_task_results();
                 let message_tasks = self.app.drain_message_task_results();
+                if message_tasks > 0 {
+                    self.sync_conversation_body_editors();
+                }
                 let direct_timeouts = self.app.reconcile_due_lxmf_direct_timeouts(now);
                 let propagation_timeouts = self.app.reconcile_due_lxmf_propagation_timeouts(now);
                 let diagnostics = self.app.drain_diagnostics_task_results();
@@ -3721,6 +3735,19 @@ impl DesktopApp {
         if needs_replace {
             self.conversation_body_editors
                 .insert(conversation_id, text_editor::Content::with_text(&body));
+        }
+    }
+
+    fn sync_conversation_body_editors(&mut self) {
+        let conversation_ids = self
+            .app
+            .workspace
+            .conversations
+            .iter()
+            .map(|conversation| conversation.id)
+            .collect::<Vec<_>>();
+        for conversation_id in conversation_ids {
+            self.sync_conversation_body_editor(conversation_id);
         }
     }
 
@@ -9987,7 +10014,7 @@ impl DesktopApp {
         let browser_help = column![
             wrapped_panel_text("Open NomadNet pages with destination:/path.mu or paste a full destination hash into the address field. Use Request Path when the route/key is unknown, then retry after the path status returns pass."),
             wrapped_panel_text("Back, Forward, Reload, Stop, Identify, Capture, and Diag act on the selected browser pane only. Diag opens diagnostics for that pane's current destination."),
-            wrapped_panel_text("Ctrl + mouse wheel zooms only the active Micron viewport. The Top button returns that viewport to the first rendered row."),
+            wrapped_panel_text("Ctrl + Plus zooms in, Ctrl + Minus zooms out, and Ctrl + mouse wheel also zooms only the active Micron viewport. The Top button returns that viewport to the first rendered row."),
             wrapped_panel_text("NomadNet non-.mu file links download through the configured downloads path. HTTP/HTTPS links open through the external browser prompt; use Copy URL for Tor Browser."),
         ]
         .spacing(6);
@@ -12352,7 +12379,7 @@ fn message_bubble<'a>(
             .size(ui_size(14))
             .width(Length::Fill)
             .wrapping(Wrapping::WordOrGlyph),
-        text(compact_message_preview(&message.content))
+        text(message_body_preview(message))
             .size(ui_size(15))
             .width(Length::Fill)
             .wrapping(Wrapping::WordOrGlyph),
@@ -12572,6 +12599,53 @@ fn compact_message_preview(content: &str) -> String {
         truncated = content.chars().count() > CONVERSATION_PREVIEW_CHARS;
     }
     if truncated {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn message_body_preview(message: &crate::messaging::MessageSummary) -> String {
+    if message
+        .fields
+        .get("native_lxmf_renderer")
+        .is_some_and(|renderer| renderer.eq_ignore_ascii_case("micron"))
+    {
+        return compact_micron_message_preview(&message.content);
+    }
+    compact_message_preview(&message.content)
+}
+
+fn compact_micron_message_preview(content: &str) -> String {
+    let document = parse_micron(content);
+    let rendered = render_document(&document, CONVERSATION_MICRON_PREVIEW_WIDTH);
+    let mut preview = String::new();
+    let mut char_count = 0usize;
+    let mut truncated = false;
+
+    for (line_index, row) in rendered.iter().enumerate() {
+        if line_index >= CONVERSATION_PREVIEW_LINES {
+            truncated = true;
+            break;
+        }
+        if line_index > 0 {
+            preview.push('\n');
+        }
+        for ch in row.text().chars() {
+            if char_count >= CONVERSATION_PREVIEW_CHARS {
+                truncated = true;
+                break;
+            }
+            preview.push(ch);
+            char_count += 1;
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    if preview.is_empty() && !content.is_empty() {
+        preview = compact_message_preview(content);
+    } else if truncated {
         preview.push_str("...");
     }
     preview
@@ -14625,27 +14699,30 @@ fn interface_config_summary_lines(
 const DESKTOP_THEME_CHOICES: &[&str] = &[
     "default",
     "omen",
-    "dark",
-    "moonfly",
-    "kanagawa",
     "nord",
-    "solarized_dark",
-    "light",
+    "blue",
+    "terminal_green",
+    "terror",
+    "abyss",
+    "necropolis",
 ];
 
 fn theme_from_name(name: &str) -> Theme {
     match name.trim().to_ascii_lowercase().as_str() {
-        "default" => Theme::Dark,
+        "default" | "dark" => Theme::Dark,
         "omen" => omen_desktop_theme(),
-        "light" => Theme::Light,
         "nord" => Theme::Nord,
-        "solarized_dark" | "solarized-dark" | "solarized dark" => Theme::SolarizedDark,
+        "blue" | "deep_blue" | "deep-blue" => deep_blue_desktop_theme(),
+        "terminal_green" | "terminal-green" | "terminal green" | "solarized_dark"
+        | "solarized-dark" | "solarized dark" => terminal_green_desktop_theme(),
+        "terror" | "blood" | "blood_rite" | "blood-rite" => terror_desktop_theme(),
+        "abyss" | "abyssal" => abyss_desktop_theme(),
+        "necropolis" | "bone" => necropolis_desktop_theme(),
         "gruvbox_dark" | "gruvbox-dark" | "gruvbox dark" => Theme::GruvboxDark,
         "dracula" => Theme::Dracula,
         "catppuccin" | "mocha" | "catppuccin_mocha" => Theme::CatppuccinMocha,
         "tokyo" | "tokyo_night" => Theme::TokyoNight,
-        "kanagawa" | "kanagawa_dragon" => Theme::KanagawaDragon,
-        "moonfly" => Theme::Moonfly,
+        "kanagawa" | "kanagawa_dragon" | "moonfly" | "light" => Theme::Dark,
         "nightfly" => Theme::Nightfly,
         "oxocarbon" => Theme::Oxocarbon,
         _ => Theme::Dark,
@@ -14661,6 +14738,71 @@ fn omen_desktop_theme() -> Theme {
             primary: Color::from_rgb8(156, 28, 36),
             success: Color::from_rgb8(166, 84, 70),
             danger: Color::from_rgb8(218, 54, 60),
+        },
+    )
+}
+
+fn deep_blue_desktop_theme() -> Theme {
+    Theme::custom(
+        "OMEN Blue".into(),
+        Palette {
+            background: Color::from_rgb8(0, 10, 24),
+            text: Color::from_rgb8(218, 242, 255),
+            primary: Color::from_rgb8(24, 168, 232),
+            success: Color::from_rgb8(58, 214, 184),
+            danger: Color::from_rgb8(255, 92, 92),
+        },
+    )
+}
+
+fn terminal_green_desktop_theme() -> Theme {
+    Theme::custom(
+        "Terminal Green".into(),
+        Palette {
+            background: Color::from_rgb8(1, 9, 5),
+            text: Color::from_rgb8(178, 238, 188),
+            primary: Color::from_rgb8(42, 176, 86),
+            success: Color::from_rgb8(64, 214, 116),
+            danger: Color::from_rgb8(232, 76, 64),
+        },
+    )
+}
+
+fn terror_desktop_theme() -> Theme {
+    Theme::custom(
+        "Terror".into(),
+        Palette {
+            background: Color::from_rgb8(4, 0, 10),
+            text: Color::from_rgb8(237, 226, 255),
+            primary: Color::from_rgb8(122, 48, 226),
+            success: Color::from_rgb8(168, 232, 54),
+            danger: Color::from_rgb8(255, 112, 28),
+        },
+    )
+}
+
+fn abyss_desktop_theme() -> Theme {
+    Theme::custom(
+        "Abyss".into(),
+        Palette {
+            background: Color::from_rgb8(1, 3, 10),
+            text: Color::from_rgb8(218, 226, 238),
+            primary: Color::from_rgb8(76, 64, 190),
+            success: Color::from_rgb8(54, 196, 170),
+            danger: Color::from_rgb8(221, 62, 122),
+        },
+    )
+}
+
+fn necropolis_desktop_theme() -> Theme {
+    Theme::custom(
+        "Necropolis".into(),
+        Palette {
+            background: Color::from_rgb8(5, 5, 6),
+            text: Color::from_rgb8(224, 219, 204),
+            primary: Color::from_rgb8(128, 155, 116),
+            success: Color::from_rgb8(156, 190, 128),
+            danger: Color::from_rgb8(194, 62, 72),
         },
     )
 }
@@ -15051,6 +15193,12 @@ fn map_key_press(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<M
         Key::Named(Named::ArrowLeft) if modifiers.alt() => Some(Message::BrowserBack),
         Key::Named(Named::ArrowRight) if modifiers.alt() => Some(Message::BrowserForward),
         Key::Character("b") if modifiers.command() => Some(Message::ToggleNavigation),
+        Key::Character("+") | Key::Character("=") if modifiers.command() => {
+            Some(Message::BrowserZoom { direction: 1 })
+        }
+        Key::Character("-") | Key::Character("_") if modifiers.command() => {
+            Some(Message::BrowserZoom { direction: -1 })
+        }
         Key::Character("t") if modifiers.command() => Some(Message::NewBrowserTab),
         Key::Character("w") if modifiers.command() => Some(Message::CloseBrowserTab),
         Key::Character("r") if modifiers.command() => Some(Message::ReloadBrowser),
@@ -16833,6 +16981,44 @@ mod tests {
         assert_eq!(first.draft_body, "first body");
         assert_ne!(second.draft_body, "first body");
         assert_eq!(desktop.app.active_conversation().id, first_id);
+    }
+
+    #[test]
+    fn blocked_conversation_pane_send_keeps_editor_when_no_message_row_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-desktop-send-blocked-keeps-draft-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::config::AppPaths::from_root(root);
+        paths.ensure().expect("paths");
+        let mut settings = crate::storage::settings::AppSettings::default();
+        settings.runtime_backend = crate::storage::settings::RuntimeBackendSetting::Reticulum;
+        let mut app = App::new(crate::config::AppConfig { paths, settings });
+        app.runtime_status.backend = crate::runtime::network::RuntimeBackendName::Reticulum;
+        app.runtime_status.connected = true;
+        app.runtime_status.active_identity = Some(crate::identity::IdentityProfile {
+            label: "test".into(),
+            path: app.paths.identities_dir.join("default_identity"),
+            hash_hex: "00".repeat(16),
+            managed: true,
+        });
+        let conversation_id = app.active_conversation().id;
+        app.set_active_conversation_peer_hash("not-a-hash".into());
+        app.set_active_conversation_draft_body("do not lose this".into());
+        let mut desktop = DesktopApp::new(app);
+
+        let _ = desktop.update(Message::SendConversationPaneDraft(conversation_id));
+
+        let conversation = desktop.app.active_conversation();
+        assert_eq!(conversation.draft_body, "do not lose this");
+        assert!(conversation.pending_send.is_none());
+        assert!(conversation.thread.messages.is_empty());
+        let editor = desktop
+            .conversation_body_editors
+            .get(&conversation_id)
+            .expect("conversation editor");
+        assert_eq!(conversation_editor_text(editor), "do not lose this");
     }
 
     #[test]
@@ -19862,6 +20048,27 @@ mod tests {
             ),
             Some(Message::ScrollBrowserPage { direction: 1 })
         ));
+        assert!(matches!(
+            map_key_press(
+                keyboard::Key::Character("+".into()),
+                keyboard::Modifiers::COMMAND
+            ),
+            Some(Message::BrowserZoom { direction: 1 })
+        ));
+        assert!(matches!(
+            map_key_press(
+                keyboard::Key::Character("=".into()),
+                keyboard::Modifiers::COMMAND
+            ),
+            Some(Message::BrowserZoom { direction: 1 })
+        ));
+        assert!(matches!(
+            map_key_press(
+                keyboard::Key::Character("-".into()),
+                keyboard::Modifiers::COMMAND
+            ),
+            Some(Message::BrowserZoom { direction: -1 })
+        ));
     }
 
     #[test]
@@ -19901,11 +20108,49 @@ mod tests {
             theme_from_name("omen").palette().primary,
             Color::from_rgb8(156, 28, 36)
         );
-        assert_eq!(theme_from_name("kanagawa"), Theme::KanagawaDragon);
-        assert_eq!(theme_from_name("solarized_dark"), Theme::SolarizedDark);
+        assert_eq!(
+            theme_from_name("blue").palette().primary,
+            Color::from_rgb8(24, 168, 232)
+        );
+        assert_eq!(
+            theme_from_name("terminal_green").palette().primary,
+            Color::from_rgb8(42, 176, 86)
+        );
+        assert_eq!(
+            theme_from_name("solarized_dark").palette().primary,
+            Color::from_rgb8(42, 176, 86)
+        );
+        assert_eq!(
+            theme_from_name("terror").palette().primary,
+            Color::from_rgb8(122, 48, 226)
+        );
+        assert_eq!(
+            theme_from_name("blood").palette().primary,
+            Color::from_rgb8(122, 48, 226)
+        );
+        assert_eq!(
+            theme_from_name("abyss").palette().primary,
+            Color::from_rgb8(76, 64, 190)
+        );
+        assert_eq!(
+            theme_from_name("necropolis").palette().primary,
+            Color::from_rgb8(128, 155, 116)
+        );
+        assert_eq!(theme_from_name("kanagawa"), Theme::Dark);
+        assert_eq!(theme_from_name("moonfly"), Theme::Dark);
         assert_eq!(theme_from_name("unknown"), Theme::Dark);
         assert!(DESKTOP_THEME_CHOICES.contains(&"default"));
         assert!(DESKTOP_THEME_CHOICES.contains(&"omen"));
+        assert!(DESKTOP_THEME_CHOICES.contains(&"blue"));
+        assert!(DESKTOP_THEME_CHOICES.contains(&"terminal_green"));
+        assert!(DESKTOP_THEME_CHOICES.contains(&"terror"));
+        assert!(DESKTOP_THEME_CHOICES.contains(&"abyss"));
+        assert!(DESKTOP_THEME_CHOICES.contains(&"necropolis"));
+        assert!(!DESKTOP_THEME_CHOICES.contains(&"dark"));
+        assert!(!DESKTOP_THEME_CHOICES.contains(&"moonfly"));
+        assert!(!DESKTOP_THEME_CHOICES.contains(&"kanagawa"));
+        assert!(!DESKTOP_THEME_CHOICES.contains(&"light"));
+        assert!(!DESKTOP_THEME_CHOICES.contains(&"blood"));
     }
 
     #[test]
@@ -20453,6 +20698,35 @@ mod tests {
         conversation.push_message(message);
 
         let _details = selected_message_details_card(conversation.id, &conversation);
+    }
+
+    #[test]
+    fn lxmf_micron_renderer_hint_uses_micron_message_preview() {
+        let message = crate::messaging::MessageSummary {
+            peer_hash: "peer".into(),
+            peer_label: "Peer".into(),
+            title: "Subject".into(),
+            content: "`cCentered\n`Ff00red".into(),
+            timestamp: 1.0,
+            transport_method: crate::messaging::TransportMethod::Direct,
+            delivered: true,
+            failed: false,
+            incoming: true,
+            unread: false,
+            message_id: Some("packet-1".into()),
+            fields: std::collections::BTreeMap::from([(
+                "native_lxmf_renderer".into(),
+                "micron".into(),
+            )]),
+            attachments: Vec::new(),
+        };
+
+        let preview = message_body_preview(&message);
+
+        assert!(preview.contains("Centered"));
+        assert!(preview.contains("red"));
+        assert!(!preview.contains("`c"));
+        assert!(!preview.contains("`Ff00"));
     }
 
     #[test]

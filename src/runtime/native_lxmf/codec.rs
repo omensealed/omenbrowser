@@ -16,9 +16,31 @@ use crate::messaging::{
     TransportMethod as AppTransportMethod,
 };
 
+const FIELD_EMBEDDED_LXMS: i64 = 0x01;
+const FIELD_TELEMETRY: i64 = 0x02;
+const FIELD_TELEMETRY_STREAM: i64 = 0x03;
+const FIELD_ICON_APPEARANCE: i64 = 0x04;
 const FIELD_FILE_ATTACHMENTS: i64 = 0x05;
-#[cfg(feature = "native-rns-net")]
+const FIELD_IMAGE: i64 = 0x06;
+const FIELD_AUDIO: i64 = 0x07;
+const FIELD_THREAD: i64 = 0x08;
+const FIELD_COMMANDS: i64 = 0x09;
+const FIELD_RESULTS: i64 = 0x0A;
+const FIELD_GROUP: i64 = 0x0B;
 const FIELD_TICKET: i64 = 0x0C;
+const FIELD_EVENT: i64 = 0x0D;
+const FIELD_RNR_REFS: i64 = 0x0E;
+const FIELD_RENDERER: i64 = 0x0F;
+const FIELD_CUSTOM_TYPE: i64 = 0xFB;
+const FIELD_CUSTOM_DATA: i64 = 0xFC;
+const FIELD_CUSTOM_META: i64 = 0xFD;
+const FIELD_NON_SPECIFIC: i64 = 0xFE;
+const FIELD_DEBUG: i64 = 0xFF;
+
+const RENDERER_PLAIN: u64 = 0x00;
+const RENDERER_MICRON: u64 = 0x01;
+const RENDERER_MARKDOWN: u64 = 0x02;
+const RENDERER_BBCODE: u64 = 0x03;
 #[cfg(feature = "native-rns-net")]
 const LXMF_TICKET_LENGTH: usize = 16;
 #[cfg(feature = "native-rns-net")]
@@ -621,6 +643,7 @@ fn native_lxmf_summary_fields_from_message_fields(
     message_fields: Option<&rmpv::Value>,
 ) -> BTreeMap<String, String> {
     let mut fields = BTreeMap::new();
+    annotate_lxmf_field_presence(&mut fields, message_fields);
     #[cfg(feature = "native-rns-net")]
     if let Some((expires, ticket)) = ticket_entry_from_fields(message_fields) {
         fields.insert("native_lxmf_reply_ticket".into(), hex_bytes(&ticket));
@@ -641,6 +664,52 @@ fn native_lxmf_summary_fields_from_message_fields(
     fields
 }
 
+fn annotate_lxmf_field_presence(
+    fields: &mut BTreeMap<String, String>,
+    message_fields: Option<&rmpv::Value>,
+) {
+    let Some(rmpv::Value::Map(entries)) = message_fields else {
+        return;
+    };
+    let mut official = Vec::new();
+    let mut custom = Vec::new();
+
+    for (key, value) in entries {
+        let Some(field_id) = field_key_as_i64(key) else {
+            continue;
+        };
+        if let Some(name) = lxmf_field_name(field_id) {
+            official.push(name);
+            fields.insert(
+                format!("native_lxmf_field_{name}"),
+                lxmf_field_value_summary(value),
+            );
+            if field_id == FIELD_RENDERER {
+                if let Some((renderer_id, renderer_name)) = lxmf_renderer_name(value) {
+                    fields.insert("native_lxmf_renderer".into(), renderer_name.into());
+                    fields.insert("native_lxmf_renderer_id".into(), renderer_id.to_string());
+                }
+            }
+            if field_id == FIELD_THREAD {
+                annotate_lxmf_thread_field(fields, value);
+            }
+        } else if field_id >= FIELD_CUSTOM_TYPE {
+            custom.push(format!("0x{field_id:02x}"));
+        }
+    }
+
+    if !official.is_empty() {
+        official.sort_unstable();
+        official.dedup();
+        fields.insert("native_lxmf_fields".into(), official.join(","));
+    }
+    if !custom.is_empty() {
+        custom.sort_unstable();
+        custom.dedup();
+        fields.insert("native_lxmf_custom_fields".into(), custom.join(","));
+    }
+}
+
 pub fn decode_propagated_lxmf_data(
     lxmf_data: &[u8],
     private_identity_bytes: &[u8],
@@ -654,6 +723,30 @@ pub fn decode_propagated_lxmf_data_storing_attachments(
     attachments_dir: &Path,
 ) -> AppResult<MessageSummary> {
     decode_propagated_lxmf_data_inner(lxmf_data, private_identity_bytes, Some(attachments_dir))
+}
+
+#[cfg(feature = "native-rns-net")]
+pub fn lxmf_delivery_destination_hash_from_private_identity_bytes(
+    private_identity_bytes: &[u8],
+) -> AppResult<[u8; 16]> {
+    let identity = PrivateIdentity::from_private_key_bytes(private_identity_bytes)
+        .map_err(|_| AppError::Runtime("native Reticulum identity is invalid".into()))?;
+    let mut identity_hash = [0u8; 16];
+    identity_hash.copy_from_slice(identity.address_hash().as_slice());
+    Ok(rns_core::destination::destination_hash(
+        "lxmf",
+        &["delivery"],
+        Some(&identity_hash),
+    ))
+}
+
+pub fn propagated_lxmf_destination_hash(lxmf_data: &[u8]) -> Option<[u8; 16]> {
+    if lxmf_data.len() <= 16 {
+        return None;
+    }
+    let mut destination = [0u8; 16];
+    destination.copy_from_slice(&lxmf_data[..16]);
+    Some(destination)
 }
 
 fn decode_propagated_lxmf_data_inner(
@@ -866,13 +959,165 @@ fn field_key_matches_file_attachments(key: &rmpv::Value) -> bool {
 }
 
 fn field_key_matches_i64(key: &rmpv::Value, expected: i64) -> bool {
+    field_key_as_i64(key) == Some(expected)
+}
+
+fn field_key_as_i64(key: &rmpv::Value) -> Option<i64> {
     match key {
-        rmpv::Value::Integer(value) => value.as_i64() == Some(expected),
-        rmpv::Value::String(value) => {
-            value.as_str().and_then(|value| value.parse::<i64>().ok()) == Some(expected)
-        }
-        _ => false,
+        rmpv::Value::Integer(value) => value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok())),
+        rmpv::Value::String(value) => value.as_str().and_then(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .or_else(|| i64::from_str_radix(value.trim_start_matches("0x"), 16).ok())
+        }),
+        _ => None,
     }
+}
+
+fn lxmf_field_name(field_id: i64) -> Option<&'static str> {
+    Some(match field_id {
+        FIELD_EMBEDDED_LXMS => "embedded_lxms",
+        FIELD_TELEMETRY => "telemetry",
+        FIELD_TELEMETRY_STREAM => "telemetry_stream",
+        FIELD_ICON_APPEARANCE => "icon_appearance",
+        FIELD_FILE_ATTACHMENTS => "file_attachments",
+        FIELD_IMAGE => "image",
+        FIELD_AUDIO => "audio",
+        FIELD_THREAD => "thread",
+        FIELD_COMMANDS => "commands",
+        FIELD_RESULTS => "results",
+        FIELD_GROUP => "group",
+        FIELD_TICKET => "ticket",
+        FIELD_EVENT => "event",
+        FIELD_RNR_REFS => "rnr_refs",
+        FIELD_RENDERER => "renderer",
+        FIELD_CUSTOM_TYPE => "custom_type",
+        FIELD_CUSTOM_DATA => "custom_data",
+        FIELD_CUSTOM_META => "custom_meta",
+        FIELD_NON_SPECIFIC => "non_specific",
+        FIELD_DEBUG => "debug",
+        _ => return None,
+    })
+}
+
+fn lxmf_field_value_summary(value: &rmpv::Value) -> String {
+    match value {
+        rmpv::Value::Nil => "nil".into(),
+        rmpv::Value::Boolean(_) => "bool".into(),
+        rmpv::Value::Integer(_) => "integer".into(),
+        rmpv::Value::F32(_) | rmpv::Value::F64(_) => "float".into(),
+        rmpv::Value::String(value) => {
+            let len = value.as_str().map(str::len).unwrap_or_default();
+            format!("string:{len}")
+        }
+        rmpv::Value::Binary(bytes) => format!("binary:{}B", bytes.len()),
+        rmpv::Value::Array(items) => format!("array:{}", items.len()),
+        rmpv::Value::Map(entries) => format!("map:{}", entries.len()),
+        rmpv::Value::Ext(_, bytes) => format!("ext:{}B", bytes.len()),
+    }
+}
+
+fn lxmf_renderer_name(value: &rmpv::Value) -> Option<(u64, &'static str)> {
+    let renderer_id = value_as_u64(value)?;
+    let name = match renderer_id {
+        RENDERER_PLAIN => "plain",
+        RENDERER_MICRON => "micron",
+        RENDERER_MARKDOWN => "markdown",
+        RENDERER_BBCODE => "bbcode",
+        _ => "unknown",
+    };
+    Some((renderer_id, name))
+}
+
+fn annotate_lxmf_thread_field(fields: &mut BTreeMap<String, String>, value: &rmpv::Value) {
+    if let Some(thread_id) = lxmf_thread_scalar(value) {
+        fields.insert("native_lxmf_thread_id".into(), thread_id);
+        return;
+    }
+
+    match value {
+        rmpv::Value::Array(items) => {
+            if let Some(thread_id) = items.first().and_then(lxmf_thread_scalar) {
+                fields.insert("native_lxmf_thread_id".into(), thread_id);
+            }
+            if let Some(parent_id) = items.get(1).and_then(lxmf_thread_scalar) {
+                fields.insert("native_lxmf_thread_parent_id".into(), parent_id);
+            }
+        }
+        rmpv::Value::Map(entries) => {
+            for (key, value) in entries {
+                let Some(key) = lxmf_thread_map_key(key) else {
+                    continue;
+                };
+                let Some(value) = lxmf_thread_scalar(value) else {
+                    continue;
+                };
+                match key.as_str() {
+                    "id" | "thread" | "thread_id" => {
+                        fields.insert("native_lxmf_thread_id".into(), value);
+                    }
+                    "parent" | "parent_id" | "reply_to" | "reply" => {
+                        fields.insert("native_lxmf_thread_parent_id".into(), value);
+                    }
+                    "root" | "root_id" => {
+                        fields.insert("native_lxmf_thread_root_id".into(), value);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lxmf_thread_scalar(value: &rmpv::Value) -> Option<String> {
+    match value {
+        rmpv::Value::String(value) => value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(compact_lxmf_thread_value),
+        rmpv::Value::Binary(bytes) => {
+            if bytes.is_empty() {
+                None
+            } else if let Ok(value) = String::from_utf8(bytes.clone()) {
+                let value = value.trim();
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(compact_lxmf_thread_value(value))
+                }
+            } else {
+                Some(hex_bytes(bytes))
+            }
+        }
+        rmpv::Value::Integer(value) => value
+            .as_i64()
+            .map(|value| value.to_string())
+            .or_else(|| value.as_u64().map(|value| value.to_string())),
+        _ => None,
+    }
+}
+
+fn lxmf_thread_map_key(value: &rmpv::Value) -> Option<String> {
+    match value {
+        rmpv::Value::String(value) => value.as_str().map(|value| value.to_ascii_lowercase()),
+        rmpv::Value::Binary(bytes) => String::from_utf8(bytes.clone())
+            .ok()
+            .map(|value| value.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+fn compact_lxmf_thread_value(value: &str) -> String {
+    const MAX_THREAD_VALUE_CHARS: usize = 96;
+    if value.chars().count() <= MAX_THREAD_VALUE_CHARS {
+        return value.to_string();
+    }
+    value.chars().take(MAX_THREAD_VALUE_CHARS).collect()
 }
 
 fn attachment_entry_from_value(index: usize, value: &rmpv::Value) -> Option<AttachmentEntry> {
@@ -1496,6 +1741,148 @@ mod tests {
     }
 
     #[test]
+    fn signed_wire_message_preserves_known_lxmf_field_metadata() {
+        let provider = NativeReticulumIdentityProvider;
+        let private = provider
+            .create_identity_material("fielded-sender")
+            .expect("native identity");
+        let signer = PrivateIdentity::from_private_key_bytes(&private).expect("signer");
+        let source = signer.address_hash().to_hex_string();
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            attachments: Vec::new(),
+        };
+        let mut outbound = build_outbound_message(&envelope, &source).expect("outbound");
+        outbound.message.fields = Some(rmpv::Value::Map(vec![
+            (
+                rmpv::Value::Integer(FIELD_RENDERER.into()),
+                rmpv::Value::Integer((RENDERER_MICRON as i64).into()),
+            ),
+            (
+                rmpv::Value::Integer(FIELD_THREAD.into()),
+                rmpv::Value::Map(vec![
+                    (
+                        rmpv::Value::String("thread_id".into()),
+                        rmpv::Value::String("thread-1".into()),
+                    ),
+                    (
+                        rmpv::Value::String("reply_to".into()),
+                        rmpv::Value::String("parent-1".into()),
+                    ),
+                ]),
+            ),
+            (
+                rmpv::Value::Integer(FIELD_COMMANDS.into()),
+                rmpv::Value::Array(Vec::new()),
+            ),
+            (
+                rmpv::Value::Integer(FIELD_CUSTOM_META.into()),
+                rmpv::Value::Map(Vec::new()),
+            ),
+        ]));
+
+        let wire = encode_signed_wire_message(&outbound, &private).expect("encode");
+        let summary = decode_wire_message(&wire).expect("decode");
+
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_renderer")
+                .map(String::as_str),
+            Some("micron")
+        );
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_field_thread")
+                .map(String::as_str),
+            Some("map:2")
+        );
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_thread_id")
+                .map(String::as_str),
+            Some("thread-1")
+        );
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_thread_parent_id")
+                .map(String::as_str),
+            Some("parent-1")
+        );
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_field_commands")
+                .map(String::as_str),
+            Some("array:0")
+        );
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_field_custom_meta")
+                .map(String::as_str),
+            Some("map:0")
+        );
+        assert_eq!(
+            summary.fields.get("native_lxmf_fields").map(String::as_str),
+            Some("commands,custom_meta,renderer,thread")
+        );
+    }
+
+    #[test]
+    fn signed_wire_message_extracts_array_lxmf_thread_metadata() {
+        let provider = NativeReticulumIdentityProvider;
+        let private = provider
+            .create_identity_material("threaded-sender")
+            .expect("native identity");
+        let signer = PrivateIdentity::from_private_key_bytes(&private).expect("signer");
+        let source = signer.address_hash().to_hex_string();
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            attachments: Vec::new(),
+        };
+        let mut outbound = build_outbound_message(&envelope, &source).expect("outbound");
+        outbound.message.fields = Some(rmpv::Value::Map(vec![(
+            rmpv::Value::Integer(FIELD_THREAD.into()),
+            rmpv::Value::Array(vec![
+                rmpv::Value::String("thread-array".into()),
+                rmpv::Value::String("parent-array".into()),
+            ]),
+        )]));
+
+        let wire = encode_signed_wire_message(&outbound, &private).expect("encode");
+        let summary = decode_wire_message(&wire).expect("decode");
+
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_thread_id")
+                .map(String::as_str),
+            Some("thread-array")
+        );
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_thread_parent_id")
+                .map(String::as_str),
+            Some("parent-array")
+        );
+    }
+
+    #[test]
     fn outbound_envelope_encodes_python_style_file_attachments() {
         let provider = NativeReticulumIdentityProvider;
         let private = provider
@@ -1615,6 +2002,26 @@ mod tests {
                 .map(String::as_str),
             Some("propagation_sync")
         );
+    }
+
+    #[cfg(feature = "native-rns-net")]
+    #[test]
+    fn propagated_lxmf_destination_helpers_match_wire_destination() {
+        let receiver = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let receiver_hash = lxmf_delivery_hash(&receiver);
+        let helper_hash = lxmf_delivery_destination_hash_from_private_identity_bytes(
+            receiver.to_private_key_bytes().as_slice(),
+        )
+        .expect("helper hash");
+        let mut lxm_data = receiver_hash.to_vec();
+        lxm_data.extend_from_slice(b"encrypted-placeholder");
+
+        assert_eq!(helper_hash, receiver_hash);
+        assert_eq!(
+            propagated_lxmf_destination_hash(lxm_data.as_slice()),
+            Some(receiver_hash)
+        );
+        assert_eq!(propagated_lxmf_destination_hash(&[1u8; 16]), None);
     }
 
     #[test]

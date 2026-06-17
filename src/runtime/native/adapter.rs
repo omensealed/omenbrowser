@@ -3210,6 +3210,10 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     load_rns_net_proof_signing_key_file(&identity_path).map_err(AppError::from)?;
                 let identity_bytes = std::fs::read(&identity_path)
                     .map_err(|_| AppError::from(NativeRuntimeError::IdentityMissing))?;
+                let local_lxmf_destination_hash =
+                    crate::runtime::native_lxmf::codec::lxmf_delivery_destination_hash_from_private_identity_bytes(
+                        identity_bytes.as_slice(),
+                    )?;
                 let cancel = CancellationToken::new();
                 emit_propagation_sync_event(
                     &self.event_tx,
@@ -3605,6 +3609,8 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 );
                 let mut decoded_count = 0usize;
                 let mut decode_failed_count = 0usize;
+                let mut skipped_count = 0usize;
+                let mut deferred_count = 0usize;
                 let mut cache_changed = false;
                 for payload in payloads {
                     let payload_candidates = native_lxmf_payload_candidates(payload.as_slice())
@@ -3627,6 +3633,22 @@ impl NetworkRuntime for NativeNetworkRuntime {
                                 stamp.target_cost,
                                 stamp.stamp_value
                             )));
+                        }
+                        if let Some(payload_destination) =
+                            crate::runtime::native_lxmf::codec::propagated_lxmf_destination_hash(
+                                decode_data.as_slice(),
+                            )
+                        {
+                            if payload_destination != local_lxmf_destination_hash {
+                                skipped_count += 1;
+                                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native LXMF propagation sync skipped payload not addressed to local identity transient_id={} destination={} local_destination={}",
+                                    hex_encode(&transient_id),
+                                    hex_encode(&payload_destination),
+                                    hex_encode(&local_lxmf_destination_hash)
+                                )));
+                                continue;
+                            }
                         }
                         match crate::runtime::native_lxmf::codec::decode_propagated_lxmf_data_storing_attachments(
                             decode_data.as_slice(),
@@ -3680,8 +3702,22 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             }
                             Err(error) => {
                                 decode_failed_count += 1;
+                                if crate::runtime::native_lxmf::codec::propagated_lxmf_destination_hash(
+                                    decode_data.as_slice(),
+                                )
+                                .is_some_and(|destination| destination == local_lxmf_destination_hash)
+                                {
+                                    deferred_count += 1;
+                                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native LXMF propagation sync deferred undecryptable local payload transient_id={} destination={} error={error}; leaving on propagation node for retry",
+                                        hex_encode(&transient_id),
+                                        hex_encode(&local_lxmf_destination_hash)
+                                    )));
+                                    continue;
+                                }
                                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                                    "native LXMF propagation sync payload decode failed: {error}"
+                                    "native LXMF propagation sync payload decode failed transient_id={}: {error}",
+                                    hex_encode(&transient_id)
                                 )));
                             }
                         }
@@ -3701,16 +3737,18 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     }
                 }
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native LXMF propagation sync get response propagation_node={} payloads={} decoded={} failed={}",
+                    "native LXMF propagation sync get response propagation_node={} payloads={} decoded={} failed={} skipped={} deferred={}",
                     hash,
                     payload_count,
                     decoded_count,
-                    decode_failed_count
+                    decode_failed_count,
+                    skipped_count,
+                    deferred_count
                 )));
                 emit_propagation_sync_event(
                     &self.event_tx,
                     PropagationSyncStage::Decode,
-                    if decode_failed_count > 0 {
+                    if decode_failed_count > deferred_count {
                         PropagationSyncEventStatus::Failed
                     } else {
                         PropagationSyncEventStatus::Complete
@@ -3721,8 +3759,29 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         ("payloads", payload_count),
                         ("decoded", decoded_count),
                         ("failed", decode_failed_count),
+                        ("skipped", skipped_count),
+                        ("deferred", deferred_count),
                     ],
                 );
+                if deferred_count > 0 {
+                    match self.announce_identity().await {
+                        Ok(true) => {
+                            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                "native LXMF propagation sync repair announce sent after deferred local decrypts count={deferred_count}"
+                            )));
+                        }
+                        Ok(false) => {
+                            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                "native LXMF propagation sync repair announce skipped after deferred local decrypts count={deferred_count}"
+                            )));
+                        }
+                        Err(error) => {
+                            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                "native LXMF propagation sync repair announce failed after deferred local decrypts count={deferred_count}: {error}"
+                            )));
+                        }
+                    }
+                }
                 if !haves.is_empty() {
                     let haves_value = rmpv::Value::Array(
                         haves
@@ -3804,12 +3863,14 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     }
                 }
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native LXMF propagation sync complete propagation_node={} requested={} decoded={} cached_haves={} failed={}",
+                    "native LXMF propagation sync complete propagation_node={} requested={} decoded={} cached_haves={} failed={} skipped={} deferred={}",
                     hash,
                     wants.len(),
                     decoded_count,
                     haves.len(),
-                    decode_failed_count
+                    decode_failed_count,
+                    skipped_count,
+                    deferred_count
                 )));
                 cleanup_native_lxmf_propagation_sync_link(
                     &handle.client,
@@ -3830,6 +3891,8 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         ("decoded", decoded_count),
                         ("haves", haves.len()),
                         ("failed", decode_failed_count),
+                        ("skipped", skipped_count),
+                        ("deferred", deferred_count),
                     ],
                 );
                 let _ = self
@@ -8231,6 +8294,23 @@ enable_transport = No
         assert!(message.contains("reason=list request failed"));
         assert!(message.contains("link_id=abababababababababababababababab"));
         assert!(message.contains("torn_down=true"));
+    }
+
+    #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+    #[test]
+    fn propagation_sync_deferred_local_decrypts_are_not_acked_as_delivered() {
+        let source = include_str!("adapter.rs");
+        let marker = "leaving on propagation node for retry";
+        let marker_index = source
+            .find(marker)
+            .expect("deferred local decrypt branch should be present");
+        let start = marker_index.saturating_sub(800);
+        let end = source.len().min(marker_index + marker.len() + 250);
+        let branch = &source[start..end];
+
+        assert!(branch.contains("deferred_count += 1"));
+        assert!(!branch.contains("DeliveredTransientIdStore::mark_delivered"));
+        assert!(!branch.contains("haves.push(transient_id)"));
     }
 
     #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]

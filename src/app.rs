@@ -11998,7 +11998,7 @@ impl App {
                     generation,
                 ));
             }
-            (
+            let send = (
                 conversation.id,
                 conversation.peer_hash.clone(),
                 conversation.draft_title.clone(),
@@ -12007,7 +12007,11 @@ impl App {
                 conversation.include_ticket,
                 conversation.attachments.clone(),
                 conversation.peer_label.clone(),
-            )
+            );
+            conversation.draft_title.clear();
+            conversation.draft_body.clear();
+            conversation.attachments.clear();
+            send
         };
         let service = self.messaging_service.clone();
         let tx = self.event_tx.clone();
@@ -15143,9 +15147,6 @@ impl App {
                     }
                     return true;
                 }
-                if self.complete_pending_propagated_send_from_status(&status) {
-                    return true;
-                }
                 self.defer_outbound_status(status)
             }
             crate::runtime::RuntimeBusEvent::LxmfDeliveryEvidence(evidence) => {
@@ -15173,10 +15174,6 @@ impl App {
                             ),
                         );
                     }
-                    return true;
-                }
-                if self.complete_pending_propagated_send_from_evidence(&evidence) {
-                    self.maybe_auto_sync_after_propagation_acceptance(&evidence);
                     return true;
                 }
                 self.defer_lxmf_delivery_evidence(evidence)
@@ -15914,9 +15911,6 @@ impl App {
                 let conversation = &mut self.workspace.conversations[index];
                 conversation.pending_send = None;
                 remove_pending_send_placeholder(conversation, generation);
-                conversation.draft_title.clear();
-                conversation.draft_body.clear();
-                conversation.attachments.clear();
                 let propagation_state = message.fields.get("native_lxmf_state").map(String::as_str);
                 let propagation_transfer = message
                     .fields
@@ -16206,28 +16200,32 @@ impl App {
             DeliveryMode::Direct => TransportMethod::Direct,
             DeliveryMode::Propagated => TransportMethod::Propagated,
         };
-        MessageSummary {
-            peer_hash: conversation.peer_hash.clone(),
-            peer_label: conversation.peer_label.clone(),
-            title: conversation.draft_title.clone(),
-            content: conversation.draft_body.clone(),
-            timestamp: current_epoch_ms() as f64 / 1_000.0,
-            transport_method,
-            delivered: false,
-            failed: true,
-            incoming: false,
-            unread: false,
-            message_id: Some(format!("failed-send-{generation}")),
-            fields: BTreeMap::from([
-                ("native_lxmf_state".into(), "failed".into()),
-                ("native_lxmf_proof_state".into(), "failed".into()),
-                ("native_lxmf_failure_reason".into(), reason.into()),
-                (
-                    "native_lxmf_retry_guidance".into(),
-                    "send failed before delivery was queued; fix the blocker and retry".into(),
-                ),
-            ]),
-            attachments: conversation
+        let pending_id = pending_send_message_id(generation);
+        let pending_message = conversation
+            .thread
+            .messages
+            .iter()
+            .find(|message| message.message_id.as_deref() == Some(pending_id.as_str()));
+        let title = if conversation.draft_title.is_empty() {
+            pending_message
+                .map(|message| message.title.clone())
+                .unwrap_or_default()
+        } else {
+            conversation.draft_title.clone()
+        };
+        let content = if conversation.draft_body.is_empty() {
+            pending_message
+                .map(|message| message.content.clone())
+                .unwrap_or_default()
+        } else {
+            conversation.draft_body.clone()
+        };
+        let attachments = if conversation.attachments.is_empty() {
+            pending_message
+                .map(|message| message.attachments.clone())
+                .unwrap_or_default()
+        } else {
+            conversation
                 .attachments
                 .iter()
                 .filter_map(|path| {
@@ -16245,7 +16243,30 @@ impl App {
                         path: Some(path.clone()),
                     })
                 })
-                .collect(),
+                .collect()
+        };
+        MessageSummary {
+            peer_hash: conversation.peer_hash.clone(),
+            peer_label: conversation.peer_label.clone(),
+            title,
+            content,
+            timestamp: current_epoch_ms() as f64 / 1_000.0,
+            transport_method,
+            delivered: false,
+            failed: true,
+            incoming: false,
+            unread: false,
+            message_id: Some(format!("failed-send-{generation}")),
+            fields: BTreeMap::from([
+                ("native_lxmf_state".into(), "failed".into()),
+                ("native_lxmf_proof_state".into(), "failed".into()),
+                ("native_lxmf_failure_reason".into(), reason.into()),
+                (
+                    "native_lxmf_retry_guidance".into(),
+                    "send failed before delivery was queued; fix the blocker and retry".into(),
+                ),
+            ]),
+            attachments,
         }
     }
 
@@ -18372,166 +18393,6 @@ impl App {
             }
         }
         changed
-    }
-
-    fn complete_pending_propagated_send_from_evidence(
-        &mut self,
-        evidence: &LxmfDeliveryEvidence,
-    ) -> bool {
-        if evidence.kind != LxmfDeliveryEvidenceKind::PropagationNodeAccepted {
-            return false;
-        }
-        let Some(message_id) = evidence.message_id.as_deref() else {
-            return false;
-        };
-        let Some(index) = self
-            .workspace
-            .conversations
-            .iter()
-            .position(|conversation| {
-                conversation.peer_hash == evidence.peer_hash
-                    && conversation.pending_send.is_some()
-                    && matches!(conversation.delivery_mode, DeliveryMode::Propagated)
-            })
-        else {
-            return false;
-        };
-
-        let mut fields = lxmf_delivery_evidence_fields(evidence);
-        fields
-            .entry("native_lxmf_state".into())
-            .or_insert_with(|| "propagation_node_accepted".into());
-        fields
-            .entry("native_lxmf_proof_state".into())
-            .or_insert_with(|| "peer_delivery_unconfirmed".into());
-        fields
-            .entry("native_lxmf_receipt_state".into())
-            .or_insert_with(|| "propagation_node_accepted_peer_unconfirmed".into());
-        fields
-            .entry("native_lxmf_next_action".into())
-            .or_insert_with(|| "sync_propagation".into());
-        fields
-            .entry("native_lxmf_retry_guidance".into())
-            .or_insert_with(|| {
-                "propagation node accepted the payload; sync propagation or wait for peer activity before resending"
-                    .into()
-            });
-
-        let message = {
-            let conversation = &mut self.workspace.conversations[index];
-            let generation = conversation
-                .pending_send
-                .as_ref()
-                .map(|pending| pending.generation);
-            conversation.pending_send = None;
-            if let Some(generation) = generation {
-                remove_pending_send_placeholder(conversation, generation);
-            }
-            let message = MessageSummary {
-                peer_hash: conversation.peer_hash.clone(),
-                peer_label: conversation.peer_label.clone(),
-                title: conversation.draft_title.clone(),
-                content: conversation.draft_body.clone(),
-                timestamp: evidence
-                    .observed_at
-                    .unwrap_or_else(|| current_epoch_ms() as f64 / 1_000.0),
-                transport_method: TransportMethod::Propagated,
-                delivered: false,
-                failed: evidence.kind == LxmfDeliveryEvidenceKind::PropagationNodeFailed,
-                incoming: false,
-                unread: false,
-                message_id: Some(message_id.to_string()),
-                fields,
-                attachments: conversation
-                    .attachments
-                    .iter()
-                    .filter_map(|path| {
-                        let metadata = std::fs::metadata(path).ok()?;
-                        if !metadata.is_file() {
-                            return None;
-                        }
-                        Some(crate::messaging::AttachmentSummary {
-                            name: path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("attachment")
-                                .to_string(),
-                            size: metadata.len(),
-                            path: Some(path.clone()),
-                        })
-                    })
-                    .collect(),
-            };
-            conversation.draft_title.clear();
-            conversation.draft_body.clear();
-            conversation.attachments.clear();
-            message
-        };
-
-        let stored = match self.message_store.append(message.clone()) {
-            Ok(stored) => stored,
-            Err(error) => {
-                self.logs.push_with_source(
-                    LogSeverity::Error,
-                    LogSource::Messaging,
-                    format!("failed to store accepted propagated outbound message: {error}"),
-                );
-                message
-            }
-        };
-        if !message_already_present(&self.workspace.conversations[index], &stored) {
-            self.workspace.conversations[index].push_message(stored.clone());
-        }
-        self.status.task = if evidence.kind == LxmfDeliveryEvidenceKind::PropagationNodeFailed {
-            "message propagation transfer failed; retry after the blocker is fixed".into()
-        } else {
-            "message accepted by propagation node; peer delivery unconfirmed".into()
-        };
-        self.logs.push_with_source(
-            LogSeverity::Info,
-            LogSource::Messaging,
-            format!(
-                "completed pending propagated send from runtime evidence peer={} message_id={message_id}",
-                evidence.peer_hash
-            ),
-        );
-        true
-    }
-
-    fn complete_pending_propagated_send_from_status(&mut self, status: &OutboundStatus) -> bool {
-        let Some(message_id) = status.message_id.as_deref() else {
-            return false;
-        };
-        let Some(evidence) = status.evidence.as_deref() else {
-            return false;
-        };
-        let Some(transfer_state) =
-            extract_lxmf_evidence_value(evidence, "propagation_transfer_state")
-        else {
-            return false;
-        };
-        let kind = if matches!(
-            transfer_state,
-            "link_packet_failed"
-                | "resource_failed"
-                | "resource_advertise_failed"
-                | "resource_timeout"
-                | "router_timeout"
-                | "link_timeout"
-        ) || status.failed
-        {
-            LxmfDeliveryEvidenceKind::PropagationNodeFailed
-        } else {
-            LxmfDeliveryEvidenceKind::PropagationNodeAccepted
-        };
-        self.complete_pending_propagated_send_from_evidence(&LxmfDeliveryEvidence {
-            peer_hash: status.peer_hash.clone(),
-            message_id: Some(message_id.to_string()),
-            kind,
-            detail: Some(evidence.to_string()),
-            rtt: status.rtt,
-            observed_at: Some(current_epoch_ms() as f64 / 1_000.0),
-        })
     }
 
     fn defer_outbound_status(&mut self, status: OutboundStatus) -> bool {
@@ -23638,11 +23499,11 @@ side
     fn settings_theme_buttons_persist_named_theme() {
         let mut app = App::new(test_config("settings-theme-button"));
 
-        assert!(app.set_settings_theme_name("moonfly"));
+        assert!(app.set_settings_theme_name("blue"));
 
         let saved = AppSettings::load_or_default(&app.paths.settings_file).expect("load settings");
-        assert_eq!(saved.ui.theme_name, "moonfly");
-        assert!(app.status.task.contains("theme set to moonfly"));
+        assert_eq!(saved.ui.theme_name, "blue");
+        assert!(app.status.task.contains("theme set to blue"));
     }
 
     #[test]
@@ -29748,16 +29609,19 @@ side
         app.active_conversation_mut_for_test().include_ticket = true;
 
         app.send_active_conversation_draft();
-        assert!(app.active_conversation().pending_send.is_some());
-        assert_eq!(app.active_conversation().thread.messages.len(), 1);
+        let conversation = app.active_conversation();
+        assert!(conversation.pending_send.is_some());
+        assert_eq!(conversation.draft_title, "");
+        assert_eq!(conversation.draft_body, "");
+        assert_eq!(conversation.thread.messages.len(), 1);
         assert_eq!(
-            app.active_conversation().thread.messages[0]
-                .message_id
-                .as_deref(),
+            conversation.thread.messages[0].message_id.as_deref(),
             Some("pending-send-1")
         );
+        assert_eq!(conversation.thread.messages[0].title, "Subject");
+        assert_eq!(conversation.thread.messages[0].content, "Body");
         assert_eq!(
-            app.active_conversation().thread.messages[0]
+            conversation.thread.messages[0]
                 .fields
                 .get("native_lxmf_state")
                 .map(String::as_str),
@@ -29957,15 +29821,23 @@ side
     }
 
     #[test]
-    fn propagation_acceptance_evidence_completes_pending_send_row() {
-        let mut app = App::new(test_config("propagation-evidence-completes-pending"));
-        app.active_conversation_mut_for_test().peer_hash = FIXTURE_NODE_HASH.into();
-        app.active_conversation_mut_for_test().peer_label = "Peer".into();
-        app.active_conversation_mut_for_test().delivery_mode = DeliveryMode::Propagated;
-        app.active_conversation_mut_for_test().draft_title = "Subject".into();
-        app.active_conversation_mut_for_test().draft_body = "Body".into();
-        app.active_conversation_mut_for_test().pending_send =
-            Some(MessageSendState { generation: 12 });
+    fn propagation_acceptance_evidence_before_send_result_keeps_visible_pending_row() {
+        let mut app = App::new(test_config(
+            "propagation-evidence-defers-before-send-result",
+        ));
+        {
+            let conversation = app.active_conversation_mut_for_test();
+            conversation.peer_hash = FIXTURE_NODE_HASH.into();
+            conversation.peer_label = "Peer".into();
+            conversation.delivery_mode = DeliveryMode::Propagated;
+            conversation.draft_title = "Subject".into();
+            conversation.draft_body = "Body".into();
+            conversation.pending_send = Some(MessageSendState { generation: 12 });
+            let pending = pending_outbound_message_from_conversation(conversation, 12);
+            conversation.push_message(pending);
+            conversation.draft_title.clear();
+            conversation.draft_body.clear();
+        }
 
         assert!(app.handle_runtime_bus_event(
             crate::runtime::RuntimeBusEvent::LxmfDeliveryEvidence(LxmfDeliveryEvidence {
@@ -29982,39 +29854,38 @@ side
         ));
 
         let conversation = app.active_conversation();
-        assert!(conversation.pending_send.is_none());
+        assert_eq!(
+            conversation.pending_send,
+            Some(MessageSendState { generation: 12 })
+        );
+        assert_eq!(conversation.draft_title, "");
         assert_eq!(conversation.draft_body, "");
         assert_eq!(conversation.thread.messages.len(), 1);
-        let message = &conversation.thread.messages[0];
-        assert_eq!(message.title, "Subject");
-        assert_eq!(message.content, "Body");
+        assert_eq!(conversation.thread.messages[0].title, "Subject");
+        assert_eq!(conversation.thread.messages[0].content, "Body");
         assert_eq!(
-            message.message_id.as_deref(),
-            Some("propagated-runtime-accepted")
+            conversation.thread.messages[0].message_id.as_deref(),
+            Some("pending-send-12")
         );
-        assert_eq!(
-            message
-                .fields
-                .get("native_lxmf_propagation_transfer_state")
-                .map(String::as_str),
-            Some("link_packet_sent")
-        );
-        assert_eq!(
-            app.status.task,
-            "message accepted by propagation node; peer delivery unconfirmed"
-        );
+        assert_eq!(app.pending_lxmf_delivery_evidence.len(), 1);
     }
 
     #[test]
-    fn propagation_acceptance_status_completes_pending_send_row() {
-        let mut app = App::new(test_config("propagation-status-completes-pending"));
-        app.active_conversation_mut_for_test().peer_hash = FIXTURE_NODE_HASH.into();
-        app.active_conversation_mut_for_test().peer_label = "Peer".into();
-        app.active_conversation_mut_for_test().delivery_mode = DeliveryMode::Propagated;
-        app.active_conversation_mut_for_test().draft_title = "Subject".into();
-        app.active_conversation_mut_for_test().draft_body = "Body".into();
-        app.active_conversation_mut_for_test().pending_send =
-            Some(MessageSendState { generation: 13 });
+    fn propagation_acceptance_status_before_send_result_keeps_visible_pending_row() {
+        let mut app = App::new(test_config("propagation-status-defers-before-send-result"));
+        {
+            let conversation = app.active_conversation_mut_for_test();
+            conversation.peer_hash = FIXTURE_NODE_HASH.into();
+            conversation.peer_label = "Peer".into();
+            conversation.delivery_mode = DeliveryMode::Propagated;
+            conversation.draft_title = "Subject".into();
+            conversation.draft_body = "Body".into();
+            conversation.pending_send = Some(MessageSendState { generation: 13 });
+            let pending = pending_outbound_message_from_conversation(conversation, 13);
+            conversation.push_message(pending);
+            conversation.draft_title.clear();
+            conversation.draft_body.clear();
+        }
 
         assert!(app.handle_runtime_bus_event(
             crate::runtime::RuntimeBusEvent::MessageDeliveryUpdated(OutboundStatus {
@@ -30032,12 +29903,20 @@ side
         ));
 
         let conversation = app.active_conversation();
-        assert!(conversation.pending_send.is_none());
+        assert_eq!(
+            conversation.pending_send,
+            Some(MessageSendState { generation: 13 })
+        );
+        assert_eq!(conversation.draft_title, "");
+        assert_eq!(conversation.draft_body, "");
         assert_eq!(conversation.thread.messages.len(), 1);
+        assert_eq!(conversation.thread.messages[0].title, "Subject");
+        assert_eq!(conversation.thread.messages[0].content, "Body");
         assert_eq!(
             conversation.thread.messages[0].message_id.as_deref(),
-            Some("propagated-status-accepted")
+            Some("pending-send-13")
         );
+        assert_eq!(app.pending_outbound_statuses.len(), 1);
     }
 
     #[test]
@@ -30105,6 +29984,10 @@ side
         app.active_conversation_mut_for_test().draft_body = "Body".into();
         app.active_conversation_mut_for_test().pending_send =
             Some(MessageSendState { generation: 7 });
+        let pending = pending_outbound_message_from_conversation(app.active_conversation(), 7);
+        app.active_conversation_mut_for_test().push_message(pending);
+        app.active_conversation_mut_for_test().draft_title.clear();
+        app.active_conversation_mut_for_test().draft_body.clear();
 
         assert!(app.apply_message_task_result(MessageTaskResult::Error {
             conversation_id: Some(conversation_id),

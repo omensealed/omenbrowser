@@ -74,6 +74,7 @@ impl MessageStore {
             thread.unread_count += 1;
         }
         thread.messages.push(message.clone());
+        remember_reply_ticket_from_message(&mut thread, &message, timestamp_secs());
         thread.messages.sort_by(|left, right| {
             left.timestamp
                 .total_cmp(&right.timestamp)
@@ -114,6 +115,13 @@ impl MessageStore {
         now: f64,
     ) -> AppResult<Option<NativeLxmfReplyTicket>> {
         let thread = self.load_thread(peer_hash, None)?;
+        if let Some(ticket) = thread
+            .lxmf_reply_ticket
+            .as_ref()
+            .filter(|ticket| ticket.expires > now && ticket.ticket.len() == 16)
+        {
+            return Ok(Some(ticket.clone()));
+        }
         Ok(thread
             .messages
             .iter()
@@ -406,6 +414,7 @@ impl MessageStore {
                     .unwrap_or_else(|| peer_hash.chars().take(8).collect()),
                 messages: Vec::new(),
                 unread_count: 0,
+                lxmf_reply_ticket: None,
             });
         }
         let raw = std::fs::read_to_string(&path)?;
@@ -427,6 +436,7 @@ impl MessageStore {
                         .unwrap_or_else(|| peer_hash.chars().take(8).collect()),
                     messages: Vec::new(),
                     unread_count: 0,
+                    lxmf_reply_ticket: None,
                 })
             }
         }
@@ -459,6 +469,24 @@ fn reply_ticket_from_message(message: &MessageSummary, now: f64) -> Option<Nativ
         return None;
     }
     Some(NativeLxmfReplyTicket { ticket, expires })
+}
+
+fn remember_reply_ticket_from_message(
+    thread: &mut ConversationThread,
+    message: &MessageSummary,
+    now: f64,
+) {
+    let Some(ticket) = reply_ticket_from_message(message, now) else {
+        return;
+    };
+    let should_replace = thread
+        .lxmf_reply_ticket
+        .as_ref()
+        .map(|existing| existing.expires < ticket.expires)
+        .unwrap_or(true);
+    if should_replace {
+        thread.lxmf_reply_ticket = Some(ticket);
+    }
 }
 
 fn hex_to_bytes(value: &str) -> Option<Vec<u8>> {

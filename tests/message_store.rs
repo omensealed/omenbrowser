@@ -34,6 +34,11 @@ fn message(peer: &str, timestamp: f64, incoming: bool) -> MessageSummary {
 #[test]
 fn message_store_returns_latest_valid_lxmf_reply_ticket() {
     let store = MessageStore::new(temp_dir("reply-ticket")).expect("store");
+    let future_expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs_f64()
+        + 3600.0;
     let mut expired = message("peer-a", 1.0, true);
     expired.message_id = Some("expired".into());
     expired.fields.insert(
@@ -57,9 +62,10 @@ fn message_store_returns_latest_valid_lxmf_reply_ticket() {
         "native_lxmf_reply_ticket".into(),
         "101112131415161718191a1b1c1d1e1f".into(),
     );
-    valid
-        .fields
-        .insert("native_lxmf_reply_ticket_expires".into(), "200.0".into());
+    valid.fields.insert(
+        "native_lxmf_reply_ticket_expires".into(),
+        future_expiry.to_string(),
+    );
     store.append(expired).expect("append expired");
     store.append(invalid).expect("append invalid");
     store.append(valid).expect("append valid");
@@ -69,8 +75,62 @@ fn message_store_returns_latest_valid_lxmf_reply_ticket() {
         .expect("ticket lookup")
         .expect("valid ticket");
 
-    assert_eq!(ticket.expires, 200.0);
+    assert_eq!(ticket.expires, future_expiry);
     assert_eq!(ticket.ticket, (0x10u8..=0x1f).collect::<Vec<_>>());
+
+    let thread = store.get_thread("peer-a").expect("thread");
+    assert_eq!(
+        thread
+            .lxmf_reply_ticket
+            .as_ref()
+            .map(|ticket| ticket.ticket.clone()),
+        Some((0x10u8..=0x1f).collect::<Vec<_>>())
+    );
+}
+
+#[test]
+fn message_store_reply_ticket_lookup_falls_back_for_legacy_threads() {
+    let root = temp_dir("legacy-reply-ticket");
+    let peer_path = root.join("peer-a.json");
+    std::fs::write(
+        &peer_path,
+        serde_json::json!({
+            "peer_hash": "peer-a",
+            "peer_label": "Peer A",
+            "messages": [
+                {
+                    "peer_hash": "peer-a",
+                    "peer_label": "Peer A",
+                    "title": "title",
+                    "content": "body",
+                    "timestamp": 3.0,
+                    "transport_method": "direct",
+                    "delivered": true,
+                    "failed": false,
+                    "incoming": true,
+                    "unread": false,
+                    "message_id": "valid",
+                    "fields": {
+                        "native_lxmf_reply_ticket": "202122232425262728292a2b2c2d2e2f",
+                        "native_lxmf_reply_ticket_expires": "300.0"
+                    },
+                    "attachments": []
+                }
+            ],
+            "unread_count": 0
+        })
+        .to_string(),
+    )
+    .expect("write legacy thread");
+    let store = MessageStore::new(root).expect("store");
+
+    let ticket = store
+        .latest_valid_lxmf_reply_ticket("peer-a", 100.0)
+        .expect("ticket lookup")
+        .expect("legacy ticket");
+
+    assert_eq!(ticket.expires, 300.0);
+    assert_eq!(ticket.ticket, (0x20u8..=0x2f).collect::<Vec<_>>());
 }
 
 #[test]

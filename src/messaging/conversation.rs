@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::messaging::{DeliveryMode, MessageSummary};
+use crate::messaging::{DeliveryMode, MessageSummary, NativeLxmfReplyTicket};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ConversationThread {
@@ -11,6 +11,8 @@ pub struct ConversationThread {
     pub peer_label: String,
     pub messages: Vec<MessageSummary>,
     pub unread_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lxmf_reply_ticket: Option<NativeLxmfReplyTicket>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +50,7 @@ impl Conversation {
                 peer_label: peer_label.clone(),
                 messages: Vec::new(),
                 unread_count: 0,
+                lxmf_reply_ticket: None,
             },
             peer_hash,
             peer_label,

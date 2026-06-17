@@ -32,6 +32,7 @@ fi
 echo "== Building compatibility .deb in ${image} via ${runtime} =="
 "$runtime" run --rm \
   "${userns_args[@]}" \
+  --user 0:0 \
   -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
   -e DEB_ARCH="${DEB_ARCH:-amd64}" \
   -e OMENBROWSER_COMPAT_UID="$uid" \
