@@ -236,7 +236,14 @@ impl ChatClient {
                 Vec::new(),
             )?;
         }
-        store.append_events(session.events.clone())?;
+        store.append_events(
+            session
+                .events
+                .iter()
+                .filter(|event| !is_transient_local_event_id(event.event_id))
+                .cloned()
+                .collect(),
+        )?;
         Ok(())
     }
 
@@ -347,6 +354,10 @@ impl ChatClient {
         }
         Ok(restored)
     }
+}
+
+fn is_transient_local_event_id(event_id: EventId) -> bool {
+    event_id > u64::MAX.saturating_sub(1_000_000)
 }
 
 fn restore_room_for_server<S: ChatStore>(
@@ -492,6 +503,79 @@ mod tests {
                 .map(|event| (event.room_id, event.event_id))
                 .collect::<Vec<_>>(),
             vec![(1, 1), (2, 1)]
+        );
+    }
+
+    #[test]
+    fn client_persistence_skips_transient_local_echo_events() {
+        let mut store = SqliteChatStore::in_memory().expect("store");
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "server-a".into(),
+                destination: "server-a".into(),
+                display_name: "Server A".into(),
+            },
+            active_room: ChatRoomSummary {
+                server_id: "server-a".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            rooms: vec![ChatRoomSummary {
+                server_id: "server-a".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            }],
+            users: Vec::new(),
+            events: vec![
+                ChatEvent {
+                    server_id: "server-a".into(),
+                    room_id: 1,
+                    event_id: 1,
+                    actor_user_id: Some(1),
+                    actor_display_name: Some("Alice".into()),
+                    at_unix: 1,
+                    kind: ChatEventKind::Message {
+                        body: "stored".into(),
+                    },
+                },
+                ChatEvent {
+                    server_id: "server-a".into(),
+                    room_id: 1,
+                    event_id: u64::MAX - 1,
+                    actor_user_id: Some(1),
+                    actor_display_name: Some("Alice".into()),
+                    at_unix: 2,
+                    kind: ChatEventKind::Message {
+                        body: "pending local echo".into(),
+                    },
+                },
+            ],
+            status: "test".into(),
+        });
+
+        client
+            .persist_session(&mut store, session_id)
+            .expect("persist session");
+
+        let events = store
+            .latest_events(&"server-a".into(), 1, 50)
+            .expect("stored events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, 1);
+        assert_eq!(
+            events[0].kind,
+            ChatEventKind::Message {
+                body: "stored".into()
+            }
         );
     }
 

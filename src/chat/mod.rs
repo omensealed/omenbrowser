@@ -12,10 +12,10 @@ pub mod ui;
 #[cfg(feature = "mock-runtime")]
 pub mod mock;
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod rns;
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod live;
 
 #[cfg(feature = "chat-client-lxmf")]

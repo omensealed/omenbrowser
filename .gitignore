@@ -59,6 +59,7 @@ Thumbs.db
 /old-src/
 /official-sources/
 /vendor/
+/kotlin-omen/
 /docs/23-codex-prompts.md
 /docs/CODEX_HANDOFF.md
 /docs/99-implementation-notes.md

@@ -69,7 +69,7 @@ testing discovery without waiting for the configured announce interval.
 
 `omenchatd` watches live Reticulum interface stats while the server is running.
 If configured interfaces repeatedly report disconnected, or interface stats stop
-responding, the server rebuilds its live `rns-net` runtime and announces again.
+responding, the server rebuilds its live Reticulum runtime and announces again.
 This is intended to recover after a TCP gateway, private gateway, or local RNS
 instance restarts without requiring an `omenchatd` process restart.
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 out_root="${1:-dist}"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
-version="${version:-0.1.0}"
+version="${version:-0.6.0}"
 arch="${DEB_ARCH:-$(dpkg --print-architecture 2>/dev/null || uname -m)}"
 pkg_dir="${out_root%/}/deb/omenbrowser-rs_${version}_${arch}"
 
@@ -13,8 +13,15 @@ if ! command -v dpkg-deb >/dev/null 2>&1; then
 fi
 
 echo "== Building release binaries =="
-cargo build --release --features chat-client-rns
-cargo build --release --manifest-path src/server/Cargo.toml --features live-rns-net
+browser_features="${OMENBROWSER_BROWSER_FEATURES:-chat-client-rns-clean}"
+cargo build --release --features "$browser_features"
+cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
+mkdir -p "${out_root%/}"
+target/release/omenbrowser_rs --version > "${out_root%/}/omenbrowser_rs-package-version.txt"
+grep -q "chat-client-rns-clean:on" "${out_root%/}/omenbrowser_rs-package-version.txt"
+grep -q "native-network:on" "${out_root%/}/omenbrowser_rs-package-version.txt"
+src/server/target/release/omenchatd --version > "${out_root%/}/omenchatd-package-version.txt"
+grep -q "live-reticulum:on" "${out_root%/}/omenchatd-package-version.txt"
 
 echo "== Staging Debian package =="
 rm -rf "$pkg_dir"
@@ -57,7 +64,6 @@ Description: Reticulum/NomadNet/LXMF browser and OMENchat client/server
 EOF
 
 echo "== Building .deb =="
-mkdir -p "${out_root%/}"
 deb_path="${out_root%/}/omenbrowser-rs_${version}_${arch}.deb"
 dpkg-deb --root-owner-group --build "$pkg_dir" "$deb_path"
 (

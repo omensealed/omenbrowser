@@ -4,7 +4,9 @@ use crate::error::ServerResult;
 use crate::protocol::codec::decode_frame;
 use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue, RoomId};
 use crate::session::{ServerPeer, SessionEngine};
-use crate::transport::{send_response_frame, LinkId, OmenchatTransport, OMENCHAT_LINK_CONTEXT};
+use crate::transport::{
+    send_response_frame_with_context, LinkId, OmenchatTransport, OMENCHAT_LINK_CONTEXT,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OmenchatLinkEvent {
@@ -139,6 +141,7 @@ pub struct OmenchatLiveServer<T> {
     transport: T,
     peers: BTreeMap<LinkId, ServerPeer>,
     link_rooms: BTreeMap<LinkId, RoomId>,
+    link_response_contexts: BTreeMap<LinkId, u8>,
     link_opened_at: BTreeMap<LinkId, i64>,
     link_traffic: BTreeMap<LinkId, LinkTrafficSummary>,
     recent_closed_links: VecDeque<ClosedLinkSummary>,
@@ -152,6 +155,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             transport,
             peers: BTreeMap::new(),
             link_rooms: BTreeMap::new(),
+            link_response_contexts: BTreeMap::new(),
             link_opened_at: BTreeMap::new(),
             link_traffic: BTreeMap::new(),
             recent_closed_links: VecDeque::new(),
@@ -199,14 +203,42 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 context,
                 data,
             } => {
-                if context != OMENCHAT_LINK_CONTEXT {
+                let frame = decode_frame(&data).ok();
+                if context != OMENCHAT_LINK_CONTEXT && frame.is_none() {
                     self.stats.ignored_packets = self.stats.ignored_packets.saturating_add(1);
                     return Ok(());
                 }
-                let Some(mut peer) = self.peers.get(&link_id).cloned() else {
-                    self.stats.unknown_link_packets =
-                        self.stats.unknown_link_packets.saturating_add(1);
-                    return Ok(());
+                if frame.is_some() && context != 0 {
+                    self.link_response_contexts.insert(link_id, context);
+                }
+                let mut peer = match self.peers.get(&link_id).cloned() {
+                    Some(peer) => peer,
+                    None => {
+                        if !frame
+                            .as_ref()
+                            .map(|frame| frame.op == ChatOp::SessionOpen)
+                            .unwrap_or(false)
+                        {
+                            self.stats.unknown_link_packets =
+                                self.stats.unknown_link_packets.saturating_add(1);
+                            return Ok(());
+                        }
+                        let provisional = ServerPeer {
+                            identity_hash: link_id.to_vec(),
+                            display_name: format!("link-{}", short_link_id(&link_id)),
+                            lxmf_destination: None,
+                        };
+                        let peer =
+                            peer_from_session_open(&provisional, &data).unwrap_or(provisional);
+                        self.peers.insert(link_id, peer.clone());
+                        self.link_opened_at
+                            .entry(link_id)
+                            .or_insert_with(current_unix_secs);
+                        self.link_traffic.entry(link_id).or_default();
+                        self.stats.links_opened = self.stats.links_opened.saturating_add(1);
+                        self.refresh_active_links();
+                        peer
+                    }
                 };
                 if let Some(updated_peer) = peer_from_session_open(&peer, &data) {
                     peer = updated_peer;
@@ -214,7 +246,6 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                     self.peers.insert(link_id, peer.clone());
                     self.refresh_active_links();
                 }
-                let frame = decode_frame(&data).ok();
                 self.record_link_traffic(
                     link_id,
                     data.len() as u64,
@@ -307,7 +338,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                         .handle_upload_resource(&peer, &resource_id, data.clone())?
                 {
                     self.stats.count_outbound_op(&response);
-                    send_response_frame(&self.engine, link_id, &response, &mut self.transport)?;
+                    self.send_response_frame(link_id, &response)?;
                     self.broadcast_room_event(link_id, &response)?;
                 }
                 self.stats.frames_out = self
@@ -328,6 +359,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                     self.stats.links_closed = self.stats.links_closed.saturating_add(1);
                 }
                 self.link_rooms.remove(&link_id);
+                self.link_response_contexts.remove(&link_id);
                 self.link_opened_at.remove(&link_id);
                 self.link_traffic.remove(&link_id);
                 if let Some(room_id) = room_id {
@@ -362,13 +394,13 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             {
                 if let Some(ack) = message_ack_from_room_event(request_seq, &response) {
                     self.stats.count_outbound_op(&ack);
-                    send_response_frame(&self.engine, link_id, &ack, &mut self.transport)?;
+                    self.send_response_frame(link_id, &ack)?;
                     self.broadcast_room_event(link_id, &response)?;
                     continue;
                 }
             }
             self.stats.count_outbound_op(&response);
-            send_response_frame(&self.engine, link_id, &response, &mut self.transport)?;
+            self.send_response_frame(link_id, &response)?;
             self.broadcast_room_event(link_id, &response)?;
         }
         Ok(())
@@ -387,7 +419,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 let link_ids = self.peer_link_ids(origin_link_id);
                 for link_id in link_ids {
                     self.stats.count_outbound_op(response);
-                    send_response_frame(&self.engine, link_id, response, &mut self.transport)?;
+                    self.send_response_frame(link_id, response)?;
                 }
             }
             return Ok(());
@@ -395,7 +427,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         let link_ids = self.room_link_ids(room_id, origin_link_id);
         for link_id in link_ids {
             self.stats.count_outbound_op(response);
-            send_response_frame(&self.engine, link_id, response, &mut self.transport)?;
+            self.send_response_frame(link_id, response)?;
         }
         Ok(())
     }
@@ -424,9 +456,22 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         let peers = self.active_peers_in_room(room_id);
         let frame = self.engine.active_userlist_frame(room_id, &peers)?;
         for link_id in link_ids {
-            send_response_frame(&self.engine, link_id, &frame, &mut self.transport)?;
+            self.send_response_frame(link_id, &frame)?;
         }
         Ok(())
+    }
+
+    fn send_response_frame(
+        &mut self,
+        link_id: LinkId,
+        frame: &crate::protocol::Frame,
+    ) -> ServerResult<()> {
+        let context = self
+            .link_response_contexts
+            .get(&link_id)
+            .copied()
+            .unwrap_or(OMENCHAT_LINK_CONTEXT);
+        send_response_frame_with_context(&self.engine, link_id, frame, &mut self.transport, context)
     }
 
     fn room_link_ids_including(&self, room_id: RoomId) -> Vec<LinkId> {
@@ -519,6 +564,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             self.record_closed_link(*link_id, Some("admin disconnect".into()));
             self.peers.remove(link_id);
             self.link_rooms.remove(link_id);
+            self.link_response_contexts.remove(link_id);
             self.link_opened_at.remove(link_id);
             self.link_traffic.remove(link_id);
         }
@@ -621,6 +667,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             self.record_closed_link(duplicate, Some("duplicate identity link replaced".into()));
             self.peers.remove(&duplicate);
             self.link_rooms.remove(&duplicate);
+            self.link_response_contexts.remove(&duplicate);
             self.link_opened_at.remove(&duplicate);
             self.link_traffic.remove(&duplicate);
         }
@@ -833,6 +880,14 @@ fn is_provisional_peer(peer: &ServerPeer) -> bool {
     peer.identity_hash.len() == 16 && peer.display_name.starts_with("link-")
 }
 
+fn short_link_id(link_id: &LinkId) -> String {
+    link_id
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -908,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn live_server_routes_known_link_data_and_ignores_other_contexts() {
+    fn live_server_routes_known_link_data_and_columba_context_zero_frames() {
         let store = OmenchatStore::in_memory().expect("store");
         let engine = SessionEngine::new(store);
         let link_id = [7u8; 16];
@@ -938,7 +993,7 @@ mod tests {
             context: 0,
             data: request.clone(),
         })
-        .expect("wrong context ignored");
+        .expect("columba context zero frame routed");
         live.handle_event(OmenchatLinkEvent::LinkData {
             link_id,
             context: OMENCHAT_LINK_CONTEXT,
@@ -949,21 +1004,128 @@ mod tests {
         assert_eq!(live.stats().active_links, 1);
         assert_eq!(live.stats().links_opened, 1);
         assert_eq!(live.stats().unknown_link_packets, 1);
-        assert_eq!(live.stats().ignored_packets, 1);
-        assert_eq!(live.stats().frames_in, 1);
-        assert_eq!(live.stats().frames_out, 2);
-        assert_eq!(live.stats().room_navigation_in, 1);
-        assert_eq!(live.stats().traffic_in_frames(), 1);
+        assert_eq!(live.stats().ignored_packets, 0);
+        assert_eq!(live.stats().frames_in, 2);
+        assert_eq!(live.stats().frames_out, 4);
+        assert_eq!(live.stats().room_navigation_in, 2);
+        assert_eq!(live.stats().traffic_in_frames(), 2);
         assert!(live.stats().bytes_in >= request_len);
         assert!(live.stats().bytes_out > 0);
-        assert_eq!(live.transport().frames.len(), 2);
+        assert_eq!(live.transport().frames.len(), 4);
         assert!(live.stats().summary_line().contains("traffic_in="));
-        assert!(live.stats().summary_line().contains("room:1"));
+        assert!(live.stats().summary_line().contains("room:2"));
         assert!(live
             .transport()
             .frames
             .iter()
             .all(|frame| frame.link_id == link_id));
+        assert!(live
+            .transport()
+            .frames
+            .iter()
+            .all(|frame| frame.context == OMENCHAT_LINK_CONTEXT));
+    }
+
+    #[test]
+    fn live_server_recovers_unknown_link_from_session_open() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let link_id = [9u8; 16];
+        let session_open = encode_frame(&Frame::new(
+            ChatOp::SessionOpen,
+            1,
+            None,
+            FrameBody::Fields(vec![
+                FrameValue::String("omenchat/0.1".into()),
+                FrameValue::String("Clean Client".into()),
+                FrameValue::String("0b09688ccb50c3ca949399fed7108f7f".into()),
+            ]),
+        ))
+        .expect("encode session open");
+        let join = encode_frame(&Frame::new(
+            ChatOp::JoinRoom,
+            2,
+            None,
+            FrameBody::Text("lobby".into()),
+        ))
+        .expect("encode join");
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: 0,
+            data: session_open,
+        })
+        .expect("session open recovers unknown link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: 0,
+            data: join,
+        })
+        .expect("join routes after recovered session");
+
+        assert_eq!(live.stats().active_links, 1);
+        assert_eq!(live.stats().links_opened, 1);
+        assert_eq!(live.stats().unknown_link_packets, 0);
+        assert_eq!(live.stats().frames_in, 2);
+        assert!(live
+            .active_link_summaries()
+            .iter()
+            .any(|link| link.display_name == "Clean Client"));
+        assert!(live.transport().frames.iter().any(|captured| {
+            captured.link_id == link_id
+                && captured.context == OMENCHAT_LINK_CONTEXT
+                && decode_frame(&captured.bytes)
+                    .map(|frame| frame.op == ChatOp::SessionAccept)
+                    .unwrap_or(false)
+        }));
+        assert!(live.transport().frames.iter().any(|captured| {
+            captured.link_id == link_id
+                && captured.context == OMENCHAT_LINK_CONTEXT
+                && decode_frame(&captured.bytes)
+                    .map(|frame| frame.op == ChatOp::JoinAccept)
+                    .unwrap_or(false)
+        }));
+    }
+
+    #[test]
+    fn live_server_ignores_context_zero_non_frames() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let link_id = [7u8; 16];
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: peer(),
+        })
+        .expect("open link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: 0,
+            data: b"not an omenchat frame".to_vec(),
+        })
+        .expect("non-frame ignored");
+
+        assert_eq!(live.stats().ignored_packets, 1);
+        assert_eq!(live.stats().frames_in, 0);
+        assert_eq!(live.transport().frames.len(), 0);
+    }
+
+    #[test]
+    fn live_server_resource_metadata_requires_omenchat_prefix() {
+        let valid = crate::transport::resource_metadata("upload:test.png");
+
+        assert_eq!(
+            resource_id_from_metadata(Some(&valid)).as_deref(),
+            Some("upload:test.png")
+        );
+        assert_eq!(resource_id_from_metadata(Some(b"omenchat-frame:1")), None);
+        assert_eq!(
+            resource_id_from_metadata(Some(b"other:upload:test.png")),
+            None
+        );
+        assert_eq!(resource_id_from_metadata(Some(b"omenchat-resource:")), None);
+        assert_eq!(resource_id_from_metadata(None), None);
     }
 
     #[test]

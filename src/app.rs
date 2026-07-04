@@ -46,9 +46,10 @@ use crate::plugins::BUILTIN_MICRONPLUS_PLUGIN_ID;
 use crate::plugins::{InstalledPlugin, PluginManifest, PluginRegistry};
 use crate::runtime::{
     build_runtime, CancellationToken, DestinationInspection, LxmfDeliveryEvidence,
-    LxmfDeliveryEvidenceKind, LxmfDeliveryProbeReport, LxmfDeliveryProbeStage, NetworkRuntime,
-    NetworkSnapshot, NetworkStatus, OutboundDeliveryState, OutboundStatus, PageFetchProbeReport,
-    PageFetchProbeStage, PageFetchProbeStep, RuntimeBackendName, RuntimeBusEvent, RuntimeStatus,
+    LxmfDeliveryEvidenceKind, LxmfDeliveryProbeReport, LxmfDeliveryProbeStage,
+    LxmfSdkRpcProbeSnapshot, NetworkRuntime, NetworkSnapshot, NetworkStatus, OutboundDeliveryState,
+    OutboundStatus, PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep,
+    RuntimeBackendName, RuntimeBusEvent, RuntimeStatus,
 };
 use crate::storage::files::sanitize_filename;
 use crate::storage::form_state::BrowserFormStateStore;
@@ -278,7 +279,7 @@ impl BrowserProbeSummary {
                 "run Diagnostics D to request path and inspect dry-run state"
             }
             PageFetchProbeStage::LinkSetup => {
-                "run Diagnostics X or L for a live probe and inspect rns-net link setup"
+                "run Diagnostics X or L for a live probe and inspect Reticulum 0.6 link setup"
             }
             PageFetchProbeStage::RequestSend => {
                 "run Diagnostics X or L and inspect request payload/path send traces"
@@ -1174,16 +1175,24 @@ async fn collect_native_network_smoke_test_report(
 async fn collect_native_lxmf_smoke_send_report(
     runtime: Arc<dyn NetworkRuntime>,
     peer_hash: String,
+    delivery_mode: DeliveryMode,
+    propagation_node: Option<String>,
+    include_ticket: bool,
 ) -> AppResult<serde_json::Value> {
     let attempt_epoch_ms = current_epoch_ms();
+    if matches!(delivery_mode, DeliveryMode::Propagated) {
+        runtime
+            .set_outbound_propagation_node(propagation_node.clone())
+            .await?;
+    }
     let readiness = runtime.probe_lxmf_delivery(&peer_hash, false).await?;
     let send = if readiness.ready_to_send {
         let envelope = crate::messaging::MessageEnvelope {
             peer_hash: peer_hash.clone(),
             title: "OMENbrowser_rs LXMF smoke test".into(),
             body: "OMENbrowser_rs native LXMF smoke-send test. This message was explicitly requested by the local user.".into(),
-            delivery_mode: DeliveryMode::Direct,
-            include_ticket: false,
+            delivery_mode: delivery_mode.clone(),
+            include_ticket,
             native_reply_ticket: None,
             attachments: Vec::new(),
         };
@@ -1201,6 +1210,9 @@ async fn collect_native_lxmf_smoke_send_report(
                     "delivered": message.delivered,
                     "failed": message.failed,
                     "native_lxmf_state": message.fields.get("native_lxmf_state").cloned(),
+                    "include_ticket": include_ticket,
+                    "native_lxmf_include_ticket": message.fields.get("native_lxmf_include_ticket").cloned(),
+                    "native_lxmf_reply_ticket_offered": message.fields.get("native_lxmf_reply_ticket_offered").cloned(),
                     "peer_hash": message.peer_hash,
                     "peer_label": message.peer_label,
                     "timestamp": message.timestamp,
@@ -1234,7 +1246,7 @@ async fn collect_native_lxmf_smoke_send_report(
             "epoch_ms": attempt_epoch_ms,
             "peer_visible": readiness.ready_to_send,
             "delivery_confirmation": "not_available_yet",
-            "delivery_meaning": "success means submitted to rns-net; remote delivery receipt is not wired yet",
+            "delivery_meaning": "success means submitted to the active native Reticulum transport; remote delivery receipt is not wired yet",
         },
         "warning": "This action sends a real, deliberately labeled LXMF smoke-test message when readiness passes.",
         "app_actions": {
@@ -1245,6 +1257,8 @@ async fn collect_native_lxmf_smoke_send_report(
         },
         "command_examples": live_interop_command_examples("00112233445566778899aabbccddeeff:/page/index.mu", Some(&peer_hash)),
         "peer_hash": peer_hash,
+        "delivery_mode": delivery_mode,
+        "propagation_node": propagation_node,
         "readiness_probe": readiness,
         "send": send,
     }))
@@ -1254,9 +1268,17 @@ async fn collect_native_lxmf_live_interop_report(
     runtime: Arc<dyn NetworkRuntime>,
     peer_hash: Option<String>,
     wait_secs: u64,
+    delivery_mode: DeliveryMode,
+    propagation_node: Option<String>,
+    include_ticket: bool,
 ) -> AppResult<serde_json::Value> {
     let attempt_epoch_ms = current_epoch_ms();
     let mut receiver = runtime.subscribe_events();
+    if matches!(delivery_mode, DeliveryMode::Propagated) {
+        runtime
+            .set_outbound_propagation_node(propagation_node.clone())
+            .await?;
+    }
     let status_before = runtime.status().await;
     let announce = runtime
         .announce_identity()
@@ -1298,8 +1320,8 @@ async fn collect_native_lxmf_live_interop_report(
                 peer_hash: peer.to_string(),
                 title: "OMENbrowser_rs LXMF interop test".into(),
                 body: "OMENbrowser_rs native LXMF live interop test. This message was explicitly requested by the local user.".into(),
-                delivery_mode: DeliveryMode::Direct,
-                include_ticket: false,
+                delivery_mode: delivery_mode.clone(),
+                include_ticket,
                 native_reply_ticket: None,
                 attachments: Vec::new(),
             };
@@ -1314,6 +1336,10 @@ async fn collect_native_lxmf_live_interop_report(
                         "message_id": message.message_id,
                         "packet_hash": message.message_id,
                         "native_lxmf_state": message.fields.get("native_lxmf_state").cloned(),
+                        "native_lxmf_propagation_node": message.fields.get("native_lxmf_propagation_node").cloned(),
+                        "include_ticket": include_ticket,
+                        "native_lxmf_include_ticket": message.fields.get("native_lxmf_include_ticket").cloned(),
+                        "native_lxmf_reply_ticket_offered": message.fields.get("native_lxmf_reply_ticket_offered").cloned(),
                         "transport_method": message.transport_method,
                         "delivered": message.delivered,
                         "failed": message.failed,
@@ -1383,6 +1409,8 @@ async fn collect_native_lxmf_live_interop_report(
         "runtime_status_after": status_after,
         "local_announce": announce,
         "peer_hash": peer_hash,
+        "delivery_mode": delivery_mode,
+        "propagation_node": propagation_node,
         "readiness_probe": readiness,
         "readiness_retry": readiness_retry,
         "send": send,
@@ -1821,6 +1849,23 @@ async fn wait_for_lxmf_interop_events(
                             proof_count += 1;
                         }
                     }
+                    if summary.get("event").and_then(serde_json::Value::as_str)
+                        == Some("lxmf_delivery_evidence")
+                    {
+                        match summary.get("kind").and_then(serde_json::Value::as_str) {
+                            Some("packet_submitted" | "propagation_node_accepted") => {
+                                delivery_count += 1;
+                            }
+                            Some("rns_packet_proof" | "lxmf_router_delivered") => {
+                                delivery_count += 1;
+                                proof_count += 1;
+                            }
+                            Some("inbound_peer_message") => {
+                                inbound_count += 1;
+                            }
+                            _ => {}
+                        }
+                    }
                     events.push(summary);
                 }
             }
@@ -2021,6 +2066,17 @@ fn lxmf_interop_classification(
         .get("inbound_reply_match_state")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
+    let send_native_state = send
+        .get("native_lxmf_state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let send_submitted_unconfirmed = matches!(
+        send_native_state,
+        "submitted_to_clean_reticulum"
+            | "submitted_to_rns_net"
+            | "submitted_to_runtime"
+            | "submitted_unconfirmed"
+    );
 
     let (outcome, reason, next_step) = if !announce_ok {
         (
@@ -2048,6 +2104,12 @@ fn lxmf_interop_classification(
                 "pass",
                 "explicit send produced matching LXMF/RNS evidence",
                 "repeat from this conversation or select another trusted peer to validate additional LXMF delivery paths",
+            )
+        } else if send_submitted_unconfirmed {
+            (
+                "submitted_unconfirmed",
+                "explicit send was accepted by the native transport but no peer proof or reply arrived before timeout",
+                "treat the outbound row as peer-unconfirmed; retry only if the peer does not receive it or use propagation for store-and-forward evidence",
             )
         } else if wait_status == "timeout" || wait_status == "submitted_only" {
             (
@@ -2164,7 +2226,10 @@ fn lxmf_interop_event_summary(
             if message.contains("lxmf")
                 || message.contains("LXMF")
                 || message.contains("proof")
-                || message.contains("announce") =>
+                || message.contains("announce")
+                || message.contains("app-data")
+                || message.contains("stamp")
+                || message.contains("submitted") =>
         {
             Some(serde_json::json!({
                 "event": "debug",
@@ -2884,13 +2949,13 @@ fn native_network_smoke_test_verdicts(
             live_report,
             execute_live_probe,
             PageFetchProbeStage::LinkSetup,
-            "run Diagnostics L or X to perform an explicit live probe; if it fails, inspect rns-net link setup"
+            "run Diagnostics L or X to perform an explicit live probe; if it fails, inspect Reticulum 0.6 link setup"
         ),
         "request_send": live_or_skipped_stage_verdict(
             live_report,
             execute_live_probe,
             PageFetchProbeStage::RequestSend,
-            "run Diagnostics L or X; if it fails, inspect request payload/path and rns-net send_request"
+            "run Diagnostics L or X; if it fails, inspect request payload/path and clean Reticulum request send"
         ),
         "response_wait": live_or_skipped_stage_verdict(
             live_report,
@@ -2990,13 +3055,13 @@ fn native_network_smoke_test_classification(
             "link_setup",
             "fail",
             "live link setup failed",
-            "inspect rns-net link setup details in live_page_probe or run with --live --fetch-page --stdout",
+            "inspect Reticulum 0.6 link setup details in live_page_probe or run with --live --fetch-page --stdout",
         ),
         (
             "request_send",
             "fail",
             "live request send failed",
-            "inspect request payload/path traces and rns-net send_request behavior",
+            "inspect request payload/path traces and clean Reticulum request send behavior",
         ),
         (
             "response_wait",
@@ -3133,10 +3198,10 @@ fn page_fetch_stage_next_step(stage: Option<&PageFetchProbeStage>) -> &'static s
             "request the destination path, use --warm-path, and retry after Reticulum path discovery"
         }
         Some(PageFetchProbeStage::LinkSetup) => {
-            "inspect rns-net link setup details in live_page_probe"
+            "inspect Reticulum 0.6 link setup details in live_page_probe"
         }
         Some(PageFetchProbeStage::RequestSend) => {
-            "inspect request payload/path traces and rns-net send_request behavior"
+            "inspect request payload/path traces and clean Reticulum request send behavior"
         }
         Some(PageFetchProbeStage::ResponseWait) => {
             "verify remote node availability, path stability, and request timeout settings"
@@ -4482,6 +4547,7 @@ pub struct InterfacesPanelState {
 #[derive(Clone, Debug, Default)]
 pub struct DiagnosticsPanelState {
     pub last_snapshot: Option<String>,
+    pub last_lxmf_sdk_rpc_probe: Option<LxmfSdkRpcProbeSnapshot>,
     pub last_export_path: Option<PathBuf>,
     pub last_export_summary: Option<String>,
     pub preview_lines: Vec<String>,
@@ -4943,11 +5009,11 @@ pub struct App {
     pending_local_lxmf_announce_action: Option<PendingLocalLxmfAnnounceAction>,
     pending_outbound_statuses: BTreeMap<String, OutboundStatus>,
     pending_lxmf_delivery_evidence: BTreeMap<String, Vec<LxmfDeliveryEvidence>>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pending_omenchat_link_data: Vec<crate::runtime::OmenChatLinkData>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pending_omenchat_link_closed: Vec<crate::runtime::OmenChatLinkClosed>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pending_omenchat_resource_data: Vec<crate::runtime::OmenChatResourceData>,
     micronplus_node_warnings: BTreeMap<String, Vec<MicronPlusNodeWarning>>,
     diagnostics_export_pending: Option<u64>,
@@ -5183,11 +5249,11 @@ impl App {
             pending_local_lxmf_announce_action: None,
             pending_outbound_statuses: BTreeMap::new(),
             pending_lxmf_delivery_evidence: BTreeMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             pending_omenchat_link_data: Vec::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             pending_omenchat_link_closed: Vec::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             pending_omenchat_resource_data: Vec::new(),
             micronplus_node_warnings: BTreeMap::new(),
             diagnostics_export_pending: None,
@@ -5453,12 +5519,6 @@ impl App {
             conversations.push(Conversation::new(1, "", "New Conversation"));
         }
 
-        if settings_use_native_lxmf(&settings.runtime_backend) {
-            for conversation in &mut conversations {
-                conversation.include_ticket = false;
-            }
-        }
-
         conversations
     }
 
@@ -5486,6 +5546,7 @@ impl App {
             tab.viewport_width = self.browser_viewport_width;
             tab.viewport_height = self.browser_viewport_height;
         }
+        self.clamp_browser_tab_scroll_offset_by_index(active);
     }
 
     pub fn set_browser_tab_viewport(&mut self, tab_id: TabId, width: usize, height: usize) -> bool {
@@ -5498,6 +5559,7 @@ impl App {
             self.browser_viewport_width = width.max(1);
             self.browser_viewport_height = height.max(1);
         }
+        self.clamp_browser_tab_scroll_offset_by_index(index);
         true
     }
 
@@ -8332,9 +8394,15 @@ impl App {
         let event_tx = self.event_tx.clone();
         let task_peer = peer_hash.clone();
         tokio::spawn(async move {
-            let report = collect_native_lxmf_smoke_send_report(runtime, task_peer.clone())
-                .await
-                .map_err(|error| error.to_string());
+            let report = collect_native_lxmf_smoke_send_report(
+                runtime,
+                task_peer.clone(),
+                DeliveryMode::Direct,
+                None,
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string());
             let _ = event_tx
                 .send(InternalAppEvent::DiagnosticsTask(
                     DiagnosticsTaskResult::NativeLxmfSmokeSend {
@@ -8387,10 +8455,16 @@ impl App {
         let event_tx = self.event_tx.clone();
         let task_peer = peer_hash.clone();
         tokio::spawn(async move {
-            let report =
-                collect_native_lxmf_live_interop_report(runtime, task_peer.clone(), wait_secs)
-                    .await
-                    .map_err(|error| error.to_string());
+            let report = collect_native_lxmf_live_interop_report(
+                runtime,
+                task_peer.clone(),
+                wait_secs,
+                DeliveryMode::Direct,
+                None,
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string());
             let _ = event_tx
                 .send(InternalAppEvent::DiagnosticsTask(
                     DiagnosticsTaskResult::NativeLxmfLiveInterop {
@@ -8974,16 +9048,50 @@ impl App {
     pub async fn native_lxmf_smoke_send_report_for_peer(
         &self,
         peer_hash: impl Into<String>,
+        delivery_mode: DeliveryMode,
+        propagation_node: Option<String>,
+        include_ticket: bool,
     ) -> AppResult<serde_json::Value> {
-        collect_native_lxmf_smoke_send_report(self.runtime.clone(), peer_hash.into()).await
+        collect_native_lxmf_smoke_send_report(
+            self.runtime.clone(),
+            peer_hash.into(),
+            delivery_mode,
+            propagation_node,
+            include_ticket,
+        )
+        .await
     }
 
     pub async fn native_lxmf_live_interop_report(
         &self,
         peer_hash: Option<String>,
         wait_secs: u64,
+        delivery_mode: DeliveryMode,
+        propagation_node: Option<String>,
+        include_ticket: bool,
     ) -> AppResult<serde_json::Value> {
-        collect_native_lxmf_live_interop_report(self.runtime.clone(), peer_hash, wait_secs).await
+        collect_native_lxmf_live_interop_report(
+            self.runtime.clone(),
+            peer_hash,
+            wait_secs,
+            delivery_mode,
+            propagation_node,
+            include_ticket,
+        )
+        .await
+    }
+
+    pub async fn native_lxmf_propagation_diagnostics_report(
+        &self,
+        selected_from_settings: Option<String>,
+        sync_limit: Option<u32>,
+    ) -> serde_json::Value {
+        collect_native_lxmf_propagation_diagnostics_report(
+            self.runtime.clone(),
+            selected_from_settings,
+            sync_limit,
+        )
+        .await
     }
 
     pub async fn preload_known_destinations_for_smoke_test(
@@ -9388,6 +9496,10 @@ impl App {
     }
 
     fn write_diagnostics_bundle_export(&mut self, snapshot: Option<&DiagnosticsSnapshot>) -> bool {
+        if let Some(snapshot) = snapshot {
+            self.diagnostics_state.last_lxmf_sdk_rpc_probe =
+                Some(snapshot.native_lxmf_sdk_rpc_probe.clone());
+        }
         let bundle = self.redacted_diagnostics_bundle_with_snapshot(snapshot);
         let content = match serde_json::to_string_pretty(&bundle) {
             Ok(content) => content,
@@ -12213,7 +12325,11 @@ impl App {
                 TransportMethod::Direct | TransportMethod::Unknown(_) => DeliveryMode::Direct,
             }
         };
-        conversation.include_ticket = false;
+        conversation.include_ticket = message
+            .fields
+            .get("native_lxmf_include_ticket")
+            .map(String::as_str)
+            == Some("true");
         conversation.attachments = message
             .attachments
             .iter()
@@ -14146,6 +14262,18 @@ impl App {
             .saturating_sub(height)
     }
 
+    fn clamp_browser_tab_scroll_offset_by_index(&mut self, index: usize) {
+        let Some(tab) = self.workspace.browser_tabs.get(index) else {
+            return;
+        };
+        let width = tab.viewport_width.max(1);
+        let height = tab.viewport_height.max(1);
+        let max_offset = self.browser_max_scroll_offset_by_index(index, width, height);
+        if let Some(tab) = self.workspace.browser_tabs.get_mut(index) {
+            tab.scroll.offset = tab.scroll.offset.min(max_offset);
+        }
+    }
+
     pub fn scroll_active_browser_page(&mut self, viewport_rows: usize, direction: isize) -> usize {
         let rows = viewport_rows.max(1) as isize;
         self.scroll_active_browser_lines(rows.saturating_mul(direction.signum()))
@@ -14600,17 +14728,17 @@ impl App {
             .is_ok()
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub fn drain_omenchat_link_data(&mut self) -> Vec<crate::runtime::OmenChatLinkData> {
         std::mem::take(&mut self.pending_omenchat_link_data)
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub fn drain_omenchat_link_closed(&mut self) -> Vec<crate::runtime::OmenChatLinkClosed> {
         std::mem::take(&mut self.pending_omenchat_link_closed)
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub fn drain_omenchat_resource_data(&mut self) -> Vec<crate::runtime::OmenChatResourceData> {
         std::mem::take(&mut self.pending_omenchat_resource_data)
     }
@@ -15397,7 +15525,7 @@ impl App {
                     .monitoring_state
                     .estimated_inbound_bytes
                     .saturating_add(data.frame_bytes.len() as u64);
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 self.pending_omenchat_link_data.push(data.clone());
                 self.logs.push_with_source(
                     LogSeverity::Debug,
@@ -15411,7 +15539,7 @@ impl App {
                 true
             }
             crate::runtime::RuntimeBusEvent::OmenChatLinkClosed(data) => {
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 self.pending_omenchat_link_closed.push(data.clone());
                 let benign_close = data.reason.as_deref().is_some_and(|reason| {
                     let reason = reason.trim();
@@ -15439,7 +15567,7 @@ impl App {
                     .monitoring_state
                     .estimated_inbound_bytes
                     .saturating_add(data.data.len() as u64);
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 self.pending_omenchat_resource_data.push(data.clone());
                 self.logs.push_with_source(
                     LogSeverity::Debug,
@@ -18728,6 +18856,40 @@ impl App {
         );
         self.diagnostics_state.last_snapshot = Some(summary);
     }
+
+    pub fn native_lxmf_sdk_rpc_probe_line(&self) -> String {
+        match &self.diagnostics_state.last_lxmf_sdk_rpc_probe {
+            Some(probe) => format_native_lxmf_sdk_rpc_probe_line(probe),
+            None => {
+                "native LXMF SDK/RPC probe: not collected; export diagnostics bundle to probe endpoint".into()
+            }
+        }
+    }
+}
+
+fn format_native_lxmf_sdk_rpc_probe_line(probe: &LxmfSdkRpcProbeSnapshot) -> String {
+    let endpoint = probe.endpoint.as_deref().unwrap_or("none");
+    let mut line = format!(
+        "native LXMF SDK/RPC probe: state={} endpoint={endpoint}",
+        probe.state
+    );
+    if let Some(runtime_id) = &probe.runtime_id {
+        line.push_str(&format!(" runtime_id={runtime_id}"));
+    }
+    if let Some(version) = probe.active_contract_version {
+        line.push_str(&format!(" contract={version}"));
+    }
+    if probe.queued_messages.is_some() || probe.in_flight_messages.is_some() {
+        line.push_str(&format!(
+            " queued={} in_flight={}",
+            probe.queued_messages.unwrap_or_default(),
+            probe.in_flight_messages.unwrap_or_default()
+        ));
+    }
+    if let Some(detail) = &probe.detail {
+        line.push_str(&format!(" detail={detail}"));
+    }
+    line
 }
 
 pub fn current_epoch_ms() -> u64 {
@@ -22911,7 +23073,7 @@ side
     }
 
     #[test]
-    fn native_lxmf_restore_downgrades_stale_ticket_state() {
+    fn native_lxmf_restore_preserves_ticket_state() {
         let mut config = test_config("native-session-ticket-restore");
         config.settings.runtime_backend = RuntimeBackendSetting::Reticulum;
         config.settings.conversation_tabs = vec![ConversationTabSettings {
@@ -22926,7 +23088,7 @@ side
 
         let app = App::new(config);
 
-        assert!(!app.active_conversation().include_ticket);
+        assert!(app.active_conversation().include_ticket);
         assert!(app.active_conversation_uses_native_lxmf());
     }
 
@@ -24392,6 +24554,9 @@ side
             bundle["interfaces"]["generated_reticulum_config"]["content"],
             app.interface_service.render_config()
         );
+        assert!(app
+            .native_lxmf_sdk_rpc_probe_line()
+            .contains("not collected"));
 
         assert!(app.export_diagnostics_bundle());
         assert!(app.diagnostics_export_pending());
@@ -24421,9 +24586,18 @@ side
         assert!(exported.contains("diagnostics_service_snapshot"));
         assert!(exported.contains("interface_stats"));
         assert!(exported.contains("propagation_status"));
+        assert!(exported.contains("native_lxmf_sdk_rpc_probe"));
         assert!(exported.contains("cache_files"));
         assert!(!exported.contains(&identity_path.display().to_string()));
         assert!(!exported.contains("secret message text"));
+        assert!(app
+            .diagnostics_state
+            .last_lxmf_sdk_rpc_probe
+            .as_ref()
+            .is_some_and(|probe| probe.state == "disabled"));
+        assert!(app
+            .native_lxmf_sdk_rpc_probe_line()
+            .contains("state=disabled"));
         assert!(app
             .diagnostics_state
             .last_export_summary
@@ -25077,6 +25251,83 @@ side
                 .get("wait_status")
                 .and_then(serde_json::Value::as_str),
             Some("submitted_only")
+        );
+    }
+
+    #[test]
+    fn lxmf_interop_classification_marks_clean_direct_submit_peer_unconfirmed() {
+        let readiness = crate::runtime::network::LxmfDeliveryProbeReport {
+            backend: crate::runtime::network::RuntimeBackendName::Reticulum,
+            peer_hash: FIXTURE_NODE_HASH.into(),
+            execute_send: false,
+            ready_to_send: true,
+            steps: Vec::new(),
+        };
+        let classification = lxmf_interop_classification(
+            &serde_json::json!({"ok": true, "announced": true}),
+            Some(&readiness),
+            &serde_json::json!({
+                "requested": true,
+                "ok": true,
+                "message_id": "packet-1",
+                "native_lxmf_state": "submitted_to_clean_reticulum",
+            }),
+            &serde_json::json!({
+                "status": "timeout",
+                "proof_match_state": "no_matching_packet_proof",
+                "inbound_reply_match_state": "no_matching_peer_reply",
+            }),
+            Some(FIXTURE_NODE_HASH),
+        );
+
+        assert_eq!(
+            classification
+                .get("outcome")
+                .and_then(serde_json::Value::as_str),
+            Some("submitted_unconfirmed")
+        );
+        assert!(classification
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|reason| reason.contains("accepted by the native transport")));
+    }
+
+    #[tokio::test]
+    async fn lxmf_interop_wait_counts_structured_lxmf_delivery_evidence() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        tx.send(crate::runtime::RuntimeBusEvent::LxmfDeliveryEvidence(
+            LxmfDeliveryEvidence {
+                peer_hash: FIXTURE_NODE_HASH.into(),
+                message_id: Some("packet-1".into()),
+                kind: LxmfDeliveryEvidenceKind::RnsPacketProof,
+                detail: Some("packet_hash:packet-1;matched_pending:true".into()),
+                rtt: Some(0.25),
+                observed_at: Some(10.0),
+            },
+        ))
+        .expect("send evidence");
+
+        let wait = wait_for_lxmf_interop_events(
+            Some(&mut rx),
+            Some(FIXTURE_NODE_HASH),
+            Some("packet-1"),
+            1,
+        )
+        .await;
+
+        assert_eq!(
+            wait.get("status").and_then(serde_json::Value::as_str),
+            Some("observed")
+        );
+        assert_eq!(
+            wait.get("proof_match_state")
+                .and_then(serde_json::Value::as_str),
+            Some("matched_packet_proof")
+        );
+        assert_eq!(
+            wait.get("packet_proofs")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
         );
     }
 
@@ -26630,21 +26881,21 @@ side
     fn native_browser_load_failure_reports_exact_link_request_response_stage() {
         let cases = [
             (
-                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during link setup: rns-net failed to create page request link"),
+                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during link setup: Reticulum 0.6 failed to create page request link"),
                 PageFetchProbeStage::LinkSetup,
                 "native-load",
                 "link setup failed",
                 "link/request/response report",
             ),
             (
-                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during request send: rns-net failed to send page request"),
+                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during request send: clean Reticulum request send failed"),
                 PageFetchProbeStage::RequestSend,
                 "native-load",
                 "request send failed",
                 "link/request/response report",
             ),
             (
-                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during response wait: timed out waiting for rns-net page response"),
+                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during response wait: timed out waiting for clean Reticulum page response"),
                 PageFetchProbeStage::ResponseWait,
                 "native-load",
                 "response wait failed",
@@ -26713,7 +26964,7 @@ side
         assert!(app.apply_browser_task_result(BrowserTaskResult::Error {
             tab_id,
             generation: 12,
-            message: format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during response wait: timed out waiting for rns-net page response"),
+            message: format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during response wait: timed out waiting for clean Reticulum page response"),
         }));
 
         let retry = app
@@ -30188,6 +30439,27 @@ side
             (second_tab.viewport_width, second_tab.viewport_height),
             (90, 20)
         );
+    }
+
+    #[test]
+    fn browser_viewport_resize_clamps_stale_scroll_offset() {
+        let mut app = App::new(test_config("browser-viewport-clamp"));
+        let tab_id = app.active_browser_tab().id;
+        let page = BrowserPage {
+            url: "mock.node:/short.mu".into(),
+            title: "Short".into(),
+            markup: "one\ntwo\nthree".into(),
+            source: crate::browser::PageSource::Network,
+            metadata: BTreeMap::new(),
+            request_data: None,
+        };
+        app.active_browser_tab_mut().session.apply_page(page, true);
+        app.sync_browser_tab_from_session(app.workspace.active_browser, None);
+        app.active_browser_tab_mut().scroll.offset = usize::MAX;
+
+        assert!(app.set_browser_tab_viewport(tab_id, 80, 20));
+
+        assert_eq!(app.active_browser_tab().scroll.offset, 0);
     }
 
     #[test]

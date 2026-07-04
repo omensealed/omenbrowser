@@ -1282,6 +1282,7 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
             "reticulum storage: {}",
             app.paths.reticulum_storage_dir.display()
         )),
+        Line::from(app.native_lxmf_sdk_rpc_probe_line()),
         Line::from(
             app.diagnostics_state
                 .last_snapshot

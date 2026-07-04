@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+#[cfg(feature = "native-rns-net")]
+compile_error!(
+    "native-rns-net was removed from OMENbrowser_rs; use chat-client-rns-clean/native-network with reticulum-rs 0.6"
+);
+
 pub mod app;
 pub mod browser;
 #[cfg(feature = "chat-client")]

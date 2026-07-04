@@ -2,16 +2,21 @@
 
 ## Build
 
-Browser with desktop UI, native networking, and OMENchat:
+Browser with desktop UI, native networking, and OMENchat using the current
+live-tested clean Reticulum 0.6 path:
 
 ```bash
-cargo build --release --features chat-client-rns
+cargo build --release --features chat-client-rns-clean
 ```
+
+`chat-client-rns-clean` uses the `reticulum-rs`/`lxmf` 0.6 stack without
+pulling in the old `rns-net` compatibility crates. The old compatibility
+features have been removed from the normal project manifests.
 
 Standalone OMENchat server:
 
 ```bash
-cargo build --release --manifest-path src/server/Cargo.toml --features live-rns-net
+cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
 ```
 
 ## Run The Browser

@@ -1,14 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-#[cfg(feature = "native-rns-net")]
 use rand_core::RngCore;
-use reticulum_rs::core::identity::PrivateIdentity;
-use reticulum_rs::core::ratchets::{decrypt_with_identity, encrypt_for_public_key};
-#[cfg(feature = "native-rns-net")]
+use reticulum_rs::core::identity::{Identity, PrivateIdentity};
+use reticulum_rs::core::ratchets::decrypt_with_identity;
 use sha2::{Digest, Sha256};
-#[cfg(feature = "native-rns-net")]
-use x25519_dalek::PublicKey;
 
 use crate::error::{AppError, AppResult};
 use crate::messaging::{
@@ -41,21 +37,14 @@ const RENDERER_PLAIN: u64 = 0x00;
 const RENDERER_MICRON: u64 = 0x01;
 const RENDERER_MARKDOWN: u64 = 0x02;
 const RENDERER_BBCODE: u64 = 0x03;
-#[cfg(feature = "native-rns-net")]
 const LXMF_TICKET_LENGTH: usize = 16;
-#[cfg(feature = "native-rns-net")]
 const LXMF_TICKET_EXPIRY_SECONDS: f64 = 21.0 * 24.0 * 60.0 * 60.0;
-#[cfg(feature = "native-rns-net")]
 const LXMF_STAMP_SIZE: usize = 32;
-#[cfg(feature = "native-rns-net")]
 const PROPAGATION_LXMF_OVERHEAD: usize = 112;
-#[cfg(feature = "native-rns-net")]
 const DIRECT_WORKBLOCK_EXPAND_ROUNDS: u32 = 3000;
-#[cfg(feature = "native-rns-net")]
 const PROPAGATION_WORKBLOCK_EXPAND_ROUNDS: u32 = 1000;
-#[cfg(feature = "native-rns-net")]
+pub const DEFAULT_PROPAGATION_STAMP_TARGET_COST: u8 = 16;
 pub const DEFAULT_PROPAGATION_STAMP_MAX_ATTEMPTS: u64 = 1 << 22;
-#[cfg(feature = "native-rns-net")]
 pub const DEFAULT_DIRECT_STAMP_MAX_ATTEMPTS: u64 = 1 << 22;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,9 +82,9 @@ pub fn native_lxmf_wire_api() -> NativeLxmfWireApi {
 pub fn native_lxmf_parity() -> NativeLxmfParity {
     NativeLxmfParity {
         payload_stamps_supported: true,
-        stamp_validation_supported: cfg!(feature = "native-rns-net"),
-        stamp_generation_supported: cfg!(feature = "native-rns-net"),
-        include_ticket_supported: cfg!(feature = "native-rns-net"),
+        stamp_validation_supported: true,
+        stamp_generation_supported: true,
+        include_ticket_supported: true,
     }
 }
 
@@ -105,6 +94,8 @@ pub fn native_delivery_type_name() -> &'static str {
 
 pub fn delivery_display_name_from_app_data(app_data: &[u8]) -> Option<String> {
     lxmf::wire::announce::display_name_from_delivery_app_data(app_data)
+        .ok()
+        .flatten()
 }
 
 pub fn delivery_announce_stamp_cost(app_data: &[u8]) -> Option<u8> {
@@ -124,8 +115,9 @@ pub fn delivery_announce_stamp_cost(app_data: &[u8]) -> Option<u8> {
 }
 
 pub fn encode_delivery_display_name_app_data(display_name: &str) -> AppResult<Vec<u8>> {
-    lxmf::wire::announce::encode_delivery_display_name_app_data(display_name)
-        .ok_or_else(|| AppError::Runtime("LXMF delivery announce app-data failed".into()))
+    lxmf::wire::announce::encode_delivery_display_name_app_data(display_name).map_err(|error| {
+        AppError::Runtime(format!("LXMF delivery announce app-data failed: {error}"))
+    })
 }
 
 pub fn propagation_display_name_from_app_data(app_data: &[u8]) -> Option<String> {
@@ -196,7 +188,6 @@ pub fn propagation_announce_target_stamp_cost(app_data: &[u8]) -> Option<u8> {
         .next()
 }
 
-#[cfg(feature = "native-rns-net")]
 pub fn validate_propagation_stamp_any_cost(
     transient_data: &[u8],
     target_costs: &[u8],
@@ -217,7 +208,6 @@ pub fn validate_propagation_stamp_any_cost(
     None
 }
 
-#[cfg(feature = "native-rns-net")]
 pub fn encode_signed_propagation_envelope(
     outbound: &NativeLxmfOutbound,
     private_identity_bytes: &[u8],
@@ -231,7 +221,7 @@ pub fn encode_signed_propagation_envelope(
     })?;
     let timestamp = wire.payload.timestamp;
     let (lxm_data, transient_id) =
-        pack_destination_salted_propagation_transient(&wire, recipient_public_key)?;
+        pack_identity_salted_propagation_transient(&wire, recipient_public_key)?;
     let stamp = if let Some(target_cost) = target_stamp_cost {
         Some(generate_propagation_stamp_for_transient(
             &lxm_data,
@@ -255,52 +245,30 @@ pub fn encode_signed_propagation_envelope(
     })
 }
 
-#[cfg(feature = "native-rns-net")]
-fn pack_destination_salted_propagation_transient(
+fn pack_identity_salted_propagation_transient(
     wire: &lxmf::WireMessage,
     recipient_public_key: [u8; 64],
 ) -> AppResult<(Vec<u8>, [u8; 32])> {
-    let packed = wire.pack().map_err(|err| {
-        AppError::Runtime(format!("LXMF wire pack before propagation failed: {err}"))
-    })?;
-    if packed.len() <= 16 {
-        return Err(AppError::Runtime(
-            "LXMF wire payload is shorter than destination hash".into(),
-        ));
-    }
-    let mut public_key = [0u8; 32];
-    public_key.copy_from_slice(&recipient_public_key[..32]);
-    let encrypted = encrypt_for_public_key(
-        &PublicKey::from(public_key),
-        &packed[..16],
-        &packed[16..],
-        rand_core::OsRng,
-    )
-    .map_err(|_| AppError::Runtime("LXMF propagation transient encrypt failed".into()))?;
-
-    let mut lxm_data = Vec::with_capacity(16 + encrypted.len());
-    lxm_data.extend_from_slice(&packed[..16]);
-    lxm_data.extend_from_slice(&encrypted);
-    let digest = Sha256::digest(&lxm_data);
-    let mut transient_id = [0u8; 32];
-    transient_id.copy_from_slice(digest.as_slice());
-    Ok((lxm_data, transient_id))
+    let recipient =
+        Identity::new_from_slices(&recipient_public_key[..32], &recipient_public_key[32..]);
+    wire.pack_propagation_transient_with_rng(&recipient, rand_core::OsRng)
+        .map_err(|err| {
+            AppError::Runtime(format!("LXMF propagation transient encode failed: {err}"))
+        })
 }
 
-#[cfg(feature = "native-rns-net")]
 pub fn generate_propagation_stamp_for_transient(
     lxm_data: &[u8],
     transient_id: [u8; 32],
     target_cost: u8,
     max_attempts: u64,
 ) -> AppResult<GeneratedPropagationStamp> {
-    let workblock =
-        rns_core::stamp::stamp_workblock(&transient_id, PROPAGATION_WORKBLOCK_EXPAND_ROUNDS);
+    let workblock = stamp_workblock(&transient_id, PROPAGATION_WORKBLOCK_EXPAND_ROUNDS)?;
     let mut stamp = vec![0u8; LXMF_STAMP_SIZE];
     for attempt in 1..=max_attempts {
         rand_core::OsRng.fill_bytes(&mut stamp);
-        if rns_core::stamp::stamp_valid(&stamp, target_cost, &workblock) {
-            let stamp_value = rns_core::stamp::stamp_value(&workblock, &stamp);
+        if stamp_valid(&stamp, target_cost, &workblock) {
+            let stamp_value = stamp_value(&workblock, &stamp);
             let mut transient_data = Vec::with_capacity(lxm_data.len() + stamp.len());
             transient_data.extend_from_slice(lxm_data);
             transient_data.extend_from_slice(&stamp);
@@ -323,7 +291,6 @@ pub fn generate_propagation_stamp_for_transient(
     )))
 }
 
-#[cfg(feature = "native-rns-net")]
 fn validate_propagation_stamp(
     transient_data: &[u8],
     target_cost: u8,
@@ -337,22 +304,49 @@ fn validate_propagation_stamp(
     let digest = Sha256::digest(lxm_data);
     let mut transient_id = [0u8; 32];
     transient_id.copy_from_slice(&digest);
-    let workblock =
-        rns_core::stamp::stamp_workblock(&transient_id, PROPAGATION_WORKBLOCK_EXPAND_ROUNDS);
-    if rns_core::stamp::stamp_valid(stamp, target_cost, &workblock) {
-        let stamp_value = rns_core::stamp::stamp_value(&workblock, stamp);
+    let workblock = stamp_workblock(&transient_id, PROPAGATION_WORKBLOCK_EXPAND_ROUNDS).ok()?;
+    if stamp_valid(stamp, target_cost, &workblock) {
+        let stamp_value = stamp_value(&workblock, stamp);
         Some((transient_id, lxm_data.to_vec(), stamp_value))
     } else {
         None
     }
 }
 
-#[cfg(not(feature = "native-rns-net"))]
-pub fn validate_propagation_stamp_any_cost(
-    _transient_data: &[u8],
-    _target_costs: &[u8],
-) -> Option<PropagationStampValidation> {
-    None
+fn stamp_workblock(material: &[u8], expand_rounds: u32) -> AppResult<Vec<u8>> {
+    let mut workblock = Vec::with_capacity(expand_rounds as usize * 256);
+    for n in 0..expand_rounds {
+        let mut packed_round = Vec::new();
+        rmpv::encode::write_value(&mut packed_round, &rmpv::Value::Integer(n.into()))
+            .map_err(|err| AppError::Runtime(format!("LXMF stamp round encode failed: {err}")))?;
+        let salt = Sha256::digest([material, packed_round.as_slice()].concat());
+        let hkdf = hkdf::Hkdf::<Sha256>::new(Some(salt.as_slice()), material);
+        let mut block = [0u8; 256];
+        hkdf.expand(&[], &mut block)
+            .map_err(|_| AppError::Runtime("LXMF stamp workblock HKDF expand failed".into()))?;
+        workblock.extend_from_slice(&block);
+    }
+    Ok(workblock)
+}
+
+fn stamp_value(workblock: &[u8], stamp: &[u8]) -> u32 {
+    let digest = Sha256::digest([workblock, stamp].concat());
+    let mut value = 0u32;
+    for byte in digest {
+        let leading = byte.leading_zeros().min(8);
+        value += leading;
+        if leading < 8 {
+            break;
+        }
+    }
+    value
+}
+
+fn stamp_valid(stamp: &[u8], target_cost: u8, workblock: &[u8]) -> bool {
+    if target_cost == 0 {
+        return true;
+    }
+    stamp_value(workblock, stamp) >= u32::from(target_cost)
 }
 
 fn parse_propagation_announce_data(app_data: &[u8]) -> Option<Vec<rmpv::Value>> {
@@ -404,13 +398,6 @@ pub fn build_outbound_message(
     envelope: &MessageEnvelope,
     source_hash_hex: &str,
 ) -> AppResult<NativeLxmfOutbound> {
-    #[cfg(not(feature = "native-rns-net"))]
-    if envelope.include_ticket {
-        return Err(AppError::Unsupported(
-            "native LXMF include-ticket sending requires the native-rns-net feature".into(),
-        ));
-    }
-
     let destination = parse_lxmf_hash(&envelope.peer_hash)?;
     let source = parse_lxmf_hash(source_hash_hex)?;
     let desired_method = match envelope.delivery_mode {
@@ -427,14 +414,13 @@ pub fn build_outbound_message(
     message.set_title_from_string(&envelope.title);
     message.set_content_from_string(&envelope.body);
     message.set_state(lxmf::wire::message::State::Outbound);
-    let (mut fields, attachments) = attachment_fields_from_paths(&envelope.attachments)?;
-    #[cfg(feature = "native-rns-net")]
+    let (fields, attachments) = attachment_fields_from_paths(&envelope.attachments)?;
+    let mut fields = fields;
     if envelope.include_ticket {
         insert_lxmf_field(&mut fields, FIELD_TICKET, generate_lxmf_ticket_field());
     }
     message.fields = fields;
     let mut reply_ticket_used = false;
-    #[cfg(feature = "native-rns-net")]
     if let Some(ticket) = envelope.native_reply_ticket.as_ref() {
         if ticket.expires > current_unix_secs_f64() {
             apply_reply_ticket_stamp(&mut message, ticket)?;
@@ -451,7 +437,6 @@ pub fn build_outbound_message(
     })
 }
 
-#[cfg(feature = "native-rns-net")]
 fn apply_reply_ticket_stamp(
     message: &mut lxmf::Message,
     ticket: &NativeLxmfReplyTicket,
@@ -462,7 +447,6 @@ fn apply_reply_ticket_stamp(
     Ok(())
 }
 
-#[cfg(feature = "native-rns-net")]
 pub fn apply_direct_stamp_if_needed(
     outbound: &mut NativeLxmfOutbound,
     target_cost: Option<u8>,
@@ -483,18 +467,17 @@ pub fn apply_direct_stamp_if_needed(
     Ok(Some(generated))
 }
 
-#[cfg(feature = "native-rns-net")]
 pub fn generate_direct_stamp_for_message(
     message_id: [u8; 32],
     target_cost: u8,
     max_attempts: u64,
 ) -> AppResult<GeneratedDirectStamp> {
-    let workblock = rns_core::stamp::stamp_workblock(&message_id, DIRECT_WORKBLOCK_EXPAND_ROUNDS);
+    let workblock = stamp_workblock(&message_id, DIRECT_WORKBLOCK_EXPAND_ROUNDS)?;
     let mut stamp = vec![0u8; LXMF_STAMP_SIZE];
     for attempt in 1..=max_attempts {
         rand_core::OsRng.fill_bytes(&mut stamp);
-        if rns_core::stamp::stamp_valid(&stamp, target_cost, &workblock) {
-            let stamp_value = rns_core::stamp::stamp_value(&workblock, &stamp);
+        if stamp_valid(&stamp, target_cost, &workblock) {
+            let stamp_value = stamp_value(&workblock, &stamp);
             return Ok(GeneratedDirectStamp {
                 message_id,
                 stamp,
@@ -509,17 +492,15 @@ pub fn generate_direct_stamp_for_message(
     )))
 }
 
-#[cfg(feature = "native-rns-net")]
 pub fn validate_direct_stamp(message_id: &[u8; 32], stamp: &[u8], target_cost: u8) -> Option<u32> {
-    let workblock = rns_core::stamp::stamp_workblock(message_id, DIRECT_WORKBLOCK_EXPAND_ROUNDS);
-    if rns_core::stamp::stamp_valid(stamp, target_cost, &workblock) {
-        Some(rns_core::stamp::stamp_value(&workblock, stamp))
+    let workblock = stamp_workblock(message_id, DIRECT_WORKBLOCK_EXPAND_ROUNDS).ok()?;
+    if stamp_valid(stamp, target_cost, &workblock) {
+        Some(stamp_value(&workblock, stamp))
     } else {
         None
     }
 }
 
-#[cfg(feature = "native-rns-net")]
 fn lxmf_message_id(message: &mut lxmf::Message) -> AppResult<[u8; 32]> {
     let destination = message
         .destination_hash
@@ -540,7 +521,6 @@ fn lxmf_message_id(message: &mut lxmf::Message) -> AppResult<[u8; 32]> {
     Ok(wire.message_id())
 }
 
-#[cfg(feature = "native-rns-net")]
 pub fn ticket_entry_from_fields(fields: Option<&rmpv::Value>) -> Option<(f64, Vec<u8>)> {
     let rmpv::Value::Map(entries) = fields? else {
         return None;
@@ -569,7 +549,6 @@ pub fn ticket_entry_from_fields(fields: Option<&rmpv::Value>) -> Option<(f64, Ve
     Some((expires, ticket))
 }
 
-#[cfg(feature = "native-rns-net")]
 pub fn ticket_stamp_for_message(ticket: &[u8], message_id: &[u8; 32]) -> AppResult<[u8; 16]> {
     if ticket.len() != LXMF_TICKET_LENGTH {
         return Err(AppError::Runtime(format!(
@@ -644,7 +623,6 @@ fn native_lxmf_summary_fields_from_message_fields(
 ) -> BTreeMap<String, String> {
     let mut fields = BTreeMap::new();
     annotate_lxmf_field_presence(&mut fields, message_fields);
-    #[cfg(feature = "native-rns-net")]
     if let Some((expires, ticket)) = ticket_entry_from_fields(message_fields) {
         fields.insert("native_lxmf_reply_ticket".into(), hex_bytes(&ticket));
         fields.insert(
@@ -725,19 +703,22 @@ pub fn decode_propagated_lxmf_data_storing_attachments(
     decode_propagated_lxmf_data_inner(lxmf_data, private_identity_bytes, Some(attachments_dir))
 }
 
-#[cfg(feature = "native-rns-net")]
 pub fn lxmf_delivery_destination_hash_from_private_identity_bytes(
     private_identity_bytes: &[u8],
 ) -> AppResult<[u8; 16]> {
     let identity = PrivateIdentity::from_private_key_bytes(private_identity_bytes)
         .map_err(|_| AppError::Runtime("native Reticulum identity is invalid".into()))?;
-    let mut identity_hash = [0u8; 16];
-    identity_hash.copy_from_slice(identity.address_hash().as_slice());
-    Ok(rns_core::destination::destination_hash(
-        "lxmf",
-        &["delivery"],
-        Some(&identity_hash),
-    ))
+    let destination = reticulum_rs::core::destination::Destination::<
+        PrivateIdentity,
+        reticulum_rs::core::destination::Input,
+        reticulum_rs::core::destination::Single,
+    >::new(
+        identity,
+        reticulum_rs::core::destination::DestinationName::new("lxmf", "delivery"),
+    );
+    let mut destination_hash = [0u8; 16];
+    destination_hash.copy_from_slice(destination.desc.address_hash.as_slice());
+    Ok(destination_hash)
 }
 
 pub fn propagated_lxmf_destination_hash(lxmf_data: &[u8]) -> Option<[u8; 16]> {
@@ -767,7 +748,7 @@ fn decode_propagated_lxmf_data_inner(
         .map_err(|_| AppError::Runtime("native Reticulum identity is invalid".into()))?;
     let destination_hash = &lxmf_data[..16];
     let encrypted = &lxmf_data[16..];
-    let decrypted = decrypt_with_identity(&identity, destination_hash, encrypted)
+    let decrypted = decrypt_with_identity(&identity, identity.address_hash().as_slice(), encrypted)
         .map_err(|_| AppError::Runtime("propagated LXMF decrypt failed".into()))?;
     let mut wire = Vec::with_capacity(16 + decrypted.len());
     wire.extend_from_slice(destination_hash);
@@ -847,7 +828,6 @@ fn attachment_fields_from_paths(
     ))
 }
 
-#[cfg(feature = "native-rns-net")]
 fn insert_lxmf_field(fields: &mut Option<rmpv::Value>, field: i64, value: rmpv::Value) {
     match fields {
         Some(rmpv::Value::Map(entries)) => {
@@ -863,7 +843,6 @@ fn insert_lxmf_field(fields: &mut Option<rmpv::Value>, field: i64, value: rmpv::
     }
 }
 
-#[cfg(feature = "native-rns-net")]
 fn generate_lxmf_ticket_field() -> rmpv::Value {
     let mut ticket = vec![0u8; LXMF_TICKET_LENGTH];
     rand_core::OsRng.fill_bytes(&mut ticket);
@@ -871,7 +850,6 @@ fn generate_lxmf_ticket_field() -> rmpv::Value {
     rmpv::Value::Array(vec![rmpv::Value::F64(expires), rmpv::Value::Binary(ticket)])
 }
 
-#[cfg(feature = "native-rns-net")]
 fn current_unix_secs_f64() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1282,14 +1260,13 @@ mod tests {
     const DEST: &str = "00112233445566778899aabbccddeeff";
     const SRC: &str = "ffeeddccbbaa99887766554433221100";
 
-    #[cfg(feature = "native-rns-net")]
     fn lxmf_delivery_hash(identity: &PrivateIdentity) -> [u8; 16] {
-        let mut identity_hash = [0u8; 16];
-        identity_hash.copy_from_slice(identity.address_hash().as_slice());
-        rns_core::destination::destination_hash("lxmf", &["delivery"], Some(&identity_hash))
+        lxmf_delivery_destination_hash_from_private_identity_bytes(
+            identity.to_private_key_bytes().as_slice(),
+        )
+        .expect("lxmf delivery hash")
     }
 
-    #[cfg(feature = "native-rns-net")]
     fn hex16_bytes(bytes: &[u8; 16]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
@@ -1310,10 +1287,7 @@ mod tests {
         assert!(parity.payload_stamps_supported);
         assert!(parity.stamp_validation_supported);
         assert!(parity.stamp_generation_supported);
-        assert_eq!(
-            parity.include_ticket_supported,
-            cfg!(feature = "native-rns-net")
-        );
+        assert!(parity.include_ticket_supported);
     }
 
     #[test]
@@ -1412,6 +1386,38 @@ mod tests {
         assert_eq!(stamp.lxm_data, lxm_data);
         assert_eq!(stamp.target_cost, 0);
         assert_eq!(stamp.transient_id.len(), 32);
+    }
+
+    #[test]
+    fn propagation_stamp_generation_validates_without_legacy_rns_net_stack() {
+        let mut lxm_data = vec![0x33; 180];
+        lxm_data[0] = 0x92;
+        let digest = Sha256::digest(&lxm_data);
+        let mut transient_id = [0u8; 32];
+        transient_id.copy_from_slice(&digest);
+
+        let stamp = generate_propagation_stamp_for_transient(&lxm_data, transient_id, 1, 512)
+            .expect("propagation stamp");
+        let mut transient_data = lxm_data.clone();
+        transient_data.extend_from_slice(&stamp.stamp);
+        let validated = validate_propagation_stamp_any_cost(&transient_data, &[1])
+            .expect("generated propagation stamp validates");
+
+        assert_eq!(validated.lxm_data, lxm_data);
+        assert_eq!(validated.transient_id, transient_id);
+        assert_eq!(validated.stamp_value, stamp.stamp_value);
+    }
+
+    #[test]
+    fn direct_stamp_generation_validates_without_legacy_rns_net_stack() {
+        let message_id = [0x55; 32];
+
+        let stamp = generate_direct_stamp_for_message(message_id, 1, 512).expect("direct stamp");
+
+        assert_eq!(
+            validate_direct_stamp(&message_id, &stamp.stamp, stamp.target_cost),
+            Some(stamp.stamp_value)
+        );
     }
 
     #[test]
@@ -1575,7 +1581,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "native-rns-net")]
     fn include_ticket_send_adds_lxmf_ticket_field() {
         let envelope = MessageEnvelope {
             peer_hash: DEST.into(),
@@ -1597,7 +1602,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "native-rns-net")]
     fn signed_ticketed_wire_message_decodes_reply_ticket_metadata() {
         let provider = NativeReticulumIdentityProvider;
         let private = provider
@@ -1643,8 +1647,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "native-rns-net"))]
-    fn include_ticket_requires_native_rns_net_feature() {
+    fn clean_include_ticket_send_adds_lxmf_ticket_field() {
         let envelope = MessageEnvelope {
             peer_hash: DEST.into(),
             title: "Subject".into(),
@@ -1655,13 +1658,16 @@ mod tests {
             attachments: Vec::new(),
         };
 
-        let error = build_outbound_message(&envelope, SRC).expect_err("ticket requires native");
+        let outbound = build_outbound_message(&envelope, SRC).expect("ticketed outbound");
+        let (expires, ticket) =
+            ticket_entry_from_fields(outbound.message.fields.as_ref()).expect("ticket field");
 
-        assert!(error.to_string().contains("native-rns-net"));
+        assert!(outbound.include_ticket);
+        assert_eq!(ticket.len(), LXMF_TICKET_LENGTH);
+        assert!(expires > current_unix_secs_f64());
     }
 
     #[test]
-    #[cfg(feature = "native-rns-net")]
     fn ticket_stamp_uses_ticket_and_message_id_truncated_hash() {
         let ticket = [0x11u8; LXMF_TICKET_LENGTH];
         let message_id = [0x22u8; 32];
@@ -1674,7 +1680,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "native-rns-net")]
     fn outbound_reply_ticket_sets_lxmf_ticket_stamp() {
         let ticket = NativeLxmfReplyTicket {
             ticket: vec![0x42; LXMF_TICKET_LENGTH],
@@ -1982,7 +1987,7 @@ mod tests {
         receiver_public[..32].copy_from_slice(receiver_identity.public_key_bytes());
         receiver_public[32..].copy_from_slice(receiver_identity.verifying_key_bytes());
         let (lxmf_data, _transient_id) =
-            pack_destination_salted_propagation_transient(&wire, receiver_public)
+            pack_identity_salted_propagation_transient(&wire, receiver_public)
                 .expect("propagation data");
 
         let summary = decode_propagated_lxmf_data(
@@ -2004,7 +2009,37 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[test]
+    fn clean_wire_propagated_lxmf_data_decrypts_to_message_summary() {
+        let sender = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let receiver = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let receiver_hash = lxmf_delivery_hash(&receiver);
+        let sender_hash = lxmf_delivery_hash(&sender);
+        let payload = lxmf::Payload::new(
+            42.0,
+            Some(b"Body".to_vec()),
+            Some(b"Subject".to_vec()),
+            None,
+            None,
+        );
+        let mut wire = lxmf::WireMessage::new(receiver_hash, sender_hash, payload);
+        wire.sign(&sender).expect("sign");
+        let (lxmf_data, _transient_id) = wire
+            .pack_propagation_transient_with_rng(receiver.as_identity(), rand_core::OsRng)
+            .expect("pack clean propagation transient");
+
+        let summary = decode_propagated_lxmf_data(
+            lxmf_data.as_slice(),
+            receiver.to_private_key_bytes().as_slice(),
+        )
+        .expect("decode propagated");
+
+        assert_eq!(summary.peer_hash, hex16_bytes(&sender_hash));
+        assert_eq!(summary.title, "Subject");
+        assert_eq!(summary.content, "Body");
+        assert_eq!(summary.transport_method, AppTransportMethod::Propagated);
+    }
+
     #[test]
     fn propagated_lxmf_destination_helpers_match_wire_destination() {
         let receiver = PrivateIdentity::new_from_rand(rand_core::OsRng);

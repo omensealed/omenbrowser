@@ -6,6 +6,16 @@ These scripts build local packages from the current source tree. They do not
 delete or overwrite user identities, Reticulum storage, message history, or
 OMENchat server homes.
 
+Public alpha packages must use the live-tested browser feature set:
+`chat-client-rns-clean` with `native-network:on`. The packaging scripts verify
+this through the browser `--version` output. Server packages must report
+`live-reticulum:on` from `omenchatd --version`.
+
+Do not cut the next public package release until the clean Reticulum 0.6 LXMF
+path has a live smoke pass for direct sends, propagation sync, tickets, and
+attachments. The packaging scripts can build local artifacts before then, but a
+GitHub release tag should wait for that LXMF parity check.
+
 Linux packages must be built on the oldest glibc baseline we intend to
 support. Building on a newer rolling distro can produce binaries that fail on
 older but still-supported systems with errors like `GLIBC_2.39 not found` or

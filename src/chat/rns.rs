@@ -11,7 +11,7 @@ pub const OMENCHAT_LINK_CONTEXT: u8 = 0x4f;
 pub const OMENCHAT_RESOURCE_METADATA_PREFIX: &[u8] = b"omenchat-resource:";
 
 pub const CHAT_RNS_TRANSPORT_STATUS: &str =
-    "chat-client-rns transport boundary is wired; native Reticulum Link backend is pending";
+    "chat-client-rns uses the live-tested compatibility transport; use chat-client-rns-clean only for reticulum-rs link/resource migration testing";
 
 pub trait ChatLinkTransport {
     fn send_frame(&mut self, frame_bytes: Vec<u8>) -> anyhow::Result<()>;
@@ -219,7 +219,7 @@ pub fn resource_id_from_metadata(metadata: Option<&[u8]>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 pub mod native {
     use std::collections::{BTreeMap, VecDeque};
 
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(resource_id_from_metadata(Some(b"other:abc")), None);
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn native_adapter_filters_link_context_and_resources() {
         use crate::runtime::native::rns_net::{RnsNetLinkData, RnsNetResourceEvent};

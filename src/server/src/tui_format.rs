@@ -107,12 +107,12 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
     }
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn human_bytes_per_second(bytes: u64, elapsed_secs: f64) -> String {
     human_bytes((bytes as f64 / elapsed_secs).round() as u64)
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn human_duration(seconds: f64) -> String {
     if seconds >= 60.0 {
         format!("{:.1}m", seconds / 60.0)
@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(human_age_duration(180_000), "2d 2h");
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn rate_formatters_are_human_readable() {
         assert_eq!(human_bytes_per_second(2048, 2.0), "1.00 KiB");

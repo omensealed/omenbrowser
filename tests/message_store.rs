@@ -75,7 +75,12 @@ fn message_store_returns_latest_valid_lxmf_reply_ticket() {
         .expect("ticket lookup")
         .expect("valid ticket");
 
-    assert_eq!(ticket.expires, future_expiry);
+    assert!(
+        (ticket.expires - future_expiry).abs() < 0.000_001,
+        "ticket expiry should round-trip within f64 JSON precision: left={} right={}",
+        ticket.expires,
+        future_expiry
+    );
     assert_eq!(ticket.ticket, (0x10u8..=0x1f).collect::<Vec<_>>());
 
     let thread = store.get_thread("peer-a").expect("thread");

@@ -270,6 +270,22 @@ pub struct NetworkSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LxmfSdkRpcProbeSnapshot {
+    pub endpoint: Option<String>,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_contract_version: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_messages: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight_messages: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectoryCandidate {
     pub destination_hash: String,
     pub display_name: String,
@@ -585,6 +601,18 @@ pub trait NetworkRuntime: Send + Sync {
                 representation: None,
                 progress: None,
             }),
+        })
+    }
+
+    async fn native_lxmf_sdk_rpc_probe(&self) -> AppResult<LxmfSdkRpcProbeSnapshot> {
+        Ok(LxmfSdkRpcProbeSnapshot {
+            endpoint: None,
+            state: "disabled".into(),
+            runtime_id: None,
+            active_contract_version: None,
+            queued_messages: None,
+            in_flight_messages: None,
+            detail: Some("native LXMF SDK/RPC feature is not enabled".into()),
         })
     }
 

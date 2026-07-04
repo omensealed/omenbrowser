@@ -7,6 +7,9 @@ root_dir="$(cd "$script_dir/.." && pwd)"
 browser_bin="${OMENBROWSER_BIN:-}"
 server_bin="${OMENCHATD_BIN:-}"
 tcp_endpoint="${OMENCHAT_TCP_ENDPOINT:-127.0.0.1:42420}"
+server_tcp_client="${OMENCHAT_SERVER_TCP_CLIENT:-}"
+network_name="${OMENCHAT_NETWORK_NAME:-}"
+passphrase="${OMENCHAT_PASSPHRASE:-}"
 path_wait="${OMENCHAT_PATH_WAIT:-75}"
 out_root="${TMPDIR:-/tmp}/omenbrowser-rs-omenchat-smoke"
 message="OMENchat alpha smoke from packaged script"
@@ -25,6 +28,11 @@ Options:
   --browser-bin FILE   OMENbrowser_rs binary to run
   --server-bin FILE    omenchatd binary to run
   --tcp HOST:PORT      Local TCPServerInterface endpoint (default: 127.0.0.1:42420)
+  --server-tcp-client HOST:PORT
+                       Run omenchatd as a TCP client to an existing gateway.
+                       Browser clients also connect to this endpoint.
+  --network-name NAME  Optional IFAC network name for server and browser clients
+  --passphrase TEXT    Optional IFAC passphrase for server and browser clients
   --path-wait SECS     OMENchat path wait seconds (default: 75)
   --out DIR            Output parent directory
   --message TEXT       Smoke message body
@@ -36,6 +44,9 @@ Environment fallbacks:
   OMENBROWSER_BIN
   OMENCHATD_BIN
   OMENCHAT_TCP_ENDPOINT
+  OMENCHAT_SERVER_TCP_CLIENT
+  OMENCHAT_NETWORK_NAME
+  OMENCHAT_PASSPHRASE
   OMENCHAT_PATH_WAIT
 USAGE
 }
@@ -52,6 +63,19 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tcp)
       tcp_endpoint="${2:-}"
+      shift 2
+      ;;
+    --server-tcp-client)
+      server_tcp_client="${2:-}"
+      tcp_endpoint="${2:-}"
+      shift 2
+      ;;
+    --network-name)
+      network_name="${2:-}"
+      shift 2
+      ;;
+    --passphrase)
+      passphrase="${2:-}"
       shift 2
       ;;
     --path-wait)
@@ -124,6 +148,22 @@ browser_root="$run_dir/browser-root"
 browser_root_2="$run_dir/browser-root-2"
 mkdir -p "$server_home" "$browser_root"
 
+server_interface_args=()
+client_interface_args=(--tcp-client "$tcp_endpoint")
+if [[ -n "$server_tcp_client" ]]; then
+  server_interface_args=(--tcp-client "$server_tcp_client")
+else
+  server_interface_args=(--tcp-server "$tcp_endpoint")
+fi
+if [[ -n "$network_name" ]]; then
+  server_interface_args+=(--network-name "$network_name")
+  client_interface_args+=(--network-name "$network_name")
+fi
+if [[ -n "$passphrase" ]]; then
+  server_interface_args+=(--passphrase "$passphrase")
+  client_interface_args+=(--passphrase "$passphrase")
+fi
+
 server_pid=""
 cleanup() {
   if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
@@ -137,7 +177,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Initializing isolated omenchatd =="
-"$server_bin" init --home "$server_home" --tcp-server "$tcp_endpoint" \
+"$server_bin" init --home "$server_home" "${server_interface_args[@]}" \
   > "$run_dir/omenchatd-init.txt"
 "$server_bin" config set --home "$server_home" --announce-interval 1 \
   > "$run_dir/omenchatd-config.txt"
@@ -154,7 +194,7 @@ if [[ -z "$destination" ]]; then
 fi
 
 echo "== Starting isolated omenchatd =="
-"$server_bin" run --home "$server_home" --tcp-server "$tcp_endpoint" \
+"$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
   > "$run_dir/omenchatd-run.log" 2>&1 &
 server_pid="$!"
 
@@ -187,12 +227,12 @@ echo "== Creating isolated browser identity =="
 echo "== Running OMENchat client smoke =="
 "$browser_bin" \
   --omenchat-smoke "$destination" \
-  --tcp-client "$tcp_endpoint" \
+  "${client_interface_args[@]}" \
   --path-wait "$path_wait" \
   --app-root "$browser_root" \
   --omenchat-message "$message" \
-  --stdout \
-  > "$run_dir/omenchat-smoke.json" \
+  --output "$run_dir/omenchat-smoke.json" \
+  > "$run_dir/omenchat-smoke.stdout" \
   2> "$run_dir/omenchat-smoke.stderr"
 
 if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke.json"; then
@@ -215,12 +255,12 @@ if [[ "$multi_client" -eq 1 ]]; then
   second_message="${message} (second client)"
   "$browser_bin" \
     --omenchat-smoke "$destination" \
-    --tcp-client "$tcp_endpoint" \
+    "${client_interface_args[@]}" \
     --path-wait "$path_wait" \
     --app-root "$browser_root_2" \
     --omenchat-message "$second_message" \
-    --stdout \
-    > "$run_dir/omenchat-smoke-2.json" \
+    --output "$run_dir/omenchat-smoke-2.json" \
+    > "$run_dir/omenchat-smoke-2.stdout" \
     2> "$run_dir/omenchat-smoke-2.stderr"
 
   if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke-2.json"; then
@@ -241,6 +281,8 @@ created_utc: $timestamp
 outcome: pass
 destination: $destination
 tcp_endpoint: $tcp_endpoint
+server_mode: $([[ -n "$server_tcp_client" ]] && printf 'tcp-client' || printf 'tcp-server')
+ifac: $([[ -n "$network_name$passphrase" ]] && printf 'configured' || printf 'none')
 browser_bin: $browser_bin
 server_bin: $server_bin
 browser_root: $browser_root

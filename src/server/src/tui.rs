@@ -1,8 +1,8 @@
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use std::time::Instant;
 
 use crossterm::event::{
@@ -22,11 +22,11 @@ use ratatui::{Frame, Terminal};
 
 use crate::config::{self, ServerConfig};
 use crate::error::{ServerError, ServerResult};
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::live::ActiveLinkSummary;
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::live::ClosedLinkSummary;
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::live::LiveServerStats;
 use crate::tui_format::{
     current_unix_secs, human_age, human_age_duration, human_bytes, human_system_time_local,
@@ -36,11 +36,11 @@ use crate::tui_layout::{
     action_hitboxes, action_list_label, inner_rect, list_row_at, tab_hitboxes, tab_label,
     tab_panel_height,
 };
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::tui_text::closed_link_churn_summary;
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::tui_text::traffic_delta_text;
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::tui_text::{
     active_link_activity_label, active_link_monitoring_line, closed_link_monitoring_line,
     closed_link_status_label, interface_health_label, ActiveLinkMonitoringText,
@@ -69,12 +69,19 @@ use crate::tui_text::{
     RoomConsoleRowText, RoomListLabelText, SetupAddressesText, SetupChecklistLineText,
     SetupConsoleText, SetupLaunchText, SetupNextStepsText, UserConsoleRowText,
 };
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::tui_text::{monitoring_operator_summary_text, upload_transfer_summary};
 use crate::{parse_tcp_server_override, TcpClientOverride};
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(feature = "live-reticulum")]
+use crate::reticulum_live::{self, ReticulumLiveRuntime};
+#[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
 use crate::rns_net_live::{self, RnsNetLiveRuntime};
+
+#[cfg(feature = "live-reticulum")]
+type AdminLiveRuntime = ReticulumLiveRuntime;
+#[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
+type AdminLiveRuntime = RnsNetLiveRuntime;
 
 const SETUP_ACTION_PANEL_HEIGHT: u16 = 21;
 
@@ -330,26 +337,97 @@ struct AdminTui {
     room_list_area: Rect,
     user_list_area: Rect,
     help_scroll: u16,
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     live: Option<TuiLiveRuntime>,
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     next_live_announce: Instant,
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     next_live_stats: Instant,
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     live_status: String,
     last_announce_event: String,
 }
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 struct TuiLiveRuntime {
-    runtime: RnsNetLiveRuntime,
+    #[cfg(feature = "live-reticulum")]
+    tokio: tokio::runtime::Runtime,
+    runtime: AdminLiveRuntime,
     last_stats: String,
     last_stats_snapshot: LiveServerStats,
     last_stats_at: Instant,
     recent_stats: String,
     last_interface_stats: Vec<String>,
     interface_recovery_samples: u8,
+}
+
+#[cfg(feature = "live-reticulum")]
+fn start_admin_live_server(config: &ServerConfig) -> ServerResult<TuiLiveRuntime> {
+    let tokio = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| ServerError::Message(format!("tokio runtime failed: {error}")))?;
+    let runtime = tokio.block_on(reticulum_live::start_live_server(config))?;
+    let stats = runtime.live_server.stats().clone();
+    Ok(TuiLiveRuntime {
+        tokio,
+        runtime,
+        last_stats: stats.summary_line(),
+        last_stats_snapshot: stats,
+        last_stats_at: Instant::now(),
+        recent_stats: "waiting for next sample".into(),
+        last_interface_stats: Vec::new(),
+        interface_recovery_samples: 0,
+    })
+}
+
+#[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
+fn start_admin_live_server(config: &ServerConfig) -> ServerResult<TuiLiveRuntime> {
+    let runtime = rns_net_live::start_live_server(config)?;
+    let stats = runtime.live_server.stats().clone();
+    Ok(TuiLiveRuntime {
+        runtime,
+        last_stats: stats.summary_line(),
+        last_stats_snapshot: stats,
+        last_stats_at: Instant::now(),
+        recent_stats: "waiting for next sample".into(),
+        last_interface_stats: Vec::new(),
+        interface_recovery_samples: 0,
+    })
+}
+
+#[cfg(feature = "live-reticulum")]
+fn drain_admin_live_events_logged(
+    live: &mut TuiLiveRuntime,
+    max_events: usize,
+    config: &ServerConfig,
+) -> ServerResult<usize> {
+    reticulum_live::drain_live_events_logged(&mut live.runtime, max_events, config)
+}
+
+#[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
+fn drain_admin_live_events_logged(
+    live: &mut TuiLiveRuntime,
+    max_events: usize,
+    config: &ServerConfig,
+) -> ServerResult<usize> {
+    rns_net_live::drain_live_events_logged(&mut live.runtime, max_events, config)
+}
+
+#[cfg(feature = "live-reticulum")]
+fn announce_admin_live_runtime(
+    live: &mut TuiLiveRuntime,
+    config: &ServerConfig,
+) -> ServerResult<()> {
+    live.tokio.block_on(live.runtime.announce(config))
+}
+
+#[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
+fn announce_admin_live_runtime(
+    live: &mut TuiLiveRuntime,
+    _config: &ServerConfig,
+) -> ServerResult<()> {
+    live.runtime.announce()
 }
 
 impl AdminTui {
@@ -371,13 +449,13 @@ impl AdminTui {
             room_list_area: Rect::default(),
             user_list_area: Rect::default(),
             help_scroll: 0,
-            #[cfg(feature = "live-rns-net")]
+            #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
             live: None,
-            #[cfg(feature = "live-rns-net")]
+            #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
             next_live_announce: Instant::now(),
-            #[cfg(feature = "live-rns-net")]
+            #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
             next_live_stats: Instant::now(),
-            #[cfg(feature = "live-rns-net")]
+            #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
             live_status: "live server not started".into(),
             last_announce_event: "none yet".into(),
         }
@@ -404,7 +482,7 @@ impl AdminTui {
         }
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn start_live_runtime(&mut self) {
         if self.live.is_some() {
             self.status =
@@ -417,21 +495,20 @@ impl AdminTui {
             self.status = self.live_status.clone();
             return;
         }
-        match rns_net_live::start_live_server(&self.config) {
-            Ok(runtime) => {
+        match start_admin_live_server(&self.config) {
+            Ok(mut live) => {
+                let runtime = &mut live.runtime;
                 let last_stats = runtime.live_server.stats().summary_line();
                 let last_stats_snapshot = runtime.live_server.stats().clone();
                 let last_interface_stats = runtime.interface_stats_lines();
                 let destination = hex_lower_local(&runtime.destination_hash);
-                self.live = Some(TuiLiveRuntime {
-                    runtime,
-                    last_stats,
-                    last_stats_snapshot,
-                    last_stats_at: Instant::now(),
-                    recent_stats: "waiting for next sample".into(),
-                    last_interface_stats,
-                    interface_recovery_samples: 0,
-                });
+                live.last_stats = last_stats;
+                live.last_stats_snapshot = last_stats_snapshot;
+                live.last_stats_at = Instant::now();
+                live.recent_stats = "waiting for next sample".into();
+                live.last_interface_stats = last_interface_stats;
+                live.interface_recovery_samples = 0;
+                self.live = Some(live);
                 self.next_live_announce = Instant::now()
                     + Duration::from_secs(self.config.announce_interval_minutes.max(1) * 60);
                 self.next_live_stats = Instant::now() + Duration::from_secs(5);
@@ -448,13 +525,13 @@ impl AdminTui {
         }
     }
 
-    #[cfg(not(feature = "live-rns-net"))]
+    #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
     fn start_live_runtime(&mut self) {
         self.status =
-            "live server unavailable: rebuild omenchatd with --features live-rns-net".into();
+            "live server unavailable: rebuild omenchatd with --features live-reticulum".into();
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn stop_live_runtime(&mut self) {
         if self.live.take().is_some() {
             self.live_status = "live server stopped".into();
@@ -464,19 +541,19 @@ impl AdminTui {
         }
     }
 
-    #[cfg(not(feature = "live-rns-net"))]
+    #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
     fn stop_live_runtime(&mut self) {
         self.status =
-            "live server unavailable: rebuild omenchatd with --features live-rns-net".into();
+            "live server unavailable: rebuild omenchatd with --features live-reticulum".into();
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn announce_live_now(&mut self) {
         let Some(live) = self.live.as_mut() else {
             self.status = "live server is not running; start live before announcing".into();
             return;
         };
-        match live.runtime.announce() {
+        match announce_admin_live_runtime(live, &self.config) {
             Ok(()) => {
                 let destination = hex_lower_local(&live.runtime.destination_hash);
                 self.next_live_announce = Instant::now()
@@ -493,20 +570,20 @@ impl AdminTui {
         }
     }
 
-    #[cfg(not(feature = "live-rns-net"))]
+    #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
     fn announce_live_now(&mut self) {
         self.status =
-            "live announce unavailable: rebuild omenchatd with --features live-rns-net".into();
+            "live announce unavailable: rebuild omenchatd with --features live-reticulum".into();
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn tick_live_runtime(&mut self) {
         const LIVE_RUNTIME_RESTART_BACKOFF: Duration = Duration::from_secs(5);
         const INTERFACE_RECOVERY_SAMPLES: u8 = 3;
         let Some(live) = self.live.as_mut() else {
             return;
         };
-        match rns_net_live::drain_live_events_logged(&mut live.runtime, 64, &self.config) {
+        match drain_admin_live_events_logged(live, 64, &self.config) {
             Ok(drained) if drained > 0 => {
                 self.live_status = format!(
                     "live server running | drained {drained} event(s) | {}",
@@ -516,15 +593,15 @@ impl AdminTui {
             Ok(_) => {}
             Err(error) => {
                 self.live_status = format!(
-                    "live event handling failed: {error}; restarting rns-net runtime after {}s",
+                    "live event handling failed: {error}; restarting live runtime after {}s",
                     LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
                 );
                 self.status = self.live_status.clone();
                 std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
-                match rns_net_live::start_live_server(&self.config) {
-                    Ok(runtime) => {
-                        let destination = hex_lower_local(&runtime.destination_hash);
-                        live.runtime = runtime;
+                match start_admin_live_server(&self.config) {
+                    Ok(next_live) => {
+                        let destination = hex_lower_local(&next_live.runtime.destination_hash);
+                        *live = next_live;
                         live.last_stats = live.runtime.live_server.stats().summary_line();
                         live.last_stats_snapshot = live.runtime.live_server.stats().clone();
                         live.last_stats_at = Instant::now();
@@ -555,7 +632,7 @@ impl AdminTui {
 
         let now = Instant::now();
         if now >= self.next_live_announce {
-            match live.runtime.announce() {
+            match announce_admin_live_runtime(live, &self.config) {
                 Ok(()) => {
                     let destination = hex_lower_local(&live.runtime.destination_hash);
                     self.status = "live destination announced".into();
@@ -567,15 +644,15 @@ impl AdminTui {
                 }
                 Err(error) => {
                     self.live_status = format!(
-                        "live announce failed: {error}; restarting rns-net runtime after {}s",
+                        "live announce failed: {error}; restarting live runtime after {}s",
                         LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
                     );
                     self.status = self.live_status.clone();
                     std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
-                    match rns_net_live::start_live_server(&self.config) {
-                        Ok(runtime) => {
-                            let destination = hex_lower_local(&runtime.destination_hash);
-                            live.runtime = runtime;
+                    match start_admin_live_server(&self.config) {
+                        Ok(next_live) => {
+                            let destination = hex_lower_local(&next_live.runtime.destination_hash);
+                            *live = next_live;
                             live.last_stats = live.runtime.live_server.stats().summary_line();
                             live.last_stats_snapshot = live.runtime.live_server.stats().clone();
                             live.last_stats_at = Instant::now();
@@ -635,10 +712,10 @@ impl AdminTui {
                         interface_health.label()
                     );
                     std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
-                    match rns_net_live::start_live_server(&self.config) {
-                        Ok(runtime) => {
-                            let destination = hex_lower_local(&runtime.destination_hash);
-                            live.runtime = runtime;
+                    match start_admin_live_server(&self.config) {
+                        Ok(next_live) => {
+                            let destination = hex_lower_local(&next_live.runtime.destination_hash);
+                            *live = next_live;
                             live.last_stats = live.runtime.live_server.stats().summary_line();
                             live.last_stats_snapshot = live.runtime.live_server.stats().clone();
                             live.last_stats_at = Instant::now();
@@ -672,7 +749,7 @@ impl AdminTui {
         }
     }
 
-    #[cfg(not(feature = "live-rns-net"))]
+    #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
     fn tick_live_runtime(&mut self) {}
 
     fn render_tabs(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -695,7 +772,7 @@ impl AdminTui {
     }
 
     fn live_status_text(&self) -> String {
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         {
             let mut lines = vec![format!("runtime: {}", self.live_status)];
             if let Some(live) = self.live.as_ref() {
@@ -717,19 +794,19 @@ impl AdminTui {
             }
             lines.join("\n")
         }
-        #[cfg(not(feature = "live-rns-net"))]
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         {
-            "runtime: offline; rebuild with --features live-rns-net for all-in-one live server"
+            "runtime: offline; rebuild with --features live-reticulum for all-in-one live server"
                 .into()
         }
     }
 
     fn live_is_running(&self) -> bool {
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         {
             self.live.is_some()
         }
-        #[cfg(not(feature = "live-rns-net"))]
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         {
             false
         }
@@ -741,7 +818,7 @@ impl AdminTui {
 
     fn announce_schedule_text(&self) -> String {
         let interval = self.config.announce_interval_minutes.max(1);
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         {
             let Some(_) = self.live.as_ref() else {
                 return format!(
@@ -760,17 +837,17 @@ impl AdminTui {
                 self.last_announce_event
             );
         }
-        #[cfg(not(feature = "live-rns-net"))]
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         {
             format!(
-                "announce: unavailable without live-rns-net | interval {interval}m | last: {}",
+                "announce: unavailable without live-reticulum | interval {interval}m | last: {}",
                 self.last_announce_event
             )
         }
     }
 
     fn monitoring_counter_text(&self) -> String {
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         {
             let Some(live) = self.live.as_ref() else {
                 return [
@@ -896,10 +973,10 @@ impl AdminTui {
             }
             lines.join("\n")
         }
-        #[cfg(not(feature = "live-rns-net"))]
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         {
             [
-                "operator summary:\n  live monitoring unavailable; rebuild omenchatd with --features live-rns-net".to_string(),
+                "operator summary:\n  live monitoring unavailable; rebuild omenchatd with --features live-reticulum".to_string(),
                 self.announce_schedule_text(),
             ]
             .join("\n")
@@ -907,7 +984,7 @@ impl AdminTui {
     }
 
     fn monitoring_interface_text(&self) -> String {
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         {
             self.live
                 .as_ref()
@@ -915,7 +992,7 @@ impl AdminTui {
                 .filter(|text| !text.trim().is_empty())
                 .unwrap_or_else(|| "live server is stopped".into())
         }
-        #[cfg(not(feature = "live-rns-net"))]
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         {
             "live interface stats unavailable in this build".into()
         }
@@ -1329,7 +1406,7 @@ impl AdminTui {
         );
 
         let page = std::fs::read_to_string(self.config.nomadnet_index_page_path())
-            .unwrap_or_else(|_| "No portal page exists yet. Start the live server once, or run status/doctor with live-rns-net support, to create the first template after the OMENchat destination hash is available.".into());
+            .unwrap_or_else(|_| "No portal page exists yet. Start the live server once, or run status/doctor with live-reticulum support, to create the first template after the OMENchat destination hash is available.".into());
         frame.render_widget(
             Paragraph::new(page)
                 .block(admin_block("reticulum/storage/pages/index.mu"))
@@ -2256,7 +2333,7 @@ impl AdminTui {
         Ok(())
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn disconnect_live_user(&mut self, user: &AdminUserRow) -> usize {
         self.live
             .as_mut()
@@ -2268,7 +2345,7 @@ impl AdminTui {
             .unwrap_or(0)
     }
 
-    #[cfg(not(feature = "live-rns-net"))]
+    #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
     fn disconnect_live_user(&mut self, _user: &AdminUserRow) -> usize {
         0
     }
@@ -2559,7 +2636,7 @@ impl AdminTui {
         Ok(())
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn active_user_link_count(&self, user: &AdminUserRow) -> usize {
         self.live
             .as_ref()
@@ -2574,7 +2651,7 @@ impl AdminTui {
             .unwrap_or(0)
     }
 
-    #[cfg(not(feature = "live-rns-net"))]
+    #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
     fn active_user_link_count(&self, _user: &AdminUserRow) -> usize {
         0
     }
@@ -3045,7 +3122,7 @@ fn stateful_action_label(action: AdminAction, label: &str, live_running: bool) -
     }
 }
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 fn announce_event_text(kind: &str, destination: &str) -> String {
     format!(
         "{kind} announce at {} for omenchat://{destination}",
@@ -3108,7 +3185,7 @@ fn stale_delete_status_label(user: &AdminUserRow) -> String {
     }
 }
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 fn active_link_monitoring_text(
     link: &ActiveLinkSummary,
     room: &str,
@@ -3138,7 +3215,7 @@ fn active_link_monitoring_text(
     }
 }
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 fn closed_link_monitoring_text(
     link: &ClosedLinkSummary,
     room: &str,
@@ -3171,7 +3248,7 @@ fn closed_link_monitoring_text(
     }
 }
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 fn indent_lines(text: &str, prefix: &str) -> String {
     text.lines()
         .map(|line| format!("{prefix}{line}"))
@@ -3288,7 +3365,7 @@ fn compact_identity(hex: &str) -> String {
     }
 }
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 fn hex_lower_local(bytes: &[u8]) -> String {
     bytes_to_hex(bytes)
 }
@@ -3406,15 +3483,21 @@ fn compact_identity_destination_text(config: &ServerConfig) -> String {
     }
 }
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(feature = "live-reticulum")]
+fn identity_destination_text(config: &ServerConfig) -> String {
+    crate::reticulum_live::configured_destination_status(config)
+        .unwrap_or_else(|error| format!("destination: unavailable ({error})\n"))
+}
+
+#[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
 fn identity_destination_text(config: &ServerConfig) -> String {
     crate::rns_net_live::configured_destination_status(config)
         .unwrap_or_else(|error| format!("destination: unavailable ({error})\n"))
 }
 
-#[cfg(not(feature = "live-rns-net"))]
+#[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
 fn identity_destination_text(_config: &ServerConfig) -> String {
-    "destination: unavailable (rebuild with --features live-rns-net)\n".into()
+    "destination: unavailable (rebuild with --features live-reticulum)\n".into()
 }
 
 fn read_log_tail(path: &std::path::Path, max_lines: usize) -> ServerResult<String> {
@@ -4476,10 +4559,10 @@ mod tests {
         assert!(text.contains("announce:"));
         assert!(text.contains("interval 42m"));
         assert!(text.contains("last: none yet"));
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         assert!(text.contains("start live before Announce Now"));
-        #[cfg(not(feature = "live-rns-net"))]
-        assert!(text.contains("unavailable without live-rns-net"));
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
+        assert!(text.contains("unavailable without live-reticulum"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4547,7 +4630,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn line_console_setup_text_includes_join_addresses() {
         let root = temp_root("setup-console-addresses");
@@ -5075,18 +5158,18 @@ mod tests {
         assert!(app.status.contains("config saved"));
         assert!(app.status.contains("restart live server"));
 
-        #[cfg(not(feature = "live-rns-net"))]
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         {
             app.start_live_runtime();
             assert!(app.status.contains("live server unavailable"));
-            assert!(app.status.contains("live-rns-net"));
+            assert!(app.status.contains("live-reticulum"));
 
             app.stop_live_runtime();
             assert!(app.status.contains("live server unavailable"));
-            assert!(app.status.contains("live-rns-net"));
+            assert!(app.status.contains("live-reticulum"));
         }
 
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         {
             app.stop_live_runtime();
             assert!(app.status.contains("live server is not running"));
@@ -5114,12 +5197,12 @@ mod tests {
         assert!(app.status.contains("restart live server"));
 
         app.handle_click(5, 5).expect("click start live");
-        #[cfg(not(feature = "live-rns-net"))]
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         {
             assert!(app.status.contains("live server unavailable"));
-            assert!(app.status.contains("live-rns-net"));
+            assert!(app.status.contains("live-reticulum"));
         }
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         {
             assert!(
                 app.status.contains("live server started")
@@ -5128,12 +5211,12 @@ mod tests {
         }
 
         app.handle_click(5, 6).expect("click stop live");
-        #[cfg(not(feature = "live-rns-net"))]
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         {
             assert!(app.status.contains("live server unavailable"));
-            assert!(app.status.contains("live-rns-net"));
+            assert!(app.status.contains("live-reticulum"));
         }
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         {
             assert!(
                 app.status.contains("live server stopped")
@@ -5154,9 +5237,9 @@ mod tests {
         app.handle_admin_action(AdminAction::AnnounceNow)
             .expect("announce now");
 
-        #[cfg(feature = "live-rns-net")]
+        #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
         assert!(app.status.contains("live server is not running"));
-        #[cfg(not(feature = "live-rns-net"))]
+        #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         assert!(app.status.contains("live announce unavailable"));
 
         let _ = std::fs::remove_dir_all(root);
@@ -5756,7 +5839,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn identity_panel_reports_configured_destination_hash() {
         let root = temp_root("identity-panel-live-destination");
@@ -5793,7 +5876,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(not(feature = "live-rns-net"))]
+    #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
     #[test]
     fn identity_panel_reports_live_destination_feature_requirement() {
         let root = temp_root("identity-panel-live-destination-unavailable");
@@ -5803,7 +5886,7 @@ mod tests {
         let text = identity_panel_text(&config);
 
         assert!(text.contains("destination: unavailable"));
-        assert!(text.contains("rebuild with --features live-rns-net"));
+        assert!(text.contains("rebuild with --features live-reticulum"));
         let _ = std::fs::remove_dir_all(root);
     }
 

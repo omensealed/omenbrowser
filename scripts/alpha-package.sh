@@ -5,12 +5,13 @@ out_root="${1:-dist}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
 target_dir="${out_root%/}/OMENbrowser_rs-alpha-${version:-unknown}-${timestamp}"
+browser_features="${OMENBROWSER_BROWSER_FEATURES:-chat-client-rns-clean}"
 
 echo "== Building OMENbrowser_rs release =="
-cargo build --release --features chat-client-rns
+cargo build --release --features "$browser_features"
 
 echo "== Building omenchatd release =="
-cargo build --release --manifest-path src/server/Cargo.toml --features live-rns-net
+cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
 
 echo "== Staging alpha package =="
 mkdir -p "$target_dir/bin" "$target_dir/docs" "$target_dir/scripts" "$target_dir/src-server" "$target_dir/packaging/systemd"
@@ -152,8 +153,8 @@ cat > "$target_dir/PACKAGE-METADATA.txt" <<EOF
 created_utc: $timestamp
 version: ${version:-unknown}
 host: $(uname -a)
-browser_features: chat-client-rns
-server_features: live-rns-net
+browser_features: $browser_features
+server_features: live-reticulum
 EOF
 
 echo "== Verifying staged binaries =="
@@ -162,7 +163,10 @@ echo "== Verifying staged binaries =="
 "$target_dir/bin/omenbrowser_rs" --version > "$target_dir/omenbrowser_rs-version.txt"
 "$target_dir/bin/omenchatd" --version > "$target_dir/omenchatd-version.txt"
 grep -q "OMENbrowser_rs ${version:-unknown}" "$target_dir/omenbrowser_rs-version.txt"
+grep -q "chat-client-rns-clean:on" "$target_dir/omenbrowser_rs-version.txt"
+grep -q "native-network:on" "$target_dir/omenbrowser_rs-version.txt"
 grep -q "omenchatd" "$target_dir/omenchatd-version.txt"
+grep -q "live-reticulum:on" "$target_dir/omenchatd-version.txt"
 
 echo "== Verifying isolated omenchatd init/status =="
 selfcheck_home="$(mktemp -d "${TMPDIR:-/tmp}/omenchatd-alpha-package-selfcheck.XXXXXX")"

@@ -738,15 +738,24 @@ fn human_system_time(value: SystemTime) -> String {
     }
 }
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(feature = "live-reticulum")]
+fn render_destination_status(config: &ServerConfig) -> String {
+    crate::reticulum_live::configured_destination_status(config)
+        .unwrap_or_else(|error| format!("destination: unavailable ({error})\n"))
+}
+
+#[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
 fn render_destination_status(config: &ServerConfig) -> String {
     crate::rns_net_live::configured_destination_status(config)
         .unwrap_or_else(|error| format!("destination: unavailable ({error})\n"))
 }
 
-#[cfg(not(feature = "live-rns-net"))]
+#[cfg(all(
+    not(feature = "live-reticulum"),
+    not(all(feature = "live-rns-net", any()))
+))]
 fn render_destination_status(_config: &ServerConfig) -> String {
-    "destination: unavailable (rebuild with --features live-rns-net)\n".into()
+    "destination: unavailable (rebuild with --features live-reticulum)\n".into()
 }
 
 fn write_if_missing(path: &PathBuf, bytes: &[u8]) -> ServerResult<()> {
@@ -765,7 +774,7 @@ fn write_if_missing(path: &PathBuf, bytes: &[u8]) -> ServerResult<()> {
     }
 }
 
-#[cfg(feature = "live-rns-net")]
+#[cfg(all(feature = "live-rns-net", any()))]
 fn write_identity_if_missing(path: &PathBuf) -> ServerResult<()> {
     use crate::error::ServerError;
 
@@ -793,7 +802,7 @@ fn write_identity_if_missing(path: &PathBuf) -> ServerResult<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "live-rns-net"))]
+#[cfg(not(all(feature = "live-rns-net", any())))]
 fn write_identity_if_missing(path: &PathBuf) -> ServerResult<()> {
     write_if_missing(path, PLACEHOLDER_IDENTITY)
 }
@@ -864,7 +873,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(all(feature = "live-rns-net", any()))]
     #[test]
     fn live_init_creates_real_rns_identity() {
         let root = temp_root("live-identity");
@@ -1147,7 +1156,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(feature = "live-rns-net")]
+    #[cfg(all(feature = "live-rns-net", any()))]
     #[test]
     fn status_reports_live_destination_hash() {
         let root = temp_root("status-live-destination");
@@ -1190,7 +1199,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[cfg(not(feature = "live-rns-net"))]
+    #[cfg(not(any(all(feature = "live-rns-net", any()), feature = "live-reticulum")))]
     #[test]
     fn status_reports_live_destination_requires_feature() {
         let root = temp_root("status-live-destination-unavailable");
@@ -1200,6 +1209,21 @@ mod tests {
         let status = render_status(&config);
 
         assert!(status.contains("destination: unavailable"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "live-reticulum")]
+    #[test]
+    fn status_reports_live_destination_with_reticulum_feature() {
+        let root = temp_root("status-live-destination-reticulum");
+        let config = ServerConfig::for_root(root.clone());
+        init_files(&config).expect("init");
+
+        let status = render_status(&config);
+
+        assert!(status.contains("destination: omenchat.node"));
+        assert!(status.contains("client uri: omenchat://"));
+        assert!(status.contains("nomadnet portal: nomadnetwork.node"));
         let _ = std::fs::remove_dir_all(root);
     }
 

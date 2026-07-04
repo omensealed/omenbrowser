@@ -12,7 +12,8 @@ use crate::interfaces::ReticulumInterfaceProfile;
 use crate::messaging::MessageStore;
 use crate::plugins::PluginManifest;
 use crate::runtime::{
-    InterfaceStats, NetworkRuntime, NetworkSnapshot, PropagationStatus, RuntimeStatus,
+    InterfaceStats, LxmfSdkRpcProbeSnapshot, NetworkRuntime, NetworkSnapshot, PropagationStatus,
+    RuntimeStatus,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -25,6 +26,7 @@ pub struct DiagnosticsSnapshot {
     pub reticulum: ReticulumPathDiagnostics,
     pub interface_stats: InterfaceStats,
     pub propagation_status: PropagationStatus,
+    pub native_lxmf_sdk_rpc_probe: LxmfSdkRpcProbeSnapshot,
     pub network: NetworkSnapshot,
     pub counts: DiagnosticsCounts,
     pub plugins: Vec<PluginManifest>,
@@ -107,6 +109,19 @@ impl DiagnosticsService {
         let interface_stats = self.runtime.interface_stats().await?;
         let network = self.runtime.network_snapshot().await?;
         let propagation_status = self.runtime.propagation_status().await?;
+        let native_lxmf_sdk_rpc_probe = self
+            .runtime
+            .native_lxmf_sdk_rpc_probe()
+            .await
+            .unwrap_or_else(|error| LxmfSdkRpcProbeSnapshot {
+                endpoint: None,
+                state: "error".into(),
+                runtime_id: None,
+                active_contract_version: None,
+                queued_messages: None,
+                in_flight_messages: None,
+                detail: Some(error.to_string()),
+            });
         Ok(DiagnosticsSnapshot {
             app_version: env!("CARGO_PKG_VERSION").into(),
             platform: PlatformInfo {
@@ -126,6 +141,7 @@ impl DiagnosticsService {
             },
             interface_stats,
             propagation_status,
+            native_lxmf_sdk_rpc_probe,
             network,
             counts: DiagnosticsCounts {
                 message_threads: message_store

@@ -4,6 +4,7 @@ set -euo pipefail
 mode="${1:-quick}"
 package_archive="${2:-}"
 package_smoke_out="${3:-/tmp/omenbrowser-rs-alpha-package-check}"
+browser_features="${OMENBROWSER_BROWSER_FEATURES:-chat-client-rns-clean}"
 
 if [[ -z "$package_archive" ]]; then
   if [[ -f "dist/OMENbrowser_rs-alpha-latest.tar.gz" ]]; then
@@ -23,6 +24,18 @@ case "$mode" in
 esac
 
 echo "== OMENbrowser_rs alpha check: $mode =="
+echo "browser features: $browser_features"
+
+require_clean_browser_version() {
+  local version_file="$1"
+  grep -q 'chat-client-rns-clean:on' "$version_file"
+  grep -q 'native-network:on' "$version_file"
+}
+
+require_clean_server_version() {
+  local version_file="$1"
+  grep -q 'live-reticulum:on' "$version_file"
+}
 
 if [[ "$mode" == "package" ]]; then
   require_file() {
@@ -109,8 +122,10 @@ if [[ "$mode" == "package" ]]; then
   "$package_dir/bin/omenchatd" --version > "$extract_root/omenchatd-version.txt"
   grep -q 'OMENbrowser_rs ' "$extract_root/omenbrowser_rs-version.txt"
   grep -q 'features=' "$extract_root/omenbrowser_rs-version.txt"
+  require_clean_browser_version "$extract_root/omenbrowser_rs-version.txt"
   grep -q 'omenchatd ' "$extract_root/omenchatd-version.txt"
   grep -q 'features=' "$extract_root/omenchatd-version.txt"
+  require_clean_server_version "$extract_root/omenchatd-version.txt"
 
   echo "== Package omenchatd isolated init/status =="
   server_home="$(mktemp -d "${TMPDIR:-/tmp}/omenchatd-alpha-check-package.XXXXXX")"
@@ -180,46 +195,50 @@ echo "== Browser format =="
 cargo fmt --check
 
 echo "== Browser feature check =="
-cargo check --features chat-client-rns
+cargo check --features "$browser_features"
+cargo run --features "$browser_features" --bin omenbrowser_rs -- --version > /tmp/omenbrowser-rs-alpha-check-version.txt
+require_clean_browser_version /tmp/omenbrowser-rs-alpha-check-version.txt
 
 echo "== Browser focused OMENchat tests =="
-cargo test --features chat-client-rns \
+cargo test --features "$browser_features" \
   live_sync_recent_history_requests_latest_active_room_batch
-cargo test --features chat-client-rns \
+cargo test --features "$browser_features" \
   omenchat_help_documents_alpha_isolation_and_server_storage
-cargo test --features chat-client-rns \
+cargo test --features "$browser_features" \
   opening_different_omenchat_destinations_creates_separate_sessions
 
 echo "== omenchatd format =="
 cargo fmt --manifest-path src/server/Cargo.toml --check
 
 echo "== omenchatd feature check =="
-cargo check --manifest-path src/server/Cargo.toml --features live-rns-net
+cargo check --manifest-path src/server/Cargo.toml --features live-reticulum
+cargo run --manifest-path src/server/Cargo.toml --features live-reticulum -- --version > /tmp/omenchatd-alpha-check-version.txt
+require_clean_server_version /tmp/omenchatd-alpha-check-version.txt
 
 echo "== omenchatd focused server tests =="
-cargo test --manifest-path src/server/Cargo.toml --features live-rns-net \
+cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
   history_recent_returns_current_when_client_fingerprint_matches
-cargo test --manifest-path src/server/Cargo.toml --features live-rns-net \
+cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
   history_recent_returns_bounded_backlog_when_client_fingerprint_differs
-cargo test --manifest-path src/server/Cargo.toml --features live-rns-net \
+cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
   status_reports_live_destination_hash
-cargo test --manifest-path src/server/Cargo.toml --features live-rns-net \
+cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
   init_creates_editable_baseline_reticulum_config
-cargo test --manifest-path src/server/Cargo.toml --features live-rns-net \
+cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
   tcp_client_override_writes_isolated_reticulum_config
 
 if [[ "$mode" == "full" ]]; then
   echo "== Browser full feature tests =="
-  cargo test --features chat-client-rns
+  cargo test --features "$browser_features"
 
   echo "== Browser clippy =="
-  cargo clippy --features chat-client-rns -- -D warnings
+  cargo clippy --features "$browser_features" -- -D warnings
 
   echo "== omenchatd full feature tests =="
-  cargo test --manifest-path src/server/Cargo.toml --features live-rns-net
+  cargo test --manifest-path src/server/Cargo.toml --features live-reticulum
 
   echo "== omenchatd clippy =="
-  cargo clippy --manifest-path src/server/Cargo.toml --features live-rns-net -- -D warnings
+  cargo clippy --manifest-path src/server/Cargo.toml --features live-reticulum -- -D warnings
 fi
 
 echo "== alpha check complete =="

@@ -17,9 +17,9 @@ pub use event::{
 pub use network::{
     AnnouncePayload, CancellationToken, DestinationId, DestinationInspection, DirectoryCandidate,
     InterfaceStats, LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, LxmfDeliveryProbeReport,
-    LxmfDeliveryProbeStage, LxmfDeliveryProbeStep, MockNetworkRuntime, NetworkRuntime,
-    NetworkSnapshot, NetworkStatus, OmenChatLinkClosed, OmenChatLinkData, OmenChatLinkOpened,
-    OmenChatResourceData, OutboundDeliveryState, OutboundStatus, PageFetchProbeReport,
-    PageFetchProbeStage, PageFetchProbeStep, PropagationDebugSnapshot, PropagationMessageSnapshot,
-    PropagationStatus, RuntimeBackendName, RuntimeEvent, RuntimeStatus,
+    LxmfDeliveryProbeStage, LxmfDeliveryProbeStep, LxmfSdkRpcProbeSnapshot, MockNetworkRuntime,
+    NetworkRuntime, NetworkSnapshot, NetworkStatus, OmenChatLinkClosed, OmenChatLinkData,
+    OmenChatLinkOpened, OmenChatResourceData, OutboundDeliveryState, OutboundStatus,
+    PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep, PropagationDebugSnapshot,
+    PropagationMessageSnapshot, PropagationStatus, RuntimeBackendName, RuntimeEvent, RuntimeStatus,
 };

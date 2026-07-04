@@ -472,7 +472,7 @@ fn failed_submitted_browser_request_does_not_auto_resubmit() {
     assert!(app.apply_browser_task_result(BrowserTaskResult::Error {
         tab_id,
         generation: 42,
-        message: format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during response wait: timed out waiting for rns-net page response"),
+        message: format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during response wait: timed out waiting for clean Reticulum page response"),
     }));
 
     let tab = app.active_browser_tab();

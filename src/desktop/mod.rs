@@ -19,7 +19,7 @@ use iced::{
     event, keyboard, time, window, Background, Border, Color, ContentFit, Element, Font, Length,
     Padding, Pixels, Settings, Shadow, Subscription, Task, Theme,
 };
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use std::collections::{BTreeMap, VecDeque};
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "chat-client")]
@@ -42,7 +42,7 @@ use crate::chat::client::is_restorable_server_destination;
 use crate::chat::commands::{parse_client_command, ClientCommand};
 #[cfg(feature = "chat-client")]
 use crate::chat::protocol::RoomId;
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use crate::chat::rns::{
     replay_pending_resource_offers, resource_id_from_metadata, ChatLinkTransport,
 };
@@ -103,14 +103,13 @@ const ICON_OMENCHAT_RECONNECT: &str = "\u{f01e}";
 const ICON_OMENCHAT_ATTACH: &str = "\u{f0c6}";
 const ICON_DOWNLOAD: &str = "\u{f019}";
 const ICON_OPEN: &str = "\u{f06e}";
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 const OMENCHAT_RECENT_SYNC_MAX_ATTEMPTS: u8 = 3;
 const EMOJI_CHARSET: &str = "1f408";
 const DESKTOP_IDLE_TICK_MS: u64 = 1_000;
 const DESKTOP_LIVE_TICK_MS: u64 = 250;
-// rns-core clamps Link keepalive to a 5s minimum and marks low-RTT links stale
-// after roughly 10s without inbound traffic. A lightweight OMENchat ping below
-// that window is less noisy than repeated Link teardown/reconnect/history sync.
+// Reticulum links can go stale quickly on quiet paths. A lightweight OMENchat
+// ping below that window is less noisy than repeated teardown/reconnect/history sync.
 const OMENCHAT_HEARTBEAT_IDLE_MS: u64 = 4_000;
 const OMENCHAT_HEARTBEAT_TIMEOUT_MS: u64 = 18_000;
 const OMENCHAT_MIN_HEARTBEAT_IDLE_MS: u64 = 5_000;
@@ -188,8 +187,8 @@ const OMENCHATD_OPERATOR_HELP_LINES: &[&str] = &[
     "The server must not use ~/.reticulum, ~/.nomadnetwork, ~/.lxmd, or OMENbrowser_rs identity storage unless an operator explicitly points it somewhere else.",
     "The public chat destination announces as omenchat.node. The quiet NomadNet portal announces separately as nomadnetwork.node and serves /page/index.mu from reticulum/storage/pages/index.mu.",
     "Edit reticulum/storage/pages/index.mu for MOTD, server rules, room summaries, and the omenchat:// link. omenchatd creates the file only if it is missing and should not overwrite operator edits.",
-    "Typical server start: cargo run --manifest-path src/server/Cargo.toml --features live-rns-net -- run",
-    "Typical server setup UI: cargo run --manifest-path src/server/Cargo.toml --features live-rns-net -- tui",
+    "Typical server start: cargo run --manifest-path src/server/Cargo.toml --features live-reticulum -- run",
+    "Typical server setup UI: cargo run --manifest-path src/server/Cargo.toml --features live-reticulum -- tui",
     "Use omenchatd tui for setup, interfaces, rooms, moderation, monitoring, logs, audit, and help. Use omenchatd status for copyable identity, destination, portal path, limits, and storage information.",
     "Room creation is admin-only. Topic edits and kick/ban/mute actions are moderator/admin operations. Use the Moderation panel or slash commands from a privileged OMENchat client.",
 ];
@@ -344,7 +343,7 @@ fn detect_clearweb_socks_proxy(host: &str, configured_port: u16) -> Option<(Stri
         .map(|port| (host.into(), port))
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_monitor_frame_label(op: crate::chat::protocol::ChatOp) -> String {
     match op {
         crate::chat::protocol::ChatOp::SessionOpen => "session open",
@@ -554,33 +553,33 @@ struct DesktopApp {
     omenchat_rooms_visible: bool,
     #[cfg(feature = "chat-client")]
     omenchat_pending_upload_sources: HashMap<(ChatSessionId, String, u64), PathBuf>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_live_state: crate::chat::live::LiveChatClientState,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_live_transports: HashMap<ChatSessionId, DesktopOmenChatTransport>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_link_sessions: HashMap<[u8; 16], ChatSessionId>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_live_opening: HashSet<ChatSessionId>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_live_retry_after: HashMap<ChatSessionId, u64>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_live_retry_count: HashMap<ChatSessionId, u8>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_live_connect_count: HashMap<ChatSessionId, u64>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_live_disconnect_count: HashMap<ChatSessionId, u64>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_live_last_disconnect_reason: HashMap<ChatSessionId, String>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_recent_sync_pending: HashSet<ChatSessionId>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_recent_sync_links: HashMap<ChatSessionId, [u8; 16]>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_recent_sync_due_after: HashMap<ChatSessionId, u64>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_recent_sync_attempts: HashMap<ChatSessionId, u8>,
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     omenchat_live_reconnect_generation: HashMap<ChatSessionId, u64>,
 }
 
@@ -592,7 +591,7 @@ enum OmenChatDraftCommandResult {
     HandledKeep,
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 #[derive(Clone, Debug, Default)]
 struct DesktopOmenChatTransport {
     link_id: [u8; 16],
@@ -635,7 +634,7 @@ struct DesktopOmenChatTransport {
     heartbeat_idle_ms: u64,
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct OmenChatLiveMonitorTotals {
     sessions: usize,
@@ -659,7 +658,7 @@ struct OmenChatLiveMonitorTotals {
     awaiting_pongs: usize,
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 impl DesktopOmenChatTransport {
     fn new(link_id: [u8; 16], now_ms: u64) -> Self {
         Self {
@@ -824,7 +823,7 @@ impl DesktopOmenChatTransport {
     }
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 impl ChatLinkTransport for DesktopOmenChatTransport {
     fn send_frame(&mut self, frame_bytes: Vec<u8>) -> anyhow::Result<()> {
         self.frames_out = self.frames_out.saturating_add(1);
@@ -958,24 +957,24 @@ enum Message {
     #[cfg(feature = "chat-client")]
     LoadOlderOmenChatHistory(ChatSessionId),
     #[cfg(feature = "chat-client")]
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     RequestOmenChatPath(ChatSessionId),
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     ReconnectOmenChatSession(ChatSessionId),
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     ReconnectOmenChatSessionIfDisconnected(ChatSessionId),
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     OmenChatPathRequestResult {
         session_id: ChatSessionId,
         destination: String,
         result: Result<bool, String>,
     },
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     OmenChatLiveOpenResult {
         descriptor: OmenChatDescriptor,
         result: Result<crate::runtime::OmenChatLinkOpened, String>,
     },
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     OmenChatLiveReconnectResult {
         session_id: ChatSessionId,
         generation: u64,
@@ -1502,33 +1501,33 @@ impl DesktopApp {
             omenchat_rooms_visible: true,
             #[cfg(feature = "chat-client")]
             omenchat_pending_upload_sources: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_state: crate::chat::live::LiveChatClientState::default(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_transports: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_link_sessions: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_opening: HashSet::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_retry_after: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_retry_count: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_connect_count: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_disconnect_count: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_last_disconnect_reason: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_recent_sync_pending: HashSet::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_recent_sync_links: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_recent_sync_due_after: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_recent_sync_attempts: HashMap::new(),
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_reconnect_generation: HashMap::new(),
         }
     }
@@ -1719,19 +1718,19 @@ impl DesktopApp {
             Message::LoadOlderOmenChatHistory(session_id) => {
                 self.load_older_omenchat_history(session_id);
             }
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::RequestOmenChatPath(session_id) => {
                 return self.request_omenchat_path_task(session_id);
             }
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::ReconnectOmenChatSession(session_id) => {
                 return self.reconnect_omenchat_session_task(session_id);
             }
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::ReconnectOmenChatSessionIfDisconnected(session_id) => {
                 return self.reconnect_omenchat_session_if_disconnected_task(session_id);
             }
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChatPathRequestResult {
                 session_id,
                 destination,
@@ -1780,11 +1779,11 @@ impl DesktopApp {
                     self.app.status.task = format!("OMENchat path request failed: {error}");
                 }
             },
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChatLiveOpenResult { descriptor, result } => {
                 return self.handle_omenchat_live_open_result(descriptor, result);
             }
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChatLiveReconnectResult {
                 session_id,
                 generation,
@@ -2673,13 +2672,13 @@ impl DesktopApp {
                     .drain_internal_events_with_active_conversation_readable(
                         active_conversation_readable,
                     );
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 let omenchat_runtime = self.drain_omenchat_runtime_events();
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 let omenchat_recent_sync = self.sync_due_omenchat_recent_history(now);
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 let omenchat_heartbeat = self.maintain_omenchat_live_links(now);
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 let omenchat_reconnect = self.reconnect_restored_omenchat_sessions_if_ready();
                 let browser_tasks = self.app.drain_browser_task_results();
                 let message_tasks = self.app.drain_message_task_results();
@@ -2732,13 +2731,13 @@ impl DesktopApp {
                     self.snap_conversations_with_new_messages_to_bottom(),
                     #[cfg(feature = "chat-client")]
                     self.snap_omenchat_with_new_events_to_bottom(),
-                    #[cfg(feature = "chat-client-rns")]
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     omenchat_runtime,
-                    #[cfg(feature = "chat-client-rns")]
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     omenchat_recent_sync,
-                    #[cfg(feature = "chat-client-rns")]
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     omenchat_heartbeat,
-                    #[cfg(feature = "chat-client-rns")]
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     omenchat_reconnect,
                     interface_stats_task,
                 ];
@@ -3885,7 +3884,7 @@ impl DesktopApp {
             .retain(|(stored_session_id, _), _| *stored_session_id != session_id);
         self.chat_event_counts
             .retain(|(stored_session_id, _), _| *stored_session_id != session_id);
-        #[cfg(feature = "chat-client-rns")]
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         {
             self.omenchat_live_opening.remove(&session_id);
             self.omenchat_live_retry_after.remove(&session_id);
@@ -4430,7 +4429,7 @@ impl DesktopApp {
             self.persist_omenchat_session(session_id);
             return;
         }
-        #[cfg(feature = "chat-client-rns")]
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         if self.omenchat_live_history_request_requires_reconnect(session_id) {
             if cached_loaded == 0 {
                 self.set_omenchat_session_status(
@@ -4449,7 +4448,10 @@ impl DesktopApp {
         }
     }
 
-    #[cfg(all(feature = "chat-client", feature = "chat-client-rns"))]
+    #[cfg(all(
+        feature = "chat-client",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
     fn omenchat_live_history_request_requires_reconnect(&self, session_id: ChatSessionId) -> bool {
         !self.omenchat_live_transports.contains_key(&session_id)
             && self.chat_client.session(session_id).is_some_and(|session| {
@@ -4458,7 +4460,7 @@ impl DesktopApp {
             })
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn request_omenchat_path_task(&mut self, session_id: ChatSessionId) -> Task<Message> {
         let Some(destination) = self
             .chat_client
@@ -4504,7 +4506,7 @@ impl DesktopApp {
         )
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn reconnect_omenchat_session_task(&mut self, session_id: ChatSessionId) -> Task<Message> {
         if !self.app.runtime_status.connected {
             self.set_omenchat_session_status(
@@ -4538,7 +4540,7 @@ impl DesktopApp {
         self.open_live_omenchat_reconnect_task(session_id, generation, descriptor)
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn reconnect_omenchat_session_if_disconnected_task(
         &mut self,
         session_id: ChatSessionId,
@@ -4561,7 +4563,7 @@ impl DesktopApp {
         self.reconnect_omenchat_session_task(session_id)
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn disconnect_omenchat_session(&mut self, session_id: ChatSessionId, status: &str) {
         let Some(transport) = self.omenchat_live_transports.remove(&session_id) else {
             return;
@@ -4581,13 +4583,13 @@ impl DesktopApp {
         });
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn remove_omenchat_link_session_mappings(&mut self, session_id: ChatSessionId) {
         self.omenchat_link_sessions
             .retain(|_, mapped_session_id| *mapped_session_id != session_id);
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn register_omenchat_live_transport(
         &mut self,
         session_id: ChatSessionId,
@@ -4632,7 +4634,7 @@ impl DesktopApp {
         Task::none()
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn sync_recent_omenchat_room_history(
         &mut self,
         session_id: ChatSessionId,
@@ -4681,7 +4683,7 @@ impl DesktopApp {
         events
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn sync_recent_omenchat_room_history_if_needed(
         &mut self,
         session_id: ChatSessionId,
@@ -4708,13 +4710,13 @@ impl DesktopApp {
         self.sync_recent_omenchat_room_history(session_id)
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn schedule_delayed_omenchat_recent_sync(&mut self, session_id: ChatSessionId) {
         self.omenchat_recent_sync_due_after
             .insert(session_id, current_epoch_ms().saturating_add(1_500));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn schedule_retry_omenchat_recent_sync_if_unconfirmed(&mut self, session_id: ChatSessionId) {
         let attempts = self
             .omenchat_recent_sync_attempts
@@ -4738,7 +4740,7 @@ impl DesktopApp {
         );
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn schedule_omenchat_recent_sync_after_link_activity(
         &mut self,
         session_id: ChatSessionId,
@@ -4781,7 +4783,7 @@ impl DesktopApp {
         );
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn sync_due_omenchat_recent_history(&mut self, now_ms: u64) -> Task<Message> {
         if self.omenchat_recent_sync_due_after.is_empty() {
             return Task::none();
@@ -4814,7 +4816,7 @@ impl DesktopApp {
         }
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn mark_omenchat_recent_sync_complete(&mut self, session_id: ChatSessionId) {
         if let Some(link_id) = self
             .omenchat_live_transports
@@ -4833,7 +4835,7 @@ impl DesktopApp {
         }
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn omenchat_recent_sync_monitor_label(&self, session_id: ChatSessionId, now_ms: u64) -> String {
         let live_link = self
             .omenchat_live_transports
@@ -4877,7 +4879,7 @@ impl DesktopApp {
         }
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn clear_omenchat_reconnect_state(&mut self, session_id: ChatSessionId) {
         self.omenchat_live_opening.remove(&session_id);
         self.omenchat_live_retry_after.remove(&session_id);
@@ -4885,7 +4887,7 @@ impl DesktopApp {
         self.omenchat_live_reconnect_generation.remove(&session_id);
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn omenchat_descriptor_for_session(
         &self,
         session_id: ChatSessionId,
@@ -4914,7 +4916,7 @@ impl DesktopApp {
                 }];
             }
         }
-        #[cfg(feature = "chat-client-rns")]
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         if let Some(session_id) = request_session_id(&request) {
             if self.omenchat_live_transports.contains_key(&session_id) {
                 return self.handle_live_omenchat_request(request);
@@ -4929,7 +4931,17 @@ impl DesktopApp {
                 }];
             }
         }
-        crate::chat::mock::handle_mock_request(&mut self.chat_client, request)
+        #[cfg(feature = "mock-runtime")]
+        {
+            crate::chat::mock::handle_mock_request(&mut self.chat_client, request)
+        }
+        #[cfg(not(feature = "mock-runtime"))]
+        {
+            vec![ChatClientEvent::Error {
+                session_id: request_session_id(&request),
+                message: "OMENchat is disconnected; use Reconnect before sending".into(),
+            }]
+        }
     }
 
     #[cfg(feature = "chat-client")]
@@ -4973,7 +4985,7 @@ impl DesktopApp {
             self.ensure_omenchat_bottom_entry(session_id);
             self.place_omenchat_session_preferring_active_blank(session_id);
             self.persist_workspace_panes("workspace panes");
-            #[cfg(feature = "chat-client-rns")]
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             if self.app.runtime_status.connected
                 && !self.omenchat_live_transports.contains_key(&session_id)
                 && !self.omenchat_live_opening.contains(&session_id)
@@ -5002,7 +5014,7 @@ impl DesktopApp {
             );
             return Some(Task::none());
         }
-        #[cfg(feature = "chat-client-rns")]
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         if self.app.runtime_status.connected
             && descriptor.server_destination != "mockchatdestination"
             && descriptor.server_destination.len() >= 32
@@ -5044,7 +5056,7 @@ impl DesktopApp {
             .collect()
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn open_live_omenchat_task(&self, descriptor: OmenChatDescriptor) -> Task<Message> {
         let runtime = self.app.runtime.clone();
         let destination_hash = descriptor.server_destination.clone();
@@ -5064,7 +5076,7 @@ impl DesktopApp {
         )
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn open_live_omenchat_reconnect_task(
         &self,
         session_id: ChatSessionId,
@@ -5094,7 +5106,7 @@ impl DesktopApp {
         )
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn reconnect_restored_omenchat_sessions_if_ready(&mut self) -> Task<Message> {
         if !self.app.runtime_status.connected {
             return Task::none();
@@ -5155,7 +5167,7 @@ impl DesktopApp {
         }
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn handle_omenchat_live_open_result(
         &mut self,
         descriptor: OmenChatDescriptor,
@@ -5200,7 +5212,7 @@ impl DesktopApp {
         scroll_task
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn handle_omenchat_live_reconnect_result(
         &mut self,
         session_id: ChatSessionId,
@@ -5270,7 +5282,7 @@ impl DesktopApp {
         scroll_task
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn next_omenchat_reconnect_generation(&mut self, session_id: ChatSessionId) -> u64 {
         let entry = self
             .omenchat_live_reconnect_generation
@@ -5280,7 +5292,7 @@ impl DesktopApp {
         *entry
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn omenchat_reconnect_generation_is_current(
         &self,
         session_id: ChatSessionId,
@@ -5303,7 +5315,7 @@ impl DesktopApp {
         }
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn handle_live_omenchat_request(&mut self, request: ChatClientRequest) -> Vec<ChatClientEvent> {
         let Some(session_id) = request_session_id(&request) else {
             return vec![ChatClientEvent::Error {
@@ -5335,7 +5347,7 @@ impl DesktopApp {
         events
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn send_omenchat_outgoing_frames(&mut self, link_id: [u8; 16], frames: Vec<Vec<u8>>) {
         if frames.is_empty() {
             return;
@@ -5388,7 +5400,7 @@ impl DesktopApp {
         });
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn send_omenchat_outgoing_resources(
         &mut self,
         link_id: [u8; 16],
@@ -5425,7 +5437,7 @@ impl DesktopApp {
         });
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn omenchat_frame_summary(frame: &[u8]) -> String {
         crate::chat::codec::decode_frame(frame)
             .map(|decoded| {
@@ -5446,12 +5458,12 @@ impl DesktopApp {
             .unwrap_or_else(|error| format!("decode_error {error}"))
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn omenchat_frame_summary_is_heartbeat(summary: &str) -> bool {
         summary.starts_with("Ping ") || summary.starts_with("Pong ")
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn drain_omenchat_runtime_events(&mut self) -> Task<Message> {
         let now = current_epoch_ms();
         let mut scroll_tasks = Vec::new();
@@ -5629,7 +5641,7 @@ impl DesktopApp {
         }
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn maintain_omenchat_live_links(&mut self, now: u64) -> Task<Message> {
         let mut stale_sessions = Vec::new();
         let mut outbound = Vec::new();
@@ -5698,7 +5710,7 @@ impl DesktopApp {
         Task::none()
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn omenchat_reconnect_state_label(&self, session_id: ChatSessionId, now: u64) -> String {
         if self.omenchat_live_transports.contains_key(&session_id) {
             return if self.omenchat_live_opening.contains(&session_id)
@@ -5914,7 +5926,7 @@ impl DesktopApp {
             match event {
                 ChatClientEvent::RoomJoined { session_id, .. } => {
                     self.restore_cached_omenchat_room_history(*session_id);
-                    #[cfg(feature = "chat-client-rns")]
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     if self.omenchat_live_transports.contains_key(session_id) {
                         self.sync_recent_omenchat_room_history_if_needed(*session_id);
                     } else {
@@ -5939,7 +5951,7 @@ impl DesktopApp {
                         .insert(*session_id, *upload_quota_bytes);
                     self.omenchat_upload_max_file_bytes
                         .insert(*session_id, *upload_max_file_bytes);
-                    #[cfg(feature = "chat-client-rns")]
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     if let Some(transport) = self.omenchat_live_transports.get_mut(session_id) {
                         transport.heartbeat_idle_ms =
                             ping_interval_seconds.saturating_mul(1_000).clamp(
@@ -5970,21 +5982,24 @@ impl DesktopApp {
                     }
                 }
                 ChatClientEvent::HistoryPrepended { session_id, .. } => {
-                    #[cfg(feature = "chat-client-rns")]
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     self.mark_omenchat_recent_sync_complete(*session_id);
                     self.persist_omenchat_session(*session_id);
                 }
                 ChatClientEvent::HistorySynced { session_id, .. } => {
-                    #[cfg(not(feature = "chat-client-rns"))]
+                    #[cfg(not(any(
+                        feature = "chat-client-rns",
+                        feature = "chat-client-rns-clean"
+                    )))]
                     let _ = session_id;
-                    #[cfg(feature = "chat-client-rns")]
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     self.mark_omenchat_recent_sync_complete(*session_id);
                 }
                 ChatClientEvent::HistorySyncNeeded {
                     session_id,
                     room_id,
                 } => {
-                    #[cfg(feature = "chat-client-rns")]
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     {
                         self.omenchat_recent_sync_links.remove(session_id);
                         self.omenchat_recent_sync_attempts.remove(session_id);
@@ -5996,7 +6011,10 @@ impl DesktopApp {
                             "OMENchat live event gap detected; scheduled bounded recent sync"
                         );
                     }
-                    #[cfg(not(feature = "chat-client-rns"))]
+                    #[cfg(not(any(
+                        feature = "chat-client-rns",
+                        feature = "chat-client-rns-clean"
+                    )))]
                     let _ = (session_id, room_id);
                 }
                 ChatClientEvent::UploadAccepted {
@@ -6613,7 +6631,7 @@ impl DesktopApp {
             let focused = pane == self.active_workspace_pane;
             let controls = if is_maximized {
                 let row = row![].spacing(6);
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 let row = if let DesktopPane::OmenChat(session_id) = kind {
                     row.push(tooltip_icon_button(
                         ICON_OMENCHAT_PATH,
@@ -6636,7 +6654,7 @@ impl DesktopApp {
                 .wrap()
             } else {
                 let row = row![].spacing(6);
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 let row = if let DesktopPane::OmenChat(session_id) = kind {
                     row.push(tooltip_icon_button(
                         ICON_OMENCHAT_PATH,
@@ -6686,7 +6704,7 @@ impl DesktopApp {
             };
             let compact_controls = if is_maximized {
                 let row = row![].spacing(6);
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 let row = if let DesktopPane::OmenChat(session_id) = kind {
                     row.push(tooltip_icon_button(
                         ICON_OMENCHAT_PATH,
@@ -6709,7 +6727,7 @@ impl DesktopApp {
                 .wrap()
             } else {
                 let row = row![].spacing(6);
-                #[cfg(feature = "chat-client-rns")]
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                 let row = if let DesktopPane::OmenChat(session_id) = kind {
                     row.push(tooltip_icon_button(
                         ICON_OMENCHAT_PATH,
@@ -6764,14 +6782,14 @@ impl DesktopApp {
                         text(title)
                             .size(ui_size(15))
                             .width(Length::Fill)
-                            .wrapping(Wrapping::Word),
+                            .wrapping(Wrapping::WordOrGlyph),
                     ]
                     .spacing(6)
                     .width(Length::Fill),
                     text(subtitle.unwrap_or_default())
                         .size(ui_size(12))
                         .width(Length::Fill)
-                        .wrapping(Wrapping::Word),
+                        .wrapping(Wrapping::WordOrGlyph),
                 ]
                 .spacing(2)
                 .width(Length::Fill),
@@ -7137,7 +7155,7 @@ impl DesktopApp {
                     ) == crate::directory::TrustLevel::Trusted,
                     &self.omenchat_media_cache,
                 );
-                let mut line = text(body.text.clone()).size(ui_size(14));
+                let mut line = safe_timeline_text(body.text.clone(), 14);
                 if body.is_action {
                     line = line.font(Font {
                         style: FontStyle::Italic,
@@ -7160,26 +7178,22 @@ impl DesktopApp {
                             received,
                             total,
                         }) => {
-                            upload_line = upload_line.push(
-                                text(omenchat_upload_state_label(
-                                    &OmenChatMediaLoadState::Loading {
-                                        message: message.clone(),
-                                        received: *received,
-                                        total: *total,
-                                    },
-                                ))
-                                .size(ui_size(11)),
-                            );
+                            upload_line = upload_line.push(safe_timeline_text(
+                                omenchat_upload_state_label(&OmenChatMediaLoadState::Loading {
+                                    message: message.clone(),
+                                    received: *received,
+                                    total: *total,
+                                }),
+                                11,
+                            ));
                         }
                         Some(OmenChatMediaLoadState::Failed { message }) => {
-                            upload_line = upload_line.push(
-                                text(omenchat_upload_state_label(
-                                    &OmenChatMediaLoadState::Failed {
-                                        message: message.clone(),
-                                    },
-                                ))
-                                .size(ui_size(11)),
-                            );
+                            upload_line = upload_line.push(safe_timeline_text(
+                                omenchat_upload_state_label(&OmenChatMediaLoadState::Failed {
+                                    message: message.clone(),
+                                }),
+                                11,
+                            ));
                             upload_line = upload_line.push(inline_icon_button_owned(
                                 ICON_DOWNLOAD,
                                 "Retry attachment download",
@@ -7228,7 +7242,7 @@ impl DesktopApp {
                     let mut hint_row = row![].spacing(8).align_y(iced::Alignment::Center);
                     let mut has_hint_row = false;
                     if !hint.label.is_empty() {
-                        hint_row = hint_row.push(text(hint.label).size(ui_size(11)));
+                        hint_row = hint_row.push(safe_timeline_text(hint.label.to_string(), 11));
                         has_hint_row = true;
                     }
                     if let Some(url) = hint.open_url {
@@ -7266,8 +7280,8 @@ impl DesktopApp {
                         );
                         group_content = group_content.push(container(media).width(Length::Fill));
                         if let Some(caption) = hint.caption {
-                            group_content = group_content
-                                .push(text(caption).size(ui_size(11)).width(Length::Fill));
+                            group_content =
+                                group_content.push(safe_timeline_text(caption.to_string(), 11));
                         }
                     }
                 }
@@ -7545,19 +7559,20 @@ impl DesktopApp {
 
         let show_path_actions = browser_request_preview_has_path_actions(tab, preview);
         let mut body = column![row![
-            text(format!(
-                "Request {} -> {}",
-                request_status_label(&preview.status),
-                preview.target
-            ))
-            .size(ui_size(14))
-            .width(Length::Fill),
+            safe_timeline_text(
+                format!(
+                    "Request {} -> {}",
+                    request_status_label(&preview.status),
+                    preview.target
+                ),
+                14
+            ),
             subtle_button("Close", Message::DismissBrowserPaneRequest(tab.id)),
         ]
         .spacing(8)]
         .spacing(3);
         if show_path_actions || !matches!(preview.status, BrowserRequestStatus::Pending) {
-            body = body.push(text(request_preview_line(tab, preview)).size(ui_size(12)));
+            body = body.push(safe_timeline_text(request_preview_line(tab, preview), 12));
         }
         if show_path_actions {
             let mut actions = vec![
@@ -7604,11 +7619,11 @@ impl DesktopApp {
 
         container(
             column![
-                text("Live load failed; visible page may be stale").size(ui_size(18)),
-                text(format!("target: {}", warning.target)).size(ui_size(14)),
-                text(format!("visible: {visible}")).size(ui_size(14)),
-                text(format!("failure: {}", warning.message)).size(ui_size(14)),
-                text(format!("next: {}", warning.next_action)).size(ui_size(14)),
+                safe_timeline_text("Live load failed; visible page may be stale", 18),
+                safe_timeline_text(format!("target: {}", warning.target), 14),
+                safe_timeline_text(format!("visible: {visible}"), 14),
+                safe_timeline_text(format!("failure: {}", warning.message), 14),
+                safe_timeline_text(format!("next: {}", warning.next_action), 14),
                 actions,
             ]
             .spacing(4),
@@ -9159,6 +9174,7 @@ impl DesktopApp {
                         ),
                         wrapped_text_owned(format!("task: {}", self.app.status.task), 14),
                         wrapped_text_owned(format!("identity: {}", self.app.status.identity), 14),
+                        wrapped_text_owned(self.app.native_lxmf_sdk_rpc_probe_line(), 14),
                     ]
                     .spacing(4),
                 ),
@@ -9494,7 +9510,7 @@ impl DesktopApp {
         .into()
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn omenchat_live_monitor_totals(&self) -> OmenChatLiveMonitorTotals {
         let mut history_sync_waiting: HashSet<ChatSessionId> =
             self.omenchat_recent_sync_pending.iter().copied().collect();
@@ -9545,7 +9561,7 @@ impl DesktopApp {
     }
 
     fn omenchat_monitoring_card(&self) -> Element<'_, Message> {
-        #[cfg(feature = "chat-client-rns")]
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         {
             let now = current_epoch_ms();
             let mut lines = column![].spacing(6);
@@ -9790,7 +9806,7 @@ impl DesktopApp {
             }
             section_card("OMENchat Live Links", lines)
         }
-        #[cfg(not(feature = "chat-client-rns"))]
+        #[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
         {
             section_card(
                 "OMENchat Live Links",
@@ -10593,6 +10609,24 @@ fn wrapped_text_owned(content: impl Into<String>, size: u16) -> Text<'static> {
         .width(Length::Fill)
 }
 
+fn safe_timeline_text<'a>(content: impl Into<String>, size: u16) -> Text<'a> {
+    const MAX_TIMELINE_TEXT_CHARS: usize = 16_384;
+    let mut content = printable_label(&content.into());
+    if content.chars().count() > MAX_TIMELINE_TEXT_CHARS {
+        content = format!(
+            "{}\n[message preview truncated for renderer safety]",
+            content
+                .chars()
+                .take(MAX_TIMELINE_TEXT_CHARS)
+                .collect::<String>()
+        );
+    }
+    text(content)
+        .size(ui_size(size))
+        .wrapping(Wrapping::WordOrGlyph)
+        .width(Length::Fill)
+}
+
 fn tooltip_icon_button<'a>(
     icon: &'a str,
     label: &'static str,
@@ -10940,7 +10974,10 @@ fn scroll_offset_should_show_history_notice(offset: RelativeOffset) -> bool {
     sanitize_scroll_offset(offset).y <= 0.88
 }
 
-#[cfg(all(feature = "chat-client", feature = "chat-client-rns"))]
+#[cfg(all(
+    feature = "chat-client",
+    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+))]
 fn omenchat_recent_sync_wants_bottom_restore(events: &[ChatClientEvent]) -> bool {
     events.iter().any(|event| {
         matches!(
@@ -12213,7 +12250,7 @@ fn compact_elapsed_ms(milliseconds: u64) -> String {
     }
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_monitor_health_line(totals: &OmenChatLiveMonitorTotals) -> String {
     if totals.sessions == 0 {
         return "health: no OMENchat sessions open".into();
@@ -12276,7 +12313,7 @@ fn omenchat_monitor_health_line(totals: &OmenChatLiveMonitorTotals) -> String {
     )
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 struct OmenChatSessionAttention<'a> {
     connected: bool,
     opening: bool,
@@ -12288,7 +12325,7 @@ struct OmenChatSessionAttention<'a> {
     history_sync_label: &'a str,
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_session_attention_line(attention: OmenChatSessionAttention<'_>) -> String {
     if attention.opening {
         return "attention: opening live OMENchat link".into();
@@ -13608,7 +13645,7 @@ fn request_session_id(request: &ChatClientRequest) -> Option<ChatSessionId> {
     }
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn delayed_omenchat_reconnect_if_disconnected_task(session_id: ChatSessionId) -> Task<Message> {
     Task::perform(
         async move {
@@ -13619,7 +13656,7 @@ fn delayed_omenchat_reconnect_if_disconnected_task(session_id: ChatSessionId) ->
     )
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_live_open_error_status(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("request_path") || lower.contains("path to") && lower.contains("not known") {
@@ -13642,14 +13679,14 @@ fn omenchat_live_open_error_status(error: &str) -> String {
     }
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_close_reason_is_timeout(reason: Option<&str>) -> bool {
     reason
         .map(str::trim)
         .is_some_and(|reason| reason.eq_ignore_ascii_case("timeout"))
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_close_reason_allows_quick_reconnect(reason: Option<&str>) -> bool {
     let Some(reason) = reason.map(str::trim) else {
         return false;
@@ -13659,7 +13696,7 @@ fn omenchat_close_reason_allows_quick_reconnect(reason: Option<&str>) -> bool {
         || reason.eq_ignore_ascii_case("initiatorclosed")
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -16014,7 +16051,7 @@ mod tests {
         assert_eq!(counts.get(&(9, 3)), Some(&0));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_load_older_uses_cache_when_live_session_is_disconnected() {
         let root = std::env::temp_dir().join(format!(
@@ -16345,7 +16382,7 @@ mod tests {
         assert!(desktop.chat_scroll_bottom_locks.contains(&(session_id, 1)));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_load_older_reports_reconnect_when_disconnected_cache_is_empty() {
         let root = std::env::temp_dir().join(format!(
@@ -17240,7 +17277,7 @@ mod tests {
         assert!(saved.conversation_tabs.is_empty());
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_stale_reconnect_result_does_not_finish_current_attempt() {
         let root = std::env::temp_dir().join(format!(
@@ -17302,7 +17339,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_path_result_uses_guarded_delayed_reconnect_status() {
         let root = std::env::temp_dir().join(format!(
@@ -17374,7 +17411,7 @@ mod tests {
             .contains("reconnecting after announce wait"));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_delayed_reconnect_clears_stale_retry_state_when_link_is_active() {
         let root = std::env::temp_dir().join(format!(
@@ -17425,7 +17462,7 @@ mod tests {
             .contains("already active"));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[tokio::test]
     async fn omenchat_live_monitor_totals_aggregate_sessions_and_transfers() {
         let root = std::env::temp_dir().join(format!(
@@ -17502,7 +17539,7 @@ mod tests {
         assert_eq!(totals.awaiting_pongs, 1);
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_monitor_health_line_prioritizes_actionable_states() {
         assert_eq!(
@@ -17564,7 +17601,7 @@ mod tests {
         assert!(omenchat_monitor_health_line(&quiet).contains("connected and quiet"));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_session_attention_line_prioritizes_stalls_without_network_actions() {
         let attention = |connected,
@@ -17650,7 +17687,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[tokio::test]
     async fn omenchat_recent_sync_monitor_label_reports_retry_and_current() {
         let root = std::env::temp_dir().join(format!(
@@ -17696,7 +17733,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[tokio::test]
     async fn omenchat_transport_tracks_ping_pong_rtt_for_monitoring() {
         let mut transport = DesktopOmenChatTransport::new([0x71; 16], 1_000);
@@ -17720,7 +17757,7 @@ mod tests {
         assert!(!transport.awaiting_pong);
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[tokio::test]
     async fn omenchat_registered_live_transport_syncs_recent_history() {
         let root = std::env::temp_dir().join(format!(
@@ -17790,7 +17827,7 @@ mod tests {
         assert!(desktop.restore_workspace_scrolls_pending);
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[tokio::test]
     async fn omenchat_recent_sync_preserves_manual_scrollback() {
         let root = std::env::temp_dir().join(format!(
@@ -17852,7 +17889,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[tokio::test]
     async fn omenchat_live_transport_due_sync_catches_restored_room_without_join_event() {
         let root = std::env::temp_dir().join(format!(
@@ -17920,7 +17957,7 @@ mod tests {
         }));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[tokio::test]
     async fn omenchat_recent_sync_request_alone_does_not_suppress_later_join_sync() {
         let root = std::env::temp_dir().join(format!(
@@ -18018,7 +18055,7 @@ mod tests {
         }));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[tokio::test]
     async fn omenchat_room_join_before_transport_registers_defers_recent_sync() {
         let root = std::env::temp_dir().join(format!(
@@ -18092,7 +18129,7 @@ mod tests {
         }));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_timeout_close_marks_session_for_quick_reconnect() {
         let root = std::env::temp_dir().join(format!(
@@ -18152,7 +18189,7 @@ mod tests {
         assert!(status.contains("reconnecting"));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_destination_closed_marks_session_for_quick_reconnect() {
         let root = std::env::temp_dir().join(format!(
@@ -18205,7 +18242,7 @@ mod tests {
         assert!(status.contains("reconnecting"));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_non_retryable_close_waits_for_manual_reconnect() {
         let root = std::env::temp_dir().join(format!(
@@ -18261,7 +18298,7 @@ mod tests {
         assert!(status.contains("use Reconnect"));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_stale_link_close_does_not_disconnect_active_link() {
         let root = std::env::temp_dir().join(format!(
@@ -19822,7 +19859,7 @@ mod tests {
             .any(|(_, pane)| matches!(pane, DesktopPane::OmenChat(_))));
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[tokio::test]
     async fn close_omenchat_session_clears_live_transport_and_retry_state() {
         let root = std::env::temp_dir().join(format!(
@@ -20646,8 +20683,8 @@ mod tests {
         assert!(server_help.contains("reticulum/storage/pages/index.mu"));
         assert!(server_help.contains("omenchat.node"));
         assert!(server_help.contains("nomadnetwork.node"));
-        assert!(server_help.contains("--features live-rns-net -- run"));
-        assert!(server_help.contains("--features live-rns-net -- tui"));
+        assert!(server_help.contains("--features live-reticulum -- run"));
+        assert!(server_help.contains("--features live-reticulum -- tui"));
 
         let history_help = OMENCHAT_HISTORY_HELP_LINES.join("\n");
         assert!(history_help.contains("bounded recent room history"));
@@ -20790,7 +20827,7 @@ mod tests {
                 "markup_bytes": 128,
                 "markup_lines": 6,
                 "metadata": {
-                    "native_request_backend": "rns-net"
+                    "native_request_backend": "reticulum_transport"
                 }
             }
         }))
@@ -20802,7 +20839,7 @@ mod tests {
         let card = diagnostics_preview_live_fetch_card(&lines).expect("live fetch card");
         assert_eq!(card.outcome, "pass");
         assert_eq!(card.stage_hint, "response_decode");
-        assert_eq!(card.request_backend, "rns-net");
+        assert_eq!(card.request_backend, "reticulum_transport");
         assert_eq!(card.response_size, "128 bytes, 6 lines");
         assert_eq!(card.first_failed_stage, "live_fetch");
     }
@@ -21359,13 +21396,13 @@ mod tests {
         assert!(setup_tcp_client_profile(&app).is_some());
     }
 
-    #[cfg(feature = "chat-client-rns")]
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_live_open_errors_have_user_visible_statuses() {
         assert!(omenchat_live_open_error_status("has no known identity key")
             .contains("path/key missing"));
         assert!(omenchat_live_open_error_status(
-            "timed out waiting for rns-net link establishment"
+            "timed out waiting for Reticulum 0.6 link establishment"
         )
         .contains("Link handshake"));
         assert!(
@@ -21488,7 +21525,7 @@ mod tests {
             .contains("restored existing OMENchat session"));
     }
 
-    #[cfg(feature = "chat-client")]
+    #[cfg(all(feature = "chat-client", feature = "mock-runtime"))]
     #[test]
     fn opening_destination_from_blank_chat_replaces_blank_pane() {
         let root = std::env::temp_dir().join(format!(
@@ -21503,6 +21540,7 @@ mod tests {
             settings: crate::storage::settings::AppSettings::default(),
         });
         let mut desktop = DesktopApp::new(app);
+        desktop.app.runtime_status.connected = false;
 
         let _ = desktop.update(Message::NewOmenChatPane);
         let blank_id = desktop.chat_client.sessions()[0].session_id;
@@ -21530,7 +21568,7 @@ mod tests {
             .all(|(_, pane)| *pane != DesktopPane::OmenChat(blank_id)));
     }
 
-    #[cfg(feature = "chat-client")]
+    #[cfg(all(feature = "chat-client", feature = "mock-runtime"))]
     #[test]
     fn opening_different_omenchat_destinations_creates_separate_sessions() {
         let root = std::env::temp_dir().join(format!(
@@ -21545,6 +21583,7 @@ mod tests {
             settings: crate::storage::settings::AppSettings::default(),
         });
         let mut desktop = DesktopApp::new(app);
+        desktop.app.runtime_status.connected = false;
 
         desktop.omenchat_server_entry = FIXTURE_CHAT_SERVER_HASH.into();
         let _ = desktop.update(Message::OpenOmenChatServerEntry);

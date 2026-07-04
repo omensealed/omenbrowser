@@ -1,8 +1,8 @@
 use crate::config::ServerConfig;
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::live::{ActiveLinkSummary, LiveServerStats};
 use crate::tui_format::{fit_line_to_width, human_age_duration, human_bytes, human_timestamp};
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::tui_format::{human_bytes_per_second, human_duration};
 
 pub(crate) struct ModerationUserText<'a> {
@@ -31,7 +31,7 @@ pub(crate) struct UserConsoleRowText<'a> {
     pub(crate) lxmf_destination: &'a str,
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) struct ActiveLinkMonitoringText {
     pub(crate) name: String,
     pub(crate) identity: String,
@@ -48,7 +48,7 @@ pub(crate) struct ActiveLinkMonitoringText {
     pub(crate) link_id: String,
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) struct ClosedLinkMonitoringText {
     pub(crate) name: String,
     pub(crate) identity: String,
@@ -206,7 +206,7 @@ pub(crate) fn admin_help_text() -> String {
         "OMENchat announces as omenchat.node. Operators should not change that service type; it is how OMENbrowser_rs discovers chat servers.",
         "The optional NomadNet portal announces separately as nomadnetwork.node and always serves /page/index.mu. It is for MOTD/rules/portal text, not chat traffic.",
         "Users join chat with omenchat://<destination_hash>. NomadNet links are only the quiet launch/portal path.",
-        "The TUI starts the same live Reticulum path as `omenchatd run` when built with live-rns-net.",
+        "The TUI starts the same live Reticulum path as `omenchatd run` when built with live-reticulum.",
         "",
         "Traffic And Upload Policy",
         "",
@@ -776,7 +776,7 @@ pub(crate) fn user_console_row_text(user: &UserConsoleRowText<'_>) -> String {
     )
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn upload_transfer_summary(stats: &LiveServerStats) -> String {
     if stats.upload_offers_in == 0
         && stats.upload_fetches_in == 0
@@ -798,7 +798,7 @@ pub(crate) fn upload_transfer_summary(stats: &LiveServerStats) -> String {
     )
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn interface_health_label(interface_lines: &[String]) -> String {
     if interface_lines.is_empty() {
         return "waiting for Reticulum interface stats".into();
@@ -820,7 +820,7 @@ pub(crate) fn interface_health_label(interface_lines: &[String]) -> String {
     "disconnected; watchdog will rebuild runtime after repeated samples".into()
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn closed_link_status_label(reason: &str) -> &'static str {
     let reason = reason.to_ascii_lowercase();
     if reason.contains("duplicate identity") || reason.contains("replaced") {
@@ -843,7 +843,7 @@ pub(crate) fn closed_link_status_label(reason: &str) -> &'static str {
     }
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn closed_link_churn_summary(recent_close_reasons: &[&str]) -> String {
     if recent_close_reasons.is_empty() {
         return "recent close summary: none".into();
@@ -887,7 +887,7 @@ pub(crate) fn closed_link_churn_summary(recent_close_reasons: &[&str]) -> String
     )
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn active_link_activity_label(
     link: &ActiveLinkSummary,
     now_unix: i64,
@@ -926,7 +926,7 @@ pub(crate) fn active_link_activity_label(
     ))
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn traffic_delta_text(
     previous: &LiveServerStats,
     current: &LiveServerStats,
@@ -994,7 +994,7 @@ pub(crate) fn traffic_delta_text(
     )
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn server_health_label(
     stats: &LiveServerStats,
     recent_close_reasons: &[&str],
@@ -1027,7 +1027,7 @@ pub(crate) fn server_health_label(
     "server health: ok".into()
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn monitoring_operator_summary_text(
     stats: Option<&LiveServerStats>,
     interface_lines: &[String],
@@ -1089,7 +1089,7 @@ pub(crate) fn monitoring_operator_summary_text(
     .join("\n")
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn active_link_monitoring_line(link: &ActiveLinkMonitoringText) -> String {
     format!(
         "  {name} [{identity}] {room} | age {age} | {activity} | rx {frames} frame(s), {bytes} | req h={history} p={ping} chat={chat} cmd={command} up={upload} | link {link_id}",
@@ -1109,7 +1109,7 @@ pub(crate) fn active_link_monitoring_line(link: &ActiveLinkMonitoringText) -> St
     )
 }
 
-#[cfg(any(test, feature = "live-rns-net"))]
+#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 pub(crate) fn closed_link_monitoring_line(link: &ClosedLinkMonitoringText) -> String {
     format!(
         "  {name} [{identity}] {room} | {status} | connected {connected_for} | closed {closed_ago} ago | reason {reason} | link {link_id}",
@@ -1788,7 +1788,7 @@ mod tests {
         assert!(text.contains("identity=70656572 lxmf=lxmf-old"));
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn upload_transfer_summary_reports_idle_and_activity() {
         assert_eq!(upload_transfer_summary(&LiveServerStats::default()), "idle");
@@ -1812,7 +1812,7 @@ mod tests {
         assert!(text.contains("resource offers 5"));
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn interface_health_label_classifies_operator_states() {
         assert_eq!(
@@ -1837,7 +1837,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn closed_link_status_label_classifies_operator_reasons() {
         assert_eq!(
@@ -1860,7 +1860,7 @@ mod tests {
         assert_eq!(closed_link_status_label("decode failed"), "check logs");
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn closed_link_churn_summary_groups_operator_reasons() {
         assert_eq!(closed_link_churn_summary(&[]), "recent close summary: none");
@@ -1881,7 +1881,7 @@ mod tests {
         assert!(summary.contains("investigate 1"));
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn active_link_activity_label_flags_noisy_clients() {
         let link = ActiveLinkSummary {
@@ -1910,7 +1910,7 @@ mod tests {
         assert!(label.contains("high upload"));
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn traffic_delta_text_reports_recent_activity_mix() {
         let previous = LiveServerStats {
@@ -1948,7 +1948,7 @@ mod tests {
         ));
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn server_health_label_summarizes_recent_link_churn() {
         let stats = LiveServerStats {
@@ -1985,7 +1985,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn monitoring_operator_summary_reports_stopped_and_live_health() {
         let stopped = monitoring_operator_summary_text(None, &[], "waiting for next sample", &[]);
@@ -2033,7 +2033,7 @@ mod tests {
         assert!(text.contains("health: ok"));
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn monitoring_operator_summary_flags_problem_counters() {
         let stats = LiveServerStats {
@@ -2054,7 +2054,7 @@ mod tests {
         assert!(text.contains("health: check problem counters (6 total)"));
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn active_link_monitoring_line_groups_identity_rate_and_requests() {
         let line = active_link_monitoring_line(&ActiveLinkMonitoringText {
@@ -2081,7 +2081,7 @@ mod tests {
         assert!(line.contains("link aaaaaaaa"));
     }
 
-    #[cfg(any(test, feature = "live-rns-net"))]
+    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     #[test]
     fn closed_link_monitoring_line_groups_status_and_reason() {
         let line = closed_link_monitoring_line(&ClosedLinkMonitoringText {

@@ -2,6 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use omenbrowser_rs::app::{App, SmokeKnownDestinationsPreload, SmokePathWarmup};
 use omenbrowser_rs::config::{AppConfig, AppPaths};
+use omenbrowser_rs::messaging::DeliveryMode;
 use omenbrowser_rs::storage::settings::{AppSettings, RuntimeBackendSetting};
 
 const FIXTURE_NODE_HASH: &str = "00112233445566778899aabbccddeeff";
@@ -164,7 +165,12 @@ async fn native_lxmf_smoke_send_report_skips_send_when_not_ready() {
     let app = App::new(test_config("native-lxmf-smoke-send-skip"));
 
     let report = app
-        .native_lxmf_smoke_send_report_for_peer(FIXTURE_NODE_HASH)
+        .native_lxmf_smoke_send_report_for_peer(
+            FIXTURE_NODE_HASH,
+            DeliveryMode::Direct,
+            None,
+            false,
+        )
         .await
         .expect("smoke send report");
 
@@ -206,7 +212,7 @@ async fn native_lxmf_live_interop_report_announces_and_waits_without_peer_send()
     let app = App::new(test_config("native-lxmf-live-interop"));
 
     let report = app
-        .native_lxmf_live_interop_report(None, 0)
+        .native_lxmf_live_interop_report(None, 0, DeliveryMode::Direct, None, false)
         .await
         .expect("interop report");
 

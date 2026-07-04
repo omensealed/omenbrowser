@@ -1,7 +1,7 @@
 use crate::interfaces::{InterfaceKind, ReticulumInterfaceProfile};
 use crate::runtime::native::NativeRuntimeError;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NativeInterfacePlan {
     pub profile_id: String,
     pub name: String,
@@ -10,8 +10,29 @@ pub struct NativeInterfacePlan {
     pub supported: bool,
     pub endpoint: Option<NativeTcpEndpoint>,
     pub ifac_network_name: Option<String>,
+    pub ifac_passphrase: Option<String>,
     pub ifac_configured: bool,
     pub reason: Option<String>,
+}
+
+impl std::fmt::Debug for NativeInterfacePlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeInterfacePlan")
+            .field("profile_id", &self.profile_id)
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("enabled", &self.enabled)
+            .field("supported", &self.supported)
+            .field("endpoint", &self.endpoint)
+            .field("ifac_network_name", &self.ifac_network_name)
+            .field(
+                "ifac_passphrase",
+                &self.ifac_passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .field("ifac_configured", &self.ifac_configured)
+            .field("reason", &self.reason)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +60,7 @@ pub fn plan_interface(profile: &ReticulumInterfaceProfile) -> NativeInterfacePla
         supported,
         endpoint,
         ifac_network_name: (!profile.network_name.is_empty()).then(|| profile.network_name.clone()),
+        ifac_passphrase: (!profile.passphrase.is_empty()).then(|| profile.passphrase.clone()),
         ifac_configured: !profile.network_name.is_empty() || !profile.passphrase.is_empty(),
         reason: (!supported)
             .then(|| "native interface startup is not implemented for this profile kind".into()),

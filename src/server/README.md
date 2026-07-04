@@ -16,8 +16,8 @@ Standalone check:
 ```bash
 cd src/server
 cargo check
-cargo check --features live-rns-net
-cargo run --features live-rns-net -- init
+cargo check --features live-reticulum
+cargo run --features live-reticulum -- init
 ```
 
 Initial commands:

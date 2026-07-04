@@ -75,7 +75,7 @@ pub fn load_transport_private_identity_file(
         .map_err(|_| NativeRuntimeError::IdentityInvalid)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 pub fn load_rns_net_proof_signing_key_file(path: &Path) -> Result<[u8; 64], NativeRuntimeError> {
     let raw = std::fs::read(path).map_err(|_| NativeRuntimeError::IdentityMissing)?;
     load_private_identity_bytes(&raw)?;
@@ -83,7 +83,7 @@ pub fn load_rns_net_proof_signing_key_file(path: &Path) -> Result<[u8; 64], Nati
         .map_err(|_| NativeRuntimeError::IdentityInvalid)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 pub fn rns_net_identity_from_signing_key(signing_key: &[u8; 64]) -> rns_crypto::identity::Identity {
     rns_crypto::identity::Identity::from_private_key(signing_key)
 }
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(identity.address_hash().to_hex_string().len(), 32);
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn rns_net_proof_signing_key_loads_full_private_identity_key() {
         let root = temp_dir("proof-key");
@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(key.len(), 64);
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn rns_net_identity_from_signing_key_preserves_identity_hash() {
         let root = temp_dir("rns-net-identity");
@@ -212,7 +212,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     fn hex_bytes(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }

@@ -1,18 +1,18 @@
 use anyhow::Context;
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use omenbrowser_rs::app::{App, LogEntry, SmokePathWarmup};
 use omenbrowser_rs::browser::BrowserAddress;
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use omenbrowser_rs::chat::rns::ChatLinkTransport;
 use omenbrowser_rs::config::{AppConfig, AppPaths};
 #[cfg(feature = "desktop-ui")]
 use omenbrowser_rs::desktop;
 use omenbrowser_rs::interfaces::ReticulumInterfaceProfile;
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use omenbrowser_rs::runtime::{CancellationToken, RuntimeBusEvent};
 use omenbrowser_rs::storage::settings::RuntimeBackendSetting;
 #[cfg(feature = "tui")]
@@ -30,13 +30,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "omenbrowser_rs=info".into()),
+                .unwrap_or_else(|_| "omenbrowser_rs=info,reticulum_rs_transport=warn".into()),
         )
         .with_writer(std::io::stderr)
-        .init();
+        .try_init();
 
     let cli = CliCommand::parse(std::env::args().skip(1))?;
     if matches!(cli, CliCommand::Help) {
@@ -74,6 +74,9 @@ async fn async_main() -> anyhow::Result<()> {
             live,
             fetch,
             lxmf_smoke_peer,
+            lxmf_smoke_delivery_mode,
+            lxmf_smoke_propagation_node,
+            lxmf_include_ticket,
             lxmf_interop_wait_secs,
             warmup,
             output,
@@ -87,6 +90,9 @@ async fn async_main() -> anyhow::Result<()> {
                 live,
                 fetch,
                 lxmf_smoke_peer,
+                lxmf_smoke_delivery_mode,
+                lxmf_smoke_propagation_node,
+                lxmf_include_ticket,
                 lxmf_interop_wait_secs,
                 warmup,
                 output,
@@ -137,6 +143,9 @@ async fn async_main() -> anyhow::Result<()> {
         }
         CliCommand::LxmfInterop {
             peer_hash,
+            lxmf_smoke_delivery_mode,
+            lxmf_smoke_propagation_node,
+            lxmf_include_ticket,
             wait_secs,
             output,
             stdout,
@@ -146,7 +155,30 @@ async fn async_main() -> anyhow::Result<()> {
         } => {
             run_lxmf_interop_command(LxmfInteropCommandInput {
                 peer_hash,
+                lxmf_smoke_delivery_mode,
+                lxmf_smoke_propagation_node,
+                lxmf_include_ticket,
                 wait_secs,
+                output,
+                stdout,
+                suggest_shell,
+                bundle_report,
+                overrides: *overrides,
+            })
+            .await
+        }
+        CliCommand::LxmfPropagationSync {
+            lxmf_smoke_propagation_node,
+            sync_limit,
+            output,
+            stdout,
+            suggest_shell,
+            bundle_report,
+            overrides,
+        } => {
+            run_lxmf_propagation_sync_command(LxmfPropagationSyncCommandInput {
+                lxmf_smoke_propagation_node,
+                sync_limit,
                 output,
                 stdout,
                 suggest_shell,
@@ -182,6 +214,9 @@ async fn async_main() -> anyhow::Result<()> {
         CliCommand::NativeLiveSequence {
             destination,
             lxmf_smoke_peer,
+            lxmf_smoke_delivery_mode,
+            lxmf_smoke_propagation_node,
+            lxmf_include_ticket,
             lxmf_interop_wait_secs,
             warmup,
             preflight_wait_ms,
@@ -194,6 +229,9 @@ async fn async_main() -> anyhow::Result<()> {
             run_native_live_sequence_command(NativeLiveSequenceCommandInput {
                 destination,
                 lxmf_smoke_peer,
+                lxmf_smoke_delivery_mode,
+                lxmf_smoke_propagation_node,
+                lxmf_include_ticket,
                 lxmf_interop_wait_secs,
                 warmup,
                 preflight_wait_ms,
@@ -235,6 +273,9 @@ enum CliCommand {
         live: bool,
         fetch: bool,
         lxmf_smoke_peer: Option<String>,
+        lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode,
+        lxmf_smoke_propagation_node: Option<String>,
+        lxmf_include_ticket: bool,
         lxmf_interop_wait_secs: Option<u64>,
         warmup: Option<SmokePathWarmup>,
         output: Option<PathBuf>,
@@ -263,6 +304,9 @@ enum CliCommand {
     NativeLiveSequence {
         destination: String,
         lxmf_smoke_peer: Option<String>,
+        lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode,
+        lxmf_smoke_propagation_node: Option<String>,
+        lxmf_include_ticket: bool,
         lxmf_interop_wait_secs: Option<u64>,
         warmup: SmokePathWarmup,
         preflight_wait_ms: u64,
@@ -274,7 +318,19 @@ enum CliCommand {
     },
     LxmfInterop {
         peer_hash: Option<String>,
+        lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode,
+        lxmf_smoke_propagation_node: Option<String>,
+        lxmf_include_ticket: bool,
         wait_secs: u64,
+        output: Option<PathBuf>,
+        stdout: bool,
+        suggest_shell: bool,
+        bundle_report: Option<PathBuf>,
+        overrides: Box<SmokeOverrides>,
+    },
+    LxmfPropagationSync {
+        lxmf_smoke_propagation_node: Option<String>,
+        sync_limit: Option<u32>,
         output: Option<PathBuf>,
         stdout: bool,
         suggest_shell: bool,
@@ -315,6 +371,8 @@ struct SmokeOverrides {
 struct TcpClientOverride {
     host: String,
     port: u16,
+    network_name: Option<String>,
+    passphrase: Option<String>,
 }
 
 struct NativeSmokeCommandInput {
@@ -322,6 +380,9 @@ struct NativeSmokeCommandInput {
     live: bool,
     fetch: bool,
     lxmf_smoke_peer: Option<String>,
+    lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode,
+    lxmf_smoke_propagation_node: Option<String>,
+    lxmf_include_ticket: bool,
     lxmf_interop_wait_secs: Option<u64>,
     warmup: Option<SmokePathWarmup>,
     output: Option<PathBuf>,
@@ -333,7 +394,20 @@ struct NativeSmokeCommandInput {
 
 struct LxmfInteropCommandInput {
     peer_hash: Option<String>,
+    lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode,
+    lxmf_smoke_propagation_node: Option<String>,
+    lxmf_include_ticket: bool,
     wait_secs: u64,
+    output: Option<PathBuf>,
+    stdout: bool,
+    suggest_shell: bool,
+    bundle_report: Option<PathBuf>,
+    overrides: SmokeOverrides,
+}
+
+struct LxmfPropagationSyncCommandInput {
+    lxmf_smoke_propagation_node: Option<String>,
+    sync_limit: Option<u32>,
     output: Option<PathBuf>,
     stdout: bool,
     suggest_shell: bool,
@@ -376,6 +450,9 @@ struct NativeStartupCommandInput {
 struct NativeLiveSequenceCommandInput {
     destination: String,
     lxmf_smoke_peer: Option<String>,
+    lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode,
+    lxmf_smoke_propagation_node: Option<String>,
+    lxmf_include_ticket: bool,
     lxmf_interop_wait_secs: Option<u64>,
     warmup: SmokePathWarmup,
     preflight_wait_ms: u64,
@@ -423,7 +500,15 @@ impl CliCommand {
         let mut live = false;
         let mut fetch = false;
         let mut lxmf_smoke_peer = None;
+        let mut lxmf_smoke_delivery_mode = omenbrowser_rs::messaging::DeliveryMode::Direct;
+        let mut lxmf_smoke_propagation_node = std::env::var("TEST_PROPAGATION")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && value != "PROPAGATION_NODE_ADDRESS");
+        let mut lxmf_include_ticket = false;
         let mut lxmf_interop_wait_secs = None;
+        let mut lxmf_sync_propagation = false;
+        let mut lxmf_sync_limit = None;
         let mut warmup = None;
         let mut preflight_wait_ms = 250;
         let mut output = None;
@@ -514,8 +599,37 @@ impl CliCommand {
                     })?;
                     lxmf_smoke_peer = Some(peer_hash);
                 }
+                "--lxmf-smoke-method" | "--lxmf-delivery" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires direct or propagated"))?;
+                    lxmf_smoke_delivery_mode = parse_lxmf_delivery_mode(&value)?;
+                }
+                "--propagation-node" | "--lxmf-propagation-node" => {
+                    let hash = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a propagation node hash"))?;
+                    lxmf_smoke_propagation_node = Some(hash);
+                }
+                "--lxmf-include-ticket" | "--include-ticket" => {
+                    lxmf_include_ticket = true;
+                }
                 "--lxmf-interop" | "--lxmf-live-interop" => {
                     lxmf_interop_wait_secs = Some(10);
+                }
+                "--lxmf-sync-propagation" | "--sync-lxmf-propagation" => {
+                    lxmf_sync_propagation = true;
+                }
+                "--lxmf-sync-limit" | "--sync-limit" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a message limit"))?;
+                    lxmf_sync_limit = Some(
+                        value
+                            .parse::<u32>()
+                            .with_context(|| format!("invalid LXMF sync limit in {value}"))?,
+                    );
+                    lxmf_sync_propagation = true;
                 }
                 "--lxmf-wait" | "--lxmf-wait-secs" => {
                     let value = args
@@ -583,7 +697,30 @@ impl CliCommand {
                     let endpoint = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires host:port"))?;
-                    overrides.tcp_client = Some(parse_tcp_client_endpoint(&endpoint)?);
+                    let mut parsed_tcp = parse_tcp_client_endpoint(&endpoint)?;
+                    if let Some(existing) = overrides.tcp_client.take() {
+                        parsed_tcp.network_name = existing.network_name;
+                        parsed_tcp.passphrase = existing.passphrase;
+                    }
+                    overrides.tcp_client = Some(parsed_tcp);
+                }
+                "--network-name" => {
+                    let name = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a value"))?;
+                    let tcp = overrides
+                        .tcp_client
+                        .get_or_insert_with(TcpClientOverride::empty);
+                    tcp.network_name = Some(name);
+                }
+                "--passphrase" => {
+                    let passphrase = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a value"))?;
+                    let tcp = overrides
+                        .tcp_client
+                        .get_or_insert_with(TcpClientOverride::empty);
+                    tcp.passphrase = Some(passphrase);
                 }
                 "--app-root" => {
                     let path = args
@@ -619,6 +756,7 @@ impl CliCommand {
             + usize::from(frontend.is_some())
             + usize::from(omenchat_smoke_destination.is_some())
             + usize::from(generate_native_identity_label.is_some())
+            + usize::from(lxmf_sync_propagation)
             + usize::from(
                 lxmf_interop_wait_secs.is_some()
                     && command.is_none()
@@ -671,6 +809,9 @@ impl CliCommand {
             Ok(Self::NativeLiveSequence {
                 destination,
                 lxmf_smoke_peer,
+                lxmf_smoke_delivery_mode,
+                lxmf_smoke_propagation_node,
+                lxmf_include_ticket,
                 lxmf_interop_wait_secs,
                 warmup: warmup.unwrap_or(SmokePathWarmup { wait_secs: 10 }),
                 preflight_wait_ms,
@@ -699,6 +840,19 @@ impl CliCommand {
                 bundle_report,
                 overrides: Box::new(overrides),
             })
+        } else if lxmf_sync_propagation {
+            if overrides.runtime_backend.is_none() {
+                overrides.runtime_backend = Some(RuntimeBackendSetting::Reticulum);
+            }
+            Ok(Self::LxmfPropagationSync {
+                lxmf_smoke_propagation_node,
+                sync_limit: lxmf_sync_limit,
+                output,
+                stdout,
+                suggest_shell,
+                bundle_report,
+                overrides: Box::new(overrides),
+            })
         } else if let Some(destination) = native_validate_destination {
             if overrides.runtime_backend.is_none() {
                 overrides.runtime_backend = Some(RuntimeBackendSetting::Reticulum);
@@ -708,6 +862,9 @@ impl CliCommand {
                 live: true,
                 fetch: true,
                 lxmf_smoke_peer,
+                lxmf_smoke_delivery_mode,
+                lxmf_smoke_propagation_node,
+                lxmf_include_ticket,
                 lxmf_interop_wait_secs,
                 warmup: warmup.or(Some(SmokePathWarmup { wait_secs: 10 })),
                 output,
@@ -722,6 +879,9 @@ impl CliCommand {
                 live,
                 fetch,
                 lxmf_smoke_peer,
+                lxmf_smoke_delivery_mode,
+                lxmf_smoke_propagation_node,
+                lxmf_include_ticket,
                 lxmf_interop_wait_secs,
                 warmup,
                 output,
@@ -733,6 +893,9 @@ impl CliCommand {
         } else if let Some(wait_secs) = lxmf_interop_wait_secs {
             Ok(Self::LxmfInterop {
                 peer_hash: lxmf_smoke_peer,
+                lxmf_smoke_delivery_mode,
+                lxmf_smoke_propagation_node,
+                lxmf_include_ticket,
                 wait_secs,
                 output,
                 stdout,
@@ -754,6 +917,9 @@ async fn run_native_smoke_command(input: NativeSmokeCommandInput) -> anyhow::Res
         live,
         fetch,
         lxmf_smoke_peer,
+        lxmf_smoke_delivery_mode,
+        lxmf_smoke_propagation_node,
+        lxmf_include_ticket,
         lxmf_interop_wait_secs,
         warmup,
         output,
@@ -806,7 +972,12 @@ async fn run_native_smoke_command(input: NativeSmokeCommandInput) -> anyhow::Res
         .context("failed to collect native-network smoke report")?;
     if let Some(peer_hash) = lxmf_smoke_peer {
         let lxmf_report = app
-            .native_lxmf_smoke_send_report_for_peer(peer_hash.clone())
+            .native_lxmf_smoke_send_report_for_peer(
+                peer_hash.clone(),
+                lxmf_smoke_delivery_mode.clone(),
+                lxmf_smoke_propagation_node.clone(),
+                lxmf_include_ticket,
+            )
             .await
             .context("failed to collect native LXMF smoke-send report")?;
         if let Some(object) = report.as_object_mut() {
@@ -814,7 +985,13 @@ async fn run_native_smoke_command(input: NativeSmokeCommandInput) -> anyhow::Res
         }
         if let Some(wait_secs) = lxmf_interop_wait_secs {
             let interop_report = app
-                .native_lxmf_live_interop_report(Some(peer_hash), wait_secs)
+                .native_lxmf_live_interop_report(
+                    Some(peer_hash),
+                    wait_secs,
+                    lxmf_smoke_delivery_mode.clone(),
+                    lxmf_smoke_propagation_node.clone(),
+                    lxmf_include_ticket,
+                )
                 .await
                 .context("failed to collect native LXMF live interop report")?;
             if let Some(object) = report.as_object_mut() {
@@ -823,7 +1000,13 @@ async fn run_native_smoke_command(input: NativeSmokeCommandInput) -> anyhow::Res
         }
     } else if let Some(wait_secs) = lxmf_interop_wait_secs {
         let interop_report = app
-            .native_lxmf_live_interop_report(None, wait_secs)
+            .native_lxmf_live_interop_report(
+                None,
+                wait_secs,
+                lxmf_smoke_delivery_mode.clone(),
+                lxmf_smoke_propagation_node.clone(),
+                lxmf_include_ticket,
+            )
             .await
             .context("failed to collect native LXMF live interop report")?;
         if let Some(object) = report.as_object_mut() {
@@ -886,7 +1069,7 @@ async fn run_native_smoke_command(input: NativeSmokeCommandInput) -> anyhow::Res
     Ok(())
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 #[derive(Clone, Debug, Default)]
 struct OmenChatSmokeTransport {
     incoming_frames: VecDeque<Vec<u8>>,
@@ -895,7 +1078,7 @@ struct OmenChatSmokeTransport {
     outgoing_frames: Vec<Vec<u8>>,
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 impl OmenChatSmokeTransport {
     fn push_incoming_frame(&mut self, frame: Vec<u8>) {
         self.incoming_frames.push_back(frame);
@@ -920,7 +1103,7 @@ impl OmenChatSmokeTransport {
     }
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 impl ChatLinkTransport for OmenChatSmokeTransport {
     fn send_frame(&mut self, frame_bytes: Vec<u8>) -> anyhow::Result<()> {
         self.outgoing_frames.push(frame_bytes);
@@ -948,7 +1131,7 @@ impl ChatLinkTransport for OmenChatSmokeTransport {
     }
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> {
     use omenbrowser_rs::chat::{
         ChatClient, ChatClientEvent, ChatClientRequest, OmenChatDescriptor,
@@ -1118,6 +1301,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         &mut runtime_events,
         opened.link_id,
         &mut client,
+        &mut live_state,
         &mut transport,
         session_id,
         Duration::from_secs(response_wait_secs),
@@ -1162,6 +1346,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
             &mut runtime_events,
             opened.link_id,
             &mut client,
+            &mut live_state,
             &mut transport,
             session_id,
             Duration::from_secs(response_wait_secs),
@@ -1221,12 +1406,12 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
     Ok(())
 }
 
-#[cfg(not(feature = "chat-client-rns"))]
+#[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
 async fn run_omenchat_smoke_command(_input: OmenChatSmokeCommandInput) -> anyhow::Result<()> {
-    anyhow::bail!("OMENchat smoke requires --features chat-client-rns")
+    anyhow::bail!("OMENchat smoke requires --features chat-client-rns or chat-client-rns-clean")
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 async fn send_omenchat_smoke_outgoing(
     runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
     link_id: [u8; 16],
@@ -1241,11 +1426,12 @@ async fn send_omenchat_smoke_outgoing(
     Ok(())
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 async fn wait_for_omenchat_condition(
     runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
     link_id: [u8; 16],
     client: &mut omenbrowser_rs::chat::ChatClient,
+    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
     transport: &mut OmenChatSmokeTransport,
     session_id: omenbrowser_rs::chat::ChatSessionId,
     wait: Duration,
@@ -1278,8 +1464,9 @@ async fn wait_for_omenchat_condition(
             RuntimeBusEvent::OmenChatLinkData(data) if data.link_id == link_id => {
                 let bytes = data.frame_bytes.len();
                 transport.push_incoming_frame(data.frame_bytes);
-                let decoded = omenbrowser_rs::chat::live::drain_live_events(
+                let decoded = omenbrowser_rs::chat::live::drain_live_events_with_state(
                     client,
+                    live_state,
                     transport,
                     Some(session_id),
                 );
@@ -1293,8 +1480,9 @@ async fn wait_for_omenchat_condition(
                 let bytes = data.data.len();
                 let metadata_len = data.metadata.as_ref().map_or(0, Vec::len);
                 transport.push_resource(data.metadata, data.data);
-                let decoded = omenbrowser_rs::chat::live::drain_live_events(
+                let decoded = omenbrowser_rs::chat::live::drain_live_events_with_state(
                     client,
+                    live_state,
                     transport,
                     Some(session_id),
                 );
@@ -1323,7 +1511,7 @@ async fn wait_for_omenchat_condition(
     events
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 async fn collect_runtime_trace(
     runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
     wait: Duration,
@@ -1374,7 +1562,7 @@ async fn collect_runtime_trace(
     events
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_session_contains_message(
     client: &omenbrowser_rs::chat::ChatClient,
     session_id: omenbrowser_rs::chat::ChatSessionId,
@@ -1382,6 +1570,9 @@ fn omenchat_session_contains_message(
 ) -> bool {
     client.session(session_id).is_some_and(|session| {
         session.events.iter().any(|event| {
+            if event.event_id > u64::MAX.saturating_sub(1_000_000) {
+                return false;
+            }
             matches!(
                 &event.kind,
                 omenbrowser_rs::chat::ChatEventKind::Message { body }
@@ -1394,7 +1585,7 @@ fn omenchat_session_contains_message(
     })
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_json::Value {
     match event {
         omenbrowser_rs::chat::ChatClientEvent::ServerOpened { session_id, server } => {
@@ -1556,7 +1747,7 @@ fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_jso
     }
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn format_chat_timeline_event(event: &omenbrowser_rs::chat::ChatEvent) -> serde_json::Value {
     let (kind, body) = match &event.kind {
         omenbrowser_rs::chat::ChatEventKind::Message { body } => ("message", body.as_str()),
@@ -1589,7 +1780,7 @@ fn format_chat_timeline_event(event: &omenbrowser_rs::chat::ChatEvent) -> serde_
     value
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_smoke_report(
     ok: bool,
     stage: &str,
@@ -1623,7 +1814,7 @@ fn omenchat_smoke_report(
     })
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn write_omenchat_smoke_report(
     report: serde_json::Value,
     output: Option<PathBuf>,
@@ -1664,7 +1855,7 @@ fn write_omenchat_smoke_report(
     Ok(())
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn default_omenchat_smoke_report_path(diagnostics_dir: &std::path::Path) -> PathBuf {
     let epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1673,7 +1864,7 @@ fn default_omenchat_smoke_report_path(diagnostics_dir: &std::path::Path) -> Path
     diagnostics_dir.join(format!("omenchat-smoke-{epoch}.json"))
 }
 
-#[cfg(feature = "chat-client-rns")]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -1681,6 +1872,9 @@ fn hex_bytes(bytes: &[u8]) -> String {
 async fn run_lxmf_interop_command(input: LxmfInteropCommandInput) -> anyhow::Result<()> {
     let LxmfInteropCommandInput {
         peer_hash,
+        lxmf_smoke_delivery_mode,
+        lxmf_smoke_propagation_node,
+        lxmf_include_ticket,
         wait_secs,
         output,
         stdout,
@@ -1700,7 +1894,13 @@ async fn run_lxmf_interop_command(input: LxmfInteropCommandInput) -> anyhow::Res
         .await
         .context("failed to start configured runtime for LXMF interop")?;
     let mut report = app
-        .native_lxmf_live_interop_report(peer_hash, wait_secs)
+        .native_lxmf_live_interop_report(
+            peer_hash,
+            wait_secs,
+            lxmf_smoke_delivery_mode,
+            lxmf_smoke_propagation_node,
+            lxmf_include_ticket,
+        )
         .await
         .context("failed to collect native LXMF live interop report")?;
     add_lxmf_interop_suggested_commands(&mut report, wait_secs);
@@ -1745,6 +1945,92 @@ async fn run_lxmf_interop_command(input: LxmfInteropCommandInput) -> anyhow::Res
             identity_path: identity_path.as_ref(),
         })
         .context("failed to write LXMF interop bundle report")?;
+        if stdout {
+            eprintln!("{}", bundle_dir.display());
+        } else {
+            println!("{}", bundle_dir.display());
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_lxmf_propagation_sync_command(
+    input: LxmfPropagationSyncCommandInput,
+) -> anyhow::Result<()> {
+    let LxmfPropagationSyncCommandInput {
+        lxmf_smoke_propagation_node,
+        sync_limit,
+        output,
+        stdout,
+        suggest_shell,
+        bundle_report,
+        overrides,
+    } = input;
+    let mut config = load_config_for_smoke(overrides.app_root.clone())
+        .context("failed to load LXMF propagation sync app configuration")?;
+    let selected_node = lxmf_smoke_propagation_node
+        .clone()
+        .or_else(|| config.settings.preferred_propagation_node_hash.clone());
+    if let Some(node) = selected_node.clone() {
+        config.settings.preferred_propagation_node_hash = Some(node);
+    }
+    let interface_override = apply_smoke_overrides(&mut config, overrides.clone());
+    let default_output = output.is_none() && !stdout && bundle_report.is_none();
+    let diagnostics_dir = config.paths.diagnostics_dir.clone();
+    let logs_dir = config.paths.logs_dir.clone();
+    let identity_path = config.settings.identity_path.clone();
+    let mut app = App::try_new(config).context("failed to initialize application services")?;
+    app.start_runtime_for_smoke_test_with_interfaces(interface_override)
+        .await
+        .context("failed to start configured runtime for LXMF propagation sync")?;
+    let report = app
+        .native_lxmf_propagation_diagnostics_report(selected_node, sync_limit)
+        .await;
+    let content = serde_json::to_string_pretty(&report)
+        .context("failed to render LXMF propagation sync report JSON")?;
+    let summary = render_report_summary_with_options(&report, suggest_shell);
+
+    if stdout {
+        eprintln!("{summary}");
+        println!("{content}");
+    } else if suggest_shell {
+        eprintln!("{summary}");
+    }
+
+    if let Some(path) = output.or_else(|| {
+        default_output.then(|| default_lxmf_propagation_sync_report_path(&diagnostics_dir))
+    }) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create output directory {}", parent.display())
+            })?;
+        }
+        std::fs::write(&path, content.as_bytes()).with_context(|| {
+            format!(
+                "failed to write LXMF propagation sync report {}",
+                path.display()
+            )
+        })?;
+        if stdout {
+            eprintln!("{}", path.display());
+        } else {
+            println!("{}", path.display());
+        }
+    }
+
+    if let Some(root) = bundle_report {
+        let bundle_dir = write_report_bundle(ReportBundleInput {
+            root: &root,
+            prefix: "native-lxmf-propagation-sync",
+            command_kind: "lxmf_propagation_sync",
+            report: &report,
+            summary: &summary,
+            overrides: &overrides,
+            logs_dir: &logs_dir,
+            identity_path: identity_path.as_ref(),
+        })
+        .context("failed to write LXMF propagation sync bundle report")?;
         if stdout {
             eprintln!("{}", bundle_dir.display());
         } else {
@@ -2012,6 +2298,9 @@ async fn run_native_live_sequence_command(
     let NativeLiveSequenceCommandInput {
         destination,
         lxmf_smoke_peer,
+        lxmf_smoke_delivery_mode,
+        lxmf_smoke_propagation_node,
+        lxmf_include_ticket,
         lxmf_interop_wait_secs,
         warmup,
         preflight_wait_ms,
@@ -2107,7 +2396,12 @@ async fn run_native_live_sequence_command(
             }
             if let Some(peer_hash) = lxmf_smoke_peer.clone() {
                 let lxmf_report = smoke_app
-                    .native_lxmf_smoke_send_report_for_peer(peer_hash.clone())
+                    .native_lxmf_smoke_send_report_for_peer(
+                        peer_hash.clone(),
+                        lxmf_smoke_delivery_mode.clone(),
+                        lxmf_smoke_propagation_node.clone(),
+                        lxmf_include_ticket,
+                    )
                     .await
                     .context("failed to collect native LXMF smoke-send report")?;
                 if let Some(object) = report.as_object_mut() {
@@ -2115,7 +2409,13 @@ async fn run_native_live_sequence_command(
                 }
                 if let Some(wait_secs) = lxmf_interop_wait_secs {
                     let interop_report = smoke_app
-                        .native_lxmf_live_interop_report(Some(peer_hash), wait_secs)
+                        .native_lxmf_live_interop_report(
+                            Some(peer_hash),
+                            wait_secs,
+                            lxmf_smoke_delivery_mode.clone(),
+                            lxmf_smoke_propagation_node.clone(),
+                            lxmf_include_ticket,
+                        )
                         .await
                         .context("failed to collect native LXMF live interop report")?;
                     if let Some(object) = report.as_object_mut() {
@@ -2124,7 +2424,13 @@ async fn run_native_live_sequence_command(
                 }
             } else if let Some(wait_secs) = lxmf_interop_wait_secs {
                 let interop_report = smoke_app
-                    .native_lxmf_live_interop_report(None, wait_secs)
+                    .native_lxmf_live_interop_report(
+                        None,
+                        wait_secs,
+                        lxmf_smoke_delivery_mode.clone(),
+                        lxmf_smoke_propagation_node.clone(),
+                        lxmf_include_ticket,
+                    )
                     .await
                     .context("failed to collect native LXMF live interop report")?;
                 if let Some(object) = report.as_object_mut() {
@@ -2494,6 +2800,12 @@ fn apply_smoke_overrides(
         let mut profile = ReticulumInterfaceProfile::tcp_client("cli-tcp-client", "CLI TCP Client");
         profile.target_host = tcp.host;
         profile.target_port = tcp.port;
+        if let Some(network_name) = tcp.network_name {
+            profile.network_name = network_name;
+        }
+        if let Some(passphrase) = tcp.passphrase {
+            profile.passphrase = passphrase;
+        }
         profile.enabled = true;
         vec![profile]
     })
@@ -2509,7 +2821,7 @@ fn generate_known_destinations_fixture_for_smoke(
     write_known_destinations_fixture(path, destination)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn write_known_destinations_fixture(
     path: &std::path::Path,
     destination: [u8; 16],
@@ -2519,14 +2831,14 @@ fn write_known_destinations_fixture(
         .map_err(Into::into)
 }
 
-#[cfg(not(feature = "native-rns-net"))]
+#[cfg(not(all(feature = "native-rns-net", any())))]
 fn write_known_destinations_fixture(
     path: &std::path::Path,
     destination: [u8; 16],
 ) -> anyhow::Result<()> {
     let _ = (path, destination);
     Err(anyhow::anyhow!(
-        "known_destinations fixture generation requires --features native-rns-net or native-network"
+        "known_destinations fixture generation is not available in the clean Reticulum 0.6 build"
     ))
 }
 
@@ -2557,6 +2869,20 @@ fn parse_backend(value: &str) -> anyhow::Result<RuntimeBackendSetting> {
     }
 }
 
+fn parse_lxmf_delivery_mode(
+    value: &str,
+) -> anyhow::Result<omenbrowser_rs::messaging::DeliveryMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "direct" => Ok(omenbrowser_rs::messaging::DeliveryMode::Direct),
+        "propagated" | "propagation" | "prop" => {
+            Ok(omenbrowser_rs::messaging::DeliveryMode::Propagated)
+        }
+        other => Err(anyhow::anyhow!(
+            "invalid LXMF smoke delivery mode {other}; expected direct or propagated"
+        )),
+    }
+}
+
 fn parse_tcp_client_endpoint(value: &str) -> anyhow::Result<TcpClientOverride> {
     let (host, port) = value
         .rsplit_once(':')
@@ -2570,7 +2896,20 @@ fn parse_tcp_client_endpoint(value: &str) -> anyhow::Result<TcpClientOverride> {
     Ok(TcpClientOverride {
         host: host.into(),
         port,
+        network_name: None,
+        passphrase: None,
     })
+}
+
+impl TcpClientOverride {
+    fn empty() -> Self {
+        Self {
+            host: String::new(),
+            port: 0,
+            network_name: None,
+            passphrase: None,
+        }
+    }
 }
 
 fn default_smoke_report_path(diagnostics_dir: &std::path::Path) -> PathBuf {
@@ -2587,6 +2926,14 @@ fn default_lxmf_interop_report_path(diagnostics_dir: &std::path::Path) -> PathBu
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     diagnostics_dir.join(format!("native-lxmf-interop-{epoch}.json"))
+}
+
+fn default_lxmf_propagation_sync_report_path(diagnostics_dir: &std::path::Path) -> PathBuf {
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    diagnostics_dir.join(format!("native-lxmf-propagation-sync-{epoch}.json"))
 }
 
 fn default_preflight_report_path(diagnostics_dir: &std::path::Path) -> PathBuf {
@@ -3259,24 +3606,12 @@ async fn collect_transport_startup_preflight(
         omenbrowser_rs::runtime::RuntimeBackendName::Reticulum
     );
     let status_connected = status.connected;
-    let rns_net_primary = interface_stats.as_ref().is_ok_and(|stats| {
-        stats
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("rns-net"))
-            || stats
-                .interfaces
-                .iter()
-                .any(|interface| interface.contains("rns-net"))
-    });
     let native_expectation_met = if backend_is_reticulum {
         status_connected && interface_available
     } else {
         startup_ok && shutdown_ok
     };
-    let expectation = if backend_is_reticulum && rns_net_primary {
-        "reticulum_rns_net"
-    } else if backend_is_reticulum {
+    let expectation = if backend_is_reticulum {
         "reticulum_transport"
     } else {
         "non_native_backend"
@@ -3319,7 +3654,6 @@ async fn collect_transport_startup_preflight(
         "backend_is_reticulum": backend_is_reticulum,
         "status_connected": status_connected,
         "interface_available": interface_available,
-        "rns_net_primary": rns_net_primary,
         "event_subscription": events.is_some(),
         "observed_events": observed_events,
         "status": {
@@ -3525,7 +3859,7 @@ fn preflight_known_destinations_stage(
     )
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn semantic_known_destinations_check(
     path: &std::path::Path,
     destination_hash: Option<[u8; 16]>,
@@ -3552,7 +3886,7 @@ fn semantic_known_destinations_check(
     }
 }
 
-#[cfg(not(feature = "native-rns-net"))]
+#[cfg(not(all(feature = "native-rns-net", any())))]
 fn semantic_known_destinations_check(
     _path: &std::path::Path,
     _destination_hash: Option<[u8; 16]>,
@@ -3560,7 +3894,7 @@ fn semantic_known_destinations_check(
     serde_json::json!({
         "available": false,
         "ok": true,
-        "detail": "semantic known_destinations parsing requires --features native-rns-net or native-network",
+        "detail": "semantic known_destinations parsing is not available in the clean Reticulum 0.6 build",
     })
 }
 
@@ -3730,6 +4064,8 @@ fn redacted_override_snapshot(overrides: &SmokeOverrides) -> serde_json::Value {
         "tcp_client": overrides.tcp_client.as_ref().map(|tcp| serde_json::json!({
             "host": tcp.host,
             "port": tcp.port,
+            "network_name": tcp.network_name.as_ref().map(|_| "<redacted>"),
+            "passphrase": tcp.passphrase.as_ref().map(|_| "<redacted>"),
         })),
     })
 }
@@ -3757,7 +4093,6 @@ fn redacted_environment_snapshot() -> serde_json::Value {
         "features": {
             "native_reticulum": cfg!(feature = "native-reticulum"),
             "native_lxmf": cfg!(feature = "native-lxmf"),
-            "native_rns_net": cfg!(feature = "native-rns-net"),
             "native_network": cfg!(feature = "native-network"),
             "mock_runtime": cfg!(feature = "mock-runtime"),
         },
@@ -4060,7 +4395,7 @@ fn render_lxmf_smoke_send_summary(report: &serde_json::Value) -> Vec<String> {
 
 fn print_help() {
     println!(
-        "OMENbrowser_rs\n\nUSAGE:\n  omenbrowser_rs\n  omenbrowser_rs --version\n  omenbrowser_rs --desktop [--app-root <dir>]\n  omenbrowser_rs --tui [--app-root <dir>]\n  omenbrowser_rs --generate-native-identity <label> [--app-root <dir>] [--reticulum-config <dir>] [--output <file>] [--stdout]\n  omenbrowser_rs --native-startup [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-live-sequence <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-interop|--lxmf-wait <secs>] [--preflight-wait <ms>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-validate <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-preflight <destination:path> [--preflight-wait <ms>] [--send-lxmf-smoke <peer_hash>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--known-destinations <file>] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-smoke <destination:path> [--known-destinations <file>] [--generate-known-destinations-fixture <file>] [--warm-path] [--path-wait <secs>] [--live] [--fetch-page] [--send-lxmf-smoke <peer_hash>] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --omenchat-smoke <destination_hash> [--omenchat-room lobby] [--omenchat-message text] [--path-wait <secs>] [--known-destinations <file>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout]\n  omenbrowser_rs --lxmf-interop [--send-lxmf-smoke <peer_hash>] [--lxmf-wait <secs>] [--backend reticulum] [--identity <file>] [--tcp-client host:port] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n\nOPTIONS:\n  --desktop, --iced            Open the iced desktop UI; this is the default when desktop-ui is compiled\n  --tui, --terminal            Open the legacy ratatui terminal UI when the tui feature is compiled\n  --version, -V                Print version and compiled feature summary\n  --generate-native-identity   Create and activate managed native Reticulum identity material; requires native-reticulum/native-network features\n  --native-startup             Start the configured runtime, collect status/interface data, then stop cleanly\n  --native-live-sequence       Run startup, preflight, live NomadNet validation, and optional LXMF interop into one JSON report\n  --native-validate            Run the live native NomadNet validation path: reticulum backend, path warmup, live probe, and fetch_page\n  --native-preflight, --preflight\n                               Validate native-network CLI inputs without starting live fetch or LXMF delivery\n  --preflight-wait <ms>        Runtime event wait for preflight transport startup; default is 250 ms\n  --native-smoke, --smoke-test  Run a non-TUI native-network smoke report for a NomadNet address\n  --omenchat-smoke <hash>      Open an OMENchat Link, join a room, send one message, and report JSON evidence\n  --known-destinations <file>  Preload a Python/RNS-compatible known_destinations cache for this command\n  --generate-known-destinations-fixture <file>\n                               Write a dev/test known_destinations fixture for the smoke destination and preload it\n  --warm-path, --request-path   Request/warm the destination path before probing; default wait is 5 seconds\n  --path-wait <secs>           Set warm-path event wait seconds and enable path warmup\n  --live                       Include the explicit live page probe step\n  --fetch-page, --live-fetch   Also call the normal runtime fetch_page path and include response metadata\n  --send-lxmf-smoke <peer_hash>\n                               Explicitly send a labeled native LXMF smoke-test message when readiness passes\n  --lxmf-interop               Announce local lxmf.delivery and wait up to 10s for LXMF/proof events; can be used without --native-smoke\n  --lxmf-wait <secs>           Announce local lxmf.delivery and wait this many seconds for LXMF/proof events\n  --app-root <dir>             Temporarily use this app data root for frontend and smoke command files\n  --backend <name>             Temporarily use auto, mock, or reticulum for this command\n  --identity <file>            Temporarily attach this identity path for this command\n  --reticulum-config <dir>     Temporarily use this Reticulum config directory\n  --tcp-client <host:port>     Temporarily use a TCP client interface endpoint\n  --output, -o <file>          Write report JSON to this path\n  --stdout                     Print report JSON to stdout\n  --suggest-shell              Include shell-escaped suggested command lines in stderr summaries and bundle summary.txt\n  --bundle-report <dir>        Write report.json, summary.txt, command.json, environment.json, and logs.json under a timestamped directory\n  --help, -h                   Show this help\n\nWithout --output, --stdout, or --bundle-report, reports are written under the diagnostics directory. CLI overrides are command-local and do not rewrite saved settings, except --generate-native-identity activates the new managed identity."
+        "OMENbrowser_rs\n\nUSAGE:\n  omenbrowser_rs\n  omenbrowser_rs --version\n  omenbrowser_rs --desktop [--app-root <dir>]\n  omenbrowser_rs --tui [--app-root <dir>]\n  omenbrowser_rs --generate-native-identity <label> [--app-root <dir>] [--reticulum-config <dir>] [--output <file>] [--stdout]\n  omenbrowser_rs --native-startup [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-live-sequence <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--preflight-wait <ms>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-validate <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-preflight <destination:path> [--preflight-wait <ms>] [--send-lxmf-smoke <peer_hash>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--known-destinations <file>] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-smoke <destination:path> [--known-destinations <file>] [--generate-known-destinations-fixture <file>] [--warm-path] [--path-wait <secs>] [--live] [--fetch-page] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --omenchat-smoke <destination_hash> [--omenchat-room lobby] [--omenchat-message text] [--path-wait <secs>] [--known-destinations <file>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--network-name name] [--passphrase secret] [--output <file>] [--stdout]\n  omenbrowser_rs --lxmf-interop [--send-lxmf-smoke <peer_hash>] [--lxmf-wait <secs>] [--backend reticulum] [--identity <file>] [--tcp-client host:port] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n\nOPTIONS:\n  --desktop, --iced            Open the iced desktop UI; this is the default when desktop-ui is compiled\n  --tui, --terminal            Open the legacy ratatui terminal UI when the tui feature is compiled\n  --version, -V                Print version and compiled feature summary\n  --generate-native-identity   Create and activate managed native Reticulum identity material; requires native-reticulum/native-network features\n  --native-startup             Start the configured runtime, collect status/interface data, then stop cleanly\n  --native-live-sequence       Run startup, preflight, live NomadNet validation, and optional LXMF interop into one JSON report\n  --native-validate            Run the live native NomadNet validation path: reticulum backend, path warmup, live probe, and fetch_page\n  --native-preflight, --preflight\n                               Validate native-network CLI inputs without starting live fetch or LXMF delivery\n  --preflight-wait <ms>        Runtime event wait for preflight transport startup; default is 250 ms\n  --native-smoke, --smoke-test  Run a non-TUI native-network smoke report for a NomadNet address\n  --omenchat-smoke <hash>      Open an OMENchat Link, join a room, send one message, and report JSON evidence\n  --known-destinations <file>  Preload a Python/RNS-compatible known_destinations cache for this command\n  --generate-known-destinations-fixture <file>\n                               Write a dev/test known_destinations fixture for the smoke destination and preload it\n  --warm-path, --request-path   Request/warm the destination path before probing; default wait is 5 seconds\n  --path-wait <secs>           Set warm-path event wait seconds and enable path warmup\n  --live                       Include the explicit live page probe step\n  --fetch-page, --live-fetch   Also call the normal runtime fetch_page path and include response metadata\n  --send-lxmf-smoke <peer_hash>\n                               Explicitly send a labeled native LXMF smoke-test message when readiness passes\n  --lxmf-interop               Announce local lxmf.delivery and wait up to 10s for LXMF/proof events; can be used without --native-smoke\n  --lxmf-wait <secs>           Announce local lxmf.delivery and wait this many seconds for LXMF/proof events\n  --app-root <dir>             Temporarily use this app data root for frontend and smoke command files\n  --backend <name>             Temporarily use auto, mock, or reticulum for this command\n  --identity <file>            Temporarily attach this identity path for this command\n  --reticulum-config <dir>     Temporarily use this Reticulum config directory\n  --tcp-client <host:port>     Temporarily use a TCP client interface endpoint\n  --network-name <name>        Set IFAC network name for the temporary TCP client\n  --passphrase <secret>        Set IFAC passphrase for the temporary TCP client\n  --output, -o <file>          Write report JSON to this path\n  --stdout                     Print report JSON to stdout\n  --suggest-shell              Include shell-escaped suggested command lines in stderr summaries and bundle summary.txt\n  --bundle-report <dir>        Write report.json, summary.txt, command.json, environment.json, and logs.json under a timestamped directory\n  --help, -h                   Show this help\n\nWithout --output, --stdout, or --bundle-report, reports are written under the diagnostics directory. CLI overrides are command-local and do not rewrite saved settings, except --generate-native-identity activates the new managed identity."
     );
 }
 
@@ -4077,6 +4412,10 @@ fn compiled_feature_summary() -> String {
         ("desktop-ui", cfg!(feature = "desktop-ui")),
         ("tui", cfg!(feature = "tui")),
         ("chat-client-rns", cfg!(feature = "chat-client-rns")),
+        (
+            "chat-client-rns-clean",
+            cfg!(feature = "chat-client-rns-clean"),
+        ),
         ("native-reticulum", cfg!(feature = "native-reticulum")),
         ("native-network", cfg!(feature = "native-network")),
     ]
@@ -4108,7 +4447,11 @@ mod tests {
             CliCommand::parse(["--version".to_string()]).expect("parse"),
             CliCommand::Version
         );
-        assert!(compiled_feature_summary().contains("chat-client-rns:"));
+        let features = compiled_feature_summary();
+        assert!(features.contains("chat-client-rns:"));
+        assert!(features.contains("chat-client-rns-clean:"));
+        assert!(!features.contains("chat-client-rns-legacy:"));
+        assert!(!features.contains("native-rns-net:"));
     }
 
     #[test]
@@ -4160,6 +4503,12 @@ mod tests {
             "hello smoke".to_string(),
             "--path-wait".to_string(),
             "3".to_string(),
+            "--tcp-client".to_string(),
+            "127.0.0.1:4242".to_string(),
+            "--network-name".to_string(),
+            "private_ret".to_string(),
+            "--passphrase".to_string(),
+            "secret".to_string(),
             "--stdout".to_string(),
         ])
         .expect("parse");
@@ -4177,6 +4526,12 @@ mod tests {
                 stdout: true,
                 overrides: Box::new(SmokeOverrides {
                     runtime_backend: Some(RuntimeBackendSetting::Reticulum),
+                    tcp_client: Some(TcpClientOverride {
+                        host: "127.0.0.1".into(),
+                        port: 4242,
+                        network_name: Some("private_ret".into()),
+                        passphrase: Some("secret".into()),
+                    }),
                     ..SmokeOverrides::default()
                 }),
             }
@@ -4399,6 +4754,9 @@ mod tests {
                 live: true,
                 fetch: false,
                 lxmf_smoke_peer: None,
+                lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode::Direct,
+                lxmf_smoke_propagation_node: None,
+                lxmf_include_ticket: false,
                 lxmf_interop_wait_secs: None,
                 warmup: None,
                 output: Some(PathBuf::from("/tmp/report.json")),
@@ -4417,6 +4775,8 @@ mod tests {
                     tcp_client: Some(TcpClientOverride {
                         host: "127.0.0.1".into(),
                         port: 4242,
+                        network_name: None,
+                        passphrase: None,
                     }),
                 }),
             }
@@ -4449,6 +4809,9 @@ mod tests {
             CliCommand::NativeLiveSequence {
                 destination: FIXTURE_DESTINATION_URL.into(),
                 lxmf_smoke_peer: Some(FIXTURE_LXMF_PEER_HASH.into()),
+                lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode::Direct,
+                lxmf_smoke_propagation_node: None,
+                lxmf_include_ticket: false,
                 lxmf_interop_wait_secs: Some(15),
                 warmup: SmokePathWarmup { wait_secs: 7 },
                 preflight_wait_ms: 500,
@@ -4462,6 +4825,8 @@ mod tests {
                     tcp_client: Some(TcpClientOverride {
                         host: "127.0.0.1".into(),
                         port: 4242,
+                        network_name: None,
+                        passphrase: None,
                     }),
                     ..SmokeOverrides::default()
                 }),
@@ -4487,6 +4852,9 @@ mod tests {
                 live: false,
                 fetch: false,
                 lxmf_smoke_peer: None,
+                lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode::Direct,
+                lxmf_smoke_propagation_node: None,
+                lxmf_include_ticket: false,
                 lxmf_interop_wait_secs: None,
                 warmup: Some(SmokePathWarmup { wait_secs: 0 }),
                 output: None,
@@ -4515,6 +4883,9 @@ mod tests {
                 live: true,
                 fetch: true,
                 lxmf_smoke_peer: None,
+                lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode::Direct,
+                lxmf_smoke_propagation_node: None,
+                lxmf_include_ticket: false,
                 lxmf_interop_wait_secs: None,
                 warmup: None,
                 output: None,
@@ -4542,6 +4913,9 @@ mod tests {
                 live: true,
                 fetch: true,
                 lxmf_smoke_peer: None,
+                lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode::Direct,
+                lxmf_smoke_propagation_node: None,
+                lxmf_include_ticket: false,
                 lxmf_interop_wait_secs: None,
                 warmup: Some(SmokePathWarmup { wait_secs: 10 }),
                 output: None,
@@ -4563,6 +4937,7 @@ mod tests {
             FIXTURE_DESTINATION_URL.to_string(),
             "--send-lxmf-smoke".to_string(),
             FIXTURE_LXMF_PEER_HASH.to_string(),
+            "--lxmf-include-ticket".to_string(),
             "--stdout".to_string(),
         ])
         .expect("parse");
@@ -4574,6 +4949,9 @@ mod tests {
                 live: false,
                 fetch: false,
                 lxmf_smoke_peer: Some(FIXTURE_LXMF_PEER_HASH.into()),
+                lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode::Direct,
+                lxmf_smoke_propagation_node: None,
+                lxmf_include_ticket: true,
                 lxmf_interop_wait_secs: None,
                 warmup: None,
                 output: None,
@@ -4605,6 +4983,9 @@ mod tests {
                 live: false,
                 fetch: false,
                 lxmf_smoke_peer: Some(FIXTURE_LXMF_PEER_HASH.into()),
+                lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode::Direct,
+                lxmf_smoke_propagation_node: None,
+                lxmf_include_ticket: false,
                 lxmf_interop_wait_secs: Some(3),
                 warmup: None,
                 output: None,
@@ -4632,6 +5013,9 @@ mod tests {
             parsed,
             CliCommand::LxmfInterop {
                 peer_hash: Some(FIXTURE_LXMF_PEER_HASH.into()),
+                lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode::Direct,
+                lxmf_smoke_propagation_node: None,
+                lxmf_include_ticket: false,
                 wait_secs: 10,
                 output: None,
                 stdout: true,
@@ -4672,6 +5056,8 @@ mod tests {
                     tcp_client: Some(TcpClientOverride {
                         host: "127.0.0.1".into(),
                         port: 4242,
+                        network_name: None,
+                        passphrase: None,
                     }),
                     ..SmokeOverrides::default()
                 }),
@@ -4976,7 +5362,7 @@ mod tests {
         );
         assert_eq!(
             stage.get("expectation").and_then(serde_json::Value::as_str),
-            Some("reticulum_rns_net")
+            Some("reticulum_transport")
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -4999,7 +5385,7 @@ mod tests {
             stage.get("stage").and_then(serde_json::Value::as_str),
             Some("known_destinations")
         );
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         assert_eq!(
             stage.get("outcome").and_then(serde_json::Value::as_str),
             Some("pass")
@@ -5025,6 +5411,9 @@ mod tests {
                 live: false,
                 fetch: false,
                 lxmf_smoke_peer: None,
+                lxmf_smoke_delivery_mode: omenbrowser_rs::messaging::DeliveryMode::Direct,
+                lxmf_smoke_propagation_node: None,
+                lxmf_include_ticket: false,
                 lxmf_interop_wait_secs: None,
                 warmup: None,
                 output: None,
@@ -5136,7 +5525,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn known_destinations_preflight_semantic_check_finds_destination() {
         let dir = std::env::temp_dir().join(format!(

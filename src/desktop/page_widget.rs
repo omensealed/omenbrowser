@@ -4,6 +4,7 @@ use iced::{
     alignment, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Size, Theme,
 };
 use std::rc::Rc;
+use unicode_width::UnicodeWidthChar;
 
 use crate::micron::parser::{TextStyle, DEFAULT_FG_DARK};
 #[cfg(test)]
@@ -16,6 +17,8 @@ const CELL_HEIGHT: f32 = 18.0;
 const FONT_SIZE: f32 = 15.0;
 const PADDING: f32 = 10.0;
 const RIGHT_SCROLL_GUTTER: f32 = 14.0;
+const MAX_CANVAS_COLS: usize = 512;
+const MAX_CANVAS_ROWS: usize = 2048;
 
 #[derive(Clone, Debug)]
 pub enum PageMessage {
@@ -187,10 +190,17 @@ impl<'a> canvas::Program<PageMessage> for NomadNetPageProgram<'a> {
                 let Some(position) = cursor.position_in(bounds) else {
                     return (event::Status::Ignored, None);
                 };
-                let Some((visible_row, col)) = metrics.cell_at(position, rows.len(), width) else {
+                let first_row = clamped_scroll_offset(
+                    self.scroll_offset,
+                    rows.len(),
+                    metrics.height_rows_for_bounds(bounds),
+                );
+                let visible_rows = rows.len().saturating_sub(first_row);
+                let Some((visible_row, col)) = metrics.cell_at(position, visible_rows, width)
+                else {
                     return (event::Status::Ignored, None);
                 };
-                let document_row = self.scroll_offset.saturating_add(visible_row as usize);
+                let document_row = first_row.saturating_add(visible_row as usize);
                 let Some(cell) = rows
                     .get(document_row)
                     .and_then(|rendered| rendered.cells.get(col as usize))
@@ -270,7 +280,10 @@ impl<'a> canvas::Program<PageMessage> for NomadNetPageProgram<'a> {
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), page_bg);
         let content_width = metrics.content_width_for_bounds(bounds);
 
-        for (visible_row_index, row) in rows.iter().skip(self.scroll_offset).enumerate() {
+        let visible_rows = metrics.height_rows_for_bounds(bounds);
+        let first_row = clamped_scroll_offset(self.scroll_offset, rows.len(), visible_rows);
+
+        for (visible_row_index, row) in rows.iter().skip(first_row).take(visible_rows).enumerate() {
             let y = PADDING + visible_row_index as f32 * metrics.cell_height;
             if y > bounds.height {
                 break;
@@ -314,10 +327,16 @@ impl<'a> canvas::Program<PageMessage> for NomadNetPageProgram<'a> {
         let metrics = PageMetrics::new(self.zoom_percent);
         let width = metrics.width_cells_for_bounds(bounds);
         let rows = self.rendered_rows(width);
-        let Some((visible_row, col)) = metrics.cell_at(position, rows.len(), width) else {
+        let first_row = clamped_scroll_offset(
+            self.scroll_offset,
+            rows.len(),
+            metrics.height_rows_for_bounds(bounds),
+        );
+        let visible_rows = rows.len().saturating_sub(first_row);
+        let Some((visible_row, col)) = metrics.cell_at(position, visible_rows, width) else {
             return mouse::Interaction::default();
         };
-        let document_row = self.scroll_offset.saturating_add(visible_row as usize);
+        let document_row = first_row.saturating_add(visible_row as usize);
         let actionable = self
             .rendered_rows(width)
             .get(document_row)
@@ -377,17 +396,27 @@ impl PageMetrics {
     fn width_cells_for_bounds(self, bounds: Rectangle) -> usize {
         (self.content_width_for_bounds(bounds) / self.cell_width)
             .floor()
-            .max(1.0) as usize
+            .max(1.0)
+            .min(MAX_CANVAS_COLS as f32) as usize
     }
 
     fn content_width_for_bounds(self, bounds: Rectangle) -> f32 {
-        (bounds.width - PADDING * 2.0 - RIGHT_SCROLL_GUTTER).max(self.cell_width)
+        if !bounds.width.is_finite() {
+            return self.cell_width * MAX_CANVAS_COLS as f32;
+        }
+        (bounds.width - PADDING * 2.0 - RIGHT_SCROLL_GUTTER)
+            .max(self.cell_width)
+            .min(self.cell_width * MAX_CANVAS_COLS as f32)
     }
 
     fn height_rows_for_bounds(self, bounds: Rectangle) -> usize {
+        if !bounds.height.is_finite() {
+            return MAX_CANVAS_ROWS;
+        }
         ((bounds.height - PADDING * 2.0) / self.cell_height)
             .floor()
-            .max(1.0) as usize
+            .max(1.0)
+            .min(MAX_CANVAS_ROWS as f32) as usize
     }
 
     fn cell_at(self, position: Point, row_count: usize, width: usize) -> Option<(u16, u16)> {
@@ -424,6 +453,17 @@ fn draw_cell(
     metrics: PageMetrics,
     default_fg: Option<Color>,
 ) {
+    if !x.is_finite()
+        || !y.is_finite()
+        || !metrics.cell_width.is_finite()
+        || !metrics.cell_height.is_finite()
+        || !metrics.font_size.is_finite()
+        || x.abs() > 1_000_000.0
+        || y.abs() > 1_000_000.0
+    {
+        return;
+    }
+
     let (fg, bg) = cell_colors(cell, focused, default_fg);
 
     if let Some(bg) = bg {
@@ -433,10 +473,13 @@ fn draw_cell(
             bg,
         );
     }
-    if cell.ch != ' ' {
+    if cell.ch != ' ' && !micron_canvas_text_disabled() {
+        let Some(ch) = safe_canvas_cell_char(cell.ch) else {
+            return;
+        };
         let weight_offset = if cell.style.bold { 0.7 } else { 0.0 };
         frame.fill_text(canvas::Text {
-            content: cell.ch.to_string(),
+            content: ch.to_string(),
             position: Point::new(x, y),
             color: fg,
             size: Pixels(metrics.font_size),
@@ -444,11 +487,11 @@ fn draw_cell(
             font: micron_canvas_font(),
             horizontal_alignment: alignment::Horizontal::Left,
             vertical_alignment: alignment::Vertical::Top,
-            shaping: iced::widget::text::Shaping::Advanced,
+            shaping: iced::widget::text::Shaping::Basic,
         });
         if cell.style.bold {
             frame.fill_text(canvas::Text {
-                content: cell.ch.to_string(),
+                content: ch.to_string(),
                 position: Point::new(x + weight_offset, y),
                 color: fg,
                 size: Pixels(metrics.font_size),
@@ -456,7 +499,7 @@ fn draw_cell(
                 font: micron_canvas_font(),
                 horizontal_alignment: alignment::Horizontal::Left,
                 vertical_alignment: alignment::Vertical::Top,
-                shaping: iced::widget::text::Shaping::Advanced,
+                shaping: iced::widget::text::Shaping::Basic,
             });
         }
     }
@@ -467,6 +510,40 @@ fn draw_cell(
             fg,
         );
     }
+}
+
+fn micron_canvas_text_disabled() -> bool {
+    std::env::var_os("OMEN_DISABLE_MICRON_CANVAS_TEXT").is_some()
+}
+
+fn safe_canvas_cell_char(ch: char) -> Option<char> {
+    if ch.is_control() {
+        return None;
+    }
+    match UnicodeWidthChar::width(ch) {
+        Some(0) => return None,
+        Some(1) => {}
+        _ => return Some('?'),
+    }
+    if is_canvas_cell_safe_char(ch) {
+        Some(ch)
+    } else {
+        Some('?')
+    }
+}
+
+fn is_canvas_cell_safe_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x20..=0x7e
+            | 0xa0..=0x024f
+            | 0x0370..=0x052f
+            | 0x2000..=0x206f
+            | 0x2190..=0x21ff
+            | 0x2500..=0x259f
+            | 0x25a0..=0x25ff
+            | 0x2800..=0x28ff
+    )
 }
 
 fn cell_colors(cell: &Cell, focused: bool, default_fg: Option<Color>) -> (Color, Option<Color>) {
@@ -521,6 +598,10 @@ fn height_rows_for_bounds(bounds: Rectangle) -> usize {
     ((bounds.height - PADDING * 2.0) / CELL_HEIGHT)
         .floor()
         .max(1.0) as usize
+}
+
+fn clamped_scroll_offset(requested: usize, row_count: usize, visible_rows: usize) -> usize {
+    requested.min(row_count.saturating_sub(visible_rows.max(1)))
 }
 
 fn cell_at(position: Point, row_count: usize, width: usize) -> Option<(u16, u16)> {
@@ -623,6 +704,50 @@ mod tests {
         };
 
         assert!(width_cells_for_bounds(without_gutter) < 42);
+    }
+
+    #[test]
+    fn canvas_metrics_cap_absurd_layout_bounds() {
+        let metrics = PageMetrics::new(100);
+        let huge = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: f32::INFINITY,
+            height: f32::INFINITY,
+        };
+
+        assert_eq!(metrics.width_cells_for_bounds(huge), MAX_CANVAS_COLS);
+        assert_eq!(metrics.height_rows_for_bounds(huge), MAX_CANVAS_ROWS);
+
+        let huge_finite = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: f32::MAX,
+            height: f32::MAX,
+        };
+        assert_eq!(metrics.width_cells_for_bounds(huge_finite), MAX_CANVAS_COLS);
+        assert_eq!(metrics.height_rows_for_bounds(huge_finite), MAX_CANVAS_ROWS);
+    }
+
+    #[test]
+    fn visible_scroll_offset_is_clamped_to_rendered_rows() {
+        assert_eq!(clamped_scroll_offset(0, 10, 4), 0);
+        assert_eq!(clamped_scroll_offset(6, 10, 4), 6);
+        assert_eq!(clamped_scroll_offset(7, 10, 4), 6);
+        assert_eq!(clamped_scroll_offset(usize::MAX, 10, 4), 6);
+        assert_eq!(clamped_scroll_offset(usize::MAX, 3, 10), 0);
+    }
+
+    #[test]
+    fn canvas_cell_chars_are_restricted_to_single_cell_safe_glyphs() {
+        assert_eq!(safe_canvas_cell_char('A'), Some('A'));
+        assert_eq!(safe_canvas_cell_char('█'), Some('█'));
+        assert_eq!(safe_canvas_cell_char('═'), Some('═'));
+        assert_eq!(safe_canvas_cell_char('☠'), Some('?'));
+        assert_eq!(safe_canvas_cell_char('中'), Some('?'));
+        assert_eq!(safe_canvas_cell_char('😊'), Some('?'));
+        assert_eq!(safe_canvas_cell_char('\u{fe0f}'), None);
+        assert_eq!(safe_canvas_cell_char('\n'), None);
     }
 
     #[test]

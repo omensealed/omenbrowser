@@ -11,6 +11,14 @@ pub const OMENCHAT_RESOURCE_METADATA_PREFIX: &[u8] = b"omenchat-resource:";
 
 pub trait OmenchatTransport {
     fn send_frame(&mut self, link_id: LinkId, frame_bytes: Vec<u8>) -> ServerResult<()>;
+    fn send_frame_with_context(
+        &mut self,
+        link_id: LinkId,
+        frame_bytes: Vec<u8>,
+        _context: u8,
+    ) -> ServerResult<()> {
+        self.send_frame(link_id, frame_bytes)
+    }
     fn offer_resource(
         &mut self,
         link_id: LinkId,
@@ -38,6 +46,7 @@ pub struct CapturedTransport {
 pub struct CapturedFrame {
     pub link_id: LinkId,
     pub bytes: Vec<u8>,
+    pub context: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +62,21 @@ impl OmenchatTransport for CapturedTransport {
         self.frames.push(CapturedFrame {
             link_id,
             bytes: frame_bytes,
+            context: OMENCHAT_LINK_CONTEXT,
+        });
+        Ok(())
+    }
+
+    fn send_frame_with_context(
+        &mut self,
+        link_id: LinkId,
+        frame_bytes: Vec<u8>,
+        context: u8,
+    ) -> ServerResult<()> {
+        self.frames.push(CapturedFrame {
+            link_id,
+            bytes: frame_bytes,
+            context,
         });
         Ok(())
     }
@@ -144,6 +168,21 @@ pub fn send_response_frame<T: OmenchatTransport>(
         crate::error::ServerError::Message(format!("OMENchat frame encode failed: {error}"))
     })?;
     transport.send_frame(link_id, encoded)?;
+    maybe_offer_resource(engine, link_id, response, transport)?;
+    Ok(())
+}
+
+pub fn send_response_frame_with_context<T: OmenchatTransport>(
+    engine: &SessionEngine,
+    link_id: LinkId,
+    response: &Frame,
+    transport: &mut T,
+    context: u8,
+) -> ServerResult<()> {
+    let encoded = encode_frame(response).map_err(|error| {
+        crate::error::ServerError::Message(format!("OMENchat frame encode failed: {error}"))
+    })?;
+    transport.send_frame_with_context(link_id, encoded, context)?;
     maybe_offer_resource(engine, link_id, response, transport)?;
     Ok(())
 }

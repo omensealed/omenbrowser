@@ -90,10 +90,10 @@ For normal testing, use the packaged release instead of building from source:
 
 <https://github.com/omensealed/omenbrowser/releases/latest>
 
-The current release publishes:
+Packaged releases publish:
 
-- `omenbrowser-rs_0.1.0_amd64.deb` for Debian-family systems.
-- `OMENbrowser_rs-0.1.0-x86_64.AppImage` for general Linux testing.
+- `omenbrowser-rs_<version>_amd64.deb` for Debian-family systems.
+- `OMENbrowser_rs-<version>-x86_64.AppImage` for general Linux testing.
 - `OMENbrowser_rs-alpha-latest.tar.gz` for testers who prefer unpacked
   binaries and helper scripts.
 - Matching `.sha256` checksum files.
@@ -102,7 +102,7 @@ On Debian, Ubuntu, Linux Mint, and related distributions, the `.deb` is the
 preferred install path:
 
 ```bash
-sudo apt install ./omenbrowser-rs_0.1.0_amd64.deb
+sudo apt install ./omenbrowser-rs_<version>_amd64.deb
 omenbrowser_rs --desktop
 ```
 
@@ -115,8 +115,8 @@ If package installation is not a good fit, make the AppImage executable and run
 it directly:
 
 ```bash
-chmod +x OMENbrowser_rs-0.1.0-x86_64.AppImage
-./OMENbrowser_rs-0.1.0-x86_64.AppImage --desktop
+chmod +x OMENbrowser_rs-<version>-x86_64.AppImage
+./OMENbrowser_rs-<version>-x86_64.AppImage --desktop
 ```
 
 ## First Run Network Setup
@@ -143,16 +143,22 @@ path.
 
 These commands are for developers working from a source checkout.
 
-Browser with desktop UI, native network, and OMENchat client:
+Browser with desktop UI, native network, and OMENchat client using the current
+live-tested alpha path:
 
 ```bash
-cargo build --release --features chat-client-rns
+cargo build --release --features chat-client-rns-clean
 ```
+
+`chat-client-rns-clean` is the live-tested clean Reticulum 0.6 path. It builds
+the browser against `reticulum-rs`, `reticulum-rs-transport`, and `lxmf`
+without pulling the old `rns-net` compatibility stack into normal native
+networking builds.
 
 Standalone OMENchat server:
 
 ```bash
-cargo build --release --manifest-path src/server/Cargo.toml --features live-rns-net
+cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
 ```
 
 Public alpha bundle with both binaries and starter docs:
@@ -350,14 +356,14 @@ Browser:
 
 ```bash
 cargo fmt --check
-cargo test --features chat-client-rns
+cargo test --features chat-client-rns-clean
 ```
 
 Server:
 
 ```bash
 cargo fmt --manifest-path src/server/Cargo.toml --check
-cargo test --manifest-path src/server/Cargo.toml --features live-rns-net
+cargo test --manifest-path src/server/Cargo.toml --features live-reticulum
 ```
 
 ## Alpha Runbook
@@ -379,6 +385,10 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
 
 ## Known Alpha Gaps
 
+- Do not cut the next public package release until the clean Reticulum 0.6 LXMF
+  path has live smoke coverage for direct sends, propagation sync, tickets, and
+  attachments. OMENchat and NomadNet page fetch are live-tested on the clean
+  stack, but the release should not imply full LXMF parity before that check.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when

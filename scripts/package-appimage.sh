@@ -3,7 +3,7 @@ set -euo pipefail
 
 out_root="${1:-dist}"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
-version="${version:-0.1.0}"
+version="${version:-0.6.0}"
 arch="$(uname -m)"
 appdir="${out_root%/}/AppDir"
 appimagetool="${APPIMAGETOOL:-appimagetool}"
@@ -18,8 +18,15 @@ if ! command -v "$appimagetool" >/dev/null 2>&1; then
 fi
 
 echo "== Building release binaries =="
-cargo build --release --features chat-client-rns
-cargo build --release --manifest-path src/server/Cargo.toml --features live-rns-net
+browser_features="${OMENBROWSER_BROWSER_FEATURES:-chat-client-rns-clean}"
+cargo build --release --features "$browser_features"
+cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
+mkdir -p "${out_root%/}"
+target/release/omenbrowser_rs --version > "${out_root%/}/omenbrowser_rs-appimage-version.txt"
+grep -q "chat-client-rns-clean:on" "${out_root%/}/omenbrowser_rs-appimage-version.txt"
+grep -q "native-network:on" "${out_root%/}/omenbrowser_rs-appimage-version.txt"
+src/server/target/release/omenchatd --version > "${out_root%/}/omenchatd-appimage-version.txt"
+grep -q "live-reticulum:on" "${out_root%/}/omenchatd-appimage-version.txt"
 
 echo "== Staging AppDir =="
 rm -rf "$appdir"
@@ -54,7 +61,6 @@ EOF
 chmod 0755 "$appdir/AppRun"
 
 echo "== Building AppImage =="
-mkdir -p "${out_root%/}"
 appimage_path="${out_root%/}/OMENbrowser_rs-${version}-${arch}.AppImage"
 "$appimagetool" "${appimagetool_args[@]}" "$appdir" "$appimage_path"
 (

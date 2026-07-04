@@ -1,12 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(all(feature = "native-rns-net", any()))]
+use std::time::Instant;
 
 use async_trait::async_trait;
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+use rand_core::OsRng;
+#[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
+use rns_transport::resource::ResourceEventKind;
+#[cfg(feature = "native-lxmf")]
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
+#[cfg(not(all(feature = "native-rns-net", any())))]
+use tokio::sync::Mutex as AsyncMutex;
 
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
 const NATIVE_LXMF_PROPAGATED_TERMINAL_RETENTION_SECS: f64 = 3600.0;
@@ -16,24 +24,32 @@ const NATIVE_LXMF_PROPAGATED_TRANSFER_TIMEOUT_SECS: f64 = 45.0;
 const NATIVE_LXMF_PROPAGATION_PATH_WAIT_ATTEMPTS: usize = 30;
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
 const NATIVE_LXMF_PROPAGATION_PATH_WAIT_STEP: Duration = Duration::from_millis(100);
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 const NATIVE_LXMF_DIRECT_PROOF_TIMEOUT_SECS: f64 = 45.0;
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 const NATIVE_LXMF_DIRECT_ROUTER_TICK_SECS: u64 = 5;
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 const NATIVE_KNOWN_DESTINATIONS_MAX_AGE_SECS: f64 = 6.0 * 60.0 * 60.0;
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 const NATIVE_KNOWN_DESTINATIONS_MAX_SAVED: usize = 4096;
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 const NATIVE_KNOWN_DESTINATIONS_SAVE_INTERVAL_SECS: u64 = 30;
-#[cfg(feature = "native-rns-net")]
+#[cfg(not(all(feature = "native-rns-net", any())))]
+const RETICULUM_PATH_TABLE_SAVE_INTERVAL_SECS: u64 = 30;
 const OMENCHAT_LINK_CONTEXT: u8 = 0x4f;
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 const OMENCHAT_LINK_PATH_WAIT_ATTEMPTS: usize = 40;
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 const OMENCHAT_LINK_PATH_WAIT_STEP: Duration = Duration::from_millis(250);
-#[cfg(feature = "native-rns-net")]
+#[cfg(not(all(feature = "native-rns-net", any())))]
+const OMENCHAT_CLEAN_LINK_PATH_WAIT_STEP: Duration = Duration::from_millis(250);
 const OMENCHAT_RESOURCE_METADATA_PREFIX: &[u8] = b"omenchat-resource:";
+#[cfg(not(all(feature = "native-rns-net", any())))]
+const OMENCHAT_FRAME_RESOURCE_METADATA: &[u8] = b"omenchat-frame:";
+#[cfg(not(all(feature = "native-rns-net", any())))]
+const OMENCHAT_RNS_APP_NAME: &str = "omenchat";
+#[cfg(not(all(feature = "native-rns-net", any())))]
+const OMENCHAT_NODE_ASPECT: &str = "node";
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
 const NATIVE_LXMF_LINK_PACKET_MDU: usize = 431;
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
@@ -43,13 +59,13 @@ use crate::browser::{BrowserPage, DownloadedFile};
 use crate::directory::DirectoryKind;
 use crate::error::{AppError, AppResult};
 use crate::identity::IdentityProfile;
-#[cfg(feature = "native-lxmf")]
+#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
 use crate::messaging::DeliveryMode;
-use crate::messaging::{MessageEnvelope, MessageSummary};
-#[cfg(feature = "native-rns-net")]
+use crate::messaging::{AttachmentSummary, MessageEnvelope, MessageSummary, TransportMethod};
+#[cfg(all(feature = "native-rns-net", any()))]
 use crate::runtime::native::announce::display_name_for_kind;
 use crate::runtime::native::announce::{payload_from_announce_event, NativeAnnounceState};
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 use crate::runtime::native::identity::load_rns_net_proof_signing_key_file;
 use crate::runtime::native::identity::{
     load_private_identity_file, load_transport_private_identity_file, NativeIdentitySummary,
@@ -57,44 +73,55 @@ use crate::runtime::native::identity::{
 use crate::runtime::native::interface::{
     plan_interfaces, validate_startup_plans, NativeInterfacePlan,
 };
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 use crate::runtime::native::lxmf_router::{
     DirectLxmfTimeoutEvent, NativeDirectLxmfRouter, NativePropagatedLxmfRouter,
     PropagatedNodeAccepted, PropagatedNodeFailed,
 };
-#[cfg(not(feature = "native-rns-net"))]
-use crate::runtime::native::request::NativePageFetchContext;
+#[cfg(not(all(feature = "native-rns-net", any())))]
+use crate::runtime::native::request::native_reticulum06_capability_report;
+#[cfg(not(all(feature = "native-rns-net", any())))]
+use crate::runtime::native::request::{
+    send_reticulum_link_identify, single_output_destination_desc, NativeLinkRequestFrame,
+    NativeLinkResponseFrame, NativePageFetchContext,
+};
 use crate::runtime::native::request::{
     NativeFetchPlan, NativePageTransportClient, ReticulumPageTransportClient,
 };
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 use crate::runtime::native::rns_net::{
     RnsNetAnnounceKey, RnsNetDestinationKeyStore, RnsNetDestinationKeys, RnsNetLinkData,
     RnsNetLocalDelivery, RnsNetPageCallbacks, RnsNetPageRequestClient, RnsNetPathUpdate,
     RnsNetProof, RnsNetResourceEvent,
 };
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 use crate::runtime::native::NativePageFetchFailureStage;
 use crate::runtime::native::{NativeRuntimeConfig, NativeRuntimeError};
+#[cfg(feature = "native-lxmf-sdk")]
+use crate::runtime::native_lxmf::client::{
+    build_sdk_send_plan, build_sdk_wire_delivery_from_envelope, NativeLxmfSdkSender,
+    NativeLxmfSdkSenderState, NativeLxmfSdkWireDelivery, NativeLxmfSdkWireSubmitter,
+    RpcNativeLxmfSdkSender,
+};
 use crate::runtime::network::{
     AnnouncePayload, CancellationToken, DestinationInspection, DirectoryCandidate, InterfaceSample,
     InterfaceSampleState, InterfaceStats, LxmfCorrelationRecovery, LxmfDeliveryProbeReport,
-    LxmfDeliveryProbeStage, LxmfDeliveryProbeStep, NetworkRuntime, NetworkSnapshot, NetworkStatus,
-    PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep, PropagationDebugSnapshot,
-    PropagationMessageSnapshot, PropagationStatus, RuntimeBackendName,
+    LxmfDeliveryProbeStage, LxmfDeliveryProbeStep, LxmfSdkRpcProbeSnapshot, NetworkRuntime,
+    NetworkSnapshot, NetworkStatus, OmenChatLinkClosed, OmenChatLinkData, OmenChatLinkOpened,
+    OmenChatResourceData, PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep,
+    PropagationDebugSnapshot, PropagationMessageSnapshot, PropagationStatus, RuntimeBackendName,
 };
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 use crate::runtime::network::{
-    LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, OmenChatLinkClosed, OmenChatLinkData,
-    OmenChatLinkOpened, OmenChatResourceData, OutboundDeliveryState, OutboundStatus,
+    LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, OutboundDeliveryState, OutboundStatus,
 };
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 use crate::runtime::PathEvent;
 use crate::runtime::RuntimeBusEvent;
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 use crate::runtime::{PropagationSyncEvent, PropagationSyncEventStatus, PropagationSyncStage};
 use crate::storage::files::next_available_download_path;
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 use crate::storage::transient_ids::{
     DeliveredTransientIdStore, LXMF_LOCAL_DELIVERY_CACHE_MAX_AGE_SECS,
 };
@@ -110,16 +137,303 @@ pub struct NativeNetworkRuntime {
     identify_on_connect_destinations: Arc<Mutex<BTreeSet<String>>>,
     event_tx: broadcast::Sender<RuntimeBusEvent>,
     page_transport: Arc<dyn NativePageTransportClient>,
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     rns_net: Arc<Mutex<Option<NativeRnsNetHandle>>>,
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     pending_lxmf_proofs: PendingLxmfProofs,
     #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
     pending_direct_lxmf_resources: PendingDirectLxmfResources,
     #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
     pending_propagated_lxmf: PendingPropagatedLxmf,
-    #[cfg(feature = "native-rns-net")]
     active_omenchat_links: Arc<Mutex<BTreeSet<[u8; 16]>>>,
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    clean_omenchat_links: Arc<Mutex<BTreeMap<[u8; 16], CleanOmenChatLink>>>,
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    clean_recent_omenchat_announces: Arc<Mutex<BTreeMap<String, CleanOmenChatAnnounce>>>,
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    clean_destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    clean_destination_app_data: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    clean_local_lxmf: Arc<Mutex<CleanLocalLxmfState>>,
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+#[derive(Clone)]
+struct CleanOmenChatLink {
+    destination_hash: rns_transport::hash::AddressHash,
+    link_id: rns_transport::hash::AddressHash,
+    transport: Arc<reticulum_rs::runtime::Transport>,
+    link: Arc<AsyncMutex<rns_transport::destination::link::Link>>,
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+#[derive(Clone, Copy, Debug)]
+struct CleanOmenChatAnnounce {
+    observed_at: tokio::time::Instant,
+    hops: u8,
+    iface: rns_transport::hash::AddressHash,
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+#[derive(Clone, Debug, Default)]
+struct CleanLocalLxmfState {
+    announced: bool,
+    destination_hash: Option<String>,
+}
+
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+#[derive(Clone)]
+struct CleanReticulumLxmfWireSubmitter {
+    transport: Arc<reticulum_rs::runtime::Transport>,
+    storage_path: std::path::PathBuf,
+    event_tx: broadcast::Sender<RuntimeBusEvent>,
+    outbound_propagation_node: Arc<Mutex<Option<String>>>,
+    destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
+    destination_app_data: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    timeout: Duration,
+    runtime: tokio::runtime::Handle,
+}
+
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+impl CleanReticulumLxmfWireSubmitter {
+    fn new(
+        transport: Arc<reticulum_rs::runtime::Transport>,
+        storage_path: std::path::PathBuf,
+        event_tx: broadcast::Sender<RuntimeBusEvent>,
+        outbound_propagation_node: Arc<Mutex<Option<String>>>,
+        destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
+        destination_app_data: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+        timeout: Duration,
+    ) -> AppResult<Self> {
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            AppError::Runtime(format!(
+                "native LXMF clean submitter needs an active Tokio runtime: {error}"
+            ))
+        })?;
+        Ok(Self {
+            transport,
+            storage_path,
+            event_tx,
+            outbound_propagation_node,
+            destination_identities,
+            destination_app_data,
+            timeout,
+            runtime,
+        })
+    }
+
+    async fn submit_wire_async(&self, delivery: NativeLxmfSdkWireDelivery) -> AppResult<()> {
+        let method = delivery.method.as_deref().unwrap_or("direct");
+        if !matches!(method, "direct" | "propagated") {
+            return Err(AppError::Unsupported(format!(
+                "clean LXMF {method} submit is not supported by the embedded Reticulum sender"
+            )));
+        }
+        let destination_hash = parse_transport_destination_hash(&delivery.destination_hash)?;
+        let cancel = CancellationToken::new();
+        let identity = clean_wait_for_destination_identity(
+            &self.transport,
+            &self.storage_path,
+            destination_hash,
+            self.timeout,
+            cancel.clone(),
+            Some(&self.event_tx),
+            Some(&self.destination_identities),
+        )
+        .await?;
+        let (send_hash, send_identity, send_payload, send_aspect, route_label, transient_id) =
+            if method == "propagated" {
+                let propagation_node = self
+                    .outbound_propagation_node
+                    .lock()
+                    .expect("native propagation node lock")
+                    .clone()
+                    .ok_or_else(|| {
+                        AppError::Unsupported(
+                            "clean LXMF propagated send needs a selected propagation node".into(),
+                        )
+                    })?;
+                let propagation_hash = parse_transport_destination_hash(&propagation_node)?;
+                let propagation_cancel = CancellationToken::new();
+                let propagation_identity = clean_wait_for_destination_identity(
+                    &self.transport,
+                    &self.storage_path,
+                    propagation_hash,
+                    self.timeout,
+                    propagation_cancel.clone(),
+                    Some(&self.event_tx),
+                    Some(&self.destination_identities),
+                )
+                .await?;
+                clean_wait_for_destination_path(
+                    &self.transport,
+                    propagation_hash,
+                    self.timeout,
+                    propagation_cancel,
+                    Some(&self.event_tx),
+                    None,
+                )
+                .await?;
+                let wire = lxmf::WireMessage::unpack(delivery.wire_bytes.as_slice()).map_err(
+                    |error| {
+                        AppError::Runtime(format!(
+                            "clean LXMF propagated wire decode failed destination={} message_id={}: {error}",
+                            delivery.destination_hash, delivery.message_id
+                        ))
+                    },
+                )?;
+                let lxmf_identity = reticulum_rs::core::identity::Identity::new_from_slices(
+                    identity.public_key_bytes(),
+                    identity.verifying_key_bytes(),
+                );
+                let propagation_app_data = clean_wait_for_destination_app_data(
+                    &self.destination_app_data,
+                    propagation_hash,
+                    self.timeout.min(Duration::from_secs(5)),
+                    Some(&self.event_tx),
+                )
+                .await;
+                let advertised_target_stamp_cost = propagation_app_data.as_deref().and_then(
+                    crate::runtime::native_lxmf::codec::propagation_announce_target_stamp_cost,
+                );
+                let (target_stamp_cost, target_stamp_source) = if let Some(target_cost) =
+                    advertised_target_stamp_cost
+                {
+                    (Some(target_cost), "advertised")
+                } else {
+                    (
+                            Some(
+                                crate::runtime::native_lxmf::codec::DEFAULT_PROPAGATION_STAMP_TARGET_COST,
+                            ),
+                            "default_missing_app_data",
+                        )
+                };
+                let (lxm_data, transient_id) = wire
+                    .pack_propagation_transient_with_rng(&lxmf_identity, OsRng)
+                    .map_err(|error| {
+                        AppError::Runtime(format!(
+                            "clean LXMF propagation transient encode failed destination={} message_id={}: {error}",
+                            delivery.destination_hash, delivery.message_id
+                        ))
+                    })?;
+                let stamp = if let Some(target_cost) = target_stamp_cost {
+                    let transient_id_array: [u8; 32] = transient_id;
+                    let lxm_data_for_stamp = lxm_data.clone();
+                    let stamp = tokio::task::spawn_blocking(move || {
+                        crate::runtime::native_lxmf::codec::generate_propagation_stamp_for_transient(
+                            &lxm_data_for_stamp,
+                            transient_id_array,
+                            target_cost,
+                            crate::runtime::native_lxmf::codec::DEFAULT_PROPAGATION_STAMP_MAX_ATTEMPTS,
+                        )
+                    })
+                    .await
+                    .map_err(|error| {
+                        AppError::Runtime(format!("clean LXMF propagation stamp task failed: {error}"))
+                    })??;
+                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "clean LXMF propagation stamp generated destination={} propagation_node={} transient_id={} target_cost={} source={} stamp_value={} attempts={}",
+                        delivery.destination_hash,
+                        propagation_hash.to_hex_string(),
+                        hex_encode(&stamp.transient_id),
+                        stamp.target_cost,
+                        target_stamp_source,
+                        stamp.stamp_value,
+                        stamp.attempts
+                    )));
+                    Some(stamp)
+                } else {
+                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "clean LXMF propagation stamp skipped destination={} propagation_node={} reason=no_advertised_target_cost",
+                        delivery.destination_hash,
+                        propagation_hash.to_hex_string()
+                    )));
+                    None
+                };
+                let envelope = lxmf::WireMessage::pack_propagation_envelope(
+                    wire.payload.timestamp,
+                    &lxm_data,
+                    stamp.as_ref().map(|stamp| stamp.stamp.as_slice()),
+                )
+                .map_err(|error| {
+                    AppError::Runtime(format!(
+                        "clean LXMF propagation envelope encode failed destination={} message_id={}: {error}",
+                        delivery.destination_hash, delivery.message_id
+                    ))
+                })?;
+                (
+                    propagation_hash,
+                    propagation_identity,
+                    envelope,
+                    "propagation",
+                    "propagation-envelope",
+                    Some(hex_encode(&transient_id)),
+                )
+            } else {
+                (
+                    destination_hash,
+                    identity,
+                    delivery.wire_bytes.clone(),
+                    "delivery",
+                    "direct-wire",
+                    None,
+                )
+            };
+        let destination =
+            single_output_destination_desc(send_hash, send_identity, "lxmf", send_aspect)?;
+        clean_wait_for_destination_path(
+            &self.transport,
+            send_hash,
+            self.timeout,
+            cancel,
+            Some(&self.event_tx),
+            None,
+        )
+        .await?;
+        let result = rns_transport::delivery::send_via_link(
+            &self.transport,
+            destination,
+            send_payload.as_slice(),
+            self.timeout,
+        )
+        .await
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "clean LXMF {method} submit failed destination={} send_destination={} message_id={}: {error}",
+                delivery.destination_hash,
+                send_hash.to_hex_string(),
+                delivery.message_id
+            ))
+        })?;
+        let route = match result {
+            rns_transport::delivery::LinkSendResult::Packet(_) => "link-packet",
+            rns_transport::delivery::LinkSendResult::Resource(_) => "link-resource",
+        };
+        let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native Reticulum 0.6 LXMF clean wire submitted method={} destination={} send_destination={} message_id={} route={} route_label={} bytes={} ticket={} reply_ticket={} transient_id={}",
+            method,
+            delivery.destination_hash,
+            send_hash.to_hex_string(),
+            delivery.message_id,
+            route,
+            route_label,
+            send_payload.len(),
+            delivery.include_ticket,
+            delivery.reply_ticket_used,
+            transient_id.unwrap_or_else(|| "-".into())
+        )));
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+impl NativeLxmfSdkWireSubmitter for CleanReticulumLxmfWireSubmitter {
+    fn submit_wire(&self, delivery: &NativeLxmfSdkWireDelivery) -> std::io::Result<()> {
+        self.runtime
+            .block_on(self.submit_wire_async(delivery.clone()))
+            .map_err(|error| std::io::Error::other(error.to_string()))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,7 +450,7 @@ pub struct NativeRuntimeState {
     pub active_identity_profile: Option<IdentityProfile>,
     pub interfaces: Vec<NativeInterfacePlan>,
     pub transport_started: bool,
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     pub rns_net_started: bool,
 }
 
@@ -145,9 +459,43 @@ struct NativeTransportHandle {
     transport: Arc<reticulum_rs::runtime::Transport>,
     interface_count: usize,
     attached_interfaces: Vec<String>,
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    clean_attached_interfaces: Vec<CleanAttachedInterface>,
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    storage_path: std::path::PathBuf,
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    clean_lxmf_delivery_destination:
+        Arc<AsyncMutex<rns_transport::destination::SingleInputDestination>>,
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(not(all(feature = "native-rns-net", any())))]
+#[derive(Clone, Debug)]
+struct CleanAttachedInterface {
+    name: String,
+    address: rns_transport::hash::AddressHash,
+    ifac_configured: bool,
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+impl CleanAttachedInterface {
+    fn label(&self, endpoint: &str, ifac_status: &str) -> String {
+        format!(
+            "{} tcp_client {endpoint} ifac={} iface={}",
+            self.name,
+            ifac_status,
+            self.address.to_hex_string()
+        )
+    }
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+#[derive(Clone, Debug)]
+struct CleanAttachedInterfaceRecord {
+    label: String,
+    clean: CleanAttachedInterface,
+}
+
+#[cfg(all(feature = "native-rns-net", any()))]
 #[derive(Clone)]
 struct NativeRnsNetHandle {
     client: RnsNetPageRequestClient,
@@ -160,7 +508,7 @@ struct NativeRnsNetHandle {
     local_lxmf_delivery_destination_hash: Option<String>,
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 type PendingLxmfProofs = Arc<Mutex<NativeDirectLxmfRouter>>;
 
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
@@ -204,16 +552,25 @@ impl NativeNetworkRuntime {
             identify_on_connect_destinations: Arc::new(Mutex::new(BTreeSet::new())),
             event_tx: broadcast::channel(256).0,
             page_transport: Arc::new(ReticulumPageTransportClient),
-            #[cfg(feature = "native-rns-net")]
+            #[cfg(all(feature = "native-rns-net", any()))]
             rns_net: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "native-rns-net")]
+            #[cfg(all(feature = "native-rns-net", any()))]
             pending_lxmf_proofs: Arc::new(Mutex::new(NativeDirectLxmfRouter::default())),
             #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
             pending_direct_lxmf_resources: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
             pending_propagated_lxmf: Arc::new(Mutex::new(BTreeMap::new())),
-            #[cfg(feature = "native-rns-net")]
             active_omenchat_links: Arc::new(Mutex::new(BTreeSet::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_omenchat_links: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_recent_omenchat_announces: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_destination_identities: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_destination_app_data: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_local_lxmf: Arc::new(Mutex::new(CleanLocalLxmfState::default())),
         }
     }
 
@@ -232,16 +589,25 @@ impl NativeNetworkRuntime {
             identify_on_connect_destinations: Arc::new(Mutex::new(BTreeSet::new())),
             event_tx: broadcast::channel(256).0,
             page_transport,
-            #[cfg(feature = "native-rns-net")]
+            #[cfg(all(feature = "native-rns-net", any()))]
             rns_net: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "native-rns-net")]
+            #[cfg(all(feature = "native-rns-net", any()))]
             pending_lxmf_proofs: Arc::new(Mutex::new(NativeDirectLxmfRouter::default())),
             #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
             pending_direct_lxmf_resources: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
             pending_propagated_lxmf: Arc::new(Mutex::new(BTreeMap::new())),
-            #[cfg(feature = "native-rns-net")]
             active_omenchat_links: Arc::new(Mutex::new(BTreeSet::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_omenchat_links: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_recent_omenchat_announces: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_destination_identities: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_destination_app_data: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_local_lxmf: Arc::new(Mutex::new(CleanLocalLxmfState::default())),
         }
     }
 
@@ -274,12 +640,18 @@ impl NativeNetworkRuntime {
                 .unwrap_or("none"),
             interfaces.len(),
             if ifac_summary.is_empty() {
-                "none".to_string()
+                "none"
             } else {
-                ifac_summary
+                ifac_summary.as_str()
             },
             self.config.announce_on_start
         )));
+        if !ifac_summary.is_empty() {
+            let _ = self.event_tx.send(RuntimeBusEvent::Debug(
+                "native Reticulum 0.6 IFAC TCP adapter active for configured private gateways"
+                    .into(),
+            ));
+        }
         validate_startup_plans(&interfaces).map_err(AppError::from)?;
         let identity_path = identity
             .as_ref()
@@ -297,14 +669,14 @@ impl NativeNetworkRuntime {
             .map(|path| load_private_identity_file(path))
             .transpose()
             .map_err(AppError::from)?;
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let transport = None;
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         let transport = identity_path
             .as_ref()
             .map(|path| self.build_transport(path, &interfaces))
             .transpose()?;
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let rns_net = self.build_rns_net_request_handle(
             active_identity.as_ref(),
             identity.as_ref(),
@@ -318,7 +690,20 @@ impl NativeNetworkRuntime {
         state.interfaces = interfaces;
         state.transport_started = transport.is_some();
         *self.transport.lock().expect("native transport lock") = transport;
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        {
+            let destination_hash = identity_path.as_deref().and_then(|path| {
+                clean_lxmf_delivery_destination_hash_from_identity_path(path).ok()
+            });
+            *self
+                .clean_local_lxmf
+                .lock()
+                .expect("native clean local lxmf lock") = CleanLocalLxmfState {
+                announced: false,
+                destination_hash,
+            };
+        }
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             state.rns_net_started = rns_net.is_some();
             *self.rns_net.lock().expect("native rns-net lock") = rns_net;
@@ -327,11 +712,11 @@ impl NativeNetworkRuntime {
             "native Reticulum runtime running transport_started={}{}",
             state.transport_started,
             {
-                #[cfg(feature = "native-rns-net")]
+                #[cfg(all(feature = "native-rns-net", any()))]
                 {
                     format!(" rns_net_started={}", state.rns_net_started)
                 }
-                #[cfg(not(feature = "native-rns-net"))]
+                #[cfg(not(all(feature = "native-rns-net", any())))]
                 {
                     String::new()
                 }
@@ -344,12 +729,28 @@ impl NativeNetworkRuntime {
         let mut state = self.state.lock().expect("native runtime state lock");
         state.lifecycle = NativeRuntimeLifecycle::Stopped;
         state.transport_started = false;
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             state.rns_net_started = false;
         }
         *self.transport.lock().expect("native transport lock") = None;
-        #[cfg(feature = "native-rns-net")]
+        self.active_omenchat_links
+            .lock()
+            .expect("native active OMENchat link lock")
+            .clear();
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        self.clean_omenchat_links
+            .lock()
+            .expect("native clean OMENchat link lock")
+            .clear();
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        {
+            *self
+                .clean_local_lxmf
+                .lock()
+                .expect("native clean local lxmf lock") = CleanLocalLxmfState::default();
+        }
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             *self.rns_net.lock().expect("native rns-net lock") = None;
         }
@@ -362,16 +763,101 @@ impl NativeNetworkRuntime {
             .clone()
     }
 
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    fn clean_stack_identify_identity(
+        &self,
+        identify_on_connect: bool,
+    ) -> Option<Arc<rns_transport::identity::PrivateIdentity>> {
+        if !identify_on_connect {
+            return None;
+        }
+        let identity_path = self
+            .state_snapshot()
+            .active_identity_profile
+            .as_ref()
+            .map(|profile| profile.path.clone())
+            .or_else(|| self.config.identity_path.clone())?;
+        match load_transport_private_identity_file(&identity_path) {
+            Ok(identity) => Some(Arc::new(identity)),
+            Err(error) => {
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum clean-stack identify-on-connect skipped; active identity could not be loaded from {}: {:?}",
+                    identity_path.display(),
+                    error
+                )));
+                None
+            }
+        }
+    }
+
+    fn native_lxmf_sdk_rpc_status_summary(&self) -> String {
+        #[cfg(feature = "native-lxmf-sdk")]
+        {
+            let sender = RpcNativeLxmfSdkSender::new(
+                self.config
+                    .native_lxmf_sdk_rpc_endpoint
+                    .clone()
+                    .unwrap_or_default(),
+            );
+            let status = sender.status();
+            let state = match status.state {
+                NativeLxmfSdkSenderState::Ready => "ready",
+                NativeLxmfSdkSenderState::MissingEndpoint => "missing_endpoint",
+                NativeLxmfSdkSenderState::NotWired => "not_wired",
+            };
+            format!("native_lxmf_sdk_rpc={state} note=\"{}\"", status.note)
+        }
+        #[cfg(not(feature = "native-lxmf-sdk"))]
+        {
+            "native_lxmf_sdk_rpc=disabled".into()
+        }
+    }
+
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    fn clean_local_lxmf_status_summary(&self, identity_path: Option<&Path>) -> String {
+        let state = self
+            .clean_local_lxmf
+            .lock()
+            .expect("native clean local lxmf lock")
+            .clone();
+        let destination_hash = state.destination_hash.or_else(|| {
+            identity_path
+                .and_then(|path| clean_lxmf_delivery_destination_hash_from_identity_path(path).ok())
+        });
+        let registered = destination_hash.is_some();
+        format!(
+            "local_lxmf_registered={registered} link_registered={registered} proof_capable={registered} announced={} local_lxmf_destination={}",
+            state.announced && registered,
+            destination_hash.as_deref().unwrap_or("none")
+        )
+    }
+
     fn set_failed(&self, message: impl Into<String>) {
         let mut state = self.state.lock().expect("native runtime state lock");
         state.lifecycle = NativeRuntimeLifecycle::Failed(message.into());
         state.transport_started = false;
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             state.rns_net_started = false;
         }
         *self.transport.lock().expect("native transport lock") = None;
-        #[cfg(feature = "native-rns-net")]
+        self.active_omenchat_links
+            .lock()
+            .expect("native active OMENchat link lock")
+            .clear();
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        self.clean_omenchat_links
+            .lock()
+            .expect("native clean OMENchat link lock")
+            .clear();
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        {
+            *self
+                .clean_local_lxmf
+                .lock()
+                .expect("native clean local lxmf lock") = CleanLocalLxmfState::default();
+        }
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             *self.rns_net.lock().expect("native rns-net lock") = None;
         }
@@ -405,27 +891,82 @@ impl NativeNetworkRuntime {
             "native Reticulum ratchet store {}",
             self.config.reticulum_storage_dir.join("ratchets").display()
         )));
-        let transport = reticulum_rs::runtime::Transport::new(config);
+        let mut transport = reticulum_rs::runtime::Transport::new(config);
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        let clean_lxmf_delivery_destination =
+            block_on_native_transport_setup(transport.add_destination(
+                identity.clone(),
+                rns_transport::destination::DestinationName::new("lxmf", "delivery"),
+            ))?;
         let transport = Arc::new(transport);
-        let attached_interfaces = attach_tcp_client_interfaces(&transport, interfaces)?;
+        let attached_interface_records = attach_tcp_client_interfaces(&transport, interfaces)?;
+        let attached_interfaces = attached_interface_records
+            .iter()
+            .map(|record| record.label.clone())
+            .collect::<Vec<_>>();
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        {
+            spawn_reticulum_path_table_restore(
+                transport.clone(),
+                self.config.reticulum_storage_dir.clone(),
+                self.clean_destination_identities.clone(),
+                self.event_tx.clone(),
+            );
+            spawn_reticulum_path_table_saver(
+                transport.clone(),
+                self.config.reticulum_storage_dir.clone(),
+                self.event_tx.clone(),
+            );
+        }
         spawn_announce_listener(
             transport.clone(),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            self.config.reticulum_storage_dir.clone(),
             self.announces.clone(),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            self.clean_destination_identities.clone(),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            self.clean_destination_app_data.clone(),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            self.clean_recent_omenchat_announces.clone(),
+            self.event_tx.clone(),
+        );
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        spawn_clean_omenchat_event_bridge(
+            transport.clone(),
+            self.active_omenchat_links.clone(),
+            self.clean_omenchat_links.clone(),
+            self.config.attachments_dir.clone(),
             self.event_tx.clone(),
         );
         let interface_count = attached_interfaces.len();
         let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
             "native Reticulum transport ready attached_tcp_clients={interface_count}"
         )));
+        if !attached_interfaces.is_empty() {
+            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                "native Reticulum attached clean interface map: {}",
+                attached_interfaces.join(" | ")
+            )));
+        }
 
         Ok(NativeTransportHandle {
             transport,
             interface_count,
             attached_interfaces,
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_attached_interfaces: attached_interface_records
+                .iter()
+                .map(|record| record.clean.clone())
+                .collect(),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            storage_path: self.config.reticulum_storage_dir.clone(),
+            #[cfg(not(all(feature = "native-rns-net", any())))]
+            clean_lxmf_delivery_destination,
         })
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     fn build_rns_net_request_handle(
         &self,
         active_identity: Option<&NativeIdentitySummary>,
@@ -759,11 +1300,11 @@ impl NativeNetworkRuntime {
         }
         {
             let link_closed_events = self.event_tx.clone();
-            #[cfg(feature = "native-rns-net")]
+            #[cfg(all(feature = "native-rns-net", any()))]
             let active_omenchat_links = self.active_omenchat_links.clone();
             tokio::spawn(async move {
                 while let Some(event) = link_closed_rx.recv().await {
-                    #[cfg(feature = "native-rns-net")]
+                    #[cfg(all(feature = "native-rns-net", any()))]
                     if let Some(closed) = take_active_omenchat_link_close(
                         &active_omenchat_links,
                         event.link_id,
@@ -1528,7 +2069,7 @@ impl NativeNetworkRuntime {
         let _ = self.event_tx.send(RuntimeBusEvent::Announce(payload));
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     async fn fetch_page_with_rns_net(
         &self,
         plan: &NativeFetchPlan,
@@ -1606,7 +2147,7 @@ impl NativeNetworkRuntime {
         .await
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     async fn fetch_page_with_rns_net_key(
         &self,
         handle: &NativeRnsNetHandle,
@@ -1704,7 +2245,7 @@ impl NativeNetworkRuntime {
         }
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     fn rns_net_browser_identify_key(
         &self,
         handle: &NativeRnsNetHandle,
@@ -1723,7 +2264,7 @@ impl NativeNetworkRuntime {
         }
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     async fn wait_for_rns_net_path(
         &self,
         handle: &NativeRnsNetHandle,
@@ -1870,7 +2411,7 @@ impl NativeNetworkRuntime {
         }
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     async fn request_rns_net_path_with_siblings(
         &self,
         handle: &NativeRnsNetHandle,
@@ -1890,7 +2431,7 @@ impl NativeNetworkRuntime {
         Ok(requested_siblings)
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     async fn request_rns_net_sibling_paths(
         &self,
         handle: &NativeRnsNetHandle,
@@ -1924,7 +2465,7 @@ impl NativeNetworkRuntime {
         requested
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     async fn canonical_rns_net_propagation_hash(
         &self,
         handle: &NativeRnsNetHandle,
@@ -1966,7 +2507,7 @@ impl NativeNetworkRuntime {
         Ok(Some(hex_encode(&propagation_hash)))
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     fn emit_rns_net_browser_fetch_trace(
         &self,
         plan: &NativeFetchPlan,
@@ -1989,7 +2530,17 @@ impl NativeNetworkRuntime {
 
 fn spawn_announce_listener(
     transport: Arc<reticulum_rs::runtime::Transport>,
+    #[cfg(not(all(feature = "native-rns-net", any())))] storage_path: std::path::PathBuf,
     announces: Arc<Mutex<NativeAnnounceState>>,
+    #[cfg(not(all(feature = "native-rns-net", any())))] clean_destination_identities: Arc<
+        Mutex<BTreeMap<String, rns_transport::identity::Identity>>,
+    >,
+    #[cfg(not(all(feature = "native-rns-net", any())))] clean_destination_app_data: Arc<
+        Mutex<BTreeMap<String, Vec<u8>>>,
+    >,
+    #[cfg(not(all(feature = "native-rns-net", any())))] clean_recent_omenchat_announces: Arc<
+        Mutex<BTreeMap<String, CleanOmenChatAnnounce>>,
+    >,
     event_tx: broadcast::Sender<RuntimeBusEvent>,
 ) {
     tokio::spawn(async move {
@@ -1997,19 +2548,98 @@ fn spawn_announce_listener(
         loop {
             match receiver.recv().await {
                 Ok(event) => {
+                    let hops = event.hops;
+                    let iface = hex_encode(&event.interface);
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
+                    let iface_hash = rns_transport::hash::AddressHash::new_from_slice(
+                        event.interface.as_slice(),
+                    );
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
+                    let clean_destination_identity = {
+                        let destination = event.destination.lock().await;
+                        (
+                            destination.desc.address_hash.to_hex_string(),
+                            destination.identity.clone(),
+                        )
+                    };
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
+                    let clean_destination_app_data_entry = (
+                        clean_destination_identity.0.clone(),
+                        event.app_data.as_slice().to_vec(),
+                    );
                     let payload = payload_from_announce_event(event).await;
                     if !should_emit_directory_announce(&payload) {
                         let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                            "native Reticulum ignored unclassified announce destination={}",
-                            payload.destination_hash
+                            "native Reticulum ignored unclassified announce destination={} hops={} iface={}",
+                            payload.destination_hash, hops, iface
                         )));
                         continue;
+                    }
+                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native Reticulum classified announce kind={:?} destination={} display={} hops={} iface={}",
+                        payload.kind, payload.destination_hash, payload.display_name, hops, iface
+                    )));
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
+                    clean_destination_identities
+                        .lock()
+                        .expect("native clean destination identity cache lock")
+                        .insert(clean_destination_identity.0, clean_destination_identity.1);
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
+                    {
+                        let (destination_hash, app_data) = clean_destination_app_data_entry;
+                        if !app_data.is_empty() {
+                            clean_destination_app_data
+                                .lock()
+                                .expect("native clean destination app-data cache lock")
+                                .insert(destination_hash, app_data);
+                        }
+                    }
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
+                    if payload.kind == DirectoryKind::OmenChat {
+                        clean_recent_omenchat_announces
+                            .lock()
+                            .expect("native recent OMENchat announce lock")
+                            .insert(
+                                payload.destination_hash.clone(),
+                                CleanOmenChatAnnounce {
+                                    observed_at: tokio::time::Instant::now(),
+                                    hops,
+                                    iface: iface_hash,
+                                },
+                            );
                     }
                     announces
                         .lock()
                         .expect("native announce state lock")
                         .ingest(payload.clone());
                     let _ = event_tx.send(RuntimeBusEvent::Announce(payload));
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
+                    {
+                        let save_transport = transport.clone();
+                        let save_storage_path = storage_path.clone();
+                        let save_event_tx = event_tx.clone();
+                        tokio::spawn(async move {
+                            match save_transport
+                                .save_reticulum_path_table(&save_storage_path)
+                                .await
+                            {
+                                Ok(count) => {
+                                    let _ = save_event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native Reticulum 0.6 saved path table after announce storage={} active_paths={}",
+                                        save_storage_path.display(),
+                                        count
+                                    )));
+                                }
+                                Err(error) => {
+                                    let _ = save_event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native Reticulum 0.6 path table save after announce failed storage={} error={}",
+                                        save_storage_path.display(),
+                                        error
+                                    )));
+                                }
+                            }
+                        });
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -2018,7 +2648,85 @@ fn spawn_announce_listener(
     });
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(not(all(feature = "native-rns-net", any())))]
+fn spawn_reticulum_path_table_restore(
+    transport: Arc<reticulum_rs::runtime::Transport>,
+    storage_path: std::path::PathBuf,
+    clean_destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
+    event_tx: broadcast::Sender<RuntimeBusEvent>,
+) {
+    tokio::spawn(async move {
+        match transport
+            .restore_reticulum_path_table_report(&storage_path)
+            .await
+        {
+            Ok(report) => {
+                if !report.restored_identities.is_empty() {
+                    let mut guard = clean_destination_identities
+                        .lock()
+                        .expect("native clean destination identity cache lock");
+                    for restored in &report.restored_identities {
+                        guard.insert(
+                            restored.destination.to_hex_string(),
+                            rns_transport::identity::Identity::new_from_slices(
+                                &restored.public_key,
+                                &restored.verifying_key,
+                            ),
+                        );
+                    }
+                }
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 restored path table storage={} active_paths={} identities={}",
+                    storage_path.display(),
+                    report.restored_active_paths,
+                    report.restored_identities.len()
+                )));
+            }
+            Err(error) => {
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 path table restore failed storage={} error={}",
+                    storage_path.display(),
+                    error
+                )));
+            }
+        }
+    });
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+fn spawn_reticulum_path_table_saver(
+    transport: Arc<reticulum_rs::runtime::Transport>,
+    storage_path: std::path::PathBuf,
+    event_tx: broadcast::Sender<RuntimeBusEvent>,
+) {
+    tokio::spawn(async move {
+        let save_interval = Duration::from_secs(RETICULUM_PATH_TABLE_SAVE_INTERVAL_SECS);
+        tokio::time::sleep(save_interval).await;
+        let mut interval = tokio::time::interval(save_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            match transport.save_reticulum_path_table(&storage_path).await {
+                Ok(count) => {
+                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native Reticulum 0.6 saved path table storage={} active_paths={}",
+                        storage_path.display(),
+                        count
+                    )));
+                }
+                Err(error) => {
+                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native Reticulum 0.6 path table save failed storage={} error={}",
+                        storage_path.display(),
+                        error
+                    )));
+                }
+            }
+            interval.tick().await;
+        }
+    });
+}
+
+#[cfg(all(feature = "native-rns-net", any()))]
 fn save_rns_net_known_destinations_snapshot(
     destination_keys: &Arc<Mutex<RnsNetDestinationKeyStore>>,
     path: &Path,
@@ -2039,7 +2747,7 @@ fn save_rns_net_known_destinations_snapshot(
     }
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn emit_rns_net_path_update_with_siblings(
     event_tx: &broadcast::Sender<RuntimeBusEvent>,
     destination_keys: &Arc<Mutex<RnsNetDestinationKeyStore>>,
@@ -2065,7 +2773,7 @@ fn emit_rns_net_path_update_with_siblings(
     }
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn extend_with_system_known_destinations(key_store: &mut RnsNetDestinationKeyStore) -> usize {
     let Some(home) = std::env::var_os("HOME") else {
         return 0;
@@ -2088,7 +2796,7 @@ fn extend_with_system_known_destinations(key_store: &mut RnsNetDestinationKeySto
 fn attach_tcp_client_interfaces(
     transport: &Arc<reticulum_rs::runtime::Transport>,
     interfaces: &[NativeInterfacePlan],
-) -> AppResult<Vec<String>> {
+) -> AppResult<Vec<CleanAttachedInterfaceRecord>> {
     let mut attached = Vec::new();
     for interface in interfaces {
         if !interface.enabled || !interface.supported || interface.kind != "tcp_client" {
@@ -2102,19 +2810,35 @@ fn attach_tcp_client_interfaces(
         let mut manager = manager.try_lock().map_err(|_| {
             AppError::Runtime("native Reticulum interface manager lock failed".into())
         })?;
-        manager.spawn(
-            rns_transport::iface::tcp_client::TcpClient::new(address.clone()),
-            rns_transport::iface::tcp_client::TcpClient::spawn,
-        );
-        attached.push(format!(
-            "{} tcp_client {address} ifac={}",
-            interface.name,
-            if interface.ifac_configured {
-                "configured-in-profile-not-supported-by-reticulum-rs-transport"
-            } else {
-                "none"
-            }
-        ));
+        let (iface_address, ifac_status) = if interface.ifac_configured {
+            let client = crate::runtime::native::ifac_tcp::IfacTcpClient::new(
+                address.clone(),
+                interface.ifac_network_name.clone(),
+                interface.ifac_passphrase.clone(),
+                16,
+            )
+            .map_err(|error| AppError::Runtime(format!("IFAC TCP client setup failed: {error}")))?;
+            let context = manager.new_context(client);
+            let iface_address = *context.channel.address();
+            tokio::spawn(crate::runtime::native::ifac_tcp::IfacTcpClient::spawn(
+                context,
+            ));
+            (iface_address, "configured")
+        } else {
+            let context = manager.new_context(rns_transport::iface::tcp_client::TcpClient::new(
+                address.clone(),
+            ));
+            let iface_address = *context.channel.address();
+            tokio::spawn(rns_transport::iface::tcp_client::TcpClient::spawn(context));
+            (iface_address, "none")
+        };
+        let clean = CleanAttachedInterface {
+            name: interface.name.clone(),
+            address: iface_address,
+            ifac_configured: ifac_status == "configured",
+        };
+        let label = clean.label(&address, ifac_status);
+        attached.push(CleanAttachedInterfaceRecord { label, clean });
     }
     Ok(attached)
 }
@@ -2145,7 +2869,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             NativeRuntimeLifecycle::Stopped => {
                 "native Reticulum adapter is configured but stopped".into()
             }
-            #[cfg(feature = "native-rns-net")]
+            #[cfg(all(feature = "native-rns-net", any()))]
             NativeRuntimeLifecycle::Running if state.rns_net_started => {
                 let local = self
                         .rns_net
@@ -2175,16 +2899,28 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 format!("native rns-net runtime is primary for browser page/path requests; page requests require known destination identity keys; {local}; {pending_direct}; ratchet_announces_observed={ratchet_announces}; opportunistic_lxmf=small_direct_when_cached_ratchet")
             }
             NativeRuntimeLifecycle::Running if state.transport_started => {
-                #[cfg(not(feature = "native-rns-net"))]
+                #[cfg(not(all(feature = "native-rns-net", any())))]
                 {
-                    "native Reticulum transport is constructed; page/link/resource requests are not wired yet".to_string()
+                    let identity_path = state
+                        .active_identity_profile
+                        .as_ref()
+                        .map(|profile| profile.path.as_path())
+                        .or(self.config.identity_path.as_deref());
+                    let local = self.clean_local_lxmf_status_summary(identity_path);
+                    format!(
+                        "native Reticulum 0.6 transport is running; NomadNet page fetch uses verified request-resource Link.request compatibility; {local}; {}",
+                        self.native_lxmf_sdk_rpc_status_summary()
+                    )
                 }
-                #[cfg(feature = "native-rns-net")]
+                #[cfg(all(feature = "native-rns-net", any()))]
                 {
-                    "native Reticulum transport scaffold is constructed".to_string()
+                    format!(
+                        "native Reticulum transport scaffold is constructed; {}",
+                        self.native_lxmf_sdk_rpc_status_summary()
+                    )
                 }
             }
-            NativeRuntimeLifecycle::Running => "native Reticulum identity/config layer is running without an active transport identity; transport requests are not wired yet".to_string(),
+            NativeRuntimeLifecycle::Running => "native Reticulum identity/config layer is running without an active transport identity; transport requests are unavailable".to_string(),
             NativeRuntimeLifecycle::Failed(reason) => {
                 format!("native Reticulum adapter failed: {reason}")
             }
@@ -2201,9 +2937,9 @@ impl NetworkRuntime for NativeNetworkRuntime {
     async fn attach_identity(&self, identity: IdentityProfile) -> AppResult<()> {
         match load_private_identity_file(&identity.path) {
             Ok(summary) => {
-                #[cfg(feature = "native-rns-net")]
+                #[cfg(all(feature = "native-rns-net", any()))]
                 let transport = None;
-                #[cfg(not(feature = "native-rns-net"))]
+                #[cfg(not(all(feature = "native-rns-net", any())))]
                 let transport = if matches!(
                     self.state_snapshot().lifecycle,
                     NativeRuntimeLifecycle::Running
@@ -2220,7 +2956,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     state.transport_started = true;
                     *self.transport.lock().expect("native transport lock") = transport;
                 }
-                #[cfg(feature = "native-rns-net")]
+                #[cfg(all(feature = "native-rns-net", any()))]
                 if matches!(state.lifecycle, NativeRuntimeLifecycle::Running) {
                     let rns_net = self.build_rns_net_request_handle(
                         state.active_identity.as_ref(),
@@ -2244,7 +2980,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
     }
 
     async fn announce_identity(&self) -> AppResult<bool> {
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let state = self.state_snapshot();
             let Some(identity) = state.active_identity.as_ref() else {
@@ -2284,9 +3020,56 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 Some(hex_encode(&announcement.destination_hash));
             Ok(true)
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
-            Err(unsupported("announce_identity"))
+            let state = self.state_snapshot();
+            let Some(identity_summary) = state.active_identity.as_ref() else {
+                return Err(AppError::from(NativeRuntimeError::IdentityMissing));
+            };
+            let handle = self.active_transport()?;
+            let app_data = local_lxmf_delivery_announce_app_data(
+                local_lxmf_display_name(identity_summary, state.active_identity_profile.as_ref())
+                    .as_str(),
+            )?;
+            let destination = handle.clean_lxmf_delivery_destination.clone();
+            handle
+                .transport
+                .set_destination_announce_app_data(&destination, Some(app_data.clone()))
+                .await;
+            let (destination_hash, packet) = {
+                let mut destination = destination.lock().await;
+                let destination_hash = destination.desc.address_hash.to_hex_string();
+                let packet = destination
+                    .announce(rand_core::OsRng, Some(app_data.as_slice()))
+                    .map_err(|error| {
+                        AppError::Runtime(format!(
+                            "native Reticulum 0.6 LXMF announce failed: {error:?}"
+                        ))
+                    })?;
+                (destination_hash, packet)
+            };
+            let trace = handle
+                .transport
+                .send_packet_broadcast_with_trace(packet)
+                .await
+                .dispatch;
+            {
+                let mut local = self
+                    .clean_local_lxmf
+                    .lock()
+                    .expect("native clean local lxmf lock");
+                local.announced = true;
+                local.destination_hash = Some(destination_hash.clone());
+            }
+            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                "native Reticulum 0.6 announced local lxmf.delivery destination={} dispatch=matched:{} sent:{} queued:{} failed:{}",
+                destination_hash,
+                trace.matched_ifaces,
+                trace.sent_ifaces,
+                trace.queued_ifaces,
+                trace.failed_ifaces
+            )));
+            Ok(true)
         }
     }
 
@@ -2324,7 +3107,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 "native Reticulum runtime must be started before fetching pages".into(),
             ));
         }
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let response = self.fetch_page_with_rns_net(&plan, cancel.clone()).await?;
             let mut page = response.into_browser_page(&plan).map_err(AppError::from)?;
@@ -2334,14 +3117,27 @@ impl NetworkRuntime for NativeNetworkRuntime {
             );
             return Ok(page);
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
+            let identify_on_connect = self
+                .identify_on_connect_destinations
+                .lock()
+                .expect("native identify policy lock")
+                .contains(&plan.request.destination_hash.to_hex_string());
+            let identify_identity = self.clean_stack_identify_identity(identify_on_connect);
             let context = self
                 .transport
                 .lock()
                 .expect("native transport lock")
                 .as_ref()
-                .map(|handle| NativePageFetchContext::new(handle.transport.clone()));
+                .map(|handle| {
+                    NativePageFetchContext::with_identify_on_connect(
+                        handle.transport.clone(),
+                        identify_on_connect,
+                        identify_identity.clone(),
+                        Some(self.event_tx.clone()),
+                    )
+                });
             let mut page = self
                 .page_transport
                 .fetch_page(&plan, context.as_ref(), cancel)
@@ -2375,16 +3171,29 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 "native Reticulum runtime must be started before downloading files".into(),
             ));
         }
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let response = self.fetch_page_with_rns_net(&plan, cancel.clone()).await?;
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         let response = {
+            let identify_on_connect = self
+                .identify_on_connect_destinations
+                .lock()
+                .expect("native identify policy lock")
+                .contains(&plan.request.destination_hash.to_hex_string());
+            let identify_identity = self.clean_stack_identify_identity(identify_on_connect);
             let context = self
                 .transport
                 .lock()
                 .expect("native transport lock")
                 .as_ref()
-                .map(|handle| NativePageFetchContext::new(handle.transport.clone()));
+                .map(|handle| {
+                    NativePageFetchContext::with_identify_on_connect(
+                        handle.transport.clone(),
+                        identify_on_connect,
+                        identify_identity.clone(),
+                        Some(self.event_tx.clone()),
+                    )
+                });
             self.page_transport
                 .fetch_page(&plan, context.as_ref(), cancel)
                 .await?
@@ -2972,16 +3781,144 @@ impl NetworkRuntime for NativeNetworkRuntime {
         #[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
         {
             let state = self.state_snapshot();
-            let source_hash = state
+            if !matches!(state.lifecycle, NativeRuntimeLifecycle::Running) {
+                return Err(AppError::Runtime(
+                    "native Reticulum runtime must be started before sending LXMF".into(),
+                ));
+            }
+            let _active_identity = state
                 .active_identity
                 .as_ref()
-                .map(|identity| identity.address_hash_hex.as_str())
                 .ok_or_else(|| AppError::from(NativeRuntimeError::IdentityMissing))?;
-            let outbound =
-                crate::runtime::native_lxmf::codec::build_outbound_message(&envelope, source_hash)?;
-            let _transport_method =
-                crate::runtime::native_lxmf::codec::app_transport_method(outbound.delivery.method);
-            Err(unsupported("send_message"))
+            let identity_path = state
+                .active_identity_profile
+                .as_ref()
+                .map(|profile| profile.path.as_path())
+                .or(self.config.identity_path.as_deref())
+                .ok_or_else(|| AppError::from(NativeRuntimeError::IdentityMissing))?;
+            let source_hash =
+                clean_lxmf_delivery_destination_hash_from_identity_path(identity_path)?;
+            #[cfg(feature = "native-lxmf-sdk")]
+            {
+                let delivery_mode = envelope.delivery_mode.clone();
+                let summary_peer_hash = envelope.peer_hash.clone();
+                let summary_peer_label = envelope.peer_hash.chars().take(8).collect();
+                let summary_title = envelope.title.clone();
+                let summary_content = envelope.body.clone();
+                let summary_attachments = attachment_summaries_from_paths(&envelope.attachments);
+                let (receipt, sender_name) = if let Some(endpoint) = self
+                    .config
+                    .native_lxmf_sdk_rpc_endpoint
+                    .clone()
+                    .filter(|endpoint| !endpoint.trim().is_empty())
+                {
+                    let sender = RpcNativeLxmfSdkSender::new(endpoint);
+                    let status = sender.status();
+                    if !matches!(status.state, NativeLxmfSdkSenderState::Ready) {
+                        return Err(AppError::Unsupported(format!(
+                            "clean LXMF SDK/RPC sender is not ready: {}",
+                            status.note
+                        )));
+                    }
+                    let plan = build_sdk_send_plan(&envelope, source_hash.as_str(), None);
+                    (sender.send_plan(plan).await?, status.name.to_string())
+                } else {
+                    let handle = self.active_transport()?;
+                    let identity_bytes = std::fs::read(identity_path)
+                        .map_err(|_| AppError::from(NativeRuntimeError::IdentityMissing))?;
+                    let submitter = Arc::new(CleanReticulumLxmfWireSubmitter::new(
+                        handle.transport.clone(),
+                        handle.storage_path.clone(),
+                        self.event_tx.clone(),
+                        self.outbound_propagation_node.clone(),
+                        self.clean_destination_identities.clone(),
+                        self.clean_destination_app_data.clone(),
+                        Duration::from_secs(self.config.request_timeout_secs.max(1)),
+                    )?);
+                    let delivery = build_sdk_wire_delivery_from_envelope(
+                        &envelope,
+                        source_hash.as_str(),
+                        identity_bytes.as_slice(),
+                        None,
+                    )?;
+                    submitter.submit_wire_async(delivery.clone()).await?;
+                    (
+                        crate::runtime::native_lxmf::client::NativeLxmfSdkSendReceipt {
+                            message_id: Some(delivery.message_id),
+                            accepted: true,
+                            state: "submitted_to_clean_reticulum".into(),
+                        },
+                        "embedded-clean-reticulum".to_string(),
+                    )
+                };
+                let submitted_at = native_unix_timestamp();
+                let message_id = receipt
+                    .message_id
+                    .clone()
+                    .unwrap_or_else(|| format!("sdk-rpc-{submitted_at:.3}"));
+                let transport_method = match delivery_mode {
+                    crate::messaging::DeliveryMode::Direct => TransportMethod::Direct,
+                    crate::messaging::DeliveryMode::Propagated => TransportMethod::Propagated,
+                };
+                let mut fields = BTreeMap::from([
+                    ("native_lxmf_state".into(), receipt.state.clone()),
+                    ("native_lxmf_evidence".into(), "lxmf_sdk_rpc_sender".into()),
+                    ("native_lxmf_message_id".into(), message_id.clone()),
+                    ("native_lxmf_source_hash".into(), source_hash.clone()),
+                    (
+                        "native_lxmf_submitted_at".into(),
+                        format!("{submitted_at:.3}"),
+                    ),
+                    ("native_lxmf_sdk_rpc".into(), sender_name),
+                    (
+                        "native_lxmf_retry_guidance".into(),
+                        "LXMF message was accepted by the clean Reticulum/LXMF sender; delivery evidence comes from runtime link/resource activity"
+                            .into(),
+                    ),
+                ]);
+                if let Some(propagation_node) = self
+                    .outbound_propagation_node
+                    .lock()
+                    .expect("native propagation node lock")
+                    .clone()
+                {
+                    fields.insert("native_lxmf_propagation_node".into(), propagation_node);
+                }
+                if envelope.include_ticket {
+                    fields.insert("native_lxmf_include_ticket".into(), "true".into());
+                }
+                if envelope.native_reply_ticket.is_some() {
+                    fields.insert("native_lxmf_reply_ticket".into(), "present".into());
+                }
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native LXMF clean send accepted peer={} message_id={} state={} delivery={:?} ticket={}",
+                    summary_peer_hash,
+                    message_id,
+                    receipt.state,
+                    transport_method,
+                    envelope.include_ticket
+                )));
+                return Ok(MessageSummary {
+                    peer_hash: summary_peer_hash,
+                    peer_label: summary_peer_label,
+                    title: summary_title,
+                    content: summary_content,
+                    timestamp: submitted_at,
+                    transport_method,
+                    delivered: receipt.accepted,
+                    failed: !receipt.accepted,
+                    incoming: false,
+                    unread: false,
+                    message_id: Some(message_id),
+                    fields,
+                    attachments: summary_attachments,
+                });
+            }
+            #[cfg(not(feature = "native-lxmf-sdk"))]
+            {
+                let _ = source_hash;
+                Err(unsupported("send_message"))
+            }
         }
         #[cfg(not(feature = "native-lxmf"))]
         {
@@ -2998,7 +3935,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
         &self,
         messages: Vec<MessageSummary>,
     ) -> AppResult<LxmfCorrelationRecovery> {
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let recovered_direct =
                 native_lxmf_recover_direct_correlation(&self.pending_lxmf_proofs, &messages);
@@ -3020,7 +3957,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 propagated_recovered: recovered_propagated,
             })
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
             let _ = messages;
             Ok(LxmfCorrelationRecovery::default())
@@ -3030,8 +3967,9 @@ impl NetworkRuntime for NativeNetworkRuntime {
     async fn set_outbound_propagation_node(&self, hash: Option<String>) -> AppResult<()> {
         let hash = match hash {
             Some(hash) => {
+                #[cfg(all(feature = "native-rns-net", any()))]
                 let parsed = parse_transport_destination_hash(&hash)?;
-                #[cfg(feature = "native-rns-net")]
+                #[cfg(all(feature = "native-rns-net", any()))]
                 {
                     let mut destination = [0u8; 16];
                     destination.copy_from_slice(parsed.as_slice());
@@ -3049,8 +3987,9 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         Some(hash)
                     }
                 }
-                #[cfg(not(feature = "native-rns-net"))]
+                #[cfg(not(all(feature = "native-rns-net", any())))]
                 {
+                    let _ = parse_transport_destination_hash(&hash)?;
                     Some(hash)
                 }
             }
@@ -3082,6 +4021,8 @@ impl NetworkRuntime for NativeNetworkRuntime {
     }
 
     async fn sync_propagation_messages(&self, limit: Option<u32>) -> AppResult<()> {
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        let _ = limit;
         let Some(hash) = self
             .outbound_propagation_node
             .lock()
@@ -3102,7 +4043,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 "native LXMF propagation sync needs a selected propagation node".into(),
             ));
         };
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let destination = parse_rns_net_destination_hash(&hash)?;
             let Some(handle) = self.rns_net.lock().expect("native rns-net lock").clone() else {
@@ -3286,7 +4227,12 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .app_data
                     .as_deref()
                     .map(crate::runtime::native_lxmf::codec::propagation_announce_stamp_costs)
-                    .unwrap_or_default();
+                    .filter(|costs| !costs.is_empty())
+                    .unwrap_or_else(|| {
+                        vec![
+                            crate::runtime::native_lxmf::codec::DEFAULT_PROPAGATION_STAMP_TARGET_COST,
+                        ]
+                    });
                 let now = crate::storage::transient_ids::unix_timestamp_secs();
                 let pruned = DeliveredTransientIdStore::prune_expired(
                     &mut delivered_ids,
@@ -3912,10 +4858,410 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 Err(unsupported("sync_propagation_messages"))
             }
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
-            let _ = parse_transport_destination_hash(&hash)?;
-            Err(unsupported("sync_propagation_messages"))
+            #[cfg(not(feature = "native-lxmf"))]
+            {
+                let _ = parse_transport_destination_hash(&hash)?;
+                Err(unsupported("sync_propagation_messages"))
+            }
+            #[cfg(feature = "native-lxmf")]
+            {
+                let destination_hash = parse_transport_destination_hash(&hash)?;
+                let Some(handle) = self
+                    .transport
+                    .lock()
+                    .expect("native transport lock")
+                    .clone()
+                else {
+                    return Err(AppError::Runtime(
+                        "native Reticulum runtime is not started; propagation sync cannot run"
+                            .into(),
+                    ));
+                };
+                let cancel = CancellationToken::new();
+                let identity_path = self
+                    .state_snapshot()
+                    .active_identity_profile
+                    .as_ref()
+                    .map(|profile| profile.path.clone())
+                    .or_else(|| self.config.identity_path.clone())
+                    .ok_or_else(|| AppError::from(NativeRuntimeError::IdentityMissing))?;
+                let identity_bytes = std::fs::read(&identity_path)
+                    .map_err(|_| AppError::from(NativeRuntimeError::IdentityMissing))?;
+                let identify_identity =
+                    load_transport_private_identity_file(&identity_path).map_err(AppError::from)?;
+                let local_lxmf_destination_hash_hex =
+                    clean_lxmf_delivery_destination_hash_from_identity_path(&identity_path)?;
+                let local_lxmf_destination_hash = address_hash_to_link_id(
+                    parse_transport_destination_hash(&local_lxmf_destination_hash_hex)?,
+                );
+
+                emit_propagation_sync_event(
+                    &self.event_tx,
+                    PropagationSyncStage::PathCheck,
+                    PropagationSyncEventStatus::Started,
+                    Some(&hash),
+                    "resolving clean Reticulum propagation node identity",
+                    [],
+                );
+                let propagation_identity = clean_wait_for_destination_identity(
+                    &handle.transport,
+                    &handle.storage_path,
+                    destination_hash,
+                    Duration::from_secs(12),
+                    cancel.clone(),
+                    Some(&self.event_tx),
+                    Some(&self.clean_destination_identities),
+                )
+                .await?;
+                let _ = self
+                    .event_tx
+                    .send(RuntimeBusEvent::PropagationStatus(PropagationStatus {
+                        selected: true,
+                        destination_hash: Some(hash.clone()),
+                        has_path: true,
+                        known_app_data: true,
+                        link_state: "path_known".into(),
+                        transfer_state: "router_deferred".into(),
+                    }));
+
+                emit_propagation_sync_event(
+                    &self.event_tx,
+                    PropagationSyncStage::LinkEstablish,
+                    PropagationSyncEventStatus::Started,
+                    Some(&hash),
+                    "establishing clean propagation node link",
+                    [],
+                );
+                let destination = single_output_destination_desc(
+                    destination_hash,
+                    propagation_identity,
+                    "lxmf",
+                    "propagation",
+                )
+                .map_err(AppError::from)?;
+                let link = handle.transport.link(destination).await;
+                rns_transport::delivery::await_link_activation(
+                    &handle.transport,
+                    &link,
+                    Duration::from_secs(12),
+                )
+                .await
+                .map_err(|error| {
+                    AppError::from(NativeRuntimeError::Timeout(format!(
+                        "clean LXMF propagation link establishment: {error}"
+                    )))
+                })?;
+                let link_id = *link.lock().await.id();
+
+                emit_propagation_sync_event(
+                    &self.event_tx,
+                    PropagationSyncStage::LinkIdentify,
+                    PropagationSyncEventStatus::Started,
+                    Some(&hash),
+                    "identifying local identity on clean propagation link",
+                    [],
+                );
+                send_reticulum_link_identify(
+                    &handle.transport,
+                    &link,
+                    &identify_identity,
+                    destination_hash,
+                )
+                .await?;
+
+                let delivered_store = DeliveredTransientIdStore::for_reticulum_storage(
+                    &self.config.reticulum_storage_dir,
+                );
+                let mut delivered_ids = delivered_store.load_or_default()?;
+                let now = crate::storage::transient_ids::unix_timestamp_secs();
+                let pruned = DeliveredTransientIdStore::prune_expired(
+                    &mut delivered_ids,
+                    now,
+                    LXMF_LOCAL_DELIVERY_CACHE_MAX_AGE_SECS,
+                );
+                if pruned > 0 {
+                    delivered_store.save(&delivered_ids)?;
+                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native LXMF clean propagation sync pruned {pruned} expired local delivery cache entries"
+                    )));
+                }
+
+                emit_propagation_sync_event(
+                    &self.event_tx,
+                    PropagationSyncStage::ListRequest,
+                    PropagationSyncEventStatus::Started,
+                    Some(&hash),
+                    "requesting available transient ids from clean propagation node",
+                    [("cache_entries", delivered_ids.len())],
+                );
+                let list_response = clean_send_request_value_and_wait(
+                    &handle.transport,
+                    &link,
+                    link_id,
+                    "/get",
+                    &rmpv::Value::Array(vec![rmpv::Value::Nil, rmpv::Value::Nil]),
+                    Duration::from_secs(20),
+                    cancel.clone(),
+                    &self.event_tx,
+                    &hash,
+                )
+                .await?;
+                let available = native_lxmf_parse_transient_id_list(&list_response.body)?;
+                let available_count = available.len();
+                let (wants, mut haves) =
+                    native_lxmf_select_sync_ids(available, &delivered_ids, limit);
+                emit_propagation_sync_event(
+                    &self.event_tx,
+                    PropagationSyncStage::ListResponse,
+                    PropagationSyncEventStatus::Complete,
+                    Some(&hash),
+                    "received clean propagation transient id list",
+                    [
+                        ("available", available_count),
+                        ("cached_haves", haves.len()),
+                        ("wants", wants.len()),
+                    ],
+                );
+
+                if wants.is_empty() {
+                    if !haves.is_empty() {
+                        let haves_value = rmpv::Value::Array(
+                            haves
+                                .iter()
+                                .map(|id| rmpv::Value::Binary(id.to_vec()))
+                                .collect(),
+                        );
+                        emit_propagation_sync_event(
+                            &self.event_tx,
+                            PropagationSyncStage::AckRequest,
+                            PropagationSyncEventStatus::Started,
+                            Some(&hash),
+                            "acknowledging cached propagation transient ids",
+                            [("haves", haves.len())],
+                        );
+                        let _ = clean_send_request_value_and_wait(
+                            &handle.transport,
+                            &link,
+                            link_id,
+                            "/get",
+                            &rmpv::Value::Array(vec![rmpv::Value::Nil, haves_value]),
+                            Duration::from_secs(10),
+                            CancellationToken::new(),
+                            &self.event_tx,
+                            &hash,
+                        )
+                        .await;
+                    }
+                    clean_close_link(&handle.transport, &link).await;
+                    emit_propagation_sync_event(
+                        &self.event_tx,
+                        PropagationSyncStage::Complete,
+                        PropagationSyncEventStatus::Complete,
+                        Some(&hash),
+                        "clean propagation sync complete with no new wanted messages",
+                        [("requested", 0), ("cached_haves", haves.len())],
+                    );
+                    let _ =
+                        self.event_tx
+                            .send(RuntimeBusEvent::PropagationStatus(PropagationStatus {
+                                selected: true,
+                                destination_hash: Some(hash),
+                                has_path: true,
+                                known_app_data: true,
+                                link_state: "link_closed".into(),
+                                transfer_state: "complete".into(),
+                            }));
+                    return Ok(());
+                }
+
+                let wants_value = rmpv::Value::Array(
+                    wants
+                        .iter()
+                        .map(|id| rmpv::Value::Binary(id.to_vec()))
+                        .collect(),
+                );
+                emit_propagation_sync_event(
+                    &self.event_tx,
+                    PropagationSyncStage::GetRequest,
+                    PropagationSyncEventStatus::Started,
+                    Some(&hash),
+                    "requesting wanted propagated LXMF payloads",
+                    [("wants", wants.len())],
+                );
+                let get_response = clean_send_request_value_and_wait(
+                    &handle.transport,
+                    &link,
+                    link_id,
+                    "/get",
+                    &rmpv::Value::Array(vec![
+                        wants_value,
+                        rmpv::Value::Array(Vec::new()),
+                        rmpv::Value::F64(10240.0),
+                    ]),
+                    Duration::from_secs(45),
+                    cancel,
+                    &self.event_tx,
+                    &hash,
+                )
+                .await?;
+                let payloads = native_lxmf_parse_propagation_payloads(&get_response.body)?;
+                let payload_count = payloads.len();
+                let mut decoded_count = 0usize;
+                let mut decode_failed_count = 0usize;
+                let mut skipped_count = 0usize;
+                let mut deferred_count = 0usize;
+                let mut cache_changed = false;
+                for payload in payloads {
+                    let payload_candidates = native_lxmf_payload_candidates(payload.as_slice())
+                        .unwrap_or_else(|_| vec![payload.clone()]);
+                    for lxmf_data in payload_candidates {
+                        let transient_id = native_lxmf_transient_id(lxmf_data.as_slice());
+                        let decode_data = lxmf_data;
+                        if let Some(payload_destination) =
+                            crate::runtime::native_lxmf::codec::propagated_lxmf_destination_hash(
+                                decode_data.as_slice(),
+                            )
+                        {
+                            if payload_destination != local_lxmf_destination_hash {
+                                skipped_count += 1;
+                                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native LXMF clean propagation sync skipped payload not addressed to local identity transient_id={} destination={} local_destination={}",
+                                    hex_encode(&transient_id),
+                                    hex_encode(&payload_destination),
+                                    hex_encode(&local_lxmf_destination_hash)
+                                )));
+                                continue;
+                            }
+                        }
+                        match crate::runtime::native_lxmf::codec::decode_propagated_lxmf_data_storing_attachments(
+                            decode_data.as_slice(),
+                            identity_bytes.as_slice(),
+                            &self.config.attachments_dir,
+                        ) {
+                            Ok(message) => {
+                                if !DeliveredTransientIdStore::has_delivered(
+                                    &delivered_ids,
+                                    &transient_id,
+                                ) {
+                                    DeliveredTransientIdStore::mark_delivered(
+                                        &mut delivered_ids,
+                                        &transient_id,
+                                        crate::storage::transient_ids::unix_timestamp_secs(),
+                                    );
+                                    cache_changed = true;
+                                }
+                                haves.push(transient_id);
+                                decoded_count += 1;
+                                self.inbound_messages
+                                    .lock()
+                                    .expect("native inbound message lock")
+                                    .push(message.clone());
+                                let _ = self
+                                    .event_tx
+                                    .send(RuntimeBusEvent::MessageReceived(message));
+                            }
+                            Err(error) => {
+                                decode_failed_count += 1;
+                                if crate::runtime::native_lxmf::codec::propagated_lxmf_destination_hash(
+                                    decode_data.as_slice(),
+                                )
+                                .is_some_and(|destination| destination == local_lxmf_destination_hash)
+                                {
+                                    deferred_count += 1;
+                                    let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native LXMF clean propagation sync deferred undecryptable local payload transient_id={} destination={} error={error}",
+                                        hex_encode(&transient_id),
+                                        hex_encode(&local_lxmf_destination_hash)
+                                    )));
+                                    continue;
+                                }
+                                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native LXMF clean propagation sync payload decode failed transient_id={}: {error}",
+                                    hex_encode(&transient_id)
+                                )));
+                            }
+                        }
+                    }
+                }
+                if cache_changed {
+                    delivered_store.save(&delivered_ids)?;
+                }
+                emit_propagation_sync_event(
+                    &self.event_tx,
+                    PropagationSyncStage::Decode,
+                    if decode_failed_count > deferred_count {
+                        PropagationSyncEventStatus::Failed
+                    } else {
+                        PropagationSyncEventStatus::Complete
+                    },
+                    Some(&hash),
+                    "decoded clean propagation payload candidates",
+                    [
+                        ("payloads", payload_count),
+                        ("decoded", decoded_count),
+                        ("failed", decode_failed_count),
+                        ("skipped", skipped_count),
+                        ("deferred", deferred_count),
+                    ],
+                );
+                if !haves.is_empty() {
+                    let haves_value = rmpv::Value::Array(
+                        haves
+                            .iter()
+                            .map(|id| rmpv::Value::Binary(id.to_vec()))
+                            .collect(),
+                    );
+                    emit_propagation_sync_event(
+                        &self.event_tx,
+                        PropagationSyncStage::AckRequest,
+                        PropagationSyncEventStatus::Started,
+                        Some(&hash),
+                        "acknowledging delivered propagation transient ids",
+                        [("haves", haves.len())],
+                    );
+                    let _ = clean_send_request_value_and_wait(
+                        &handle.transport,
+                        &link,
+                        link_id,
+                        "/get",
+                        &rmpv::Value::Array(vec![rmpv::Value::Nil, haves_value]),
+                        Duration::from_secs(10),
+                        CancellationToken::new(),
+                        &self.event_tx,
+                        &hash,
+                    )
+                    .await;
+                }
+                clean_close_link(&handle.transport, &link).await;
+                emit_propagation_sync_event(
+                    &self.event_tx,
+                    PropagationSyncStage::Complete,
+                    PropagationSyncEventStatus::Complete,
+                    Some(&hash),
+                    "clean propagation sync complete",
+                    [
+                        ("requested", wants.len()),
+                        ("decoded", decoded_count),
+                        ("haves", haves.len()),
+                        ("failed", decode_failed_count),
+                        ("skipped", skipped_count),
+                        ("deferred", deferred_count),
+                    ],
+                );
+                let _ = self
+                    .event_tx
+                    .send(RuntimeBusEvent::PropagationStatus(PropagationStatus {
+                        selected: true,
+                        destination_hash: Some(hash),
+                        has_path: true,
+                        known_app_data: true,
+                        link_state: "link_closed".into(),
+                        transfer_state: "complete".into(),
+                    }));
+                Ok(())
+            }
         }
     }
 
@@ -3925,12 +5271,12 @@ impl NetworkRuntime for NativeNetworkRuntime {
         reason: &str,
         sibling_aspects: bool,
     ) -> AppResult<bool> {
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let rns_net_handle = {
             let guard = self.rns_net.lock().expect("native rns-net lock");
             guard.clone()
         };
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         if let Some(handle) = rns_net_handle {
             let destination = parse_rns_net_destination_hash(destination_hash)?;
             if handle.client.has_path(destination).await? {
@@ -3949,15 +5295,26 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }
             return Ok(true);
         }
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        let _ = (reason, sibling_aspects);
         let destination = parse_transport_destination_hash(destination_hash)?;
         let transport = self.active_transport()?;
         if transport.transport.knows_destination(&destination).await {
             return Ok(true);
         }
-        transport
+        let trace = transport
             .transport
             .request_path(&destination, None, None)
             .await;
+        let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native Reticulum 0.6 requested path destination={} reason={} dispatch=matched:{} sent:{} queued:{} failed:{}",
+            destination_hash,
+            reason,
+            trace.matched_ifaces,
+            trace.sent_ifaces,
+            trace.queued_ifaces,
+            trace.failed_ifaces
+        )));
         Ok(true)
     }
 
@@ -3967,12 +5324,12 @@ impl NetworkRuntime for NativeNetworkRuntime {
         max_requests: u32,
         _cooldown_secs: u64,
     ) -> AppResult<u32> {
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let rns_net_handle = {
             let guard = self.rns_net.lock().expect("native rns-net lock");
             guard.clone()
         };
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         if let Some(handle) = rns_net_handle {
             let mut requested = 0;
             for hash in hashes.iter().take(max_requests as usize) {
@@ -4000,7 +5357,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
     }
 
     async fn preload_known_destinations(&self, path: &Path) -> AppResult<usize> {
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let rns_net_handle = {
                 let guard = self.rns_net.lock().expect("native rns-net lock");
@@ -4022,7 +5379,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .extend(loaded);
             return Ok(count);
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
             let _ = path;
             Err(unsupported("preload_known_destinations"))
@@ -4031,16 +5388,16 @@ impl NetworkRuntime for NativeNetworkRuntime {
 
     async fn interface_stats(&self) -> AppResult<InterfaceStats> {
         let state = self.state_snapshot();
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let rns_net_started = state.rns_net_started;
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let live_rns_net_stats = self
             .rns_net
             .lock()
             .expect("native rns-net lock")
             .as_ref()
             .map(|handle| handle.client.clone());
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let live_rns_net_stats = if let Some(client) = live_rns_net_stats {
             client.interface_stats().await.ok()
         } else {
@@ -4063,7 +5420,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .unwrap_or_else(|| (String::new(), Vec::new()))
         };
         let attached_samples = attached_interfaces.clone();
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let live_tcp_interfaces = live_rns_net_stats
             .as_ref()
             .map(|stats| {
@@ -4079,7 +5436,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let mut live_tcp_index = 0usize;
         let samples = state
             .interfaces
@@ -4089,11 +5446,11 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .endpoint
                     .as_ref()
                     .map(|endpoint| format!("{}:{}", endpoint.host, endpoint.port));
-                #[cfg(feature = "native-rns-net")]
+                #[cfg(all(feature = "native-rns-net", any()))]
                 let matched_live_interface = live_rns_net_stats.as_ref().and_then(|stats| {
                     find_live_rns_net_interface(stats, plan, endpoint.as_deref())
                 });
-                #[cfg(feature = "native-rns-net")]
+                #[cfg(all(feature = "native-rns-net", any()))]
                 let ordered_live_interface =
                     if plan.enabled && plan.supported && plan.kind == "tcp_client" {
                         let interface = live_tcp_interfaces.get(live_tcp_index).copied();
@@ -4102,7 +5459,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     } else {
                         None
                     };
-                #[cfg(feature = "native-rns-net")]
+                #[cfg(all(feature = "native-rns-net", any()))]
                 let live_interface =
                     select_live_rns_net_interface(matched_live_interface, ordered_live_interface);
                 let attached = attached_samples.iter().any(|line| {
@@ -4111,17 +5468,17 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             .as_ref()
                             .is_some_and(|endpoint| line.contains(endpoint))
                 }) || {
-                    #[cfg(feature = "native-rns-net")]
+                    #[cfg(all(feature = "native-rns-net", any()))]
                     {
                         live_interface.is_some_and(|interface| interface.status)
                     }
-                    #[cfg(not(feature = "native-rns-net"))]
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
                     {
                         false
                     }
                 };
                 let detail = if attached {
-                    #[cfg(feature = "native-rns-net")]
+                    #[cfg(all(feature = "native-rns-net", any()))]
                     if let Some(interface) = live_interface {
                         Some(format_live_rns_net_interface_detail(interface))
                     } else {
@@ -4135,7 +5492,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             })
                             .cloned()
                     }
-                    #[cfg(not(feature = "native-rns-net"))]
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
                     attached_samples
                         .iter()
                         .find(|line| {
@@ -4146,13 +5503,13 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         })
                         .cloned()
                 } else {
-                    #[cfg(feature = "native-rns-net")]
+                    #[cfg(all(feature = "native-rns-net", any()))]
                     if let Some(interface) = live_interface {
                         Some(format_live_rns_net_interface_detail(interface))
                     } else {
                         plan.reason.clone()
                     }
-                    #[cfg(not(feature = "native-rns-net"))]
+                    #[cfg(not(all(feature = "native-rns-net", any())))]
                     plan.reason.clone()
                 };
                 InterfaceSample {
@@ -4194,7 +5551,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .into_iter()
                 .map(|interface| format!("attached {interface}")),
         );
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         if let Some(stats) = &live_rns_net_stats {
             interfaces.extend(
                 stats
@@ -4203,7 +5560,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .map(format_live_rns_net_interface_detail),
             );
         }
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         if rns_net_started {
             interfaces.push("attached rns-net primary runtime".into());
             if let Some(identity_path) = state
@@ -4230,7 +5587,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
 
         Ok(InterfaceStats {
             available: matches!(state.lifecycle, NativeRuntimeLifecycle::Running),
-            #[cfg(feature = "native-rns-net")]
+            #[cfg(all(feature = "native-rns-net", any()))]
             reason: Some(if rns_net_started {
                 "native rns-net runtime is primary for browser page/path requests".into()
             } else if transport_detail.is_empty() {
@@ -4238,7 +5595,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             } else {
                 transport_detail
             }),
-            #[cfg(not(feature = "native-rns-net"))]
+            #[cfg(not(all(feature = "native-rns-net", any())))]
             reason: Some(if transport_detail.is_empty() {
                 "native Reticulum transport/interface runtime is not fully wired yet".into()
             } else {
@@ -4302,12 +5659,12 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 propagation_usable: None,
             });
         };
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         let rns_net_handle = {
             let guard = self.rns_net.lock().expect("native rns-net lock");
             guard.clone()
         };
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         if let Some(handle) = rns_net_handle {
             let destination_bytes = parse_rns_net_destination_hash(destination_hash)?;
             let has_path = handle.client.has_path(destination_bytes).await?;
@@ -4398,7 +5755,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 return Ok(report);
             }
         };
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         let _ = &plan;
         if !matches!(
             self.state_snapshot().lifecycle,
@@ -4418,7 +5775,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             .with_trace("backend", "reticulum"),
         );
 
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let Some(handle) = self.rns_net.lock().expect("native rns-net lock").clone() else {
                 report.steps.push(
@@ -4528,13 +5885,36 @@ impl NetworkRuntime for NativeNetworkRuntime {
             return Ok(report);
         }
 
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
             let _ = execute_request;
-            report.steps.push(PageFetchProbeStep::failed(
-                PageFetchProbeStage::RuntimeSetup,
-                "native-rns-net feature is not compiled; live NomadNet page probes are unavailable",
-            ));
+            let capabilities = native_reticulum06_capability_report();
+            report.steps.push(
+                PageFetchProbeStep::ok(
+                    PageFetchProbeStage::DestinationIdentity,
+                    "clean reticulum-rs 0.6 stack can inspect destination identity through transport",
+                )
+                .with_trace("stack", capabilities.stack)
+                .with_trace("transport", capabilities.transport_crate)
+                .with_trace("lxmf", capabilities.lxmf_crate),
+            );
+            report.steps.push(
+                PageFetchProbeStep::ok(
+                    PageFetchProbeStage::LinkSetup,
+                    "reticulum-rs-transport exposes destination link lifecycle primitives",
+                )
+                .with_trace("capability", "destination-links"),
+            );
+            report.steps.push(
+                PageFetchProbeStep::ok(
+                    PageFetchProbeStage::RequestSend,
+                    "clean reticulum-rs 0.6 page probe can use verified request-resource Link.request compatibility",
+                )
+                .with_trace("capability", "link-request-receipt")
+                .with_trace("state", "available")
+                .with_trace("remaining_parity_gaps", capabilities.blockers.join("; "))
+                .with_trace("next", capabilities.recommended_next_step),
+            );
             Ok(report)
         }
     }
@@ -4786,13 +6166,163 @@ impl NetworkRuntime for NativeNetworkRuntime {
             Ok(report)
         }
 
-        #[cfg(any(not(feature = "native-lxmf"), not(feature = "native-rns-net")))]
+        #[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
+        {
+            let state = self.state_snapshot();
+            let Some(identity_path) = state
+                .active_identity_profile
+                .as_ref()
+                .map(|profile| profile.path.as_path())
+                .or(self.config.identity_path.as_deref())
+            else {
+                report.steps.push(LxmfDeliveryProbeStep::failed(
+                    LxmfDeliveryProbeStage::SourceIdentity,
+                    "active identity path is not configured",
+                ));
+                return Ok(report);
+            };
+            let source_hash =
+                match clean_lxmf_delivery_destination_hash_from_identity_path(identity_path) {
+                    Ok(hash) => hash,
+                    Err(error) => {
+                        report.steps.push(LxmfDeliveryProbeStep::failed(
+                            LxmfDeliveryProbeStage::SourceIdentity,
+                            error.to_string(),
+                        ));
+                        return Ok(report);
+                    }
+                };
+            report.steps.push(
+                LxmfDeliveryProbeStep::ok(
+                    LxmfDeliveryProbeStage::SourceIdentity,
+                    "active source identity and clean local LXMF delivery destination are available",
+                )
+                .with_trace("source_hash", source_hash),
+            );
+
+            let peer_destination = match parse_transport_destination_hash(peer_hash) {
+                Ok(destination) => destination,
+                Err(error) => {
+                    report.steps.push(LxmfDeliveryProbeStep::failed(
+                        LxmfDeliveryProbeStage::PeerIdentity,
+                        error.to_string(),
+                    ));
+                    return Ok(report);
+                }
+            };
+            let handle = match self.active_transport() {
+                Ok(handle) => handle,
+                Err(error) => {
+                    report.steps.push(LxmfDeliveryProbeStep::failed(
+                        LxmfDeliveryProbeStage::RuntimeSetup,
+                        error.to_string(),
+                    ));
+                    return Ok(report);
+                }
+            };
+            let cancel = CancellationToken::new();
+            match clean_wait_for_destination_identity(
+                &handle.transport,
+                &handle.storage_path,
+                peer_destination,
+                Duration::from_secs(self.config.request_timeout_secs.max(1)),
+                cancel.clone(),
+                Some(&self.event_tx),
+                Some(&self.clean_destination_identities),
+            )
+            .await
+            {
+                Ok(_) => {
+                    report.steps.push(
+                        LxmfDeliveryProbeStep::ok(
+                            LxmfDeliveryProbeStage::PeerIdentity,
+                            "clean LXMF peer destination identity is known",
+                        )
+                        .with_trace("peer_hash", peer_hash),
+                    );
+                }
+                Err(error) => {
+                    report.steps.push(LxmfDeliveryProbeStep::failed(
+                        LxmfDeliveryProbeStage::PeerIdentity,
+                        error.to_string(),
+                    ));
+                    return Ok(report);
+                }
+            }
+            match clean_wait_for_destination_path(
+                &handle.transport,
+                peer_destination,
+                Duration::from_secs(self.config.request_timeout_secs.max(1)),
+                cancel,
+                Some(&self.event_tx),
+                None,
+            )
+            .await
+            {
+                Ok(_) => {
+                    report.steps.push(
+                        LxmfDeliveryProbeStep::ok(
+                            LxmfDeliveryProbeStage::PathDiscovery,
+                            "clean LXMF peer path is available",
+                        )
+                        .with_trace("peer_hash", peer_hash),
+                    );
+                }
+                Err(error) => {
+                    report.steps.push(LxmfDeliveryProbeStep::failed(
+                        LxmfDeliveryProbeStage::PathDiscovery,
+                        error.to_string(),
+                    ));
+                    return Ok(report);
+                }
+            }
+            report.steps.push(LxmfDeliveryProbeStep::ok(
+                LxmfDeliveryProbeStage::PacketBuild,
+                "clean LXMF SDK bridge can build signed wire messages for direct send",
+            ));
+            report.ready_to_send = true;
+
+            if execute_send {
+                let summary = self
+                    .send_message(MessageEnvelope {
+                        peer_hash: peer_hash.into(),
+                        title: "OMENbrowser_rs LXMF smoke test".into(),
+                        body: "OMENbrowser_rs native LXMF delivery smoke test".into(),
+                        delivery_mode: crate::messaging::DeliveryMode::Direct,
+                        include_ticket: false,
+                        native_reply_ticket: None,
+                        attachments: Vec::new(),
+                    })
+                    .await?;
+                report.steps.push(
+                    LxmfDeliveryProbeStep::ok(
+                        LxmfDeliveryProbeStage::SendPacket,
+                        "clean LXMF smoke message was submitted through reticulum-rs-transport",
+                    )
+                    .with_trace(
+                        "message_id",
+                        summary.message_id.unwrap_or_else(|| "unknown".into()),
+                    ),
+                );
+            } else {
+                report.steps.push(
+                    LxmfDeliveryProbeStep::ok(
+                        LxmfDeliveryProbeStage::SendPacket,
+                        "not executed; probe stopped before clean LXMF direct submit",
+                    )
+                    .with_trace("execute_send", "false"),
+                );
+            }
+            Ok(report)
+        }
+
+        #[cfg(not(feature = "native-lxmf"))]
         {
             let _ = peer_hash;
             let _ = execute_send;
             report.steps.push(LxmfDeliveryProbeStep::failed(
                 LxmfDeliveryProbeStage::RuntimeSetup,
-                "native-lxmf and native-rns-net features are required for LXMF delivery probes",
+                "native-lxmf feature is required for LXMF delivery probes",
             ));
             Ok(report)
         }
@@ -4824,7 +6354,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             .lock()
             .expect("native propagation node lock")
             .clone();
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         if let Some(hash) = destination_hash {
             let destination = parse_rns_net_destination_hash(&hash)?;
             let handle = self.rns_net.lock().expect("native rns-net lock").clone();
@@ -4873,16 +6403,49 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 transfer_state: "router_deferred".into(),
             });
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         if let Some(hash) = destination_hash {
-            let _ = parse_transport_destination_hash(&hash)?;
+            let destination = parse_transport_destination_hash(&hash)?;
+            let Some(handle) = self
+                .transport
+                .lock()
+                .expect("native transport lock")
+                .clone()
+            else {
+                return Ok(PropagationStatus {
+                    selected: true,
+                    destination_hash: Some(hash),
+                    has_path: false,
+                    known_app_data: false,
+                    link_state: "runtime_not_started".into(),
+                    transfer_state: "router_deferred".into(),
+                });
+            };
+            let status = handle.transport.path_status(&destination).await;
+            let known_app_data = self
+                .clean_destination_app_data
+                .lock()
+                .expect("native clean destination app-data cache lock")
+                .get(&destination.to_hex_string())
+                .is_some_and(|data| {
+                    crate::runtime::native_lxmf::codec::propagation_announce_data_is_valid(data)
+                });
+            let transfer_state = if status.path_found && known_app_data {
+                "ready"
+            } else {
+                "router_deferred"
+            };
             return Ok(PropagationStatus {
                 selected: true,
                 destination_hash: Some(hash),
-                has_path: false,
-                known_app_data: false,
-                link_state: "unsupported".into(),
-                transfer_state: "router_deferred".into(),
+                has_path: status.path_found,
+                known_app_data,
+                link_state: if status.path_found {
+                    "path_known".into()
+                } else {
+                    "no_path".into()
+                },
+                transfer_state: transfer_state.into(),
             });
         }
         Ok(PropagationStatus {
@@ -4971,13 +6534,66 @@ impl NetworkRuntime for NativeNetworkRuntime {
         Ok(snapshot)
     }
 
+    async fn native_lxmf_sdk_rpc_probe(&self) -> AppResult<LxmfSdkRpcProbeSnapshot> {
+        #[cfg(feature = "native-lxmf-sdk")]
+        {
+            let Some(endpoint) = self.config.native_lxmf_sdk_rpc_endpoint.clone() else {
+                return Ok(LxmfSdkRpcProbeSnapshot {
+                    endpoint: None,
+                    state: "missing_endpoint".into(),
+                    runtime_id: None,
+                    active_contract_version: None,
+                    queued_messages: None,
+                    in_flight_messages: None,
+                    detail: Some(
+                        "native LXMF SDK/RPC endpoint is not configured in settings".into(),
+                    ),
+                });
+            };
+
+            let sender = RpcNativeLxmfSdkSender::new(endpoint);
+            match sender.probe().await {
+                Ok(probe) => Ok(LxmfSdkRpcProbeSnapshot {
+                    endpoint: Some(probe.endpoint),
+                    state: probe.state,
+                    runtime_id: Some(probe.runtime_id),
+                    active_contract_version: Some(probe.active_contract_version),
+                    queued_messages: Some(probe.queued_messages),
+                    in_flight_messages: Some(probe.in_flight_messages),
+                    detail: None,
+                }),
+                Err(error) => Ok(LxmfSdkRpcProbeSnapshot {
+                    endpoint: Some(sender.endpoint().to_string()),
+                    state: "unreachable".into(),
+                    runtime_id: None,
+                    active_contract_version: None,
+                    queued_messages: None,
+                    in_flight_messages: None,
+                    detail: Some(error.to_string()),
+                }),
+            }
+        }
+        #[cfg(not(feature = "native-lxmf-sdk"))]
+        {
+            Ok(LxmfSdkRpcProbeSnapshot {
+                endpoint: None,
+                state: "disabled".into(),
+                runtime_id: None,
+                active_contract_version: None,
+                queued_messages: None,
+                in_flight_messages: None,
+                detail: Some("native LXMF SDK/RPC feature is not enabled".into()),
+            })
+        }
+    }
+
     async fn open_omenchat_link(
         &self,
         destination_hash: &str,
         timeout: Duration,
         cancel: CancellationToken,
     ) -> AppResult<OmenChatLinkOpened> {
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             if !matches!(
                 self.state_snapshot().lifecycle,
@@ -5136,15 +6752,377 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 rtt_millis: Some((link.rtt * 1000.0).max(0.0) as u64),
             })
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
-            let _ = (destination_hash, timeout, cancel);
-            Err(unsupported("open_omenchat_link"))
+            if !matches!(
+                self.state_snapshot().lifecycle,
+                NativeRuntimeLifecycle::Running
+            ) {
+                return Err(AppError::Runtime(
+                    "native Reticulum runtime is not running".into(),
+                ));
+            }
+            let destination_hash = parse_transport_destination_hash(destination_hash)?;
+            let handle = self.active_transport()?;
+            let mut omenchat_announce_rx = self.event_tx.subscribe();
+            let identity = clean_wait_for_destination_identity(
+                &handle.transport,
+                &handle.storage_path,
+                destination_hash,
+                timeout,
+                cancel.clone(),
+                Some(&self.event_tx),
+                Some(&self.clean_destination_identities),
+            )
+            .await?;
+            let destination = single_output_destination_desc(
+                destination_hash,
+                identity,
+                OMENCHAT_RNS_APP_NAME,
+                OMENCHAT_NODE_ASPECT,
+            )
+            .map_err(AppError::from)?;
+            let pre_wait_path_status = handle.transport.path_status(&destination_hash).await;
+            let needs_fresh_announce = !pre_wait_path_status.path_found
+                || pre_wait_path_status.hops.map_or(true, |hops| hops > 1);
+            let destination_hex = destination_hash.to_hex_string();
+            if needs_fresh_announce && pre_wait_path_status.path_found {
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat found stale/high-hop cached path before discovery destination={} hops={:?} iface={}; published reticulum-rs-transport 0.6 does not expose explicit path expiry",
+                    destination_hex,
+                    pre_wait_path_status.hops,
+                    pre_wait_path_status
+                        .interface
+                        .map(|hash| hash.to_hex_string())
+                        .unwrap_or_else(|| "-".into())
+                )));
+            }
+            let path_dispatch = clean_request_omenchat_paths_on_attached_interfaces(
+                &handle.transport,
+                destination_hash,
+                &handle.clean_attached_interfaces,
+                &self.event_tx,
+                "before-clean-link",
+            )
+            .await;
+            if path_dispatch == 0 {
+                let path_dispatch = handle
+                    .transport
+                    .request_path(&destination_hash, None, None)
+                    .await;
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat requested fresh path before clean link destination={} matched_ifaces={} sent_ifaces={} failed_ifaces={} scope=all",
+                    destination_hex,
+                    path_dispatch.matched_ifaces,
+                    path_dispatch.sent_ifaces,
+                    path_dispatch.failed_ifaces
+                )));
+                tracing::debug!(
+                    destination = %destination_hex,
+                    matched_ifaces = path_dispatch.matched_ifaces,
+                    sent_ifaces = path_dispatch.sent_ifaces,
+                    failed_ifaces = path_dispatch.failed_ifaces,
+                    "native Reticulum 0.6 OMENchat requested fresh path before clean link"
+                );
+            }
+            let recent_announce = if needs_fresh_announce {
+                self.clean_recent_omenchat_announces
+                    .lock()
+                    .expect("native recent OMENchat announce lock")
+                    .get(&destination_hex)
+                    .copied()
+                    .filter(|announce| announce.observed_at.elapsed() <= Duration::from_secs(45))
+            } else {
+                None
+            };
+            if let Some(announce) = recent_announce {
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat recent announce evidence destination={} hops={} iface={}",
+                    destination_hex,
+                    announce.hops,
+                    announce.iface.to_hex_string()
+                )));
+            }
+            let fresh_announce_seen = if needs_fresh_announce {
+                recent_announce.is_some()
+                    || clean_wait_for_omenchat_fresh_announce(
+                        &mut omenchat_announce_rx,
+                        &destination_hex,
+                        timeout.min(Duration::from_secs(12)),
+                        cancel.clone(),
+                        Some(&self.event_tx),
+                    )
+                    .await?
+            } else {
+                false
+            };
+            let has_path = clean_wait_for_destination_path(
+                &handle.transport,
+                destination_hash,
+                timeout.min(Duration::from_secs(10)),
+                cancel.clone(),
+                Some(&self.event_tx),
+                if needs_fresh_announce { Some(1) } else { None },
+            )
+            .await?;
+            if !has_path {
+                return Err(AppError::Runtime(format!(
+                    "OMENchat destination {} has no known Reticulum path; request path and reconnect after announce/path discovery",
+                    destination_hex
+                )));
+            }
+            let status_after_wait = handle.transport.path_status(&destination_hash).await;
+            if needs_fresh_announce && status_after_wait.hops.map_or(true, |hops| hops > 1) {
+                let announce_detail = self
+                    .clean_recent_omenchat_announces
+                    .lock()
+                    .expect("native recent OMENchat announce lock")
+                    .get(&destination_hex)
+                    .copied()
+                    .filter(|announce| announce.observed_at.elapsed() <= Duration::from_secs(45))
+                    .map(|announce| {
+                        format!(
+                            "recent_announce_hops={} recent_announce_iface={}",
+                            announce.hops,
+                            announce.iface.to_hex_string()
+                        )
+                    })
+                    .unwrap_or_else(|| "recent_announce=none".into());
+                let message = format!(
+                    "OMENchat clean link blocked: only high-hop/stale path is known destination={} path_found={} hops={:?} next_hop={} iface={} fresh_announce_seen={} {}; wait for a low-hop server announce or verify gateway/IFAC alignment",
+                    destination_hex,
+                    status_after_wait.path_found,
+                    status_after_wait.hops,
+                    status_after_wait
+                        .next_hop
+                        .map(|hash| hash.to_hex_string())
+                        .unwrap_or_else(|| "-".into()),
+                    status_after_wait
+                        .interface
+                        .map(|hash| hash.to_hex_string())
+                        .unwrap_or_else(|| "-".into()),
+                    fresh_announce_seen,
+                    announce_detail
+                );
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 {message}"
+                )));
+                return Err(AppError::Runtime(message));
+            }
+            let mut link_events = handle.transport.out_link_events();
+            let link = handle.transport.link(destination).await;
+            let link_id_hash = *link.lock().await.id();
+            let link_id = address_hash_to_link_id(link_id_hash);
+            let initial_status = link.lock().await.status();
+            let post_request_path_status = handle.transport.path_status(&destination_hash).await;
+            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                "native Reticulum 0.6 OMENchat clean link requested destination={} link_id={} status={:?} route_iface={} hops={:?}",
+                destination_hash.to_hex_string(),
+                link_id_hash.to_hex_string(),
+                initial_status,
+                post_request_path_status
+                    .interface
+                    .map(|hash| hash.to_hex_string())
+                    .unwrap_or_else(|| "-".into()),
+                post_request_path_status.hops
+            )));
+            tracing::debug!(
+                destination = %destination_hash.to_hex_string(),
+                link_id = %link_id_hash.to_hex_string(),
+                status = ?initial_status,
+                route_iface = ?post_request_path_status.interface,
+                hops = ?post_request_path_status.hops,
+                "native Reticulum 0.6 OMENchat clean link requested"
+            );
+
+            if link.lock().await.status() != rns_transport::destination::link::LinkStatus::Active {
+                let deadline = tokio::time::Instant::now() + timeout;
+                loop {
+                    if cancel.is_cancelled() {
+                        return Err(AppError::from(NativeRuntimeError::Cancelled));
+                    }
+                    if link.lock().await.status()
+                        == rns_transport::destination::link::LinkStatus::Active
+                    {
+                        break;
+                    }
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        let status = handle.transport.path_status(&destination_hash).await;
+                        {
+                            let mut link = link.lock().await;
+                            if matches!(
+                                link.status(),
+                                rns_transport::destination::link::LinkStatus::Pending
+                                    | rns_transport::destination::link::LinkStatus::Handshake
+                            ) {
+                                link.close();
+                            }
+                        }
+                        handle.transport.reset_out_link(&destination_hash).await;
+                        let mut rediscovery_summary = "not-requested".to_string();
+                        if let Some(blocked_iface) = status.interface {
+                            let rediscovery = clean_request_omenchat_paths_on_attached_interfaces(
+                                &handle.transport,
+                                destination_hash,
+                                &handle.clean_attached_interfaces,
+                                &self.event_tx,
+                                "after-link-timeout",
+                            )
+                            .await;
+                            if rediscovery == 0 {
+                                let rediscovery = handle
+                                    .transport
+                                    .request_path(&destination_hash, None, None)
+                                    .await;
+                                rediscovery_summary = format!(
+                                    "previous_iface={} matched_ifaces={} sent_ifaces={} failed_ifaces={}",
+                                    blocked_iface.to_hex_string(),
+                                    rediscovery.matched_ifaces,
+                                    rediscovery.sent_ifaces,
+                                    rediscovery.failed_ifaces
+                                );
+                            } else {
+                                rediscovery_summary =
+                                    format!("attached_iface_requests={rediscovery}");
+                            }
+                        }
+                        let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                            "native Reticulum 0.6 OMENchat clean link establishment timed out destination={} link_id={} path_found={} hops={:?} next_hop={} iface={}; pending link cleared before retry; published reticulum-rs-transport 0.6 does not expose explicit route expiry rediscovery={}",
+                            destination_hash.to_hex_string(),
+                            link_id_hash.to_hex_string(),
+                            status.path_found,
+                            status.hops,
+                            status
+                                .next_hop
+                                .map(|hash| hash.to_hex_string())
+                                .unwrap_or_else(|| "-".into()),
+                            status
+                                .interface
+                                .map(|hash| hash.to_hex_string())
+                                .unwrap_or_else(|| "-".into()),
+                            rediscovery_summary
+                        )));
+                        return Err(AppError::from(NativeRuntimeError::Timeout(
+                            "OMENchat clean link establishment".into(),
+                        )));
+                    }
+                    let wait = (deadline - now).min(Duration::from_millis(100));
+                    match tokio::time::timeout(wait, link_events.recv()).await {
+                        Ok(Ok(event))
+                            if event.id == link_id_hash
+                                && matches!(
+                                    event.event,
+                                    rns_transport::destination::link::LinkEvent::Activated
+                                ) =>
+                        {
+                            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                "native Reticulum 0.6 OMENchat clean link activated destination={} link_id={}",
+                                destination_hash.to_hex_string(),
+                                link_id_hash.to_hex_string()
+                            )));
+                            break;
+                        }
+                        Ok(Ok(event))
+                            if event.id == link_id_hash
+                                && matches!(
+                                    event.event,
+                                    rns_transport::destination::link::LinkEvent::Closed
+                                ) =>
+                        {
+                            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                                "native Reticulum 0.6 OMENchat clean link closed during establishment destination={} link_id={}",
+                                destination_hash.to_hex_string(),
+                                link_id_hash.to_hex_string()
+                            )));
+                            return Err(AppError::Runtime(
+                                "OMENchat clean link closed during establishment".into(),
+                            ));
+                        }
+                        Ok(Ok(_))
+                        | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                        Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                            return Err(AppError::Runtime(
+                                "OMENchat clean link event stream closed".into(),
+                            ));
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+
+            if let Some(identity) = self.clean_stack_identify_identity(true) {
+                match send_reticulum_link_identify(
+                    &handle.transport,
+                    &link,
+                    &identity,
+                    destination_hash,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                            "native Reticulum 0.6 OMENchat LinkIdentify sent destination={} link_id={} identity={}",
+                            destination_hash.to_hex_string(),
+                            link_id_hash.to_hex_string(),
+                            identity.address_hash()
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                            "native Reticulum 0.6 OMENchat LinkIdentify failed destination={} link_id={} error={}",
+                            destination_hash.to_hex_string(),
+                            link_id_hash.to_hex_string(),
+                            error
+                        )));
+                    }
+                }
+            } else {
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat opened anonymous clean link destination={} link_id={}",
+                    destination_hash.to_hex_string(),
+                    link_id_hash.to_hex_string()
+                )));
+            }
+
+            let rtt_millis = link
+                .lock()
+                .await
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX));
+            self.active_omenchat_links
+                .lock()
+                .expect("native active OMENchat link lock")
+                .insert(link_id);
+            self.clean_omenchat_links
+                .lock()
+                .expect("native clean OMENchat link lock")
+                .insert(
+                    link_id,
+                    CleanOmenChatLink {
+                        destination_hash,
+                        link_id: link_id_hash,
+                        transport: handle.transport,
+                        link,
+                    },
+                );
+            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                "native Reticulum 0.6 OMENchat clean link established destination={} link_id={} rtt_ms={}",
+                destination_hash.to_hex_string(),
+                link_id_hash.to_hex_string(),
+                rtt_millis
+            )));
+            Ok(OmenChatLinkOpened {
+                destination_hash: destination_hash.to_hex_string(),
+                link_id,
+                rtt_millis: Some(rtt_millis as u64),
+            })
         }
     }
 
     async fn send_omenchat_frame(&self, link_id: [u8; 16], frame_bytes: Vec<u8>) -> AppResult<()> {
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let client = {
                 let handle_guard = self.rns_net.lock().expect("native rns-net lock");
@@ -5169,10 +7147,51 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }
             result
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
-            let _ = (link_id, frame_bytes);
-            Err(unsupported("send_omenchat_frame"))
+            let entry = self
+                .clean_omenchat_links
+                .lock()
+                .expect("native clean OMENchat link lock")
+                .get(&link_id)
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::Runtime(format!(
+                        "OMENchat clean link {} is not active",
+                        hex_encode(&link_id)
+                    ))
+                })?;
+            {
+                let link = entry.link.lock().await;
+                if link.status() != rns_transport::destination::link::LinkStatus::Active {
+                    return Err(AppError::Runtime(format!(
+                        "OMENchat clean link {} is not active",
+                        hex_encode(&link_id)
+                    )));
+                }
+                link.ingress_iface().ok_or_else(|| {
+                    AppError::Runtime(format!(
+                        "OMENchat clean link {} has no bound ingress interface",
+                        hex_encode(&link_id)
+                    ))
+                })?;
+            }
+            rns_transport::delivery::send_on_link(&entry.transport, &entry.link, &frame_bytes)
+                .await
+                .map_err(|error| {
+                    AppError::Runtime(format!(
+                        "OMENchat clean frame send failed link_id={} destination={}: {error}",
+                        hex_encode(&link_id),
+                        entry.destination_hash.to_hex_string()
+                    ))
+                })?;
+            let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                "native Reticulum 0.6 OMENchat clean frame sent via delivery link_id={} destination={} bytes={} context=0x00",
+                hex_encode(&link_id),
+                entry.destination_hash.to_hex_string(),
+                frame_bytes.len()
+            )));
+            Ok(())
         }
     }
 
@@ -5182,7 +7201,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
         resource_id: String,
         payload: Vec<u8>,
     ) -> AppResult<()> {
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let client = {
                 let handle_guard = self.rns_net.lock().expect("native rns-net lock");
@@ -5207,15 +7226,55 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }
             result
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
-            let _ = (link_id, resource_id, payload);
-            Err(unsupported("send_omenchat_resource"))
+            let entry = self
+                .clean_omenchat_links
+                .lock()
+                .expect("native clean OMENchat link lock")
+                .get(&link_id)
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::Runtime(format!(
+                        "OMENchat clean link {} is not active",
+                        hex_encode(&link_id)
+                    ))
+                })?;
+            let mut metadata = OMENCHAT_RESOURCE_METADATA_PREFIX.to_vec();
+            metadata.extend(resource_id.as_bytes());
+            let result = entry
+                .transport
+                .send_resource(&entry.link_id, payload, Some(metadata))
+                .await
+                .map_err(|error| {
+                    AppError::Runtime(format!(
+                        "OMENchat clean resource send failed link_id={} resource_id={}: {error:?}",
+                        hex_encode(&link_id),
+                        resource_id
+                    ))
+                });
+            if let Err(error) = &result {
+                let _ =
+                    self.event_tx
+                        .send(RuntimeBusEvent::OmenChatLinkClosed(OmenChatLinkClosed {
+                            link_id,
+                            reason: Some(format!("resource send failed: {error}")),
+                        }));
+            } else {
+                let resource_hash = result.as_ref().expect("checked success");
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat clean resource advertised link_id={} resource_id={} resource_hash={}",
+                    hex_encode(&link_id),
+                    resource_id,
+                    resource_hash
+                )));
+            }
+            result.map(|_| ())
         }
     }
 
     async fn close_omenchat_link(&self, link_id: [u8; 16]) -> AppResult<bool> {
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let client = {
                 let handle_guard = self.rns_net.lock().expect("native rns-net lock");
@@ -5234,11 +7293,264 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .remove(&link_id);
             Ok(torn_down)
         }
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
-            let _ = link_id;
-            Err(unsupported("close_omenchat_link"))
+            let entry = self
+                .clean_omenchat_links
+                .lock()
+                .expect("native clean OMENchat link lock")
+                .remove(&link_id);
+            self.active_omenchat_links
+                .lock()
+                .expect("native active OMENchat link lock")
+                .remove(&link_id);
+            let Some(entry) = entry else {
+                return Ok(false);
+            };
+            let teardown = {
+                let mut link = entry.link.lock().await;
+                let ingress_iface = link.ingress_iface();
+                link.teardown().map(|packet| (ingress_iface, packet))
+            };
+            if let Some((Some(ingress_iface), packet)) = teardown {
+                entry.transport.send_direct(ingress_iface, packet).await;
+            }
+            Ok(true)
         }
+    }
+}
+
+#[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
+async fn clean_send_request_value_and_wait(
+    transport: &Arc<reticulum_rs::runtime::Transport>,
+    link: &Arc<AsyncMutex<rns_transport::destination::link::Link>>,
+    link_id: rns_transport::hash::AddressHash,
+    path: &str,
+    value: &rmpv::Value,
+    timeout: Duration,
+    cancel: CancellationToken,
+    event_tx: &broadcast::Sender<RuntimeBusEvent>,
+    propagation_node: &str,
+) -> AppResult<NativeLinkResponseFrame> {
+    if cancel.is_cancelled() {
+        return Err(AppError::from(NativeRuntimeError::Cancelled));
+    }
+    let frame =
+        NativeLinkRequestFrame::build_with_value(path, value.clone(), native_unix_timestamp())
+            .map_err(AppError::from)?;
+    let mut resource_events = transport.resource_events();
+    let mut received_data_events = transport.received_data_events();
+    let (request_id, request_resource_hash) = if frame.requires_request_resource() {
+        let request_resource_hash = transport
+            .send_request_resource(
+                &link_id,
+                frame.request_id.to_vec(),
+                frame.packed.clone(),
+                None,
+            )
+            .await
+            .map_err(|error| {
+                AppError::from(NativeRuntimeError::Native(format!(
+                    "native Reticulum 0.6 LXMF propagation request-resource send failed: {error:?}"
+                )))
+            })?;
+        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native LXMF clean propagation request resource sent propagation_node={} link_id={} path={} request_id={} request_resource={} bytes={}",
+            propagation_node,
+            link_id,
+            path,
+            hex_encode(&frame.request_id),
+            request_resource_hash,
+            frame.packed.len()
+        )));
+        (frame.request_id, Some(request_resource_hash))
+    } else {
+        let (ingress_iface, packet) = {
+            let link = link.lock().await;
+            let ingress_iface = link.ingress_iface().ok_or_else(|| {
+                AppError::from(NativeRuntimeError::Native(
+                    "native Reticulum 0.6 LXMF propagation link has no bound ingress interface"
+                        .into(),
+                ))
+            })?;
+            let mut packet = link.data_packet(&frame.packed).map_err(|error| {
+                AppError::from(NativeRuntimeError::Native(format!(
+                    "native Reticulum 0.6 LXMF propagation request packet build failed: {error:?}"
+                )))
+            })?;
+            packet.context = rns_transport::PacketContext::Request;
+            (ingress_iface, packet)
+        };
+        let packet_hash = packet.hash().to_bytes();
+        let mut request_id = [0u8; rns_transport::hash::ADDRESS_HASH_SIZE];
+        request_id.copy_from_slice(&packet_hash[..rns_transport::hash::ADDRESS_HASH_SIZE]);
+        transport.send_direct(ingress_iface, packet).await;
+        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native LXMF clean propagation request packet sent propagation_node={} link_id={} path={} request_id={} bytes={}",
+            propagation_node,
+            link_id,
+            path,
+            hex_encode(&request_id),
+            frame.packed.len()
+        )));
+        (request_id, None)
+    };
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut target_resource_events = 0usize;
+    let mut target_response_events = 0usize;
+    let mut progress_events = 0usize;
+    let mut unrelated_events = 0usize;
+    let mut outbound_complete = false;
+    let mut last_error = String::from("none");
+    loop {
+        if cancel.is_cancelled() {
+            return Err(AppError::from(NativeRuntimeError::Cancelled));
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(AppError::from(NativeRuntimeError::Timeout(format!(
+                "LXMF propagation request response path={path}; request_resource={}; target_resource_events={}; target_response_events={}; progress_events={}; unrelated_events={}; outbound_complete={}; last_error={}",
+                request_resource_hash
+                    .map(|hash| hash.to_string())
+                    .unwrap_or_else(|| "none".into()),
+                target_resource_events,
+                target_response_events,
+                progress_events,
+                unrelated_events,
+                outbound_complete,
+                last_error
+            ))));
+        }
+        let wait = (deadline - now).min(Duration::from_millis(100));
+        tokio::select! {
+            received = received_data_events.recv() => {
+                match received {
+                    Ok(data) if data.destination == link_id => {
+                        target_response_events += 1;
+                        if data.context == Some(rns_transport::PacketContext::Response) {
+                            match NativeLinkResponseFrame::parse(data.data.as_slice()) {
+                                Ok(response) if response.request_id == request_id => {
+                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native LXMF clean propagation response packet received propagation_node={} link_id={} path={} request_id={} bytes={}",
+                                        propagation_node,
+                                        link_id,
+                                        path,
+                                        hex_encode(&request_id),
+                                        data.data.len()
+                                    )));
+                                    return Ok(response);
+                                }
+                                Ok(_) => unrelated_events += 1,
+                                Err(error) => {
+                                    last_error = format!("response packet parse error: {error:?}");
+                                    unrelated_events += 1;
+                                }
+                            }
+                        } else {
+                            unrelated_events += 1;
+                        }
+                    }
+                    Ok(_) => unrelated_events += 1,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                            "native LXMF clean propagation received-data event stream lagged skipped={skipped}"
+                        )));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(AppError::from(NativeRuntimeError::Native(
+                            "native LXMF clean propagation received-data event stream closed".into(),
+                        )));
+                    }
+                }
+            }
+            resource = resource_events.recv() => {
+                match resource {
+                    Ok(event) if event.link_id == link_id => {
+                        target_resource_events += 1;
+                        match event.kind {
+                            ResourceEventKind::Complete(complete) => {
+                                match NativeLinkResponseFrame::parse_matching_response_resource(
+                                    &complete,
+                                    &request_id,
+                                ) {
+                                    Ok(Some(response)) => {
+                                        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                            "native LXMF clean propagation response resource received propagation_node={} link_id={} path={} request_id={} response_resource={} bytes={}",
+                                            propagation_node,
+                                            link_id,
+                                            path,
+                                            hex_encode(&request_id),
+                                            event.hash,
+                                            complete.data.len()
+                                        )));
+                                        return Ok(response);
+                                    }
+                                    Ok(None) => unrelated_events += 1,
+                                    Err(error) => {
+                                        last_error = format!("response resource parse error: {error:?}");
+                                        unrelated_events += 1;
+                                    }
+                                }
+                            }
+                            ResourceEventKind::Progress(_) => progress_events += 1,
+                            ResourceEventKind::OutboundComplete
+                                if request_resource_hash.is_some_and(|hash| hash == event.hash) =>
+                            {
+                                outbound_complete = true;
+                            }
+                            ResourceEventKind::OutboundFailed
+                                if request_resource_hash.is_some_and(|hash| hash == event.hash) =>
+                            {
+                                return Err(AppError::from(NativeRuntimeError::Native(
+                                    "native Reticulum 0.6 LXMF propagation request-resource transfer failed"
+                                        .into(),
+                                )));
+                            }
+                            ResourceEventKind::InboundFailed(failure) => {
+                                last_error = failure.reason;
+                            }
+                            ResourceEventKind::OutboundCancelled
+                                if request_resource_hash.is_some_and(|hash| hash == event.hash) =>
+                            {
+                                return Err(AppError::from(NativeRuntimeError::Cancelled));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(_) => unrelated_events += 1,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                            "native LXMF clean propagation resource event stream lagged skipped={skipped}"
+                        )));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(AppError::from(NativeRuntimeError::Native(
+                            "native LXMF clean propagation resource event stream closed".into(),
+                        )));
+                    }
+                }
+            }
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+#[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
+async fn clean_close_link(
+    transport: &Arc<reticulum_rs::runtime::Transport>,
+    link: &Arc<AsyncMutex<rns_transport::destination::link::Link>>,
+) -> bool {
+    let teardown = {
+        let mut link = link.lock().await;
+        let ingress_iface = link.ingress_iface();
+        link.teardown().map(|packet| (ingress_iface, packet))
+    };
+    if let Some((Some(ingress_iface), packet)) = teardown {
+        transport.send_direct(ingress_iface, packet).await;
+        true
+    } else {
+        false
     }
 }
 
@@ -5256,7 +7568,7 @@ fn parse_transport_destination_hash(
         .map_err(|_| AppError::from(NativeRuntimeError::InvalidAddress(destination_hash.into())))
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn find_live_rns_net_interface<'a>(
     stats: &'a rns_net::InterfaceStatsResponse,
     plan: &NativeInterfacePlan,
@@ -5274,7 +7586,7 @@ fn find_live_rns_net_interface<'a>(
     })
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn format_live_rns_net_interface_detail(interface: &rns_net::SingleInterfaceStat) -> String {
     format!(
         "{} [{}] {} | connected={} | rx={} in {} pkt | tx={} in {} pkt | ifac={}",
@@ -5293,7 +7605,7 @@ fn format_live_rns_net_interface_detail(interface: &rns_net::SingleInterfaceStat
     )
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn select_live_rns_net_interface<'a>(
     matched: Option<&'a rns_net::SingleInterfaceStat>,
     ordered: Option<&'a rns_net::SingleInterfaceStat>,
@@ -5301,7 +7613,7 @@ fn select_live_rns_net_interface<'a>(
     matched.or(ordered)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn human_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB"];
     let mut value = bytes as f64;
@@ -5317,7 +7629,6 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-#[cfg(feature = "native-rns-net")]
 fn take_active_omenchat_link_close(
     active_omenchat_links: &Arc<Mutex<BTreeSet<[u8; 16]>>>,
     link_id: [u8; 16],
@@ -5330,18 +7641,950 @@ fn take_active_omenchat_link_close(
     was_active.then_some(OmenChatLinkClosed { link_id, reason })
 }
 
-#[cfg(feature = "native-rns-net")]
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(not(all(feature = "native-rns-net", any())))]
+fn block_on_native_transport_setup<F, T>(future: F) -> AppResult<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return Ok(tokio::task::block_in_place(|| handle.block_on(future)));
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "native Reticulum setup runtime could not be created: {error}"
+            ))
+        })?;
+    Ok(runtime.block_on(future))
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+fn clean_lxmf_delivery_destination_hash_from_identity_path(
+    identity_path: &Path,
+) -> AppResult<String> {
+    let identity = load_transport_private_identity_file(identity_path).map_err(AppError::from)?;
+    let destination = rns_transport::destination::SingleOutputDestination::new(
+        *identity.as_identity(),
+        rns_transport::destination::DestinationName::new("lxmf", "delivery"),
+    );
+    Ok(destination.desc.address_hash.to_hex_string())
+}
+
+fn address_hash_to_link_id(hash: rns_transport::hash::AddressHash) -> [u8; 16] {
+    let mut link_id = [0u8; 16];
+    link_id.copy_from_slice(hash.as_slice());
+    link_id
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+fn clean_omenchat_frame_context(context: rns_transport::PacketContext) -> bool {
+    context == rns_transport::PacketContext::None || context as u8 == OMENCHAT_LINK_CONTEXT
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+fn clean_omenchat_optional_frame_context(context: Option<rns_transport::PacketContext>) -> bool {
+    context.map(clean_omenchat_frame_context).unwrap_or(true)
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+async fn clean_wait_for_destination_identity(
+    transport: &Arc<reticulum_rs::runtime::Transport>,
+    storage_path: &Path,
+    destination_hash: rns_transport::hash::AddressHash,
+    timeout: Duration,
+    cancel: CancellationToken,
+    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
+    cached_identities: Option<&Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>>,
+) -> AppResult<rns_transport::identity::Identity> {
+    if let Some(identity) = transport.destination_identity(&destination_hash).await {
+        if let Some(event_tx) = event_tx {
+            let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                "native Reticulum 0.6 OMENchat clean destination identity already known destination={}",
+                destination_hash.to_hex_string()
+            )));
+        }
+        return Ok(identity);
+    }
+    if let Some(identity) = cached_identities.and_then(|cache| {
+        cache
+            .lock()
+            .expect("native clean destination identity cache lock")
+            .get(&destination_hash.to_hex_string())
+            .cloned()
+    }) {
+        if let Some(event_tx) = event_tx {
+            let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                "native Reticulum 0.6 clean destination identity restored from announce cache destination={}",
+                destination_hash.to_hex_string()
+            )));
+        }
+        return Ok(identity);
+    }
+    match transport
+        .restore_reticulum_path_table_report(storage_path)
+        .await
+    {
+        Ok(report) => {
+            if !report.restored_identities.is_empty() {
+                if let Some(cache) = cached_identities {
+                    let mut guard = cache
+                        .lock()
+                        .expect("native clean destination identity cache lock");
+                    for restored in &report.restored_identities {
+                        guard.insert(
+                            restored.destination.to_hex_string(),
+                            rns_transport::identity::Identity::new_from_slices(
+                                &restored.public_key,
+                                &restored.verifying_key,
+                            ),
+                        );
+                    }
+                }
+            }
+            if let Some(identity) = transport.destination_identity(&destination_hash).await {
+                if let Some(event_tx) = event_tx {
+                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native Reticulum 0.6 OMENchat clean destination identity restored destination={} active_paths={} identities={}",
+                        destination_hash.to_hex_string(),
+                        report.restored_active_paths,
+                        report.restored_identities.len()
+                    )));
+                }
+                return Ok(identity);
+            }
+            if let Some(identity) = cached_identities.and_then(|cache| {
+                cache
+                    .lock()
+                    .expect("native clean destination identity cache lock")
+                    .get(&destination_hash.to_hex_string())
+                    .cloned()
+            }) {
+                if let Some(event_tx) = event_tx {
+                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native Reticulum 0.6 clean destination identity found in announce cache after path restore destination={} active_paths={} identities={}",
+                        destination_hash.to_hex_string(),
+                        report.restored_active_paths,
+                        report.restored_identities.len()
+                    )));
+                }
+                return Ok(identity);
+            }
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat clean path restore had no identity destination={} active_paths={} identities={}",
+                    destination_hash.to_hex_string(),
+                    report.restored_active_paths,
+                    report.restored_identities.len()
+                )));
+            }
+        }
+        Err(error) => {
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat clean path restore failed destination={} storage={} error={}",
+                    destination_hash.to_hex_string(),
+                    storage_path.display(),
+                    error
+                )));
+            }
+        }
+    }
+    transport.request_path(&destination_hash, None, None).await;
+    if let Some(event_tx) = event_tx {
+        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native Reticulum 0.6 OMENchat clean path requested destination={}",
+            destination_hash.to_hex_string()
+        )));
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(AppError::from(NativeRuntimeError::Cancelled));
+        }
+        if let Some(identity) = transport.destination_identity(&destination_hash).await {
+            return Ok(identity);
+        }
+        if let Some(identity) = cached_identities.and_then(|cache| {
+            cache
+                .lock()
+                .expect("native clean destination identity cache lock")
+                .get(&destination_hash.to_hex_string())
+                .cloned()
+        }) {
+            return Ok(identity);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat clean destination identity timed out destination={}",
+                    destination_hash.to_hex_string()
+                )));
+            }
+            return Err(AppError::from(NativeRuntimeError::PathUnavailable(
+                destination_hash.to_hex_string(),
+            )));
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_millis(100))).await;
+    }
+}
+
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+async fn clean_wait_for_destination_app_data(
+    cache: &Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    destination_hash: rns_transport::hash::AddressHash,
+    timeout: Duration,
+    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
+) -> Option<Vec<u8>> {
+    let destination = destination_hash.to_hex_string();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(app_data) = cache
+            .lock()
+            .expect("native clean destination app-data cache lock")
+            .get(&destination)
+            .cloned()
+            .filter(|data| !data.is_empty())
+        {
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 clean app-data cache hit destination={} bytes={}",
+                    destination,
+                    app_data.len()
+                )));
+            }
+            return Some(app_data);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 clean app-data cache timed out destination={}",
+                    destination
+                )));
+            }
+            return None;
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_millis(100))).await;
+    }
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+async fn clean_wait_for_destination_path(
+    transport: &Arc<reticulum_rs::runtime::Transport>,
+    destination_hash: rns_transport::hash::AddressHash,
+    timeout: Duration,
+    cancel: CancellationToken,
+    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
+    max_hops: Option<u8>,
+) -> AppResult<bool> {
+    let initial_status = transport.path_status(&destination_hash).await;
+    if let Some(event_tx) = event_tx {
+        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native Reticulum 0.6 OMENchat clean path status destination={} found={} hops={:?} next_hop={} iface={}",
+            destination_hash.to_hex_string(),
+            initial_status.path_found,
+            initial_status.hops,
+            initial_status
+                .next_hop
+                .map(|hash| hash.to_hex_string())
+                .unwrap_or_else(|| "-".into()),
+            initial_status
+                .interface
+                .map(|hash| hash.to_hex_string())
+                .unwrap_or_else(|| "-".into())
+        )));
+    }
+    if initial_status.path_found && max_hops.map_or(true, |hops| initial_status.hops <= Some(hops))
+    {
+        return Ok(true);
+    }
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(AppError::from(NativeRuntimeError::Cancelled));
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            let final_status = transport.path_status(&destination_hash).await;
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat clean path wait timed out destination={} found={} hops={:?} next_hop={} iface={}",
+                    destination_hash.to_hex_string(),
+                    final_status.path_found,
+                    final_status.hops,
+                    final_status
+                        .next_hop
+                        .map(|hash| hash.to_hex_string())
+                        .unwrap_or_else(|| "-".into()),
+                    final_status
+                        .interface
+                        .map(|hash| hash.to_hex_string())
+                        .unwrap_or_else(|| "-".into())
+                )));
+            }
+            return Ok(final_status.path_found
+                && max_hops.map_or(true, |hops| final_status.hops <= Some(hops)));
+        }
+        tokio::time::sleep((deadline - now).min(OMENCHAT_CLEAN_LINK_PATH_WAIT_STEP)).await;
+        let status = transport.path_status(&destination_hash).await;
+        if status.path_found && max_hops.map_or(true, |hops| status.hops <= Some(hops)) {
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat clean path acquired destination={} hops={:?} next_hop={} iface={}",
+                    destination_hash.to_hex_string(),
+                    status.hops,
+                    status
+                        .next_hop
+                        .map(|hash| hash.to_hex_string())
+                        .unwrap_or_else(|| "-".into()),
+                    status
+                        .interface
+                        .map(|hash| hash.to_hex_string())
+                        .unwrap_or_else(|| "-".into())
+                )));
+            }
+            return Ok(true);
+        }
+    }
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+async fn clean_request_omenchat_paths_on_attached_interfaces(
+    transport: &Arc<reticulum_rs::runtime::Transport>,
+    destination_hash: rns_transport::hash::AddressHash,
+    interfaces: &[CleanAttachedInterface],
+    event_tx: &broadcast::Sender<RuntimeBusEvent>,
+    reason: &str,
+) -> usize {
+    let mut ordered = interfaces.to_vec();
+    ordered.sort_by_key(|iface| (!iface.ifac_configured, iface.name.clone()));
+    let mut sent_or_queued = 0usize;
+    let mut details = Vec::new();
+    for iface in ordered {
+        let trace = transport
+            .request_path(&destination_hash, Some(iface.address), None)
+            .await;
+        if trace.sent_ifaces > 0 || trace.queued_ifaces > 0 {
+            sent_or_queued += trace.sent_ifaces + trace.queued_ifaces;
+        }
+        details.push(format!(
+            "{}:{} ifac={} matched={} sent={} queued={} failed={}",
+            iface.name,
+            iface.address.to_hex_string(),
+            iface.ifac_configured,
+            trace.matched_ifaces,
+            trace.sent_ifaces,
+            trace.queued_ifaces,
+            trace.failed_ifaces
+        ));
+    }
+    if details.is_empty() {
+        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native Reticulum 0.6 OMENchat attached-interface path request skipped destination={} reason={} interfaces=0",
+            destination_hash.to_hex_string(),
+            reason
+        )));
+    } else {
+        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native Reticulum 0.6 OMENchat requested path on attached interfaces destination={} reason={} total_sent_or_queued={} {}",
+            destination_hash.to_hex_string(),
+            reason,
+            sent_or_queued,
+            details.join(" | ")
+        )));
+    }
+    sent_or_queued
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+async fn clean_wait_for_omenchat_fresh_announce(
+    receiver: &mut broadcast::Receiver<RuntimeBusEvent>,
+    destination_hex: &str,
+    timeout: Duration,
+    cancel: CancellationToken,
+    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
+) -> AppResult<bool> {
+    if let Some(event_tx) = event_tx {
+        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native Reticulum 0.6 OMENchat waiting for fresh announce before high-hop clean link destination={} timeout_ms={}",
+            destination_hex,
+            timeout.as_millis()
+        )));
+    }
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(AppError::from(NativeRuntimeError::Cancelled));
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.6 OMENchat fresh announce wait timed out destination={}",
+                    destination_hex
+                )));
+            }
+            return Ok(false);
+        }
+
+        let wait = (deadline - now).min(Duration::from_millis(250));
+        match tokio::time::timeout(wait, receiver.recv()).await {
+            Ok(Ok(RuntimeBusEvent::Announce(payload)))
+                if payload.kind == DirectoryKind::OmenChat
+                    && payload
+                        .destination_hash
+                        .eq_ignore_ascii_case(destination_hex) =>
+            {
+                if let Some(event_tx) = event_tx {
+                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native Reticulum 0.6 OMENchat fresh announce observed destination={} display={}",
+                        destination_hex, payload.display_name
+                    )));
+                }
+                return Ok(true);
+            }
+            Ok(Ok(_)) | Err(_) => {}
+            Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                if let Some(event_tx) = event_tx {
+                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                        "native Reticulum 0.6 OMENchat fresh announce wait lagged destination={} skipped={}",
+                        destination_hex, skipped
+                    )));
+                }
+            }
+            Ok(Err(broadcast::error::RecvError::Closed)) => return Ok(false),
+        }
+    }
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+fn spawn_clean_omenchat_event_bridge(
+    transport: Arc<reticulum_rs::runtime::Transport>,
+    active_omenchat_links: Arc<Mutex<BTreeSet<[u8; 16]>>>,
+    clean_omenchat_links: Arc<Mutex<BTreeMap<[u8; 16], CleanOmenChatLink>>>,
+    attachments_dir: std::path::PathBuf,
+    event_tx: broadcast::Sender<RuntimeBusEvent>,
+) {
+    #[cfg(feature = "native-lxmf")]
+    let clean_lxmf_seen_messages: Arc<Mutex<BTreeMap<String, tokio::time::Instant>>> =
+        Arc::new(Mutex::new(BTreeMap::new()));
+    {
+        let mut iface_events = transport.iface_rx();
+        let active_omenchat_links = active_omenchat_links.clone();
+        let clean_omenchat_links = clean_omenchat_links.clone();
+        let event_tx = event_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match iface_events.recv().await {
+                    Ok(event) => {
+                        if event.packet.header.destination_type
+                            != rns_transport::DestinationType::Link
+                        {
+                            continue;
+                        }
+                        let packet_link_id = address_hash_to_link_id(event.packet.destination);
+                        let (active_count, is_active, is_clean) = {
+                            let active_links = active_omenchat_links
+                                .lock()
+                                .expect("native active OMENchat link lock");
+                            let active_count = active_links.len();
+                            let is_active = active_links.contains(&packet_link_id);
+                            drop(active_links);
+                            let clean_links = clean_omenchat_links
+                                .lock()
+                                .expect("native clean OMENchat link lock");
+                            let is_clean = clean_links.contains_key(&packet_link_id);
+                            (active_count, is_active, is_clean)
+                        };
+                        let is_link_data_or_proof = matches!(
+                            event.packet.header.packet_type,
+                            rns_transport::PacketType::Data | rns_transport::PacketType::Proof
+                        );
+                        if active_count == 0
+                            || ((!is_active && !is_clean) && !is_link_data_or_proof)
+                        {
+                            continue;
+                        }
+                        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                            "native Reticulum 0.6 raw link packet observed destination={} packet_type={:?} header_type={:?} context=0x{:02x} hops={} bytes={} active_omenchat={} tracked_clean={} tracked_active_links={}",
+                            event.packet.destination.to_hex_string(),
+                            event.packet.header.packet_type,
+                            event.packet.header.header_type,
+                            event.packet.context as u8,
+                            event.packet.header.hops,
+                            event.packet.data.len(),
+                            is_active,
+                            is_clean,
+                            active_count
+                        )));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    {
+        let mut link_events = transport.out_link_events();
+        let active_omenchat_links = active_omenchat_links.clone();
+        let clean_omenchat_links = clean_omenchat_links.clone();
+        let attachments_dir = attachments_dir.clone();
+        let event_tx = event_tx.clone();
+        #[cfg(feature = "native-lxmf")]
+        let clean_lxmf_seen_messages = clean_lxmf_seen_messages.clone();
+        tokio::spawn(async move {
+            loop {
+                match link_events.recv().await {
+                    Ok(event) => {
+                        let link_id = address_hash_to_link_id(event.id);
+                        match event.event {
+                            rns_transport::destination::link::LinkEvent::Closed => {
+                                clean_omenchat_links
+                                    .lock()
+                                    .expect("native clean OMENchat link lock")
+                                    .remove(&link_id);
+                                if let Some(closed) = take_active_omenchat_link_close(
+                                    &active_omenchat_links,
+                                    link_id,
+                                    Some("clean Reticulum link closed".into()),
+                                ) {
+                                    let _ =
+                                        event_tx.send(RuntimeBusEvent::OmenChatLinkClosed(closed));
+                                }
+                            }
+                            rns_transport::destination::link::LinkEvent::Data(payload) => {
+                                let (is_active, is_clean) = {
+                                    let is_active = active_omenchat_links
+                                        .lock()
+                                        .expect("native active OMENchat link lock")
+                                        .contains(&link_id);
+                                    let is_clean = clean_omenchat_links
+                                        .lock()
+                                        .expect("native clean OMENchat link lock")
+                                        .contains_key(&link_id);
+                                    (is_active, is_clean)
+                                };
+                                let is_omenchat = is_active || is_clean;
+                                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native Reticulum 0.6 clean link-event data observed link_id={} destination={} context=0x{:02x} bytes={} active={} tracked_clean={}",
+                                    hex_encode(&link_id),
+                                    event.address_hash.to_hex_string(),
+                                    payload.context() as u8,
+                                    payload.len(),
+                                    is_active,
+                                    is_clean
+                                )));
+                                if !is_omenchat {
+                                    #[cfg(feature = "native-lxmf")]
+                                    if clean_omenchat_frame_context(payload.context()) {
+                                        match decode_native_lxmf_payload(
+                                            payload.as_slice(),
+                                            &attachments_dir,
+                                        ) {
+                                            Ok(message) => {
+                                                let should_emit = clean_lxmf_should_emit_message(
+                                                    &clean_lxmf_seen_messages,
+                                                    &message,
+                                                );
+                                                let _ = event_tx.send(RuntimeBusEvent::Debug(
+                                                    format!(
+                                                        "native Reticulum 0.6 clean LXMF link-event decoded peer={} message_id={} duplicate={}",
+                                                        message.peer_hash,
+                                                        message
+                                                            .message_id
+                                                            .as_deref()
+                                                            .unwrap_or("none"),
+                                                        !should_emit
+                                                    ),
+                                                ));
+                                                if should_emit {
+                                                    let _ = event_tx.send(
+                                                        RuntimeBusEvent::MessageReceived(message),
+                                                    );
+                                                }
+                                            }
+                                            Err(error)
+                                                if !native_lxmf_decode_error_is_truncated(
+                                                    &error,
+                                                ) => {}
+                                            Err(_) => {}
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if !clean_omenchat_frame_context(payload.context()) {
+                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native Reticulum 0.6 OMENchat clean link-event ignored non-data context link_id={} context=0x{:02x}",
+                                        hex_encode(&link_id),
+                                        payload.context() as u8
+                                    )));
+                                    continue;
+                                }
+                                let frame_bytes = payload.as_slice().to_vec();
+                                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native Reticulum 0.6 OMENchat clean link-event frame received link_id={} bytes={}",
+                                    hex_encode(&link_id),
+                                    frame_bytes.len()
+                                )));
+                                let _ = event_tx.send(RuntimeBusEvent::OmenChatLinkData(
+                                    OmenChatLinkData {
+                                        link_id,
+                                        frame_bytes,
+                                    },
+                                ));
+                            }
+                            rns_transport::destination::link::LinkEvent::Activated
+                            | rns_transport::destination::link::LinkEvent::PeerIdentified(_) => {}
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    {
+        let mut link_events = transport.in_link_events();
+        let active_omenchat_links = active_omenchat_links.clone();
+        let clean_omenchat_links = clean_omenchat_links.clone();
+        let attachments_dir = attachments_dir.clone();
+        let event_tx = event_tx.clone();
+        #[cfg(feature = "native-lxmf")]
+        let clean_lxmf_seen_messages = clean_lxmf_seen_messages.clone();
+        tokio::spawn(async move {
+            loop {
+                match link_events.recv().await {
+                    Ok(event) => {
+                        let link_id = address_hash_to_link_id(event.id);
+                        if let rns_transport::destination::link::LinkEvent::Data(payload) =
+                            event.event
+                        {
+                            let (is_active, is_clean) = {
+                                let is_active = active_omenchat_links
+                                    .lock()
+                                    .expect("native active OMENchat link lock")
+                                    .contains(&link_id);
+                                let is_clean = clean_omenchat_links
+                                    .lock()
+                                    .expect("native clean OMENchat link lock")
+                                    .contains_key(&link_id);
+                                (is_active, is_clean)
+                            };
+                            let is_omenchat = is_active || is_clean;
+                            let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                "native Reticulum 0.6 clean inbound link-event data observed link_id={} destination={} context=0x{:02x} bytes={} active={} tracked_clean={}",
+                                hex_encode(&link_id),
+                                event.address_hash.to_hex_string(),
+                                payload.context() as u8,
+                                payload.len(),
+                                is_active,
+                                is_clean
+                            )));
+                            if !is_omenchat {
+                                #[cfg(feature = "native-lxmf")]
+                                if clean_omenchat_frame_context(payload.context()) {
+                                    match decode_native_lxmf_payload(
+                                        payload.as_slice(),
+                                        &attachments_dir,
+                                    ) {
+                                        Ok(message) => {
+                                            let should_emit = clean_lxmf_should_emit_message(
+                                                &clean_lxmf_seen_messages,
+                                                &message,
+                                            );
+                                            let _ = event_tx.send(RuntimeBusEvent::Debug(
+                                                format!(
+                                                    "native Reticulum 0.6 clean LXMF inbound link-event decoded peer={} message_id={} duplicate={}",
+                                                    message.peer_hash,
+                                                    message.message_id.as_deref().unwrap_or("none"),
+                                                    !should_emit
+                                                ),
+                                            ));
+                                            if should_emit {
+                                                let _ = event_tx.send(
+                                                    RuntimeBusEvent::MessageReceived(message),
+                                                );
+                                            }
+                                        }
+                                        Err(error)
+                                            if !native_lxmf_decode_error_is_truncated(&error) => {}
+                                        Err(_) => {}
+                                    }
+                                }
+                                continue;
+                            }
+                            if !clean_omenchat_frame_context(payload.context()) {
+                                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native Reticulum 0.6 OMENchat clean inbound link-event ignored non-data context link_id={} context=0x{:02x}",
+                                    hex_encode(&link_id),
+                                    payload.context() as u8
+                                )));
+                                continue;
+                            }
+                            let frame_bytes = payload.as_slice().to_vec();
+                            let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                "native Reticulum 0.6 OMENchat clean inbound link-event frame received link_id={} bytes={}",
+                                hex_encode(&link_id),
+                                frame_bytes.len()
+                            )));
+                            let _ = event_tx.send(RuntimeBusEvent::OmenChatLinkData(
+                                OmenChatLinkData {
+                                    link_id,
+                                    frame_bytes,
+                                },
+                            ));
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    {
+        let mut received_data_events = transport.received_data_events();
+        let active_omenchat_links = active_omenchat_links.clone();
+        let clean_omenchat_links = clean_omenchat_links.clone();
+        let attachments_dir = attachments_dir.clone();
+        let event_tx = event_tx.clone();
+        #[cfg(feature = "native-lxmf")]
+        let clean_lxmf_seen_messages = clean_lxmf_seen_messages.clone();
+        tokio::spawn(async move {
+            loop {
+                match received_data_events.recv().await {
+                    Ok(event) => {
+                        if event.payload_mode
+                            == rns_transport::transport::ReceivedPayloadMode::FullWire
+                        {
+                            #[cfg(feature = "native-lxmf")]
+                            match decode_native_lxmf_payload(
+                                event.data.as_slice(),
+                                &attachments_dir,
+                            ) {
+                                Ok(message) => {
+                                    let should_emit = clean_lxmf_should_emit_message(
+                                        &clean_lxmf_seen_messages,
+                                        &message,
+                                    );
+                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native Reticulum 0.6 clean LXMF full-wire decoded destination={} peer={} message_id={} duplicate={}",
+                                        event.destination.to_hex_string(),
+                                        message.peer_hash,
+                                        message.message_id.as_deref().unwrap_or("none"),
+                                        !should_emit
+                                    )));
+                                    if should_emit {
+                                        let _ = event_tx
+                                            .send(RuntimeBusEvent::MessageReceived(message));
+                                    }
+                                    continue;
+                                }
+                                Err(error) if !native_lxmf_decode_error_is_truncated(&error) => {}
+                                Err(_) => {}
+                            }
+                            let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                "native Reticulum 0.6 clean received-data full-wire observed destination={} context={} bytes={}; waiting for link-event decode",
+                                event.destination.to_hex_string(),
+                                event.context
+                                    .map(|context| format!("0x{:02x}", context as u8))
+                                    .unwrap_or_else(|| "none".into()),
+                                event.data.as_slice().len()
+                            )));
+                            continue;
+                        }
+                        if !clean_omenchat_optional_frame_context(event.context) {
+                            continue;
+                        }
+                        let event_link_id = address_hash_to_link_id(event.destination);
+                        let link_id = {
+                            let active_links = active_omenchat_links
+                                .lock()
+                                .expect("native active OMENchat link lock");
+                            if active_links.contains(&event_link_id) {
+                                Some(event_link_id)
+                            } else {
+                                drop(active_links);
+                                clean_omenchat_links
+                                    .lock()
+                                    .expect("native clean OMENchat link lock")
+                                    .iter()
+                                    .find_map(|(link_id, clean_link)| {
+                                        (clean_link.link_id == event.destination
+                                            || clean_link.destination_hash == event.destination)
+                                            .then_some(*link_id)
+                                    })
+                            }
+                        };
+                        let Some(link_id) = link_id else {
+                            continue;
+                        };
+                        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                            "native Reticulum 0.6 OMENchat clean frame received link_id={} source_hash={} bytes={}",
+                            hex_encode(&link_id),
+                            event.destination.to_hex_string(),
+                            event.data.as_slice().len()
+                        )));
+                        let _ =
+                            event_tx.send(RuntimeBusEvent::OmenChatLinkData(OmenChatLinkData {
+                                link_id,
+                                frame_bytes: event.data.as_slice().to_vec(),
+                            }));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+    {
+        let mut resource_events = transport.resource_events();
+        let active_omenchat_links = active_omenchat_links.clone();
+        let clean_omenchat_links = clean_omenchat_links.clone();
+        let attachments_dir = attachments_dir.clone();
+        let event_tx = event_tx.clone();
+        #[cfg(feature = "native-lxmf")]
+        let clean_lxmf_seen_messages = clean_lxmf_seen_messages.clone();
+        tokio::spawn(async move {
+            loop {
+                match resource_events.recv().await {
+                    Ok(event) => {
+                        let event_link_id = address_hash_to_link_id(event.link_id);
+                        let link_id = {
+                            let active_links = active_omenchat_links
+                                .lock()
+                                .expect("native active OMENchat link lock");
+                            if active_links.contains(&event_link_id) {
+                                Some(event_link_id)
+                            } else {
+                                drop(active_links);
+                                clean_omenchat_links
+                                    .lock()
+                                    .expect("native clean OMENchat link lock")
+                                    .iter()
+                                    .find_map(|(link_id, clean_link)| {
+                                        (clean_link.link_id == event.link_id
+                                            || clean_link.destination_hash == event.link_id)
+                                            .then_some(*link_id)
+                                    })
+                            }
+                        };
+                        let rns_transport::resource::ResourceEventKind::Complete(complete) =
+                            event.kind
+                        else {
+                            continue;
+                        };
+                        let is_metadata_frame =
+                            complete.metadata.as_deref().is_some_and(|metadata| {
+                                metadata.starts_with(OMENCHAT_FRAME_RESOURCE_METADATA)
+                            });
+                        if is_metadata_frame {
+                            if let Some(link_id) = link_id {
+                                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native Reticulum 0.6 OMENchat frame resource received link_id={} source_hash={} bytes={}",
+                                    hex_encode(&link_id),
+                                    event.link_id.to_hex_string(),
+                                    complete.data.len()
+                                )));
+                                let _ = event_tx.send(RuntimeBusEvent::OmenChatLinkData(
+                                    OmenChatLinkData {
+                                        link_id,
+                                        frame_bytes: complete.data,
+                                    },
+                                ));
+                            }
+                            continue;
+                        }
+                        let is_metadata_omenchat =
+                            complete.metadata.as_deref().is_some_and(|metadata| {
+                                metadata.starts_with(OMENCHAT_RESOURCE_METADATA_PREFIX)
+                            });
+                        #[cfg(feature = "native-lxmf")]
+                        if !is_metadata_omenchat {
+                            match decode_native_lxmf_payload(&complete.data, &attachments_dir) {
+                                Ok(message) => {
+                                    let should_emit = clean_lxmf_should_emit_message(
+                                        &clean_lxmf_seen_messages,
+                                        &message,
+                                    );
+                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native Reticulum 0.6 clean LXMF resource decoded source_hash={} peer={} message_id={} duplicate={}",
+                                        event.link_id.to_hex_string(),
+                                        message.peer_hash,
+                                        message.message_id.as_deref().unwrap_or("none"),
+                                        !should_emit
+                                    )));
+                                    if should_emit {
+                                        let _ = event_tx
+                                            .send(RuntimeBusEvent::MessageReceived(message));
+                                    }
+                                    continue;
+                                }
+                                Err(error) if !native_lxmf_decode_error_is_truncated(&error) => {}
+                                Err(_) => {}
+                            }
+                        }
+                        let Some(link_id) = link_id else {
+                            if is_metadata_omenchat {
+                                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native Reticulum 0.6 OMENchat resource ignored with no active link source_hash={} bytes={}",
+                                    event.link_id.to_hex_string(),
+                                    complete.data.len()
+                                )));
+                            }
+                            continue;
+                        };
+                        if !is_metadata_omenchat {
+                            continue;
+                        }
+                        let _ = event_tx.send(RuntimeBusEvent::OmenChatResourceData(
+                            OmenChatResourceData {
+                                link_id,
+                                data: complete.data,
+                                metadata: complete.metadata,
+                            },
+                        ));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+}
+
+#[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
+fn clean_lxmf_should_emit_message(
+    seen_messages: &Arc<Mutex<BTreeMap<String, tokio::time::Instant>>>,
+    message: &MessageSummary,
+) -> bool {
+    let Some(message_id) = message.message_id.as_deref() else {
+        return true;
+    };
+    let now = tokio::time::Instant::now();
+    let mut seen = seen_messages
+        .lock()
+        .expect("native clean lxmf seen message lock");
+    seen.retain(|_, observed| now.duration_since(*observed) < Duration::from_secs(300));
+    seen.insert(message_id.to_string(), now).is_none()
+}
+
+#[cfg(all(feature = "native-rns-net", any()))]
 fn omenchat_link_error_is_handshake_timeout(error: &AppError) -> bool {
     let lower = error.to_string().to_ascii_lowercase();
     lower.contains("timed out") && lower.contains("link establishment")
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn native_lxmf_transient_id(lxmf_data: &[u8]) -> [u8; 32] {
     let digest = Sha256::digest(lxmf_data);
     let mut id = [0u8; 32];
@@ -5349,7 +8592,7 @@ fn native_lxmf_transient_id(lxmf_data: &[u8]) -> [u8; 32] {
     id
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn native_lxmf_select_sync_ids(
     available: Vec<[u8; 32]>,
     delivered_ids: &BTreeMap<String, f64>,
@@ -5368,7 +8611,7 @@ fn native_lxmf_select_sync_ids(
     (wants, haves)
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn emit_propagation_sync_event(
     tx: &broadcast::Sender<RuntimeBusEvent>,
     stage: PropagationSyncStage,
@@ -5424,7 +8667,7 @@ async fn cleanup_native_lxmf_propagation_sync_link(
     torn_down
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn native_lxmf_parse_transient_id_list(bytes: &[u8]) -> AppResult<Vec<[u8; 32]>> {
     let value = native_lxmf_unpack_value(bytes)?;
     let rmpv::Value::Array(items) = value else {
@@ -5451,7 +8694,7 @@ fn native_lxmf_parse_transient_id_list(bytes: &[u8]) -> AppResult<Vec<[u8; 32]>>
     Ok(ids)
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn native_lxmf_parse_propagation_payloads(bytes: &[u8]) -> AppResult<Vec<Vec<u8>>> {
     let value = native_lxmf_unpack_value(bytes)?;
     let rmpv::Value::Array(items) = value else {
@@ -5470,13 +8713,13 @@ fn native_lxmf_parse_propagation_payloads(bytes: &[u8]) -> AppResult<Vec<Vec<u8>
         .collect()
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn native_lxmf_payload_candidates(bytes: &[u8]) -> AppResult<Vec<Vec<u8>>> {
     crate::runtime::native_lxmf::codec::propagation_envelope_entries(bytes)
         .or_else(|_| Ok(vec![bytes.to_vec()]))
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn native_lxmf_unpack_value(bytes: &[u8]) -> AppResult<rmpv::Value> {
     let mut cursor = std::io::Cursor::new(bytes);
     let value = rmpv::decode::read_value(&mut cursor)
@@ -5493,7 +8736,7 @@ fn should_emit_directory_announce(payload: &AnnouncePayload) -> bool {
     !matches!(payload.kind, DirectoryKind::Unknown)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_propagation_app_data_valid(key: &RnsNetAnnounceKey) -> bool {
     let Some(app_data) = key.app_data.as_deref() else {
         return false;
@@ -5511,7 +8754,7 @@ fn rns_net_propagation_app_data_valid(key: &RnsNetAnnounceKey) -> bool {
     }
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_announce_payload(key: &RnsNetAnnounceKey) -> AnnouncePayload {
     let destination_hash = hex_encode(&key.destination_hash);
     let kind = rns_net_announce_kind(key);
@@ -5552,7 +8795,7 @@ fn rns_net_announce_payload(key: &RnsNetAnnounceKey) -> AnnouncePayload {
     }
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_announce_kind(key: &RnsNetAnnounceKey) -> DirectoryKind {
     if key.destination_hash == rns_net_destination_hash(&key.identity_hash, "nomadnetwork", "node")
     {
@@ -5588,7 +8831,7 @@ fn rns_net_lxmf_delivery_stamp_cost(_kind: &DirectoryKind, _app_data: &[u8]) -> 
     None
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_sibling_destination_hashes(key: &RnsNetAnnounceKey) -> [[u8; 16]; 3] {
     [
         rns_net_destination_hash(&key.identity_hash, "nomadnetwork", "node"),
@@ -5597,17 +8840,17 @@ fn rns_net_sibling_destination_hashes(key: &RnsNetAnnounceKey) -> [[u8; 16]; 3] 
     ]
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_associated_hash(identity_hash: &[u8; 16], app_name: &str, aspect: &str) -> String {
     hex_encode(&rns_net_destination_hash(identity_hash, app_name, aspect))
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_destination_hash(identity_hash: &[u8; 16], app_name: &str, aspect: &str) -> [u8; 16] {
     rns_core::destination::destination_hash(app_name, &[aspect], Some(identity_hash))
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn parse_rns_net_destination_hash(destination_hash: &str) -> AppResult<[u8; 16]> {
     let destination = parse_transport_destination_hash(destination_hash)?;
     let mut bytes = [0u8; 16];
@@ -5615,7 +8858,7 @@ fn parse_rns_net_destination_hash(destination_hash: &str) -> AppResult<[u8; 16]>
     Ok(bytes)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_page_fetch_error(
     plan: &NativeFetchPlan,
     stage: NativePageFetchFailureStage,
@@ -5628,7 +8871,7 @@ fn rns_net_page_fetch_error(
     })
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn native_failure_stage_from_probe_stage(
     stage: &PageFetchProbeStage,
 ) -> NativePageFetchFailureStage {
@@ -5647,7 +8890,7 @@ fn native_failure_stage_from_probe_stage(
     }
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_observed_reused_page_link(steps: &[PageFetchProbeStep]) -> bool {
     steps.iter().any(|step| {
         step.stage == PageFetchProbeStage::LinkSetup
@@ -5656,21 +8899,21 @@ fn rns_net_observed_reused_page_link(steps: &[PageFetchProbeStep]) -> bool {
     })
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_observed_response_wait_failed(steps: &[PageFetchProbeStep]) -> bool {
     steps
         .iter()
         .any(|step| step.stage == PageFetchProbeStage::ResponseWait && !step.ok)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_observed_request_send_failed(steps: &[PageFetchProbeStep]) -> bool {
     steps
         .iter()
         .any(|step| step.stage == PageFetchProbeStage::RequestSend && !step.ok)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn rns_net_observed_stale_reused_page_link_failure(steps: &[PageFetchProbeStep]) -> bool {
     rns_net_observed_response_wait_failed(steps) || rns_net_observed_request_send_failed(steps)
 }
@@ -5706,7 +8949,7 @@ fn unsupported(operation: &str) -> AppError {
     }))
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn sync_managed_rns_net_identity_config(
     reticulum_config_dir: &Path,
     identity_path: &Path,
@@ -5721,7 +8964,7 @@ fn sync_managed_rns_net_identity_config(
     Ok(())
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn managed_rns_net_identity_config_matches(
     reticulum_config_dir: &Path,
     identity_path: &Path,
@@ -5732,7 +8975,7 @@ fn managed_rns_net_identity_config_matches(
         == Some(&identity_path.display().to_string()))
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn render_config_with_network_identity(existing: &str, identity_path: &Path) -> String {
     let identity_line = format!("network_identity = {}", identity_path.display());
     let mut lines = if existing.trim().is_empty() {
@@ -5783,7 +9026,7 @@ fn render_config_with_network_identity(existing: &str, identity_path: &Path) -> 
     format!("{}\n", lines.join("\n").trim_end())
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn read_network_identity_value(config: &str) -> Option<String> {
     let mut in_reticulum = false;
     for line in config.lines() {
@@ -5804,22 +9047,29 @@ fn read_network_identity_value(config: &str) -> Option<String> {
     None
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn decode_native_lxmf_payload(bytes: &[u8], attachments_dir: &Path) -> AppResult<MessageSummary> {
-    crate::runtime::native_lxmf::codec::decode_wire_message_storing_attachments(
+    let direct = crate::runtime::native_lxmf::codec::decode_wire_message_storing_attachments(
         bytes,
         attachments_dir,
-    )
-    .or_else(|direct_error| {
-        let packet = rns_core::packet::RawPacket::unpack(bytes).map_err(|_| direct_error)?;
-        crate::runtime::native_lxmf::codec::decode_wire_message_storing_attachments(
-            &packet.data,
-            attachments_dir,
-        )
-    })
+    );
+    #[cfg(all(feature = "native-rns-net", any()))]
+    {
+        direct.or_else(|direct_error| {
+            let packet = rns_core::packet::RawPacket::unpack(bytes).map_err(|_| direct_error)?;
+            crate::runtime::native_lxmf::codec::decode_wire_message_storing_attachments(
+                &packet.data,
+                attachments_dir,
+            )
+        })
+    }
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    {
+        direct
+    }
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn native_lxmf_decode_error_is_truncated(error: &AppError) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("wire message too short")
@@ -5835,12 +9085,29 @@ fn decode_rns_net_lxmf_delivery(
     decode_native_lxmf_payload(&delivery.raw, attachments_dir)
 }
 
-#[cfg(feature = "native-rns-net")]
 fn native_unix_timestamp() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
+fn attachment_summaries_from_paths(paths: &[std::path::PathBuf]) -> Vec<AttachmentSummary> {
+    paths
+        .iter()
+        .map(|path| AttachmentSummary {
+            name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            size: std::fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            path: Some(path.clone()),
+        })
+        .collect()
 }
 
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
@@ -5872,7 +9139,7 @@ fn annotate_native_lxmf_stamp_fields(
     }
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn native_lxmf_pending_direct_summary(pending_lxmf_proofs: &PendingLxmfProofs) -> String {
     let pending = pending_lxmf_proofs
         .lock()
@@ -5880,7 +9147,7 @@ fn native_lxmf_pending_direct_summary(pending_lxmf_proofs: &PendingLxmfProofs) -
     pending.summary(native_unix_timestamp())
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn native_lxmf_recover_direct_correlation(
     pending_lxmf_proofs: &PendingLxmfProofs,
     messages: &[MessageSummary],
@@ -5891,7 +9158,7 @@ fn native_lxmf_recover_direct_correlation(
     pending.recover_direct_correlations(messages)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn native_lxmf_reconcile_direct_router_timeouts(
     pending_lxmf_proofs: &PendingLxmfProofs,
     now: f64,
@@ -5903,7 +9170,7 @@ fn native_lxmf_reconcile_direct_router_timeouts(
         .reconcile_timeouts(now, timeout_seconds)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn emit_native_lxmf_direct_timeout_event(
     tx: &broadcast::Sender<RuntimeBusEvent>,
     event: DirectLxmfTimeoutEvent,
@@ -6017,7 +9284,7 @@ fn native_lxmf_recover_propagated_correlation(
     recovered
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn lxmf_message_runtime_id(message: &MessageSummary) -> Option<String> {
     message
         .fields
@@ -6028,7 +9295,7 @@ fn lxmf_message_runtime_id(message: &MessageSummary) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn lxmf_message_submitted_at(message: &MessageSummary) -> Option<f64> {
     message
         .fields
@@ -6036,7 +9303,7 @@ fn lxmf_message_submitted_at(message: &MessageSummary) -> Option<f64> {
         .and_then(|value| value.parse::<f64>().ok())
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn lxmf_message_peer_activity_observed(message: &MessageSummary) -> bool {
     message
         .fields
@@ -6048,7 +9315,7 @@ fn lxmf_message_peer_activity_observed(message: &MessageSummary) -> bool {
             .is_some_and(|value| value == "peer_activity_after_send")
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn native_lxmf_message_can_recover_direct(message: &MessageSummary) -> bool {
     if message.incoming || message.delivered || message.failed {
         return false;
@@ -6525,7 +9792,7 @@ fn native_lxmf_message_from_link_data(
     decode_native_lxmf_payload(&link_data.data, attachments_dir)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn native_lxmf_proof_status_for_packet(
     proof: &RnsNetProof,
     pending_lxmf_proofs: &PendingLxmfProofs,
@@ -6538,7 +9805,7 @@ fn native_lxmf_proof_status_for_packet(
         .proof_status_for_packet(packet_hash, destination_hash, proof.rtt)
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn native_lxmf_events_for_packet_proof(
     proof: &RnsNetProof,
     pending_lxmf_proofs: &PendingLxmfProofs,
@@ -6573,7 +9840,7 @@ fn native_lxmf_events_for_packet_proof(
     events
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn native_lxmf_inbound_peer_evidence(
     message: &MessageSummary,
     pending_lxmf_proofs: &PendingLxmfProofs,
@@ -6631,7 +9898,7 @@ fn native_lxmf_inbound_peer_propagated_evidence(
         .collect()
 }
 
-#[cfg(feature = "native-rns-net")]
+#[cfg(all(feature = "native-rns-net", any()))]
 fn native_lxmf_peer_activity_hash_candidates(
     message: &MessageSummary,
     destination_keys: &Arc<Mutex<RnsNetDestinationKeyStore>>,
@@ -6655,17 +9922,16 @@ fn native_lxmf_peer_activity_hash_candidates(
     candidates
 }
 
-#[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
+#[cfg(feature = "native-lxmf")]
 fn local_lxmf_delivery_announce_app_data(display_name: &str) -> AppResult<Vec<u8>> {
     crate::runtime::native_lxmf::codec::encode_delivery_display_name_app_data(display_name)
 }
 
-#[cfg(all(not(feature = "native-lxmf"), feature = "native-rns-net"))]
+#[cfg(not(feature = "native-lxmf"))]
 fn local_lxmf_delivery_announce_app_data(display_name: &str) -> AppResult<Vec<u8>> {
     Ok(display_name.as_bytes().to_vec())
 }
 
-#[cfg(feature = "native-rns-net")]
 fn local_lxmf_display_name(
     identity: &NativeIdentitySummary,
     profile: Option<&IdentityProfile>,
@@ -6708,7 +9974,7 @@ impl Default for NativeRuntimeState {
             active_identity_profile: None,
             interfaces: Vec::new(),
             transport_started: false,
-            #[cfg(feature = "native-rns-net")]
+            #[cfg(all(feature = "native-rns-net", any()))]
             rns_net_started: false,
         }
     }
@@ -6717,7 +9983,7 @@ impl Default for NativeRuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(feature = "native-rns-net"))]
+    #[cfg(not(all(feature = "native-rns-net", any())))]
     use crate::browser::PageSource;
     use crate::config::AppPaths;
     use crate::identity::{IdentityManager, IdentityMaterialProvider};
@@ -6734,7 +10000,7 @@ mod tests {
         AppPaths::from_root(root)
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn omenchat_link_close_events_only_emit_for_active_omenchat_links() {
         let active = Arc::new(Mutex::new(BTreeSet::from([[0x4f; 16]])));
@@ -6755,7 +10021,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn live_rns_net_interface_stats_match_profiles_and_format_connection_state() {
         let mut interface =
@@ -6853,7 +10119,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn reused_page_link_failure_detection_covers_send_and_response_failures() {
         let reused = PageFetchProbeStep::ok(
@@ -6920,7 +10186,7 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn local_lxmf_display_name_prefers_active_profile_label() {
         let identity = NativeIdentitySummary {
@@ -6980,7 +10246,26 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native-lxmf-sdk")]
     #[tokio::test]
+    async fn native_runtime_reports_missing_lxmf_sdk_rpc_endpoint_for_probe() {
+        let paths = temp_paths("sdk-rpc-probe-missing-endpoint");
+        let runtime = NativeNetworkRuntime::new(NativeRuntimeConfig::from_paths(&paths));
+
+        let probe = runtime
+            .native_lxmf_sdk_rpc_probe()
+            .await
+            .expect("probe snapshot");
+
+        assert_eq!(probe.state, "missing_endpoint");
+        assert_eq!(probe.endpoint, None);
+        assert!(probe
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("not configured")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn native_runtime_starts_with_identity_and_reports_status() {
         let paths = temp_paths("start");
         let manager = IdentityManager::new(
@@ -7005,12 +10290,14 @@ mod tests {
         );
         let state = runtime.state_snapshot();
         assert!(state.active_identity.is_some());
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
             assert!(state.transport_started);
-            assert!(status.message.contains("transport is constructed"));
+            assert!(status
+                .message
+                .contains("Reticulum 0.6 transport is running"));
         }
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             assert!(!state.transport_started);
             assert!(state.rns_net_started);
@@ -7021,7 +10308,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[tokio::test]
     async fn native_rns_net_start_respects_announce_on_start_setting() {
         let paths = temp_paths("announce-disabled");
@@ -7056,21 +10343,21 @@ mod tests {
         let status = runtime.status().await;
 
         assert!(status.connected);
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
             assert!(!runtime.state_snapshot().transport_started);
             assert!(status
                 .message
                 .contains("without an active transport identity"));
         }
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             assert!(runtime.state_snapshot().rns_net_started);
             assert!(status.message.contains("rns-net runtime is primary"));
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn native_attach_identity_constructs_transport_when_runtime_is_running() {
         let paths = temp_paths("attach-transport");
         let manager = IdentityManager::new(
@@ -7090,23 +10377,23 @@ mod tests {
             .expect("attach identity");
         let stats = runtime.interface_stats().await.expect("interface stats");
 
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         assert!(runtime.state_snapshot().transport_started);
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         assert!(runtime.state_snapshot().rns_net_started);
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         assert!(stats
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("transport constructed")));
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         assert!(stats
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("rns-net runtime is primary")));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn native_runtime_attaches_enabled_tcp_client_interface_plan() {
         let paths = temp_paths("tcp-client-attach");
         let manager = IdentityManager::new(
@@ -7129,11 +10416,11 @@ mod tests {
             .expect("start runtime with tcp client");
         let stats = runtime.interface_stats().await.expect("interface stats");
 
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         assert!(runtime.state_snapshot().transport_started);
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         assert!(runtime.state_snapshot().rns_net_started);
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
             assert!(stats
                 .reason
@@ -7152,7 +10439,7 @@ mod tests {
             assert!(sample.attached);
             assert_eq!(sample.state, InterfaceSampleState::Attached);
         }
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             assert!(stats
                 .interfaces
@@ -7169,7 +10456,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn managed_rns_net_identity_config_inserts_and_updates_network_identity() {
         let existing = "# header
@@ -7197,7 +10484,7 @@ enable_transport = No
         assert!(!updated.contains("identity-one"));
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn sync_managed_rns_net_identity_config_preserves_identity_file_and_reports_alignment() {
         let paths = temp_paths("rns-net-identity-sync");
@@ -7226,7 +10513,7 @@ enable_transport = No
         .expect("alignment"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn native_runtime_does_not_attach_disabled_tcp_client_interface_plan() {
         let paths = temp_paths("tcp-client-disabled");
         let manager = IdentityManager::new(
@@ -7248,7 +10535,7 @@ enable_transport = No
             .expect("start runtime with disabled tcp client");
         let stats = runtime.interface_stats().await.expect("interface stats");
 
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         {
             assert!(stats
                 .reason
@@ -7259,14 +10546,14 @@ enable_transport = No
                 .iter()
                 .any(|line| line.contains("attached Gateway")));
         }
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         assert!(stats
             .interfaces
             .iter()
             .any(|line| line.contains("attached rns-net primary runtime")));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn native_request_path_uses_constructed_transport_boundary() {
         let paths = temp_paths("request-path");
         let manager = IdentityManager::new(
@@ -7297,7 +10584,7 @@ enable_transport = No
         assert_eq!(inspection.hops, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn native_warm_paths_validates_and_bounds_requests() {
         let paths = temp_paths("warm-paths");
         let manager = IdentityManager::new(
@@ -7468,7 +10755,51 @@ enable_transport = No
             .any(|step| step.stage == PageFetchProbeStage::RuntimeSetup && !step.ok));
     }
 
-    #[cfg(not(feature = "native-rns-net"))]
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    #[tokio::test]
+    async fn native_reticulum06_page_fetch_probe_reports_verified_request_resource_adapter() {
+        let paths = temp_paths("fetch-probe-reticulum06");
+        let runtime = NativeNetworkRuntime::new(NativeRuntimeConfig::from_paths(&paths));
+        let destination = "00112233445566778899aabbccddeeff";
+        runtime.start(None, Vec::new()).expect("start runtime");
+
+        let report = runtime
+            .probe_page_fetch(&format!("{destination}:/"), true)
+            .await
+            .expect("probe report");
+
+        assert_eq!(report.destination_hash.as_deref(), Some(destination));
+        assert_eq!(report.path.as_deref(), Some("/page/index.mu"));
+        assert!(!report.ready_to_request);
+        assert!(report.steps.iter().any(|step| {
+            step.stage == PageFetchProbeStage::RuntimeSetup
+                && step.ok
+                && step.detail.contains("runtime is running")
+        }));
+        assert!(report.steps.iter().any(|step| {
+            step.stage == PageFetchProbeStage::LinkSetup
+                && step.ok
+                && step
+                    .trace
+                    .get("capability")
+                    .is_some_and(|value| value == "destination-links")
+        }));
+        assert!(report.steps.iter().any(|step| {
+            step.stage == PageFetchProbeStage::RequestSend
+                && step.ok
+                && step.detail.contains("request-resource")
+                && step
+                    .trace
+                    .get("state")
+                    .is_some_and(|value| value == "available")
+        }));
+        assert!(!report
+            .steps
+            .iter()
+            .any(|step| step.stage == PageFetchProbeStage::ResponseWait && !step.ok));
+    }
+
+    #[cfg(not(all(feature = "native-rns-net", any())))]
     #[tokio::test]
     async fn native_fetch_valid_hash_uses_page_transport_boundary() {
         let paths = temp_paths("fetch-unsupported");
@@ -7522,11 +10853,11 @@ enable_transport = No
             .await
             .expect_err("default transport unsupported");
 
-        #[cfg(not(feature = "native-rns-net"))]
+        #[cfg(not(all(feature = "native-rns-net", any())))]
         assert!(error.to_string().contains(
             "native Reticulum page transport needs a verified Link.request response API"
         ));
-        #[cfg(feature = "native-rns-net")]
+        #[cfg(all(feature = "native-rns-net", any()))]
         {
             let message = error.to_string();
             assert!(message.contains("destination identity"));
@@ -7537,7 +10868,7 @@ enable_transport = No
         }
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[tokio::test]
     async fn native_rns_net_page_fetch_probe_reports_missing_destination_identity() {
         let paths = temp_paths("fetch-probe-missing-key");
@@ -7558,7 +10889,7 @@ enable_transport = No
         }));
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn rns_net_announce_payload_classifies_node_peer_and_propagation() {
         fn key_for(
@@ -7601,7 +10932,7 @@ enable_transport = No
         );
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn rns_net_sibling_destination_hashes_cover_python_omen_aspects() {
         let identity_hash = [7u8; 16];
@@ -7632,7 +10963,7 @@ enable_transport = No
         );
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn rns_net_path_update_emits_only_exact_known_path_event() {
         let identity_hash = [7u8; 16];
@@ -7682,7 +11013,7 @@ enable_transport = No
         }));
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn native_directory_announces_suppress_unclassified_raw_announces() {
         let identity_hash = [7u8; 16];
@@ -8432,7 +11763,7 @@ enable_transport = No
         assert!(pending.contains_key("active-progress"));
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn native_lxmf_recover_direct_correlation_restores_waiting_packet() {
         let pending: PendingLxmfProofs = Arc::new(Mutex::new(NativeDirectLxmfRouter::default()));
@@ -8690,7 +12021,7 @@ enable_transport = No
         assert_eq!(status.rtt, None);
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn native_lxmf_pending_direct_summary_reports_count_and_age() {
         let pending: PendingLxmfProofs = Arc::new(Mutex::new(NativeDirectLxmfRouter::default()));
@@ -8734,7 +12065,7 @@ enable_transport = No
         assert!(summary.contains("oldest_pending_lxmf_direct_age_secs="));
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn native_lxmf_direct_router_timeout_emits_no_receipt_evidence_once() {
         let pending: PendingLxmfProofs = Arc::new(Mutex::new(NativeDirectLxmfRouter::default()));
@@ -8782,7 +12113,7 @@ enable_transport = No
         }
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn native_packet_proof_uses_pending_lxmf_peer_mapping() {
         let pending = Arc::new(Mutex::new(NativeDirectLxmfRouter::default()));
@@ -8814,7 +12145,7 @@ enable_transport = No
         assert_eq!(pending.lock().expect("pending").pending_len(), 1);
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn unmatched_native_packet_proof_falls_back_to_destination_hash() {
         let pending = Arc::new(Mutex::new(NativeDirectLxmfRouter::default()));
@@ -8831,7 +12162,7 @@ enable_transport = No
         assert_eq!(status.evidence.as_deref(), Some("rns_packet_proof"));
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn unmatched_native_packet_proof_emits_no_runtime_events() {
         let pending = Arc::new(Mutex::new(NativeDirectLxmfRouter::default()));
@@ -8846,7 +12177,7 @@ enable_transport = No
         assert!(events.is_empty());
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn matched_native_packet_proof_emits_lxmf_delivery_events() {
         let pending = Arc::new(Mutex::new(NativeDirectLxmfRouter::default()));
@@ -8876,7 +12207,7 @@ enable_transport = No
         assert!(matches!(events[2], RuntimeBusEvent::Debug(_)));
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn inbound_peer_message_evidence_matches_pending_direct_outbound() {
         let peer_hash = "00112233445566778899aabbccddeeff";
@@ -8947,7 +12278,7 @@ enable_transport = No
             .is_none());
     }
 
-    #[cfg(feature = "native-rns-net")]
+    #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn inbound_peer_message_evidence_matches_known_sibling_destination() {
         let identity_hash = [7u8; 16];

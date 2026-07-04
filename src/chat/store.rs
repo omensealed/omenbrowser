@@ -1,5 +1,6 @@
 use super::model::{ChatEvent, ChatEventKind, ChatRoomSummary, ChatServerSummary, ChatUserSummary};
 use super::protocol::{EventId, RoomId, ServerId};
+use anyhow::Context;
 
 pub trait ChatStore {
     fn save_server(&mut self, server: ChatServerSummary) -> anyhow::Result<()>;
@@ -250,6 +251,12 @@ impl ChatStore for SqliteChatStore {
     fn append_events(&mut self, events: Vec<ChatEvent>) -> anyhow::Result<()> {
         let transaction = self.connection.transaction()?;
         for event in events {
+            if is_transient_local_event_id(event.event_id) {
+                continue;
+            }
+            let event_id = i64::try_from(event.event_id).with_context(|| {
+                format!("event id {} cannot be stored in sqlite", event.event_id)
+            })?;
             let (kind, payload) = encode_event_kind(&event.kind);
             transaction.execute(
                 "INSERT INTO room_events(
@@ -261,7 +268,7 @@ impl ChatStore for SqliteChatStore {
                 (
                     &event.server_id,
                     event.room_id,
-                    event.event_id,
+                    event_id,
                     kind,
                     event.actor_user_id.map(i64::from),
                     event.actor_display_name.as_deref(),
@@ -380,6 +387,10 @@ fn decode_upload_event_kind(body: &str) -> Option<ChatEventKind> {
         filename,
         bytes,
     })
+}
+
+fn is_transient_local_event_id(event_id: EventId) -> bool {
+    event_id > u64::MAX.saturating_sub(1_000_000)
 }
 
 #[cfg(test)]

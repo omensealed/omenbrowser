@@ -18,6 +18,7 @@ pub struct NativeRuntimeConfig {
     pub instance_mode: NativeRuntimeMode,
     pub announce_on_start: bool,
     pub request_timeout_secs: u64,
+    pub native_lxmf_sdk_rpc_endpoint: Option<String>,
 }
 
 impl NativeRuntimeConfig {
@@ -40,6 +41,12 @@ impl NativeRuntimeConfig {
             },
             announce_on_start: settings.announce_on_start,
             request_timeout_secs: 30,
+            native_lxmf_sdk_rpc_endpoint: settings
+                .native_lxmf_sdk_rpc_endpoint
+                .as_deref()
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
+                .map(str::to_string),
         }
     }
 
@@ -68,6 +75,13 @@ impl std::fmt::Debug for NativeRuntimeConfig {
             .field("instance_mode", &self.instance_mode)
             .field("announce_on_start", &self.announce_on_start)
             .field("request_timeout_secs", &self.request_timeout_secs)
+            .field(
+                "native_lxmf_sdk_rpc_endpoint",
+                &self
+                    .native_lxmf_sdk_rpc_endpoint
+                    .as_ref()
+                    .map(|_| "<configured>"),
+            )
             .finish()
     }
 }

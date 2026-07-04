@@ -1,9 +1,12 @@
+#[cfg(feature = "live-rns-net")]
+compile_error!("live-rns-net was removed from omenchatd; use --features live-reticulum");
+
 pub mod config;
 pub mod error;
 pub mod live;
 pub mod protocol;
-#[cfg(feature = "live-rns-net")]
-pub mod rns_net_live;
+#[cfg(feature = "live-reticulum")]
+pub mod reticulum_live;
 pub mod session;
 pub mod store;
 pub mod transport;
@@ -143,15 +146,22 @@ impl Omenchatd {
                 if let Some(tcp_client) = options.tcp_client.as_ref() {
                     config::write_reticulum_tcp_client_config(&config, tcp_client)?;
                 }
-                #[cfg(feature = "live-rns-net")]
+                #[cfg(feature = "live-reticulum")]
+                {
+                    reticulum_live::run_live_server(config)
+                }
+                #[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
                 {
                     rns_net_live::run_live_server(config)
                 }
-                #[cfg(not(feature = "live-rns-net"))]
+                #[cfg(all(
+                    not(feature = "live-reticulum"),
+                    not(all(feature = "live-rns-net", any()))
+                ))]
                 {
                     let _ = config;
                     println!(
-                        "omenchatd run: rebuild with --features live-rns-net to enable native Reticulum transport"
+                        "omenchatd run: rebuild with --features live-reticulum to enable native Reticulum transport"
                     );
                     Ok(())
                 }
@@ -612,7 +622,7 @@ fn print_version() {
 }
 
 fn compiled_feature_summary() -> String {
-    [("live-rns-net", cfg!(feature = "live-rns-net"))]
+    [("live-reticulum", cfg!(feature = "live-reticulum"))]
         .into_iter()
         .map(|(name, enabled)| format!("{name}:{}", if enabled { "on" } else { "off" }))
         .collect::<Vec<_>>()
@@ -746,7 +756,7 @@ fn identity_check(path: &std::path::Path) -> DoctorCheck {
             level: DoctorLevel::Warn,
             name: "identity",
             detail: format!(
-                "{} (placeholder identity; rebuild/run with live-rns-net before public hosting)",
+                "{} (placeholder identity; rebuild/run with live-reticulum before public hosting)",
                 path.display()
             ),
         };
@@ -1295,7 +1305,8 @@ mod tests {
             CliCommand::parse(["--version".to_string()]),
             CliCommand::Version
         );
-        assert!(compiled_feature_summary().contains("live-rns-net:"));
+        assert!(compiled_feature_summary().contains("live-reticulum:"));
+        assert!(!compiled_feature_summary().contains("live-rns-net:"));
     }
 
     #[test]

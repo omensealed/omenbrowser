@@ -1,6 +1,6 @@
 [package]
 name = "omenbrowser_rs"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2021"
 description = "OMENbrowser Rust Desktop/TUI"
 license = "AGPL-3.0-or-later"
@@ -9,21 +9,29 @@ repository = "https://github.com/omensealed/omenbrowser"
 readme = "README.md"
 
 [features]
-default = ["mock-runtime", "native-network", "desktop-ui", "chat-client"]
+default = ["mock-runtime", "desktop-ui", "chat-client"]
 mock-runtime = []
 desktop-ui = ["dep:iced", "dep:rfd"]
 tui = ["dep:crossterm", "dep:ratatui"]
-native-reticulum = ["dep:reticulum-rs", "dep:rns_transport", "dep:rand_core", "dep:rmpv"]
-native-rns-net = ["native-reticulum", "dep:rns-core", "dep:rns-crypto", "dep:rns-net", "dep:x25519-dalek"]
+native-reticulum = ["dep:reticulum-rs", "dep:rns_transport", "dep:rand_core", "dep:rmpv", "dep:hkdf", "dep:tokio-util"]
+# Removed legacy rns-net compatibility feature names are retained only so stale
+# local commands fail with an explicit compile-time message instead of looking
+# like a valid networking path.
+native-rns-net = []
+experimental-rns-net-stack = ["native-rns-net"]
 native-lxmf = ["native-reticulum", "dep:lxmf"]
-native-lxmf-sdk = ["native-lxmf", "lxmf/sdk"]
-native-network = ["native-reticulum", "native-rns-net", "native-lxmf"]
+native-rpc = ["dep:rns_rpc"]
+native-lxmf-sdk = ["native-lxmf", "native-rpc", "lxmf/sdk"]
+native-network = ["native-reticulum", "native-lxmf-sdk"]
 live-reticulum = ["native-reticulum"]
 live-lxmf = ["native-lxmf"]
 live-network = ["native-network"]
+legacy-live-rns-net = ["experimental-rns-net-stack"]
 chat-client = ["desktop-ui", "dep:bzip2", "dep:iced_gif", "dep:reqwest", "dep:rmpv", "dep:rusqlite"]
-chat-client-rns = ["chat-client", "native-network"]
-chat-client-lxmf = ["chat-client", "native-lxmf"]
+chat-client-rns-clean = ["chat-client", "native-network"]
+chat-client-rns = ["chat-client-rns-clean"]
+chat-client-rns-legacy = ["chat-client", "experimental-rns-net-stack"]
+chat-client-lxmf = ["chat-client", "native-lxmf-sdk"]
 chat-client-popout = ["chat-client"]
 
 [dependencies]
@@ -34,27 +42,33 @@ crossterm = { version = "0.27", optional = true }
 directories = "5.0"
 iced = { version = "0.13.1", optional = true, default-features = false, features = ["canvas", "image", "tokio", "wgpu"] }
 iced_gif = { version = "0.13", optional = true }
-lxmf = { version = "0.3", optional = true, default-features = false, features = ["wire"] }
+hkdf = { version = "0.12", optional = true }
+lxmf = { version = "0.6.0", optional = true, default-features = false, features = ["wire"] }
 ratatui = { version = "0.26", optional = true }
 rand_core = { version = "0.6.4", optional = true, features = ["getrandom"] }
-reticulum-rs = { version = "0.2.0", optional = true, default-features = false, features = ["core", "transport"] }
-rns_transport = { package = "reticulum-rs-transport", version = "0.2.0", optional = true }
-rns-net = { version = "0.5.10", optional = true, default-features = false, features = ["iface-tcp", "iface-backbone"] }
-"rns-core" = { version = "0.1.13", optional = true }
-"rns-crypto" = { version = "0.1.8", optional = true }
-x25519-dalek = { version = "2.0", optional = true }
+reticulum-rs = { version = "0.6.0", optional = true, default-features = false, features = ["core", "transport"] }
+rns_transport = { package = "reticulum-rs-transport", version = "0.6.0", optional = true }
+rns_rpc = { package = "reticulum-rs-rpc", version = "0.6.0", optional = true }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "socks"] }
 rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
 rmpv = { version = "1.3", optional = true }
-rusqlite = { version = "0.31", optional = true }
+rusqlite = { version = "0.37", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "1.0"
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", optional = true }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-log = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 unicode-width = "0.1"
+
+
+[[bin]]
+name = "omen-reticulum-gateway"
+path = "src/bin/omen_reticulum_gateway.rs"
+required-features = ["native-reticulum"]
 
 [profile.dev.package."*"]
 opt-level = 3
