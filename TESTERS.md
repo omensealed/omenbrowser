@@ -1,12 +1,12 @@
-# OMENbrowser_rs Public Alpha Tester Sheet
+# OMENbrowser_rs Public Release Tester Sheet
 
-This build is for public alpha testing of OMENbrowser_rs, the built-in
+This build is for public release testing of OMENbrowser_rs, the built-in
 OMENchat plugin client, and the standalone `omenchatd` server.
 
 Use release binaries for UI testing. Debug builds are not a useful performance
 baseline.
 
-For alpha testing, start with `--app-root /tmp/omenbrowser-rs-alpha` or another
+For release testing, start with `--app-root /tmp/omenbrowser-rs-test` or another
 dedicated root. Launch the default profile only when you intentionally want to
 use your normal OMENbrowser_rs identity, storage, messages, and pane layout.
 
@@ -17,7 +17,7 @@ After unpacking the archive, run:
 ```bash
 ./bin/omenbrowser_rs --version
 ./bin/omenchatd --version
-bash ./scripts/alpha-omenchat-smoke.sh
+bash ./scripts/release-omenchat-smoke.sh
 ```
 
 Expected result:
@@ -34,14 +34,14 @@ same temporary server and verifies the second client receives the first
 client's recent room history, run:
 
 ```bash
-bash ./scripts/alpha-omenchat-smoke.sh --multi-client
+bash ./scripts/release-omenchat-smoke.sh --multi-client
 ```
 
 Developers validating from a source checkout can run the package gate against
 the latest archive:
 
 ```bash
-bash scripts/alpha-check.sh package /tmp/omenbrowser-rs-alpha-dist/OMENbrowser_rs-alpha-latest.tar.gz
+bash scripts/release-check.sh package /tmp/omenbrowser-rs-dist/OMENbrowser_rs-latest.tar.gz
 ```
 
 That developer gate is not required for normal tester use.
@@ -51,22 +51,22 @@ That developer gate is not required for normal tester use.
 Use a clean app root for testing:
 
 ```bash
-./bin/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-alpha
+./bin/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test
 ```
 
 For a second client on the same machine:
 
 ```bash
-./bin/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-alpha-2
+./bin/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test-2
 ```
 
 Before multi-client tests, run the root sanity helper:
 
 ```bash
-bash ./scripts/alpha-root-sanity.sh \
-  --browser-root /tmp/omenbrowser-rs-alpha \
-  --browser-root-2 /tmp/omenbrowser-rs-alpha-2 \
-  --server-home /tmp/omenchatd-alpha
+bash ./scripts/release-root-sanity.sh \
+  --browser-root /tmp/omenbrowser-rs-test \
+  --browser-root-2 /tmp/omenbrowser-rs-test-2 \
+  --server-home /tmp/omenchatd-test
 ```
 
 Expected result:
@@ -84,20 +84,20 @@ layout.
 Initialize a standalone server root:
 
 ```bash
-./bin/omenchatd init --home /tmp/omenchatd-alpha
+./bin/omenchatd init --home /tmp/omenchatd-test
 ```
 
 Attach it to a TCP gateway:
 
 ```bash
-./bin/omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-alpha
+./bin/omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-test
 ```
 
 If your gateway uses IFAC/network credentials:
 
 ```bash
 ./bin/omenchatd interfaces tcp-client <gateway-host:port> \
-  --home /tmp/omenchatd-alpha \
+  --home /tmp/omenchatd-test \
   --network-name <network-name> \
   --passphrase <passphrase>
 ```
@@ -105,7 +105,7 @@ If your gateway uses IFAC/network credentials:
 Start the admin TUI:
 
 ```bash
-./bin/omenchatd tui --home /tmp/omenchatd-alpha
+./bin/omenchatd tui --home /tmp/omenchatd-test
 ```
 
 In the TUI:
@@ -133,13 +133,13 @@ flags while the client is idle should be reported.
 Show the server addresses:
 
 ```bash
-./bin/omenchatd status --home /tmp/omenchatd-alpha
+./bin/omenchatd status --home /tmp/omenchatd-test
 ```
 
 Check server readiness:
 
 ```bash
-./bin/omenchatd doctor --home /tmp/omenchatd-alpha
+./bin/omenchatd doctor --home /tmp/omenchatd-test
 ```
 
 Use `client uri: omenchat://...` in the OMENbrowser_rs New Chat opener. Use
@@ -150,7 +150,7 @@ Optional user service install after gateway setup:
 ```bash
 bash ./scripts/install-omenchatd-user-service.sh \
   --bin "$PWD/bin/omenchatd" \
-  --home /tmp/omenchatd-alpha
+  --home /tmp/omenchatd-test
 ```
 
 The installer writes a systemd user unit and prints `systemctl --user` commands
@@ -169,7 +169,7 @@ bash ./scripts/install-omenbrowser-user-launchers.sh \
   --bin "$PWD/bin/omenbrowser_rs"
 ```
 
-That installs a user-level launcher for the isolated alpha browser root. Add
+That installs a user-level launcher for the isolated release browser root. Add
 `--second-client` for a second isolated-client launcher, or
 `--default-profile` only if you intentionally want a launcher for your normal
 OMENbrowser_rs profile. To remove launchers while preserving app data:
@@ -178,11 +178,11 @@ OMENbrowser_rs profile. To remove launchers while preserving app data:
 bash ./scripts/install-omenbrowser-user-launchers.sh --uninstall
 ```
 
-For the normal alpha desktop integration path, you can use the combined wrapper
-instead. By default it installs only the isolated alpha browser launcher:
+For the normal desktop integration path, you can use the combined wrapper
+instead. By default it installs only the isolated release browser launcher:
 
 ```bash
-bash ./scripts/install-alpha.sh
+bash ./scripts/install-release.sh
 ```
 
 Add `--second-client-launcher` for the second isolated browser launcher. Add
@@ -217,7 +217,7 @@ Add `--second-client-launcher` for the second isolated browser launcher. Add
 
 ## Stop And Report These First
 
-These are alpha blockers. If one happens, stop the test and collect a redacted
+These are release blockers. If one happens, stop the test and collect a redacted
 report bundle before trying many workarounds:
 
 - A browser, OMENchat, or LXMF conversation pane returns after deletion and
@@ -241,20 +241,20 @@ Useful notes to include with a report:
 - whether Monitoring showed browser/path, LXMF, OMENchat, or upload activity;
 - whether the same destination works in another NomadNet client.
 
-## Tested Alpha Paths
+## Tested Release Paths
 
 Current tested paths include NomadNet browsing, multiple tiled panes, direct
 LXMF conversations with attachments, OMENchat reconnect/restart recovery, room
 history sync, inline images/GIFs, 512 KiB per-file upload rejection, and the
 external browser prompt for HTTP/HTTPS links.
 
-## Known Alpha Gaps
+## Known Release Gaps
 
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when
   the propagation node advertises a target cost. Direct peer stamp-cost
-  negotiation without a remembered ticket is still alpha work.
+  negotiation without a remembered ticket is still active follow-up work.
 - `.deb` and AppImage release artifacts are available. The compatible `.deb`
   has been tested on Linux Mint 21.3; broader Debian/Ubuntu derivative testing
   is still useful.
@@ -266,10 +266,10 @@ external browser prompt for HTTP/HTTPS links.
 For failures:
 
 ```bash
-bash ./scripts/alpha-collect.sh \
-  --browser-root /tmp/omenbrowser-rs-alpha \
-  --browser-root-2 /tmp/omenbrowser-rs-alpha-2 \
-  --server-home /tmp/omenchatd-alpha
+bash ./scripts/release-collect.sh \
+  --browser-root /tmp/omenbrowser-rs-test \
+  --browser-root-2 /tmp/omenbrowser-rs-test-2 \
+  --server-home /tmp/omenchatd-test
 ```
 
 The collector excludes identity files, message databases, known-destination

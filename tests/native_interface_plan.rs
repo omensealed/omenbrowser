@@ -1,3 +1,5 @@
+#![cfg(feature = "native-reticulum")]
+
 use omenbrowser_rs::interfaces::ReticulumInterfaceProfile;
 use omenbrowser_rs::runtime::native::error::NativeRuntimeError;
 use omenbrowser_rs::runtime::native::interface::{

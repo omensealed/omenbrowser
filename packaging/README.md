@@ -6,7 +6,7 @@ These scripts build local packages from the current source tree. They do not
 delete or overwrite user identities, Reticulum storage, message history, or
 OMENchat server homes.
 
-Public alpha packages must use the live-tested browser feature set:
+Public release packages must use the live-tested browser feature set:
 `chat-client-rns-clean` with `native-network:on`. The packaging scripts verify
 this through the browser `--version` output. Server packages must report
 `live-reticulum:on` from `omenchatd --version`.
@@ -49,17 +49,17 @@ bash scripts/package-deb-compat.sh dist-compat
 That script requires Docker or Podman and builds inside the same Debian 11 /
 glibc 2.31 baseline used by GitHub Actions.
 
-## Alpha Tarball
+## Release Tarball
 
 ```sh
-bash scripts/alpha-package.sh dist
+bash scripts/release-package.sh dist
 ```
 
-The tarball is the current public-alpha distribution format. It includes:
+The tarball is the current public release distribution format. It includes:
 
 - `bin/omenbrowser_rs`
 - `bin/omenchatd`
-- alpha smoke-test helpers
+- release smoke-test helpers
 - optional user launcher/service installers
 - tester docs
 
@@ -127,11 +127,11 @@ Two workflows are included:
 - `.github/workflows/ci.yml`
   - runs on pushes and pull requests;
   - installs Rust and Linux build dependencies;
-  - runs `bash scripts/alpha-check.sh quick`;
+  - runs `bash scripts/release-check.sh quick`;
   - syntax-checks package and installer scripts.
 - `.github/workflows/package.yml`
   - manual `workflow_dispatch` only;
-  - builds the alpha tarball, `.deb`, and AppImage;
+  - builds the release tarball, `.deb`, and AppImage;
   - can run the packaged local OMENchat smoke;
   - uploads package artifacts and checksums.
 

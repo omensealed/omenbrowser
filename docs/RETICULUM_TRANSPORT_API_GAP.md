@@ -213,7 +213,7 @@ message echo. The server saw the expected `SessionOpen`, `JoinRoom`, and
 The smoke helper supports this topology:
 
 ```text
-scripts/alpha-omenchat-smoke.sh \
+scripts/release-omenchat-smoke.sh \
   --server-tcp-client <gateway-host:port> \
   --network-name <ifac-network> \
   --multi-client

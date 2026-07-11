@@ -17,7 +17,9 @@ use crate::browser::page::DEFAULT_PATH;
 use crate::browser::{BrowserAddress, BrowserPage, PageSource};
 use crate::error::{AppError, AppResult};
 use crate::runtime::native::NativeRuntimeError;
-use crate::runtime::network::CancellationToken;
+use crate::runtime::network::{
+    CancellationToken, ResourceLifecycleEvent, ResourceLifecycleState, ResourceProgressEvent,
+};
 use crate::runtime::RuntimeBusEvent;
 
 pub const NOMADNET_APP_NAME: &str = "nomadnetwork";
@@ -481,27 +483,61 @@ impl Reticulum06LinkRequestAdapter {
                                 }
                             }
                         }
-                        ResourceEventKind::Progress(_) => {
+                        ResourceEventKind::Progress(progress) => {
                             progress_events += 1;
+                            emit_clean_page_resource_progress(
+                                prepared.event_tx.as_ref(),
+                                event.hash.to_string(),
+                                progress.received_bytes,
+                                progress.total_bytes,
+                            );
                         }
                         ResourceEventKind::OutboundComplete
                             if event.hash == request_resource_hash =>
                         {
+                            emit_clean_page_resource_lifecycle(
+                                prepared.event_tx.as_ref(),
+                                event.hash.to_string(),
+                                ResourceLifecycleState::Complete,
+                                None,
+                                None,
+                            );
                             outbound_complete = true;
                         }
                         ResourceEventKind::OutboundFailed
                             if event.hash == request_resource_hash =>
                         {
+                            emit_clean_page_resource_lifecycle(
+                                prepared.event_tx.as_ref(),
+                                event.hash.to_string(),
+                                ResourceLifecycleState::Failed,
+                                None,
+                                Some("outbound request-resource transfer failed".into()),
+                            );
                             return Err(AppError::from(NativeRuntimeError::Native(
                                 "native Reticulum 0.6 request-resource transfer failed".into(),
                             )));
                         }
                         ResourceEventKind::InboundFailed(failure) => {
+                            emit_clean_page_resource_lifecycle(
+                                prepared.event_tx.as_ref(),
+                                event.hash.to_string(),
+                                ResourceLifecycleState::Failed,
+                                None,
+                                Some(failure.reason.clone()),
+                            );
                             last_error = failure.reason;
                         }
                         ResourceEventKind::OutboundCancelled
                             if event.hash == request_resource_hash =>
                         {
+                            emit_clean_page_resource_lifecycle(
+                                prepared.event_tx.as_ref(),
+                                event.hash.to_string(),
+                                ResourceLifecycleState::Cancelled,
+                                None,
+                                Some("cancelled".into()),
+                            );
                             return Err(AppError::from(NativeRuntimeError::Cancelled));
                         }
                         _ => {}
@@ -671,6 +707,46 @@ fn emit_clean_page_debug(
 ) {
     if let Some(event_tx) = event_tx {
         let _ = event_tx.send(RuntimeBusEvent::Debug(message.into()));
+    }
+}
+
+fn emit_clean_page_resource_progress(
+    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
+    transfer_id: String,
+    received: u64,
+    total: u64,
+) {
+    if let Some(event_tx) = event_tx {
+        let _ = event_tx.send(RuntimeBusEvent::ResourceProgress(ResourceProgressEvent {
+            transfer_id,
+            received,
+            total: Some(total),
+            source: Some("nomadnet-page".into()),
+            purpose: Some("nomadnet-page".into()),
+            direction: Some("inbound".into()),
+            peer: None,
+        }));
+    }
+}
+
+fn emit_clean_page_resource_lifecycle(
+    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
+    transfer_id: String,
+    state: ResourceLifecycleState,
+    bytes: Option<u64>,
+    reason: Option<String>,
+) {
+    if let Some(event_tx) = event_tx {
+        let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(ResourceLifecycleEvent {
+            transfer_id,
+            state,
+            bytes,
+            reason,
+            source: Some("nomadnet-page".into()),
+            purpose: Some("nomadnet-page".into()),
+            direction: Some("inbound".into()),
+            peer: None,
+        }));
     }
 }
 
@@ -1751,13 +1827,17 @@ mod tests {
     }
 
     #[test]
-    fn reticulum06_capability_report_does_not_claim_omenchat_parity() {
+    fn reticulum06_capability_report_tracks_remaining_clean_stack_work() {
         let report = native_reticulum06_capability_report();
 
-        assert!(report
+        assert!(!report
             .blockers
             .iter()
             .any(|blocker| blocker.contains("OMENchat")));
+        assert!(report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("direct Link.request")));
         assert!(
             report.recommended_next_step.contains("request-resource")
                 || report

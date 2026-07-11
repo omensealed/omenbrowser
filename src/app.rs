@@ -49,7 +49,7 @@ use crate::runtime::{
     LxmfDeliveryEvidenceKind, LxmfDeliveryProbeReport, LxmfDeliveryProbeStage,
     LxmfSdkRpcProbeSnapshot, NetworkRuntime, NetworkSnapshot, NetworkStatus, OutboundDeliveryState,
     OutboundStatus, PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep,
-    RuntimeBackendName, RuntimeBusEvent, RuntimeStatus,
+    RuntimeBackendName, RuntimeBusEvent, RuntimeFacadeEvent, RuntimeStatus,
 };
 use crate::storage::files::sanitize_filename;
 use crate::storage::form_state::BrowserFormStateStore;
@@ -595,6 +595,7 @@ impl From<WorkspaceSectionPreference> for WorkspaceSection {
             WorkspaceSectionPreference::Identities => Self::Identities,
             WorkspaceSectionPreference::Interfaces => Self::Interfaces,
             WorkspaceSectionPreference::Monitoring => Self::Monitoring,
+            WorkspaceSectionPreference::NetworkDoctor => Self::NetworkDoctor,
             WorkspaceSectionPreference::Settings => Self::Settings,
             WorkspaceSectionPreference::Diagnostics => Self::Diagnostics,
             WorkspaceSectionPreference::Logs => Self::Logs,
@@ -613,6 +614,7 @@ impl From<WorkspaceSection> for WorkspaceSectionPreference {
             WorkspaceSection::Identities => Self::Identities,
             WorkspaceSection::Interfaces => Self::Interfaces,
             WorkspaceSection::Monitoring => Self::Monitoring,
+            WorkspaceSection::NetworkDoctor => Self::NetworkDoctor,
             WorkspaceSection::Settings => Self::Settings,
             WorkspaceSection::Diagnostics => Self::Diagnostics,
             WorkspaceSection::Logs => Self::Logs,
@@ -3685,6 +3687,175 @@ fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn network_doctor_facade_events_from_runtime_bus_event(
+    event: &RuntimeBusEvent,
+) -> Vec<RuntimeFacadeEvent> {
+    match event {
+        RuntimeBusEvent::Announce(announce) => vec![RuntimeFacadeEvent::AnnounceObserved {
+            destination_hash: announce.destination_hash.clone(),
+            kind: format!("{:?}", announce.kind),
+            display_name: announce.display_name.clone(),
+            has_ratchet: announce.has_ratchet,
+        }],
+        RuntimeBusEvent::PathUpdated(path) => vec![RuntimeFacadeEvent::PathUpdated {
+            destination_hash: path.destination_hash.clone(),
+            known: path.known,
+            hops: path.hops,
+        }],
+        RuntimeBusEvent::InterfaceStats(stats) => stats
+            .samples
+            .iter()
+            .filter_map(|sample| {
+                let interface_id = if sample.profile_id.is_empty() {
+                    sample.name.clone()
+                } else {
+                    sample.profile_id.clone()
+                };
+                let detail = Some(format!(
+                    "{} {}{}",
+                    sample.kind,
+                    sample.endpoint.as_deref().unwrap_or("endpoint unavailable"),
+                    sample
+                        .detail
+                        .as_deref()
+                        .map(|detail| format!(" | {detail}"))
+                        .unwrap_or_default()
+                ));
+                if sample.attached
+                    || sample.state == crate::runtime::network::InterfaceSampleState::Attached
+                {
+                    Some(RuntimeFacadeEvent::InterfaceUp {
+                        interface_id,
+                        detail,
+                    })
+                } else if sample.enabled && sample.supported {
+                    Some(RuntimeFacadeEvent::InterfaceDown {
+                        interface_id,
+                        reason: detail,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        RuntimeBusEvent::MessageDeliveryUpdated(status) => {
+            let state = if status.failed {
+                "delivery_failed"
+            } else if status.delivered {
+                "delivery_delivered"
+            } else {
+                "delivery_updated"
+            };
+            let mut events = vec![RuntimeFacadeEvent::LxmfEvent {
+                event: state.into(),
+                detail: Some(format!(
+                    "peer={} message={} state={:?} evidence={}",
+                    compact_hash(&status.peer_hash),
+                    status.message_id.as_deref().unwrap_or("none"),
+                    status.state,
+                    status.evidence.as_deref().unwrap_or("none")
+                )),
+            }];
+            if let Some(progress) = lxmf_resource_progress_from_evidence(
+                &status.peer_hash,
+                status.message_id.as_deref(),
+                status.evidence.as_deref(),
+            ) {
+                events.push(progress);
+            }
+            events
+        }
+        RuntimeBusEvent::LxmfDeliveryEvidence(evidence) => {
+            let mut events = vec![RuntimeFacadeEvent::LxmfEvent {
+                event: format!("{:?}", evidence.kind).to_ascii_lowercase(),
+                detail: Some(format!(
+                    "peer={} message={} detail={}",
+                    compact_hash(&evidence.peer_hash),
+                    evidence.message_id.as_deref().unwrap_or("none"),
+                    evidence.detail.as_deref().unwrap_or("none")
+                )),
+            }];
+            if let Some(progress) = lxmf_resource_progress_from_evidence(
+                &evidence.peer_hash,
+                evidence.message_id.as_deref(),
+                evidence.detail.as_deref(),
+            ) {
+                events.push(progress);
+            }
+            events
+        }
+        RuntimeBusEvent::OmenChatLinkData(data) => vec![RuntimeFacadeEvent::LinkFrameReceived {
+            link_id: hex_lower(&data.link_id),
+            bytes: data.frame_bytes.len(),
+        }],
+        RuntimeBusEvent::OmenChatLinkClosed(data) => vec![RuntimeFacadeEvent::LinkClosed {
+            link_id: hex_lower(&data.link_id),
+            reason: data.reason.clone(),
+        }],
+        RuntimeBusEvent::OmenChatResourceData(data) => vec![RuntimeFacadeEvent::ResourceComplete {
+            transfer_id: hex_lower(&data.link_id),
+            bytes: data.data.len() as u64,
+            source: Some("omenchat".into()),
+            purpose: Some("omenchat-resource".into()),
+            direction: Some("inbound".into()),
+            peer: None,
+        }],
+        RuntimeBusEvent::ResourceProgress(progress) => vec![RuntimeFacadeEvent::ResourceProgress {
+            transfer_id: progress.transfer_id.clone(),
+            received: progress.received,
+            total: progress.total,
+            source: progress.source.clone(),
+            purpose: progress.purpose.clone(),
+            direction: progress.direction.clone(),
+            peer: progress.peer.clone(),
+        }],
+        RuntimeBusEvent::ResourceLifecycle(lifecycle) => match lifecycle.state {
+            crate::runtime::ResourceLifecycleState::Offered => {
+                vec![RuntimeFacadeEvent::ResourceOffered {
+                    link_id: lifecycle.peer.clone().unwrap_or_else(|| "unknown".into()),
+                    transfer_id: lifecycle.transfer_id.clone(),
+                    purpose: lifecycle
+                        .purpose
+                        .clone()
+                        .unwrap_or_else(|| "resource".into()),
+                    bytes: lifecycle.bytes,
+                    source: lifecycle.source.clone(),
+                    direction: lifecycle.direction.clone(),
+                    peer: lifecycle.peer.clone(),
+                }]
+            }
+            crate::runtime::ResourceLifecycleState::Complete => {
+                vec![RuntimeFacadeEvent::ResourceComplete {
+                    transfer_id: lifecycle.transfer_id.clone(),
+                    bytes: lifecycle.bytes.unwrap_or(0),
+                    source: lifecycle.source.clone(),
+                    purpose: lifecycle.purpose.clone(),
+                    direction: lifecycle.direction.clone(),
+                    peer: lifecycle.peer.clone(),
+                }]
+            }
+            crate::runtime::ResourceLifecycleState::Failed
+            | crate::runtime::ResourceLifecycleState::Cancelled => {
+                vec![RuntimeFacadeEvent::ResourceFailed {
+                    transfer_id: lifecycle.transfer_id.clone(),
+                    reason: lifecycle.reason.clone().unwrap_or_else(|| {
+                        match lifecycle.state {
+                            crate::runtime::ResourceLifecycleState::Cancelled => "cancelled",
+                            _ => "failed",
+                        }
+                        .into()
+                    }),
+                    source: lifecycle.source.clone(),
+                    purpose: lifecycle.purpose.clone(),
+                    direction: lifecycle.direction.clone(),
+                    peer: lifecycle.peer.clone(),
+                }]
+            }
+        },
+        _ => Vec::new(),
+    }
+}
+
 fn directory_entry_path_candidates(entry: &DirectoryEntry) -> Vec<String> {
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
@@ -3795,6 +3966,33 @@ fn extract_lxmf_evidence_value<'a>(evidence: &'a str, key: &str) -> Option<&'a s
     evidence
         .split(';')
         .find_map(|part| part.strip_prefix(prefix.as_str()))
+}
+
+fn lxmf_resource_progress_from_evidence(
+    peer_hash: &str,
+    message_id: Option<&str>,
+    evidence: Option<&str>,
+) -> Option<RuntimeFacadeEvent> {
+    let evidence = evidence?;
+    let received = extract_lxmf_evidence_value(evidence, "resource_received")?
+        .parse::<u64>()
+        .ok()?;
+    let total = extract_lxmf_evidence_value(evidence, "resource_total")
+        .and_then(|value| value.parse::<u64>().ok());
+    let transfer_id = extract_lxmf_evidence_value(evidence, "direct_link_id")
+        .or_else(|| extract_lxmf_evidence_value(evidence, "propagation_link_id"))
+        .or(message_id)
+        .map(str::to_owned)
+        .unwrap_or_else(|| compact_hash(peer_hash));
+    Some(RuntimeFacadeEvent::ResourceProgress {
+        transfer_id,
+        received,
+        total,
+        source: Some("lxmf-evidence".into()),
+        purpose: Some("lxmf".into()),
+        direction: Some("outbound".into()),
+        peer: Some(compact_hash(peer_hash)),
+    })
 }
 
 fn lxmf_propagation_state_for_transfer(transfer_state: &str) -> &'static str {
@@ -4585,6 +4783,561 @@ pub struct MonitoringPanelState {
     pub last_network_snapshot: Option<NetworkSnapshot>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetworkDoctorPanelState {
+    pub recent_paths: Vec<NetworkDoctorPathRecentRow>,
+    pub recent_links: Vec<NetworkDoctorLinkRecentRow>,
+    pub recent_resources: Vec<NetworkDoctorResourceRecentRow>,
+    pub recent_lxmf: Vec<NetworkDoctorLxmfRecentRow>,
+    pub active_resources: BTreeMap<String, NetworkDoctorActiveResourceRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkDoctorPathRecentRow {
+    pub epoch_ms: u64,
+    pub target: String,
+    pub state: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkDoctorLinkRecentRow {
+    pub epoch_ms: u64,
+    pub link_id: String,
+    pub state: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkDoctorResourceRecentRow {
+    pub epoch_ms: u64,
+    pub transfer: String,
+    pub state: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkDoctorActiveResourceRow {
+    pub epoch_ms: u64,
+    pub transfer: String,
+    pub state: String,
+    pub source: String,
+    pub purpose: Option<String>,
+    pub direction: Option<String>,
+    pub peer: Option<String>,
+    pub detail: String,
+    pub received: Option<u64>,
+    pub total: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkDoctorLxmfRecentRow {
+    pub epoch_ms: u64,
+    pub peer: String,
+    pub state: String,
+    pub detail: String,
+}
+
+impl NetworkDoctorPanelState {
+    const MAX_RECENT_ROWS: usize = 12;
+
+    fn push_path(
+        rows: &mut Vec<NetworkDoctorPathRecentRow>,
+        target: impl Into<String>,
+        state: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        let target = target.into();
+        let state = state.into();
+        let detail = detail.into();
+        if rows
+            .iter()
+            .any(|row| row.target == target && row.state == state && row.detail == detail)
+        {
+            return;
+        }
+        rows.insert(
+            0,
+            NetworkDoctorPathRecentRow {
+                epoch_ms: current_epoch_ms(),
+                target,
+                state,
+                detail,
+            },
+        );
+        rows.truncate(Self::MAX_RECENT_ROWS);
+    }
+
+    fn push_link(
+        rows: &mut Vec<NetworkDoctorLinkRecentRow>,
+        link_id: impl Into<String>,
+        state: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        let link_id = link_id.into();
+        let state = state.into();
+        let detail = detail.into();
+        if rows
+            .iter()
+            .any(|row| row.link_id == link_id && row.state == state && row.detail == detail)
+        {
+            return;
+        }
+        rows.insert(
+            0,
+            NetworkDoctorLinkRecentRow {
+                epoch_ms: current_epoch_ms(),
+                link_id,
+                state,
+                detail,
+            },
+        );
+        rows.truncate(Self::MAX_RECENT_ROWS);
+    }
+
+    fn push_resource(
+        rows: &mut Vec<NetworkDoctorResourceRecentRow>,
+        transfer: impl Into<String>,
+        state: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        let transfer = transfer.into();
+        let state = state.into();
+        let detail = detail.into();
+        if rows
+            .iter()
+            .any(|row| row.transfer == transfer && row.state == state && row.detail == detail)
+        {
+            return;
+        }
+        rows.insert(
+            0,
+            NetworkDoctorResourceRecentRow {
+                epoch_ms: current_epoch_ms(),
+                transfer,
+                state,
+                detail,
+            },
+        );
+        rows.truncate(Self::MAX_RECENT_ROWS);
+    }
+
+    fn upsert_resource(
+        &mut self,
+        transfer: impl Into<String>,
+        state: impl Into<String>,
+        source: impl Into<String>,
+        purpose: Option<String>,
+        direction: Option<String>,
+        peer: Option<String>,
+        detail: impl Into<String>,
+        received: Option<u64>,
+        total: Option<u64>,
+    ) {
+        let transfer = transfer.into();
+        let previous = self.active_resources.get(&transfer);
+        let source = source.into();
+        let source = if source == "unknown" {
+            previous
+                .map(|row| row.source.clone())
+                .unwrap_or_else(|| "unknown".into())
+        } else {
+            source
+        };
+        let purpose = purpose.or_else(|| previous.and_then(|row| row.purpose.clone()));
+        let direction = direction.or_else(|| previous.and_then(|row| row.direction.clone()));
+        let peer = peer.or_else(|| previous.and_then(|row| row.peer.clone()));
+        let detail = Self::resource_detail_with_context(
+            detail.into(),
+            &source,
+            purpose.as_deref(),
+            direction.as_deref(),
+            peer.as_deref(),
+        );
+        self.active_resources.insert(
+            transfer.clone(),
+            NetworkDoctorActiveResourceRow {
+                epoch_ms: current_epoch_ms(),
+                transfer,
+                state: state.into(),
+                source,
+                purpose,
+                direction,
+                peer,
+                detail,
+                received,
+                total,
+            },
+        );
+    }
+
+    fn resource_detail_with_context(
+        detail: String,
+        source: &str,
+        purpose: Option<&str>,
+        direction: Option<&str>,
+        peer: Option<&str>,
+    ) -> String {
+        let mut context = Vec::new();
+        if source != "unknown" {
+            context.push(format!("source={source}"));
+        }
+        if let Some(purpose) = purpose.filter(|value| !value.is_empty()) {
+            context.push(format!("purpose={purpose}"));
+        }
+        if let Some(direction) = direction.filter(|value| !value.is_empty()) {
+            context.push(format!("direction={direction}"));
+        }
+        if let Some(peer) = peer.filter(|value| !value.is_empty()) {
+            context.push(format!("peer={peer}"));
+        }
+        if context.is_empty() {
+            detail
+        } else {
+            format!("{} | {}", context.join(" "), detail)
+        }
+    }
+
+    fn push_lxmf(
+        rows: &mut Vec<NetworkDoctorLxmfRecentRow>,
+        peer: impl Into<String>,
+        state: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        let peer = peer.into();
+        let state = state.into();
+        let detail = detail.into();
+        if rows
+            .iter()
+            .any(|row| row.peer == peer && row.state == state && row.detail == detail)
+        {
+            return;
+        }
+        rows.insert(
+            0,
+            NetworkDoctorLxmfRecentRow {
+                epoch_ms: current_epoch_ms(),
+                peer,
+                state,
+                detail,
+            },
+        );
+        rows.truncate(Self::MAX_RECENT_ROWS);
+    }
+
+    fn record_announce(&mut self, announce: &crate::runtime::AnnouncePayload) {
+        self.record_facade_event(&RuntimeFacadeEvent::AnnounceObserved {
+            destination_hash: announce.destination_hash.clone(),
+            kind: format!("{:?}", announce.kind),
+            display_name: announce.display_name.clone(),
+            has_ratchet: announce.has_ratchet,
+        });
+    }
+
+    fn record_path_update(&mut self, path: &crate::runtime::PathEvent) {
+        self.record_facade_event(&RuntimeFacadeEvent::PathUpdated {
+            destination_hash: path.destination_hash.clone(),
+            known: path.known,
+            hops: path.hops,
+        });
+    }
+
+    fn record_delivery_status(&mut self, status: &OutboundStatus) {
+        let state = if status.failed {
+            "failed"
+        } else if status.delivered {
+            "delivered"
+        } else {
+            "updated"
+        };
+        Self::push_lxmf(
+            &mut self.recent_lxmf,
+            compact_hash(&status.peer_hash),
+            state,
+            format!(
+                "message={} state={:?} evidence={}",
+                status.message_id.as_deref().unwrap_or("none"),
+                status.state,
+                status.evidence.as_deref().unwrap_or("none")
+            ),
+        );
+    }
+
+    fn record_lxmf_evidence(&mut self, evidence: &LxmfDeliveryEvidence) {
+        Self::push_lxmf(
+            &mut self.recent_lxmf,
+            compact_hash(&evidence.peer_hash),
+            format!("{:?}", evidence.kind).to_ascii_lowercase(),
+            format!(
+                "message={} detail={}",
+                evidence.message_id.as_deref().unwrap_or("none"),
+                evidence.detail.as_deref().unwrap_or("none")
+            ),
+        );
+    }
+
+    fn record_omenchat_link_closed(&mut self, data: &crate::runtime::OmenChatLinkClosed) {
+        Self::push_link(
+            &mut self.recent_links,
+            hex_lower(&data.link_id),
+            "closed",
+            data.reason.as_deref().unwrap_or("unknown").to_string(),
+        );
+    }
+
+    fn record_omenchat_link_data(&mut self, data: &crate::runtime::OmenChatLinkData) {
+        Self::push_link(
+            &mut self.recent_links,
+            hex_lower(&data.link_id),
+            "frame",
+            format!("{} byte(s)", data.frame_bytes.len()),
+        );
+    }
+
+    fn record_omenchat_resource_data(&mut self, data: &crate::runtime::OmenChatResourceData) {
+        let transfer_id = hex_lower(&data.link_id);
+        let detail = format!(
+            "{} byte(s), metadata {} byte(s)",
+            data.data.len(),
+            data.metadata.as_ref().map_or(0, Vec::len)
+        );
+        self.upsert_resource(
+            transfer_id.clone(),
+            "complete",
+            "omenchat",
+            Some("omenchat-resource".into()),
+            Some("inbound".into()),
+            None,
+            detail.clone(),
+            Some(data.data.len() as u64),
+            Some(data.data.len() as u64),
+        );
+        Self::push_resource(&mut self.recent_resources, transfer_id, "complete", detail);
+    }
+
+    fn record_facade_event(&mut self, event: &crate::runtime::RuntimeFacadeEvent) {
+        match event {
+            crate::runtime::RuntimeFacadeEvent::InterfaceUp {
+                interface_id,
+                detail,
+            } => Self::push_path(
+                &mut self.recent_paths,
+                interface_id,
+                "interface up",
+                detail.as_deref().unwrap_or("no detail"),
+            ),
+            crate::runtime::RuntimeFacadeEvent::InterfaceDown {
+                interface_id,
+                reason,
+            } => Self::push_path(
+                &mut self.recent_paths,
+                interface_id,
+                "interface down",
+                reason.as_deref().unwrap_or("unknown"),
+            ),
+            crate::runtime::RuntimeFacadeEvent::AnnounceHeard {
+                destination_hash,
+                app,
+                aspect,
+            } => Self::push_path(
+                &mut self.recent_paths,
+                compact_hash(destination_hash),
+                "announce",
+                format!("{app}.{aspect}"),
+            ),
+            crate::runtime::RuntimeFacadeEvent::AnnounceObserved {
+                destination_hash,
+                kind,
+                display_name,
+                has_ratchet,
+            } => Self::push_path(
+                &mut self.recent_paths,
+                format!("announce {kind}"),
+                if *has_ratchet { "ratchet" } else { "heard" },
+                format!("{} {}", compact_hash(destination_hash), display_name),
+            ),
+            crate::runtime::RuntimeFacadeEvent::PathRequested { destination_hash } => {
+                Self::push_path(
+                    &mut self.recent_paths,
+                    compact_hash(destination_hash),
+                    "requested",
+                    "path request queued",
+                )
+            }
+            crate::runtime::RuntimeFacadeEvent::PathUpdated {
+                destination_hash,
+                known,
+                hops,
+            } => Self::push_path(
+                &mut self.recent_paths,
+                compact_hash(destination_hash),
+                if *known { "known" } else { "unknown" },
+                hops.map(|hops| format!("{hops} hop(s)"))
+                    .unwrap_or_else(|| "hop count unavailable".into()),
+            ),
+            crate::runtime::RuntimeFacadeEvent::PathFound {
+                destination_hash,
+                hops,
+            } => Self::push_path(
+                &mut self.recent_paths,
+                compact_hash(destination_hash),
+                "found",
+                hops.map(|hops| format!("{hops} hop(s)"))
+                    .unwrap_or_else(|| "hop count unavailable".into()),
+            ),
+            crate::runtime::RuntimeFacadeEvent::LinkOpening { destination_hash } => {
+                Self::push_link(
+                    &mut self.recent_links,
+                    compact_hash(destination_hash),
+                    "opening",
+                    "link open requested",
+                )
+            }
+            crate::runtime::RuntimeFacadeEvent::LinkOpened {
+                destination_hash,
+                link_id,
+            } => Self::push_link(
+                &mut self.recent_links,
+                link_id,
+                "opened",
+                format!("destination={}", compact_hash(destination_hash)),
+            ),
+            crate::runtime::RuntimeFacadeEvent::LinkClosed { link_id, reason } => Self::push_link(
+                &mut self.recent_links,
+                link_id,
+                "closed",
+                reason.as_deref().unwrap_or("unknown"),
+            ),
+            crate::runtime::RuntimeFacadeEvent::LinkFrameReceived { link_id, bytes } => {
+                Self::push_link(
+                    &mut self.recent_links,
+                    link_id,
+                    "frame",
+                    format!("{bytes} byte(s)"),
+                );
+            }
+            crate::runtime::RuntimeFacadeEvent::ResourceOffered {
+                link_id,
+                transfer_id,
+                purpose,
+                bytes,
+                source,
+                direction,
+                peer,
+            } => {
+                let detail = format!(
+                    "link={} purpose={} size={}",
+                    link_id,
+                    purpose,
+                    bytes
+                        .map(|bytes| format!("{bytes} byte(s)"))
+                        .unwrap_or_else(|| "unknown".into())
+                );
+                self.upsert_resource(
+                    transfer_id.clone(),
+                    "offered",
+                    source.as_deref().unwrap_or("unknown"),
+                    Some(purpose.clone()),
+                    direction.clone().or_else(|| Some("inbound".into())),
+                    peer.clone().or_else(|| Some(link_id.clone())),
+                    detail.clone(),
+                    None,
+                    *bytes,
+                );
+                Self::push_resource(&mut self.recent_resources, transfer_id, "offered", detail);
+            }
+            crate::runtime::RuntimeFacadeEvent::ResourceProgress {
+                transfer_id,
+                received,
+                total,
+                source,
+                purpose,
+                direction,
+                peer,
+            } => {
+                let detail = match (source.as_deref(), total) {
+                    (Some(source), Some(total)) => {
+                        format!("{source} | {received}/{total} byte(s)")
+                    }
+                    (Some(source), None) => {
+                        format!("{source} | {received} byte(s) received")
+                    }
+                    (None, Some(total)) => format!("{received}/{total} byte(s)"),
+                    (None, None) => format!("{received} byte(s) received"),
+                };
+                self.upsert_resource(
+                    transfer_id.clone(),
+                    "progress",
+                    source.as_deref().unwrap_or("unknown"),
+                    purpose.clone(),
+                    direction.clone(),
+                    peer.clone(),
+                    detail.clone(),
+                    Some(*received),
+                    *total,
+                );
+                Self::push_resource(&mut self.recent_resources, transfer_id, "progress", detail);
+            }
+            crate::runtime::RuntimeFacadeEvent::ResourceComplete {
+                transfer_id,
+                bytes,
+                source,
+                purpose,
+                direction,
+                peer,
+            } => {
+                self.upsert_resource(
+                    transfer_id.clone(),
+                    "complete",
+                    source.as_deref().unwrap_or("unknown"),
+                    purpose.clone(),
+                    direction.clone(),
+                    peer.clone(),
+                    format!("{bytes} byte(s)"),
+                    Some(*bytes),
+                    Some(*bytes),
+                );
+                Self::push_resource(
+                    &mut self.recent_resources,
+                    transfer_id,
+                    "complete",
+                    format!("{bytes} byte(s)"),
+                );
+            }
+            crate::runtime::RuntimeFacadeEvent::ResourceFailed {
+                transfer_id,
+                reason,
+                source,
+                purpose,
+                direction,
+                peer,
+            } => {
+                self.upsert_resource(
+                    transfer_id.clone(),
+                    "failed",
+                    source.as_deref().unwrap_or("unknown"),
+                    purpose.clone(),
+                    direction.clone(),
+                    peer.clone(),
+                    reason.clone(),
+                    None,
+                    None,
+                );
+                Self::push_resource(&mut self.recent_resources, transfer_id, "failed", reason);
+            }
+            crate::runtime::RuntimeFacadeEvent::LxmfEvent { event, detail } => Self::push_lxmf(
+                &mut self.recent_lxmf,
+                event,
+                "event",
+                detail.as_deref().unwrap_or("no detail"),
+            ),
+            crate::runtime::RuntimeFacadeEvent::Diagnostic { section, message } => {
+                Self::push_path(&mut self.recent_paths, section, "diagnostic", message)
+            }
+        }
+    }
+}
+
 impl MonitoringPanelState {
     fn note_runtime_event(&mut self) {
         self.runtime_events_total = self.runtime_events_total.saturating_add(1);
@@ -4992,6 +5745,7 @@ pub struct App {
     pub interfaces_state: InterfacesPanelState,
     pub diagnostics_state: DiagnosticsPanelState,
     pub monitoring_state: MonitoringPanelState,
+    pub network_doctor_state: NetworkDoctorPanelState,
     pub logs: LogBuffer,
     pub plugins_state: PluginsPanelState,
     pub settings_state: SettingsPanelState,
@@ -5212,6 +5966,7 @@ impl App {
                 started_epoch_ms: current_epoch_ms(),
                 ..MonitoringPanelState::default()
             },
+            network_doctor_state: NetworkDoctorPanelState::default(),
             logs,
             plugins_state: PluginsPanelState {
                 manifests: plugin_report
@@ -15149,6 +15904,9 @@ impl App {
 
     fn handle_runtime_bus_event(&mut self, event: crate::runtime::RuntimeBusEvent) -> bool {
         self.monitoring_state.note_runtime_event();
+        for facade_event in network_doctor_facade_events_from_runtime_bus_event(&event) {
+            self.network_doctor_state.record_facade_event(&facade_event);
+        }
         match event {
             crate::runtime::RuntimeBusEvent::StatusChanged(status) => {
                 self.runtime_status = status.clone();
@@ -15578,6 +16336,63 @@ impl App {
                         data.data.len(),
                         data.metadata.as_ref().map_or(0, Vec::len)
                     ),
+                );
+                true
+            }
+            crate::runtime::RuntimeBusEvent::ResourceProgress(progress) => {
+                self.status.task = match progress.total {
+                    Some(total) => format!(
+                        "resource {} {}/{} bytes",
+                        progress.transfer_id, progress.received, total
+                    ),
+                    None => format!(
+                        "resource {} {} bytes",
+                        progress.transfer_id, progress.received
+                    ),
+                };
+                self.logs.push_with_source(
+                    LogSeverity::Debug,
+                    LogSource::Runtime,
+                    self.status.task.clone(),
+                );
+                true
+            }
+            crate::runtime::RuntimeBusEvent::ResourceLifecycle(lifecycle) => {
+                let source = lifecycle.source.as_deref().unwrap_or("resource");
+                let reason = lifecycle.reason.as_deref().unwrap_or("no detail");
+                self.status.task = match lifecycle.state {
+                    crate::runtime::ResourceLifecycleState::Offered => format!(
+                        "{source} offered {} size={}",
+                        lifecycle.transfer_id,
+                        lifecycle
+                            .bytes
+                            .map(|bytes| format!("{bytes} bytes"))
+                            .unwrap_or_else(|| "unknown".into())
+                    ),
+                    crate::runtime::ResourceLifecycleState::Complete => format!(
+                        "{source} complete {} size={}",
+                        lifecycle.transfer_id,
+                        lifecycle
+                            .bytes
+                            .map(|bytes| format!("{bytes} bytes"))
+                            .unwrap_or_else(|| "unknown".into())
+                    ),
+                    crate::runtime::ResourceLifecycleState::Failed => {
+                        self.monitoring_state.runtime_errors =
+                            self.monitoring_state.runtime_errors.saturating_add(1);
+                        format!("{source} failed {}: {reason}", lifecycle.transfer_id)
+                    }
+                    crate::runtime::ResourceLifecycleState::Cancelled => {
+                        format!("{source} cancelled {}: {reason}", lifecycle.transfer_id)
+                    }
+                };
+                self.logs.push_with_source(
+                    match lifecycle.state {
+                        crate::runtime::ResourceLifecycleState::Failed => LogSeverity::Warn,
+                        _ => LogSeverity::Debug,
+                    },
+                    LogSource::Runtime,
+                    self.status.task.clone(),
                 );
                 true
             }
@@ -20150,6 +20965,8 @@ mod tests {
     use crate::config::AppPaths;
     use crate::directory::DirectoryKind;
     use crate::messaging::TransportMethod;
+    use crate::runtime::network::{InterfaceSample, InterfaceSampleState, InterfaceStats};
+    use crate::runtime::RuntimeFacadeEvent;
     use crate::storage::settings::{
         AppSettings, BrowserFocusedLinkSettings, BrowserOverlayPreference, BrowserTabSettings,
         ConversationTabSettings, SensitiveFormPersistence, WorkspaceSectionPreference,
@@ -20218,6 +21035,788 @@ mod tests {
             fields: BTreeMap::new(),
             attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn network_doctor_recent_rows_are_bounded_and_newest_first() {
+        let mut state = NetworkDoctorPanelState::default();
+        for index in 0..15 {
+            state.record_path_update(&crate::runtime::PathEvent {
+                destination_hash: format!("{index:032x}"),
+                known: index % 2 == 0,
+                hops: Some(index),
+            });
+        }
+
+        assert_eq!(
+            state.recent_paths.len(),
+            NetworkDoctorPanelState::MAX_RECENT_ROWS
+        );
+        assert_eq!(
+            state.recent_paths[0].target,
+            compact_hash(&format!("{:032x}", 14))
+        );
+        assert_eq!(state.recent_paths[0].state, "known");
+        assert_eq!(
+            state.recent_paths[11].target,
+            compact_hash(&format!("{:032x}", 3))
+        );
+        assert_eq!(state.recent_paths[11].state, "unknown");
+    }
+
+    #[test]
+    fn network_doctor_recent_rows_skip_identical_duplicates() {
+        let mut state = NetworkDoctorPanelState::default();
+
+        state.record_facade_event(&RuntimeFacadeEvent::InterfaceUp {
+            interface_id: "iface-1".into(),
+            detail: Some("tcp_client 127.0.0.1:4242".into()),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::InterfaceUp {
+            interface_id: "iface-1".into(),
+            detail: Some("tcp_client 127.0.0.1:4242".into()),
+        });
+        assert_eq!(state.recent_paths.len(), 1);
+
+        state.record_facade_event(&RuntimeFacadeEvent::InterfaceUp {
+            interface_id: "iface-1".into(),
+            detail: Some("tcp_client 127.0.0.1:4243".into()),
+        });
+        assert_eq!(state.recent_paths.len(), 2);
+        assert!(state.recent_paths[0].detail.contains("4243"));
+
+        state.record_facade_event(&RuntimeFacadeEvent::LinkFrameReceived {
+            link_id: "link-1".into(),
+            bytes: 12,
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::LinkFrameReceived {
+            link_id: "link-1".into(),
+            bytes: 12,
+        });
+        assert_eq!(state.recent_links.len(), 1);
+
+        state.record_facade_event(&RuntimeFacadeEvent::ResourceProgress {
+            transfer_id: "res-1".into(),
+            received: 64,
+            total: Some(128),
+            source: None,
+            purpose: None,
+            direction: None,
+            peer: None,
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::ResourceProgress {
+            transfer_id: "res-1".into(),
+            received: 64,
+            total: Some(128),
+            source: None,
+            purpose: None,
+            direction: None,
+            peer: None,
+        });
+        assert_eq!(state.recent_resources.len(), 1);
+
+        state.record_facade_event(&RuntimeFacadeEvent::LxmfEvent {
+            event: "delivery_delivered".into(),
+            detail: Some("message=1".into()),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::LxmfEvent {
+            event: "delivery_delivered".into(),
+            detail: Some("message=1".into()),
+        });
+        assert_eq!(state.recent_lxmf.len(), 1);
+    }
+
+    #[test]
+    fn network_doctor_recent_rows_capture_runtime_bus_shapes() {
+        let mut state = NetworkDoctorPanelState::default();
+        state.record_announce(&crate::runtime::AnnouncePayload {
+            destination_hash: FIXTURE_NODE_HASH.into(),
+            display_name: "Node".into(),
+            kind: DirectoryKind::Node,
+            associated_hash: None,
+            node_associated_hash: None,
+            has_ratchet: true,
+            lxmf_stamp_cost: None,
+        });
+        state.record_delivery_status(&OutboundStatus {
+            peer_hash: FIXTURE_PEER_HASH.into(),
+            message_id: Some("msg-1".into()),
+            delivered: false,
+            failed: true,
+            state: OutboundDeliveryState::Failed,
+            evidence: Some("no_path".into()),
+            rtt: None,
+        });
+        state.record_lxmf_evidence(&LxmfDeliveryEvidence {
+            peer_hash: FIXTURE_PEER_HASH.into(),
+            message_id: Some("msg-1".into()),
+            kind: LxmfDeliveryEvidenceKind::PropagationNodeAccepted,
+            detail: Some("accepted".into()),
+            rtt: None,
+            observed_at: None,
+        });
+        state.record_omenchat_link_data(&crate::runtime::OmenChatLinkData {
+            link_id: [1; 16],
+            frame_bytes: vec![1, 2, 3],
+        });
+        state.record_omenchat_link_closed(&crate::runtime::OmenChatLinkClosed {
+            link_id: [1; 16],
+            reason: Some("closed".into()),
+        });
+        state.record_omenchat_resource_data(&crate::runtime::OmenChatResourceData {
+            link_id: [2; 16],
+            data: vec![0; 8],
+            metadata: Some(vec![0; 4]),
+        });
+
+        assert_eq!(state.recent_paths.len(), 1);
+        assert_eq!(state.recent_paths[0].state, "ratchet");
+        assert_eq!(state.recent_lxmf.len(), 2);
+        assert_eq!(state.recent_lxmf[0].state, "propagationnodeaccepted");
+        assert_eq!(state.recent_lxmf[1].state, "failed");
+        assert_eq!(state.recent_links.len(), 2);
+        assert_eq!(state.recent_links[0].state, "closed");
+        assert_eq!(state.recent_links[1].state, "frame");
+        assert_eq!(state.recent_resources.len(), 1);
+        assert!(state.recent_resources[0].detail.contains("8 byte"));
+    }
+
+    #[test]
+    fn network_doctor_state_records_facade_path_and_link_events() {
+        let mut state = NetworkDoctorPanelState::default();
+        state.record_facade_event(&RuntimeFacadeEvent::PathRequested {
+            destination_hash: FIXTURE_KNOWN_PATH_HASH.into(),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::PathFound {
+            destination_hash: FIXTURE_KNOWN_PATH_HASH.into(),
+            hops: Some(2),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::LinkOpening {
+            destination_hash: FIXTURE_KNOWN_PATH_HASH.into(),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::LinkOpened {
+            destination_hash: FIXTURE_KNOWN_PATH_HASH.into(),
+            link_id: "link-1".into(),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::LinkFrameReceived {
+            link_id: "link-1".into(),
+            bytes: 12,
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::LinkClosed {
+            link_id: "link-1".into(),
+            reason: Some("done".into()),
+        });
+
+        assert_eq!(state.recent_paths.len(), 2);
+        assert_eq!(state.recent_paths[0].state, "found");
+        assert!(state.recent_paths[0].detail.contains("2 hop"));
+        assert_eq!(state.recent_paths[1].state, "requested");
+        assert_eq!(state.recent_links.len(), 4);
+        assert_eq!(state.recent_links[0].state, "closed");
+        assert_eq!(state.recent_links[1].state, "frame");
+        assert_eq!(state.recent_links[2].state, "opened");
+        assert_eq!(state.recent_links[3].state, "opening");
+    }
+
+    #[test]
+    fn network_doctor_state_records_facade_resource_and_lxmf_events() {
+        let mut state = NetworkDoctorPanelState::default();
+        state.record_facade_event(&RuntimeFacadeEvent::ResourceOffered {
+            link_id: "link-1".into(),
+            transfer_id: "res-1".into(),
+            purpose: "media".into(),
+            bytes: Some(128),
+            source: Some("omenchat".into()),
+            direction: Some("inbound".into()),
+            peer: Some("link-1".into()),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::ResourceProgress {
+            transfer_id: "res-1".into(),
+            received: 64,
+            total: Some(128),
+            source: Some("omenchat".into()),
+            purpose: Some("media".into()),
+            direction: Some("inbound".into()),
+            peer: Some("link-1".into()),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::ResourceComplete {
+            transfer_id: "res-1".into(),
+            bytes: 128,
+            source: Some("omenchat".into()),
+            purpose: Some("media".into()),
+            direction: Some("inbound".into()),
+            peer: Some("link-1".into()),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::ResourceFailed {
+            transfer_id: "res-2".into(),
+            reason: "timeout".into(),
+            source: Some("omenchat".into()),
+            purpose: Some("media".into()),
+            direction: Some("inbound".into()),
+            peer: Some("link-2".into()),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::LxmfEvent {
+            event: "queued".into(),
+            detail: Some("peer ready".into()),
+        });
+        state.record_facade_event(&RuntimeFacadeEvent::Diagnostic {
+            section: "paths".into(),
+            message: "snapshot ready".into(),
+        });
+
+        assert_eq!(state.recent_resources.len(), 4);
+        assert_eq!(state.recent_resources[0].state, "failed");
+        assert_eq!(state.recent_resources[1].state, "complete");
+        assert_eq!(state.recent_resources[2].state, "progress");
+        assert_eq!(state.recent_resources[3].state, "offered");
+        assert!(state.recent_resources[3].detail.contains("media"));
+        assert_eq!(state.active_resources.len(), 2);
+        assert_eq!(
+            state
+                .active_resources
+                .get("res-1")
+                .map(|row| row.state.as_str()),
+            Some("complete")
+        );
+        assert_eq!(
+            state.active_resources.get("res-1").map(|row| row.received),
+            Some(Some(128))
+        );
+        assert_eq!(
+            state
+                .active_resources
+                .get("res-1")
+                .map(|row| row.source.as_str()),
+            Some("omenchat")
+        );
+        assert_eq!(
+            state
+                .active_resources
+                .get("res-1")
+                .and_then(|row| row.purpose.as_deref()),
+            Some("media")
+        );
+        assert_eq!(
+            state
+                .active_resources
+                .get("res-1")
+                .and_then(|row| row.direction.as_deref()),
+            Some("inbound")
+        );
+        assert!(state
+            .active_resources
+            .get("res-1")
+            .map(|row| row.detail.contains("purpose=media"))
+            .unwrap_or(false));
+        assert_eq!(
+            state
+                .active_resources
+                .get("res-2")
+                .map(|row| row.state.as_str()),
+            Some("failed")
+        );
+        assert_eq!(
+            state
+                .active_resources
+                .get("res-2")
+                .and_then(|row| row.peer.as_deref()),
+            Some("link-2")
+        );
+        assert!(state
+            .active_resources
+            .get("res-2")
+            .map(|row| row.detail.contains("peer=link-2"))
+            .unwrap_or(false));
+        assert_eq!(state.recent_lxmf.len(), 1);
+        assert_eq!(state.recent_lxmf[0].peer, "queued");
+        assert_eq!(state.recent_paths[0].state, "diagnostic");
+    }
+
+    #[test]
+    fn network_doctor_facade_events_project_runtime_bus_shapes() {
+        let announce_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::Announce(crate::runtime::AnnouncePayload {
+                destination_hash: FIXTURE_NODE_HASH.into(),
+                display_name: "Node".into(),
+                kind: DirectoryKind::Node,
+                associated_hash: None,
+                node_associated_hash: None,
+                has_ratchet: true,
+                lxmf_stamp_cost: None,
+            }),
+        );
+        assert_eq!(announce_events.len(), 1);
+        assert!(matches!(
+            &announce_events[0],
+            RuntimeFacadeEvent::AnnounceObserved {
+                destination_hash,
+                kind,
+                display_name,
+                has_ratchet
+            } if destination_hash == FIXTURE_NODE_HASH
+                && kind == "Node"
+                && display_name == "Node"
+                && *has_ratchet
+        ));
+
+        let path_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::PathUpdated(crate::runtime::PathEvent {
+                destination_hash: FIXTURE_NODE_HASH.into(),
+                known: true,
+                hops: Some(1),
+            }),
+        );
+        assert_eq!(path_events.len(), 1);
+        assert!(matches!(
+            &path_events[0],
+            RuntimeFacadeEvent::PathUpdated {
+                destination_hash,
+                known,
+                hops,
+            } if destination_hash == FIXTURE_NODE_HASH && *known && *hops == Some(1)
+        ));
+
+        let interface_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::InterfaceStats(InterfaceStats {
+                available: true,
+                reason: None,
+                interfaces: vec!["PrivateGateway".into()],
+                samples: vec![
+                    InterfaceSample {
+                        profile_id: "iface-up".into(),
+                        name: "PrivateGateway".into(),
+                        kind: "tcp_client".into(),
+                        state: InterfaceSampleState::Attached,
+                        enabled: true,
+                        supported: true,
+                        attached: true,
+                        endpoint: Some("192.168.0.84:4242".into()),
+                        detail: Some("ifac=configured".into()),
+                    },
+                    InterfaceSample {
+                        profile_id: "iface-wait".into(),
+                        name: "WaitingGateway".into(),
+                        kind: "tcp_client".into(),
+                        state: InterfaceSampleState::Configured,
+                        enabled: true,
+                        supported: true,
+                        attached: false,
+                        endpoint: Some("127.0.0.1:4242".into()),
+                        detail: None,
+                    },
+                    InterfaceSample {
+                        profile_id: "iface-disabled".into(),
+                        name: "DisabledGateway".into(),
+                        kind: "tcp_client".into(),
+                        state: InterfaceSampleState::Disabled,
+                        enabled: false,
+                        supported: true,
+                        attached: false,
+                        endpoint: Some("10.0.0.1:4242".into()),
+                        detail: None,
+                    },
+                ],
+            }),
+        );
+        assert_eq!(interface_events.len(), 2);
+        assert!(matches!(
+            &interface_events[0],
+            RuntimeFacadeEvent::InterfaceUp {
+                interface_id,
+                detail
+            } if interface_id == "iface-up"
+                && detail.as_deref().unwrap_or_default().contains("192.168.0.84:4242")
+        ));
+        assert!(matches!(
+            &interface_events[1],
+            RuntimeFacadeEvent::InterfaceDown {
+                interface_id,
+                reason
+            } if interface_id == "iface-wait"
+                && reason.as_deref().unwrap_or_default().contains("127.0.0.1:4242")
+        ));
+
+        let delivery_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::MessageDeliveryUpdated(OutboundStatus {
+                peer_hash: FIXTURE_PEER_HASH.into(),
+                message_id: Some("msg-1".into()),
+                delivered: true,
+                failed: false,
+                state: OutboundDeliveryState::Delivered,
+                evidence: Some("peer_ack".into()),
+                rtt: None,
+            }),
+        );
+        assert_eq!(delivery_events.len(), 1);
+        assert!(matches!(
+            &delivery_events[0],
+            RuntimeFacadeEvent::LxmfEvent { event, detail }
+                if event == "delivery_delivered"
+                    && detail.as_deref().unwrap_or_default().contains("msg-1")
+        ));
+
+        let delivery_progress_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::MessageDeliveryUpdated(OutboundStatus {
+                peer_hash: FIXTURE_PEER_HASH.into(),
+                message_id: Some("msg-progress".into()),
+                delivered: false,
+                failed: false,
+                state: OutboundDeliveryState::SubmittedToRuntime,
+                evidence: Some(
+                    "direct_transfer_state:resource_progress;direct_link_id:link-abc;resource_received:2;resource_total:5"
+                        .into(),
+                ),
+                rtt: None,
+            }),
+        );
+        assert_eq!(delivery_progress_events.len(), 2);
+        assert!(matches!(
+            &delivery_progress_events[1],
+            RuntimeFacadeEvent::ResourceProgress {
+                transfer_id,
+                received,
+                total,
+                source,
+                purpose,
+                direction,
+                peer
+            } if transfer_id == "link-abc"
+                && *received == 2
+                && *total == Some(5)
+                && source.as_deref() == Some("lxmf-evidence")
+                && purpose.as_deref() == Some("lxmf")
+                && direction.as_deref() == Some("outbound")
+                && peer.as_deref() == Some(compact_hash(FIXTURE_PEER_HASH).as_str())
+        ));
+
+        let lxmf_progress_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::LxmfDeliveryEvidence(LxmfDeliveryEvidence {
+                peer_hash: FIXTURE_PEER_HASH.into(),
+                message_id: Some("msg-progress".into()),
+                kind: LxmfDeliveryEvidenceKind::PropagationNodeAccepted,
+                detail: Some(
+                    "propagation_transfer_state:resource_progress;propagation_link_id:prop-link;resource_received:7;resource_total:9"
+                        .into(),
+                ),
+                rtt: None,
+                observed_at: None,
+            }),
+        );
+        assert_eq!(lxmf_progress_events.len(), 2);
+        assert!(matches!(
+            &lxmf_progress_events[1],
+            RuntimeFacadeEvent::ResourceProgress {
+                transfer_id,
+                received,
+                total,
+                source,
+                purpose,
+                direction,
+                peer
+            } if transfer_id == "prop-link"
+                && *received == 7
+                && *total == Some(9)
+                && source.as_deref() == Some("lxmf-evidence")
+                && purpose.as_deref() == Some("lxmf")
+                && direction.as_deref() == Some("outbound")
+                && peer.as_deref() == Some(compact_hash(FIXTURE_PEER_HASH).as_str())
+        ));
+
+        let link_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::OmenChatLinkData(crate::runtime::OmenChatLinkData {
+                link_id: [7; 16],
+                frame_bytes: vec![1, 2, 3, 4],
+            }),
+        );
+        assert_eq!(link_events.len(), 1);
+        assert!(matches!(
+            &link_events[0],
+            RuntimeFacadeEvent::LinkFrameReceived { link_id, bytes }
+                if link_id == "07070707070707070707070707070707" && *bytes == 4
+        ));
+
+        let resource_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::OmenChatResourceData(crate::runtime::OmenChatResourceData {
+                link_id: [9; 16],
+                data: vec![0; 32],
+                metadata: Some(vec![0; 8]),
+            }),
+        );
+        assert_eq!(resource_events.len(), 1);
+        assert!(matches!(
+            &resource_events[0],
+            RuntimeFacadeEvent::ResourceComplete {
+                transfer_id, bytes, ..
+            }
+                if transfer_id == "09090909090909090909090909090909" && *bytes == 32
+        ));
+
+        let progress_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::ResourceProgress(crate::runtime::ResourceProgressEvent {
+                transfer_id: "res-typed".into(),
+                received: 5,
+                total: Some(10),
+                source: Some("typed-source".into()),
+                purpose: Some("typed-purpose".into()),
+                direction: Some("inbound".into()),
+                peer: Some("peer-1".into()),
+            }),
+        );
+        assert_eq!(progress_events.len(), 1);
+        assert!(matches!(
+            &progress_events[0],
+            RuntimeFacadeEvent::ResourceProgress {
+                transfer_id,
+                received,
+                total,
+                source,
+                purpose,
+                direction,
+                peer
+            } if transfer_id == "res-typed"
+                && *received == 5
+                && *total == Some(10)
+                && source.as_deref() == Some("typed-source")
+                && purpose.as_deref() == Some("typed-purpose")
+                && direction.as_deref() == Some("inbound")
+                && peer.as_deref() == Some("peer-1")
+        ));
+
+        let lifecycle_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::ResourceLifecycle(crate::runtime::ResourceLifecycleEvent {
+                transfer_id: "res-done".into(),
+                state: crate::runtime::ResourceLifecycleState::Complete,
+                bytes: Some(99),
+                reason: None,
+                source: Some("nomadnet-page".into()),
+                purpose: Some("nomadnet-page".into()),
+                direction: Some("inbound".into()),
+                peer: Some("peer-x".into()),
+            }),
+        );
+        assert_eq!(lifecycle_events.len(), 1);
+        assert!(matches!(
+            &lifecycle_events[0],
+            RuntimeFacadeEvent::ResourceComplete {
+                transfer_id,
+                bytes,
+                source,
+                purpose,
+                direction,
+                peer
+            } if transfer_id == "res-done"
+                && *bytes == 99
+                && source.as_deref() == Some("nomadnet-page")
+                && purpose.as_deref() == Some("nomadnet-page")
+                && direction.as_deref() == Some("inbound")
+                && peer.as_deref() == Some("peer-x")
+        ));
+    }
+
+    #[test]
+    fn network_doctor_runtime_handler_records_facade_projection_rows() {
+        let mut app = App::new(test_config("network-doctor-runtime-handler-facade"));
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::OmenChatLinkData(
+                crate::runtime::OmenChatLinkData {
+                    link_id: [3; 16],
+                    frame_bytes: vec![1, 2, 3],
+                },
+            ))
+        );
+        assert_eq!(app.network_doctor_state.recent_links.len(), 1);
+        assert_eq!(app.network_doctor_state.recent_links[0].state, "frame");
+        assert_eq!(
+            app.network_doctor_state.recent_links[0].link_id,
+            "03030303030303030303030303030303"
+        );
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::MessageDeliveryUpdated(OutboundStatus {
+                peer_hash: FIXTURE_PEER_HASH.into(),
+                message_id: Some("msg-2".into()),
+                delivered: false,
+                failed: true,
+                state: OutboundDeliveryState::Failed,
+                evidence: Some("timeout".into()),
+                rtt: None,
+            },))
+        );
+        assert_eq!(app.network_doctor_state.recent_lxmf.len(), 1);
+        assert_eq!(
+            app.network_doctor_state.recent_lxmf[0].peer,
+            "delivery_failed"
+        );
+        assert!(app.network_doctor_state.recent_lxmf[0]
+            .detail
+            .contains("msg-2"));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceProgress(
+                crate::runtime::ResourceProgressEvent {
+                    transfer_id: "res-live".into(),
+                    received: 64,
+                    total: Some(128),
+                    source: Some("omenchat".into()),
+                    purpose: Some("omenchat-resource".into()),
+                    direction: Some("inbound".into()),
+                    peer: Some("link-1".into()),
+                },
+            ))
+        );
+        assert_eq!(app.network_doctor_state.recent_resources.len(), 1);
+        assert_eq!(
+            app.network_doctor_state.recent_resources[0].transfer,
+            "res-live"
+        );
+        assert_eq!(
+            app.network_doctor_state.recent_resources[0].state,
+            "progress"
+        );
+        assert!(app.network_doctor_state.recent_resources[0]
+            .detail
+            .contains("omenchat | 64/128"));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::InterfaceStats(InterfaceStats {
+                available: true,
+                reason: None,
+                interfaces: vec!["PrivateGateway".into()],
+                samples: vec![InterfaceSample {
+                    profile_id: "iface-live".into(),
+                    name: "PrivateGateway".into(),
+                    kind: "tcp_client".into(),
+                    state: InterfaceSampleState::Attached,
+                    enabled: true,
+                    supported: true,
+                    attached: true,
+                    endpoint: Some("192.168.0.84:4242".into()),
+                    detail: Some("ifac=configured".into()),
+                }],
+            }))
+        );
+        assert_eq!(
+            app.network_doctor_state.recent_paths[0].target,
+            "iface-live"
+        );
+        assert_eq!(
+            app.network_doctor_state.recent_paths[0].state,
+            "interface up"
+        );
+        assert!(app.network_doctor_state.recent_paths[0]
+            .detail
+            .contains("192.168.0.84:4242"));
+    }
+
+    #[test]
+    fn network_doctor_runtime_handler_records_resource_lifecycle_events() {
+        let mut app = App::new(test_config("network-doctor-runtime-handler-lifecycle"));
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
+                crate::runtime::ResourceLifecycleEvent {
+                    transfer_id: "res-offer".into(),
+                    state: crate::runtime::ResourceLifecycleState::Offered,
+                    bytes: Some(256),
+                    reason: None,
+                    source: Some("omenchat".into()),
+                    purpose: Some("history-batch".into()),
+                    direction: Some("inbound".into()),
+                    peer: Some("link-0".into()),
+                },
+            ))
+        );
+        let offered = app
+            .network_doctor_state
+            .active_resources
+            .get("res-offer")
+            .expect("offered lifecycle row");
+        assert_eq!(offered.state, "offered");
+        assert_eq!(offered.total, Some(256));
+        assert_eq!(offered.source, "omenchat");
+        assert_eq!(offered.purpose.as_deref(), Some("history-batch"));
+        assert_eq!(offered.peer.as_deref(), Some("link-0"));
+        assert!(app.status.task.contains("offered"));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
+                crate::runtime::ResourceLifecycleEvent {
+                    transfer_id: "res-life".into(),
+                    state: crate::runtime::ResourceLifecycleState::Complete,
+                    bytes: Some(42),
+                    reason: None,
+                    source: Some("omenchat".into()),
+                    purpose: Some("omenchat-resource".into()),
+                    direction: Some("inbound".into()),
+                    peer: Some("link-1".into()),
+                },
+            ))
+        );
+        let complete = app
+            .network_doctor_state
+            .active_resources
+            .get("res-life")
+            .expect("complete lifecycle row");
+        assert_eq!(complete.state, "complete");
+        assert_eq!(complete.received, Some(42));
+        assert_eq!(complete.total, Some(42));
+        assert_eq!(complete.source, "omenchat");
+        assert_eq!(complete.purpose.as_deref(), Some("omenchat-resource"));
+        assert!(complete.detail.contains("peer=link-1"));
+        assert!(app.status.task.contains("complete"));
+
+        let errors_before = app.monitoring_state.runtime_errors;
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
+                crate::runtime::ResourceLifecycleEvent {
+                    transfer_id: "res-fail".into(),
+                    state: crate::runtime::ResourceLifecycleState::Failed,
+                    bytes: None,
+                    reason: Some("timeout".into()),
+                    source: Some("lxmf-propagation".into()),
+                    purpose: Some("lxmf-propagation".into()),
+                    direction: Some("outbound".into()),
+                    peer: Some("prop-node".into()),
+                },
+            ))
+        );
+        assert_eq!(app.monitoring_state.runtime_errors, errors_before + 1);
+        let failed = app
+            .network_doctor_state
+            .active_resources
+            .get("res-fail")
+            .expect("failed lifecycle row");
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.source, "lxmf-propagation");
+        assert_eq!(failed.peer.as_deref(), Some("prop-node"));
+        assert!(failed.detail.contains("timeout"));
+        assert!(app.status.task.contains("failed"));
+
+        let errors_after_failure = app.monitoring_state.runtime_errors;
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
+                crate::runtime::ResourceLifecycleEvent {
+                    transfer_id: "res-cancel".into(),
+                    state: crate::runtime::ResourceLifecycleState::Cancelled,
+                    bytes: Some(7),
+                    reason: Some("user cancelled".into()),
+                    source: Some("nomadnet".into()),
+                    purpose: Some("page-resource".into()),
+                    direction: Some("inbound".into()),
+                    peer: Some("mock.node".into()),
+                },
+            ))
+        );
+        assert_eq!(app.monitoring_state.runtime_errors, errors_after_failure);
+        let cancelled = app
+            .network_doctor_state
+            .active_resources
+            .get("res-cancel")
+            .expect("cancelled lifecycle row");
+        assert_eq!(cancelled.state, "failed");
+        assert_eq!(cancelled.source, "nomadnet");
+        assert!(cancelled.detail.contains("cancelled"));
+        assert!(cancelled.detail.contains("user cancelled"));
+        assert!(app.status.task.contains("cancelled"));
     }
 
     #[test]
@@ -21974,6 +23573,7 @@ side
             .any(|line| line.contains("32-character Reticulum hash")));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn lxmf_messaging_diagnostics_reports_native_identity_blocker() {
         let mut config = test_config("lxmf-diag-native-identity");
@@ -22098,6 +23698,7 @@ side
             .any(|line| line == "receipt state: peer activity observed after send"));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn lxmf_messaging_diagnostics_reports_native_propagated_queue_boundary() {
         let mut config = test_config("lxmf-diag-propagated");
@@ -22124,6 +23725,7 @@ side
             .any(|line| line.contains("selected propagation node: none")));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn lxmf_messaging_diagnostics_reports_direct_to_propagated_fallback() {
         let mut config = test_config("lxmf-diag-fallback");
@@ -22202,6 +23804,7 @@ side
         }));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn lxmf_peer_inspection_result_marks_missing_identity_and_path_as_blocked() {
         let mut config = test_config("lxmf-peer-inspect-blocked");
@@ -22457,6 +24060,7 @@ side
         );
     }
 
+    #[cfg(feature = "native-reticulum")]
     fn make_native_send_ready_app(name: &str) -> App {
         let mut config = test_config(name);
         config.settings.runtime_backend = RuntimeBackendSetting::Reticulum;
@@ -22478,6 +24082,7 @@ side
         app
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn native_lxmf_send_preflight_blocks_invalid_peer_before_pending_send() {
         let mut app = make_native_send_ready_app("native-send-invalid-peer");
@@ -22504,6 +24109,7 @@ side
         assert!(!app.remove_active_conversation_attachment(0));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[tokio::test]
     async fn conversation_attachment_only_draft_is_sendable() {
         let mut app = make_native_send_ready_app("conversation-attachment-only-send");
@@ -22518,6 +24124,7 @@ side
         assert_ne!(app.status.task, "message draft is empty");
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn native_lxmf_send_preflight_blocks_propagated_without_node() {
         let mut app = make_native_send_ready_app("native-send-propagated");
@@ -22529,6 +24136,7 @@ side
         assert!(app.status.task.contains("no propagation node"));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn native_lxmf_propagated_preflight_allows_known_peer_without_direct_path() {
         let mut app = make_native_send_ready_app("native-send-propagated-known-peer");
@@ -22557,6 +24165,7 @@ side
         assert_eq!(app.active_conversation_send_blocker(), None);
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn native_lxmf_direct_preflight_allows_missing_path_when_propagation_fallback_selected() {
         let mut app = make_native_send_ready_app("native-send-direct-propagation-fallback");
@@ -22585,6 +24194,7 @@ side
         assert_eq!(app.active_conversation_send_blocker(), None);
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[tokio::test]
     async fn native_lxmf_send_preflight_requires_peer_inspection_first() {
         let mut app = make_native_send_ready_app("native-send-needs-inspection");
@@ -22599,6 +24209,7 @@ side
             .is_some_and(|state| state.pending));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[tokio::test]
     async fn native_lxmf_send_waits_for_local_announce_before_inspection_when_needed() {
         let mut app = make_native_send_ready_app("native-send-auto-announce");
@@ -22633,6 +24244,7 @@ side
             .is_some_and(|state| state.pending));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn local_lxmf_announce_result_updates_status_message() {
         let mut app = make_native_send_ready_app("native-announce-result");
@@ -22653,6 +24265,7 @@ side
             .any(|line| line.contains("local LXMF identity announced")));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn native_lxmf_send_preflight_blocks_missing_peer_path() {
         let mut app = make_native_send_ready_app("native-send-missing-path");
@@ -22681,6 +24294,7 @@ side
         assert!(app.status.task.contains("does not have a path"));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[tokio::test]
     async fn native_lxmf_ticketed_send_preserves_ticket_state_before_queueing() {
         let mut app = make_native_send_ready_app("native-send-ticket-preserved");
@@ -22724,6 +24338,7 @@ side
         );
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn native_lxmf_ticket_toggle_updates_conversation_state() {
         let mut app = make_native_send_ready_app("native-ticket-toggle");
@@ -23072,6 +24687,7 @@ side
         assert!(app.active_conversation().pending_send.is_none());
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[test]
     fn native_lxmf_restore_preserves_ticket_state() {
         let mut config = test_config("native-session-ticket-restore");
@@ -23703,10 +25319,13 @@ side
         let mut app = App::new(test_config("settings-runtime-sync"));
 
         assert!(app.cycle_runtime_backend_setting());
+        #[cfg(feature = "native-reticulum")]
         assert_eq!(
             app.settings.runtime_backend,
             RuntimeBackendSetting::Reticulum
         );
+        #[cfg(not(feature = "native-reticulum"))]
+        assert_eq!(app.settings.runtime_backend, RuntimeBackendSetting::Auto);
         assert!(app.settings.restart_required);
         assert!(app.cycle_reticulum_instance_mode());
         assert_eq!(
@@ -23743,7 +25362,10 @@ side
         app.submit_active_input();
 
         let saved = AppSettings::load_or_default(&app.paths.settings_file).expect("load settings");
+        #[cfg(feature = "native-reticulum")]
         assert_eq!(saved.runtime_backend, RuntimeBackendSetting::Reticulum);
+        #[cfg(not(feature = "native-reticulum"))]
+        assert_eq!(saved.runtime_backend, RuntimeBackendSetting::Auto);
         assert_eq!(
             saved.reticulum_instance_mode,
             ReticulumInstanceMode::External
@@ -28356,9 +29978,9 @@ side
             Some((false, "compile with feature native-reticulum"))
         );
         assert!(app.cycle_runtime_backend_setting());
-        assert_eq!(app.settings.runtime_backend, RuntimeBackendSetting::Mock);
-        assert!(app.cycle_runtime_backend_setting());
         assert_eq!(app.settings.runtime_backend, RuntimeBackendSetting::Auto);
+        assert!(app.cycle_runtime_backend_setting());
+        assert_eq!(app.settings.runtime_backend, RuntimeBackendSetting::Mock);
     }
 
     #[cfg(feature = "native-reticulum")]

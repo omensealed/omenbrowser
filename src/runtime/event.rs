@@ -7,7 +7,7 @@ use crate::messaging::{MessageSummary, TransportMethod};
 use crate::runtime::network::{
     AnnouncePayload, InterfaceStats, LxmfDeliveryEvidence, NetworkStatus, OmenChatLinkClosed,
     OmenChatLinkData, OmenChatResourceData, OutboundStatus, PageFetchProbeReport,
-    PropagationStatus,
+    PropagationStatus, ResourceLifecycleEvent, ResourceProgressEvent,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -25,6 +25,8 @@ pub enum RuntimeBusEvent {
     OmenChatLinkClosed(OmenChatLinkClosed),
     OmenChatLinkData(OmenChatLinkData),
     OmenChatResourceData(OmenChatResourceData),
+    ResourceProgress(ResourceProgressEvent),
+    ResourceLifecycle(ResourceLifecycleEvent),
     Debug(String),
     Error(String),
 }

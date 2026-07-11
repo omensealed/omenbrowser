@@ -50,6 +50,8 @@ struct PendingLiveUploadDownload {
     content_type: Option<String>,
     total_len: usize,
     bytes: Vec<u8>,
+    pending_chunks: BTreeMap<usize, Vec<u8>>,
+    done_seen: bool,
 }
 
 impl LiveChatClientState {
@@ -1211,18 +1213,42 @@ fn apply_upload_inline_chunk(
             content_type,
             total_len,
             bytes: Vec::with_capacity(total_len.min(512 * 1024)),
+            pending_chunks: BTreeMap::new(),
+            done_seen: false,
         });
-    if offset != entry.bytes.len() {
+    if done {
+        entry.done_seen = true;
+    }
+    if offset > entry.total_len || offset.saturating_add(chunk.len()) > entry.total_len {
         events.push(ChatClientEvent::Error {
             session_id: Some(session_id),
             message: format!(
-                "OMENchat upload chunk out of order for {filename}: expected {}, got {offset}",
-                entry.bytes.len()
+                "OMENchat upload chunk is outside {filename}: offset {offset}, chunk {}, total {}",
+                chunk.len(),
+                entry.total_len
             ),
         });
         return;
     }
-    entry.bytes.extend_from_slice(chunk);
+    if offset < entry.bytes.len() {
+        let end = offset.saturating_add(chunk.len());
+        let duplicate = end <= entry.bytes.len() && entry.bytes[offset..end] == *chunk;
+        if !duplicate {
+            events.push(ChatClientEvent::Error {
+                session_id: Some(session_id),
+                message: format!("OMENchat upload chunk conflicts for {filename}: offset {offset}"),
+            });
+            return;
+        }
+    } else {
+        entry
+            .pending_chunks
+            .entry(offset)
+            .or_insert_with(|| chunk.to_vec());
+    }
+    while let Some(chunk) = entry.pending_chunks.remove(&entry.bytes.len()) {
+        entry.bytes.extend_from_slice(&chunk);
+    }
     if let Some(session) = client.session_mut(session_id) {
         session.status = format!(
             "upload resource receiving: {} / {}",
@@ -1237,7 +1263,9 @@ fn apply_upload_inline_chunk(
         received: entry.bytes.len() as u64,
         total: entry.total_len as u64,
     });
-    if done || entry.bytes.len() >= entry.total_len {
+    if (entry.done_seen || entry.bytes.len() >= entry.total_len)
+        && entry.bytes.len() >= entry.total_len
+    {
         let Some(entry) = state.pending_upload_downloads.remove(resource_id) else {
             return;
         };
@@ -1251,6 +1279,13 @@ fn apply_upload_inline_chunk(
                 ),
             });
             return;
+        }
+        if let Some(session) = client.session_mut(session_id) {
+            session.status = format!(
+                "upload resource received: {} ({})",
+                entry.filename,
+                human_bytes(entry.bytes.len() as u64)
+            );
         }
         events.push(ChatClientEvent::UploadResourceAvailable {
             session_id,
@@ -2507,6 +2542,88 @@ mod tests {
                 && content_type == "image/png"
                 && bytes == b"abcdefg"
         ));
+    }
+
+    #[test]
+    fn live_upload_inline_chunks_buffer_out_of_order_offsets() {
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "joined".into(),
+        });
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::UploadInlineChunk,
+                4,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("upload:1:7:4".into()),
+                    FrameValue::String("image.png".into()),
+                    FrameValue::U64(7),
+                    FrameValue::String("image/png".into()),
+                    FrameValue::U64(3),
+                    FrameValue::Bytes(b"defg".to_vec()),
+                    FrameValue::Bool(true),
+                ]),
+            ))
+            .expect("chunk 2");
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::UploadInlineChunk,
+                4,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("upload:1:7:4".into()),
+                    FrameValue::String("image.png".into()),
+                    FrameValue::U64(7),
+                    FrameValue::String("image/png".into()),
+                    FrameValue::U64(0),
+                    FrameValue::Bytes(b"abc".to_vec()),
+                    FrameValue::Bool(false),
+                ]),
+            ))
+            .expect("chunk 1");
+
+        let events =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ChatClientEvent::Error { .. })),
+            "out-of-order chunks should buffer without an error: {events:#?}"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::UploadResourceAvailable {
+                resource_id,
+                filename,
+                content_type: Some(content_type),
+                bytes,
+                ..
+            } if resource_id == "upload:1:7:4"
+                && filename == "image.png"
+                && content_type == "image/png"
+                && bytes == b"abcdefg"
+        )));
+        assert_eq!(
+            client
+                .session(session_id)
+                .map(|session| session.status.as_str()),
+            Some("upload resource received: image.png (7 B)")
+        );
     }
 
     #[test]

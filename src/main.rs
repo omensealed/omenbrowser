@@ -191,6 +191,9 @@ async fn async_main() -> anyhow::Result<()> {
             destination,
             room,
             message,
+            upload_file,
+            fetch_upload_filename,
+            fetch_upload_bytes,
             link_timeout_secs,
             response_wait_secs,
             warmup,
@@ -202,6 +205,9 @@ async fn async_main() -> anyhow::Result<()> {
                 destination,
                 room,
                 message,
+                upload_file,
+                fetch_upload_filename,
+                fetch_upload_bytes,
                 link_timeout_secs,
                 response_wait_secs,
                 warmup,
@@ -341,6 +347,9 @@ enum CliCommand {
         destination: String,
         room: String,
         message: String,
+        upload_file: Option<PathBuf>,
+        fetch_upload_filename: Option<String>,
+        fetch_upload_bytes: Option<u64>,
         link_timeout_secs: u64,
         response_wait_secs: u64,
         warmup: Option<SmokePathWarmup>,
@@ -420,6 +429,9 @@ struct OmenChatSmokeCommandInput {
     destination: String,
     room: String,
     message: String,
+    upload_file: Option<PathBuf>,
+    fetch_upload_filename: Option<String>,
+    fetch_upload_bytes: Option<u64>,
     link_timeout_secs: u64,
     response_wait_secs: u64,
     warmup: Option<SmokePathWarmup>,
@@ -494,6 +506,9 @@ impl CliCommand {
         let mut omenchat_smoke_destination = None;
         let mut omenchat_room = "lobby".to_string();
         let mut omenchat_message = "OMENchat smoke test from OMENbrowser_rs".to_string();
+        let mut omenchat_upload_file = None;
+        let mut omenchat_fetch_upload_filename = None;
+        let mut omenchat_fetch_upload_bytes = None;
         let mut omenchat_link_timeout_secs = 15;
         let mut omenchat_response_wait_secs = 10;
         let mut generate_native_identity_label = None;
@@ -565,6 +580,27 @@ impl CliCommand {
                     omenchat_message = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a message body"))?;
+                }
+                "--omenchat-upload-file" | "--upload-file" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a file path"))?;
+                    omenchat_upload_file = Some(PathBuf::from(value));
+                }
+                "--omenchat-fetch-upload" | "--fetch-upload" => {
+                    omenchat_fetch_upload_filename = Some(
+                        args.next()
+                            .ok_or_else(|| anyhow::anyhow!("{arg} requires a filename"))?,
+                    );
+                }
+                "--omenchat-fetch-upload-bytes" | "--fetch-upload-bytes" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a byte count"))?;
+                    omenchat_fetch_upload_bytes =
+                        Some(value.parse::<u64>().with_context(|| {
+                            format!("invalid OMENchat fetch upload byte count in {value}")
+                        })?);
                 }
                 "--omenchat-link-timeout" | "--link-timeout" => {
                     let value = args
@@ -795,6 +831,9 @@ impl CliCommand {
                 destination,
                 room: omenchat_room,
                 message: omenchat_message,
+                upload_file: omenchat_upload_file,
+                fetch_upload_filename: omenchat_fetch_upload_filename,
+                fetch_upload_bytes: omenchat_fetch_upload_bytes,
                 link_timeout_secs: omenchat_link_timeout_secs,
                 response_wait_secs: omenchat_response_wait_secs,
                 warmup,
@@ -1076,6 +1115,7 @@ struct OmenChatSmokeTransport {
     resources: BTreeMap<String, Vec<u8>>,
     pending_resource_offers: BTreeMap<String, VecDeque<Vec<u8>>>,
     outgoing_frames: Vec<Vec<u8>>,
+    outgoing_resources: Vec<(String, Vec<u8>)>,
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -1101,12 +1141,22 @@ impl OmenChatSmokeTransport {
     fn take_outgoing_frames(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.outgoing_frames)
     }
+
+    fn take_outgoing_resources(&mut self) -> Vec<(String, Vec<u8>)> {
+        std::mem::take(&mut self.outgoing_resources)
+    }
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 impl ChatLinkTransport for OmenChatSmokeTransport {
     fn send_frame(&mut self, frame_bytes: Vec<u8>) -> anyhow::Result<()> {
         self.outgoing_frames.push(frame_bytes);
+        Ok(())
+    }
+
+    fn send_resource(&mut self, resource_id: &str, payload: Vec<u8>) -> anyhow::Result<()> {
+        self.outgoing_resources
+            .push((resource_id.to_owned(), payload));
         Ok(())
     }
 
@@ -1141,6 +1191,9 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         destination,
         room,
         message,
+        upload_file,
+        fetch_upload_filename,
+        fetch_upload_bytes,
         link_timeout_secs,
         response_wait_secs,
         warmup,
@@ -1298,6 +1351,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
     };
 
     let join_events = wait_for_omenchat_condition(
+        &*app.runtime,
         &mut runtime_events,
         opened.link_id,
         &mut client,
@@ -1343,6 +1397,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
 
     let message_events = if joined {
         wait_for_omenchat_condition(
+            &*app.runtime,
             &mut runtime_events,
             opened.link_id,
             &mut client,
@@ -1362,6 +1417,146 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         "ok": message_seen,
         "events": message_events,
     }));
+
+    let mut upload_ok = true;
+    if joined && message_seen {
+        if let Some(upload_file) = upload_file {
+            let upload_bytes = std::fs::read(&upload_file).with_context(|| {
+                format!(
+                    "failed to read OMENchat smoke upload file {}",
+                    upload_file.display()
+                )
+            })?;
+            let upload_filename = upload_file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("omenchat-smoke-upload.bin")
+                .to_owned();
+            let upload_len = upload_bytes.len() as u64;
+            let send_upload_events = omenbrowser_rs::chat::live::handle_live_request(
+                &mut client,
+                &mut live_state,
+                &mut transport,
+                ChatClientRequest::SendUpload {
+                    session_id,
+                    room: room.clone(),
+                    filename: upload_filename.clone(),
+                    content_type: Some("application/octet-stream".into()),
+                    bytes: upload_bytes.clone(),
+                },
+            );
+            stages.push(serde_json::json!({
+                "stage": "upload_offer_frame",
+                "ok": !send_upload_events.iter().any(|event| matches!(event, ChatClientEvent::Error { .. })),
+                "filename": upload_filename.clone(),
+                "bytes": upload_len,
+                "events": send_upload_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+            }));
+            send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
+
+            let upload_complete_events = wait_for_omenchat_condition(
+                &*app.runtime,
+                &mut runtime_events,
+                opened.link_id,
+                &mut client,
+                &mut live_state,
+                &mut transport,
+                session_id,
+                Duration::from_secs(response_wait_secs),
+                |client| {
+                    omenchat_session_upload_resource_id(
+                        client,
+                        session_id,
+                        &upload_filename,
+                        Some(upload_len),
+                    )
+                    .is_some()
+                },
+            )
+            .await;
+            let upload_resource_id = omenchat_session_upload_resource_id(
+                &client,
+                session_id,
+                &upload_filename,
+                Some(upload_len),
+            );
+            let upload_completed = upload_resource_id.is_some()
+                && omenchat_smoke_events_contain_decoded_event(
+                    &upload_complete_events,
+                    "upload_completed",
+                );
+            stages.push(serde_json::json!({
+                "stage": "upload_complete_wait",
+                "ok": upload_completed,
+                "resource_id": upload_resource_id.clone(),
+                "events": upload_complete_events,
+            }));
+
+            if let Some(resource_id) = upload_resource_id {
+                let (upload_resource_available, fetch_stages) =
+                    run_omenchat_smoke_upload_fetch(OmenchatSmokeUploadFetch {
+                        runtime: &*app.runtime,
+                        runtime_events: &mut runtime_events,
+                        link_id: opened.link_id,
+                        client: &mut client,
+                        live_state: &mut live_state,
+                        transport: &mut transport,
+                        session_id,
+                        room: &room,
+                        resource_id,
+                        filename: &upload_filename,
+                        bytes: Some(upload_len),
+                        wait: Duration::from_secs(response_wait_secs),
+                    })
+                    .await?;
+                stages.extend(fetch_stages);
+                upload_ok = upload_completed && upload_resource_available;
+            } else {
+                upload_ok = false;
+            }
+        }
+    }
+
+    if joined && message_seen {
+        if let Some(fetch_filename) = fetch_upload_filename {
+            let existing_resource_id = omenchat_session_upload_resource_id(
+                &client,
+                session_id,
+                &fetch_filename,
+                fetch_upload_bytes,
+            );
+            stages.push(serde_json::json!({
+                "stage": "existing_upload_lookup",
+                "ok": existing_resource_id.is_some(),
+                "filename": fetch_filename.clone(),
+                "bytes": fetch_upload_bytes,
+                "resource_id": existing_resource_id.clone(),
+            }));
+            if let Some(resource_id) = existing_resource_id {
+                let (fetched_existing_upload, fetch_stages) =
+                    run_omenchat_smoke_upload_fetch(OmenchatSmokeUploadFetch {
+                        runtime: &*app.runtime,
+                        runtime_events: &mut runtime_events,
+                        link_id: opened.link_id,
+                        client: &mut client,
+                        live_state: &mut live_state,
+                        transport: &mut transport,
+                        session_id,
+                        room: &room,
+                        resource_id,
+                        filename: &fetch_filename,
+                        bytes: fetch_upload_bytes,
+                        wait: Duration::from_secs(response_wait_secs),
+                    })
+                    .await?;
+                stages.extend(fetch_stages);
+                upload_ok = upload_ok && fetched_existing_upload;
+            } else {
+                upload_ok = false;
+            }
+        }
+    }
 
     let session_summary = client.session(session_id).map(|session| {
         serde_json::json!({
@@ -1383,11 +1578,13 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
             "status": session.status.clone(),
         })
     });
-    let outcome = joined && message_seen;
+    let outcome = joined && message_seen && upload_ok;
     let failed_stage = if !joined {
         "join_wait"
     } else if !message_seen {
         "message_echo_wait"
+    } else if !upload_ok {
+        "upload_fetch_wait"
     } else {
         "complete"
     };
@@ -1423,11 +1620,18 @@ async fn send_omenchat_smoke_outgoing(
             .await
             .context("failed to send OMENchat smoke frame")?;
     }
+    for (resource_id, payload) in transport.take_outgoing_resources() {
+        runtime
+            .send_omenchat_resource(link_id, resource_id, payload)
+            .await
+            .context("failed to send OMENchat smoke resource")?;
+    }
     Ok(())
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 async fn wait_for_omenchat_condition(
+    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
     runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
     link_id: [u8; 16],
     client: &mut omenbrowser_rs::chat::ChatClient,
@@ -1475,6 +1679,14 @@ async fn wait_for_omenchat_condition(
                     "bytes": bytes,
                     "decoded": decoded.iter().map(format_chat_event).collect::<Vec<_>>(),
                 }));
+                if let Err(error) = send_omenchat_smoke_outgoing(runtime, link_id, transport).await
+                {
+                    events.push(serde_json::json!({
+                        "event": "flush_error",
+                        "error": error.to_string(),
+                    }));
+                    break;
+                }
             }
             RuntimeBusEvent::OmenChatResourceData(data) if data.link_id == link_id => {
                 let bytes = data.data.len();
@@ -1492,6 +1704,14 @@ async fn wait_for_omenchat_condition(
                     "metadata_len": metadata_len,
                     "decoded": decoded.iter().map(format_chat_event).collect::<Vec<_>>(),
                 }));
+                if let Err(error) = send_omenchat_smoke_outgoing(runtime, link_id, transport).await
+                {
+                    events.push(serde_json::json!({
+                        "event": "flush_error",
+                        "error": error.to_string(),
+                    }));
+                    break;
+                }
             }
             RuntimeBusEvent::Debug(message) => {
                 events.push(serde_json::json!({"event": "debug", "message": message}));
@@ -1509,6 +1729,76 @@ async fn wait_for_omenchat_condition(
         }
     }
     events
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+struct OmenchatSmokeUploadFetch<'a> {
+    runtime: &'a dyn omenbrowser_rs::runtime::NetworkRuntime,
+    runtime_events: &'a mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    link_id: [u8; 16],
+    client: &'a mut omenbrowser_rs::chat::ChatClient,
+    live_state: &'a mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &'a mut OmenChatSmokeTransport,
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    room: &'a str,
+    resource_id: String,
+    filename: &'a str,
+    bytes: Option<u64>,
+    wait: Duration,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn run_omenchat_smoke_upload_fetch(
+    input: OmenchatSmokeUploadFetch<'_>,
+) -> anyhow::Result<(bool, Vec<serde_json::Value>)> {
+    let request_upload_events = omenbrowser_rs::chat::live::handle_live_request(
+        input.client,
+        input.live_state,
+        input.transport,
+        omenbrowser_rs::chat::ChatClientRequest::RequestUpload {
+            session_id: input.session_id,
+            room: input.room.to_owned(),
+            resource_id: input.resource_id.clone(),
+        },
+    );
+    let mut stages = vec![serde_json::json!({
+        "stage": "upload_fetch_frame",
+        "ok": !request_upload_events.iter().any(|event| matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. })),
+        "resource_id": input.resource_id,
+        "filename": input.filename,
+        "bytes": input.bytes,
+        "events": request_upload_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+    })];
+    send_omenchat_smoke_outgoing(input.runtime, input.link_id, input.transport).await?;
+
+    let upload_fetch_events = wait_for_omenchat_condition(
+        input.runtime,
+        input.runtime_events,
+        input.link_id,
+        input.client,
+        input.live_state,
+        input.transport,
+        input.session_id,
+        input.wait,
+        |client| {
+            omenchat_session_upload_resource_received(client, input.session_id, input.filename)
+        },
+    )
+    .await;
+    let upload_resource_available =
+        omenchat_session_upload_resource_received(input.client, input.session_id, input.filename)
+            && omenchat_smoke_events_contain_decoded_event(
+                &upload_fetch_events,
+                "upload_resource_available",
+            );
+    stages.push(serde_json::json!({
+        "stage": "upload_fetch_wait",
+        "ok": upload_resource_available,
+        "filename": input.filename,
+        "bytes": input.bytes,
+        "events": upload_fetch_events,
+    }));
+    Ok((upload_resource_available, stages))
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -1582,6 +1872,61 @@ fn omenchat_session_contains_message(
                     if body == message
             )
         })
+    })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_session_upload_resource_id(
+    client: &omenbrowser_rs::chat::ChatClient,
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    filename: &str,
+    bytes: Option<u64>,
+) -> Option<String> {
+    client.session(session_id).and_then(|session| {
+        session
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                omenbrowser_rs::chat::ChatEventKind::Upload {
+                    resource_id,
+                    filename: event_filename,
+                    bytes: event_bytes,
+                } if event_filename == filename
+                    && bytes.is_none_or(|bytes| *event_bytes == bytes) =>
+                {
+                    Some(resource_id.clone())
+                }
+                _ => None,
+            })
+    })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_session_upload_resource_received(
+    client: &omenbrowser_rs::chat::ChatClient,
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    filename: &str,
+) -> bool {
+    client.session(session_id).is_some_and(|session| {
+        session.status.starts_with("upload resource received:") && session.status.contains(filename)
+    })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_smoke_events_contain_decoded_event(
+    events: &[serde_json::Value],
+    event_name: &str,
+) -> bool {
+    events.iter().any(|entry| {
+        entry
+            .get("decoded")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|decoded| {
+                decoded.iter().any(|event| {
+                    event.get("event").and_then(serde_json::Value::as_str) == Some(event_name)
+                })
+            })
     })
 }
 
@@ -4395,7 +4740,7 @@ fn render_lxmf_smoke_send_summary(report: &serde_json::Value) -> Vec<String> {
 
 fn print_help() {
     println!(
-        "OMENbrowser_rs\n\nUSAGE:\n  omenbrowser_rs\n  omenbrowser_rs --version\n  omenbrowser_rs --desktop [--app-root <dir>]\n  omenbrowser_rs --tui [--app-root <dir>]\n  omenbrowser_rs --generate-native-identity <label> [--app-root <dir>] [--reticulum-config <dir>] [--output <file>] [--stdout]\n  omenbrowser_rs --native-startup [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-live-sequence <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--preflight-wait <ms>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-validate <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-preflight <destination:path> [--preflight-wait <ms>] [--send-lxmf-smoke <peer_hash>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--known-destinations <file>] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-smoke <destination:path> [--known-destinations <file>] [--generate-known-destinations-fixture <file>] [--warm-path] [--path-wait <secs>] [--live] [--fetch-page] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --omenchat-smoke <destination_hash> [--omenchat-room lobby] [--omenchat-message text] [--path-wait <secs>] [--known-destinations <file>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--network-name name] [--passphrase secret] [--output <file>] [--stdout]\n  omenbrowser_rs --lxmf-interop [--send-lxmf-smoke <peer_hash>] [--lxmf-wait <secs>] [--backend reticulum] [--identity <file>] [--tcp-client host:port] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n\nOPTIONS:\n  --desktop, --iced            Open the iced desktop UI; this is the default when desktop-ui is compiled\n  --tui, --terminal            Open the legacy ratatui terminal UI when the tui feature is compiled\n  --version, -V                Print version and compiled feature summary\n  --generate-native-identity   Create and activate managed native Reticulum identity material; requires native-reticulum/native-network features\n  --native-startup             Start the configured runtime, collect status/interface data, then stop cleanly\n  --native-live-sequence       Run startup, preflight, live NomadNet validation, and optional LXMF interop into one JSON report\n  --native-validate            Run the live native NomadNet validation path: reticulum backend, path warmup, live probe, and fetch_page\n  --native-preflight, --preflight\n                               Validate native-network CLI inputs without starting live fetch or LXMF delivery\n  --preflight-wait <ms>        Runtime event wait for preflight transport startup; default is 250 ms\n  --native-smoke, --smoke-test  Run a non-TUI native-network smoke report for a NomadNet address\n  --omenchat-smoke <hash>      Open an OMENchat Link, join a room, send one message, and report JSON evidence\n  --known-destinations <file>  Preload a Python/RNS-compatible known_destinations cache for this command\n  --generate-known-destinations-fixture <file>\n                               Write a dev/test known_destinations fixture for the smoke destination and preload it\n  --warm-path, --request-path   Request/warm the destination path before probing; default wait is 5 seconds\n  --path-wait <secs>           Set warm-path event wait seconds and enable path warmup\n  --live                       Include the explicit live page probe step\n  --fetch-page, --live-fetch   Also call the normal runtime fetch_page path and include response metadata\n  --send-lxmf-smoke <peer_hash>\n                               Explicitly send a labeled native LXMF smoke-test message when readiness passes\n  --lxmf-interop               Announce local lxmf.delivery and wait up to 10s for LXMF/proof events; can be used without --native-smoke\n  --lxmf-wait <secs>           Announce local lxmf.delivery and wait this many seconds for LXMF/proof events\n  --app-root <dir>             Temporarily use this app data root for frontend and smoke command files\n  --backend <name>             Temporarily use auto, mock, or reticulum for this command\n  --identity <file>            Temporarily attach this identity path for this command\n  --reticulum-config <dir>     Temporarily use this Reticulum config directory\n  --tcp-client <host:port>     Temporarily use a TCP client interface endpoint\n  --network-name <name>        Set IFAC network name for the temporary TCP client\n  --passphrase <secret>        Set IFAC passphrase for the temporary TCP client\n  --output, -o <file>          Write report JSON to this path\n  --stdout                     Print report JSON to stdout\n  --suggest-shell              Include shell-escaped suggested command lines in stderr summaries and bundle summary.txt\n  --bundle-report <dir>        Write report.json, summary.txt, command.json, environment.json, and logs.json under a timestamped directory\n  --help, -h                   Show this help\n\nWithout --output, --stdout, or --bundle-report, reports are written under the diagnostics directory. CLI overrides are command-local and do not rewrite saved settings, except --generate-native-identity activates the new managed identity."
+        "OMENbrowser_rs\n\nUSAGE:\n  omenbrowser_rs\n  omenbrowser_rs --version\n  omenbrowser_rs --desktop [--app-root <dir>]\n  omenbrowser_rs --tui [--app-root <dir>]\n  omenbrowser_rs --generate-native-identity <label> [--app-root <dir>] [--reticulum-config <dir>] [--output <file>] [--stdout]\n  omenbrowser_rs --native-startup [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-live-sequence <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--preflight-wait <ms>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-validate <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-preflight <destination:path> [--preflight-wait <ms>] [--send-lxmf-smoke <peer_hash>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--known-destinations <file>] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-smoke <destination:path> [--known-destinations <file>] [--generate-known-destinations-fixture <file>] [--warm-path] [--path-wait <secs>] [--live] [--fetch-page] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --omenchat-smoke <destination_hash> [--omenchat-room lobby] [--omenchat-message text] [--omenchat-upload-file <file>] [--omenchat-fetch-upload <filename>] [--omenchat-fetch-upload-bytes <n>] [--path-wait <secs>] [--known-destinations <file>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--network-name name] [--passphrase secret] [--output <file>] [--stdout]\n  omenbrowser_rs --lxmf-interop [--send-lxmf-smoke <peer_hash>] [--lxmf-wait <secs>] [--backend reticulum] [--identity <file>] [--tcp-client host:port] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n\nOPTIONS:\n  --desktop, --iced            Open the iced desktop UI; this is the default when desktop-ui is compiled\n  --tui, --terminal            Open the legacy ratatui terminal UI when the tui feature is compiled\n  --version, -V                Print version and compiled feature summary\n  --generate-native-identity   Create and activate managed native Reticulum identity material; requires native-reticulum/native-network features\n  --native-startup             Start the configured runtime, collect status/interface data, then stop cleanly\n  --native-live-sequence       Run startup, preflight, live NomadNet validation, and optional LXMF interop into one JSON report\n  --native-validate            Run the live native NomadNet validation path: reticulum backend, path warmup, live probe, and fetch_page\n  --native-preflight, --preflight\n                               Validate native-network CLI inputs without starting live fetch or LXMF delivery\n  --preflight-wait <ms>        Runtime event wait for preflight transport startup; default is 250 ms\n  --native-smoke, --smoke-test  Run a non-TUI native-network smoke report for a NomadNet address\n  --omenchat-smoke <hash>      Open an OMENchat Link, join a room, send one message, optionally upload/fetch a file or fetch an existing room upload, and report JSON evidence\n  --known-destinations <file>  Preload a Python/RNS-compatible known_destinations cache for this command\n  --generate-known-destinations-fixture <file>\n                               Write a dev/test known_destinations fixture for the smoke destination and preload it\n  --warm-path, --request-path   Request/warm the destination path before probing; default wait is 5 seconds\n  --path-wait <secs>           Set warm-path event wait seconds and enable path warmup\n  --live                       Include the explicit live page probe step\n  --fetch-page, --live-fetch   Also call the normal runtime fetch_page path and include response metadata\n  --send-lxmf-smoke <peer_hash>\n                               Explicitly send a labeled native LXMF smoke-test message when readiness passes\n  --lxmf-interop               Announce local lxmf.delivery and wait up to 10s for LXMF/proof events; can be used without --native-smoke\n  --lxmf-wait <secs>           Announce local lxmf.delivery and wait this many seconds for LXMF/proof events\n  --app-root <dir>             Temporarily use this app data root for frontend and smoke command files\n  --backend <name>             Temporarily use auto, mock, or reticulum for this command\n  --identity <file>            Temporarily attach this identity path for this command\n  --reticulum-config <dir>     Temporarily use this Reticulum config directory\n  --tcp-client <host:port>     Temporarily use a TCP client interface endpoint\n  --network-name <name>        Set IFAC network name for the temporary TCP client\n  --passphrase <secret>        Set IFAC passphrase for the temporary TCP client\n  --output, -o <file>          Write report JSON to this path\n  --stdout                     Print report JSON to stdout\n  --suggest-shell              Include shell-escaped suggested command lines in stderr summaries and bundle summary.txt\n  --bundle-report <dir>        Write report.json, summary.txt, command.json, environment.json, and logs.json under a timestamped directory\n  --help, -h                   Show this help\n\nWithout --output, --stdout, or --bundle-report, reports are written under the diagnostics directory. CLI overrides are command-local and do not rewrite saved settings, except --generate-native-identity activates the new managed identity."
     );
 }
 
@@ -4411,6 +4756,10 @@ fn compiled_feature_summary() -> String {
     [
         ("desktop-ui", cfg!(feature = "desktop-ui")),
         ("tui", cfg!(feature = "tui")),
+        (
+            "chat-client-reticulum",
+            cfg!(feature = "chat-client-reticulum"),
+        ),
         ("chat-client-rns", cfg!(feature = "chat-client-rns")),
         (
             "chat-client-rns-clean",
@@ -4448,6 +4797,7 @@ mod tests {
             CliCommand::Version
         );
         let features = compiled_feature_summary();
+        assert!(features.contains("chat-client-reticulum:"));
         assert!(features.contains("chat-client-rns:"));
         assert!(features.contains("chat-client-rns-clean:"));
         assert!(!features.contains("chat-client-rns-legacy:"));
@@ -4467,27 +4817,27 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_frontend_app_root_for_alpha_runs() {
+    fn cli_parses_frontend_app_root_for_isolated_runs() {
         assert_eq!(
             CliCommand::parse([
                 "--desktop".to_string(),
                 "--app-root".to_string(),
-                "/tmp/omenbrowser-alpha".to_string(),
+                "/tmp/omenbrowser-test".to_string(),
             ])
             .expect("parse"),
             CliCommand::Desktop {
-                app_root: Some(PathBuf::from("/tmp/omenbrowser-alpha")),
+                app_root: Some(PathBuf::from("/tmp/omenbrowser-test")),
             }
         );
         assert_eq!(
             CliCommand::parse([
                 "--tui".to_string(),
                 "--app-root".to_string(),
-                "/tmp/omenbrowser-alpha".to_string(),
+                "/tmp/omenbrowser-test".to_string(),
             ])
             .expect("parse"),
             CliCommand::Tui {
-                app_root: Some(PathBuf::from("/tmp/omenbrowser-alpha")),
+                app_root: Some(PathBuf::from("/tmp/omenbrowser-test")),
             }
         );
     }
@@ -4519,6 +4869,9 @@ mod tests {
                 destination: FIXTURE_DESTINATION_HASH.into(),
                 room: "lobby".into(),
                 message: "hello smoke".into(),
+                upload_file: None,
+                fetch_upload_filename: None,
+                fetch_upload_bytes: None,
                 link_timeout_secs: 15,
                 response_wait_secs: 10,
                 warmup: Some(SmokePathWarmup { wait_secs: 3 }),
@@ -5322,6 +5675,7 @@ mod tests {
         assert!(text.contains("\"20\""));
     }
 
+    #[cfg(feature = "native-reticulum")]
     #[tokio::test]
     async fn native_preflight_transport_startup_stage_reports_shutdown() {
         let root = std::env::temp_dir().join(format!(

@@ -1,6 +1,6 @@
 [package]
 name = "omenbrowser_rs"
-version = "0.6.0"
+version = "0.6.0-1"
 edition = "2021"
 description = "OMENbrowser Rust Desktop/TUI"
 license = "AGPL-3.0-or-later"
@@ -12,6 +12,14 @@ readme = "README.md"
 default = ["mock-runtime", "desktop-ui", "chat-client"]
 mock-runtime = []
 desktop-ui = ["dep:iced", "dep:rfd"]
+desktop-svg = ["desktop-ui", "iced/svg"]
+desktop-qr = ["desktop-ui", "iced/qr_code"]
+desktop-markdown = ["desktop-ui", "iced/markdown"]
+desktop-ui-test = ["desktop-ui", "iced/debug", "iced/tester", "iced/time-travel"]
+desktop-widgets = ["desktop-ui", "dep:iced_aw", "dep:iced_fonts"]
+desktop-dnd = ["desktop-widgets", "dep:iced_drop"]
+desktop-animations = ["desktop-ui", "dep:iced_anim"]
+desktop-tables = ["desktop-ui", "dep:iced_table"]
 tui = ["dep:crossterm", "dep:ratatui"]
 native-reticulum = ["dep:reticulum-rs", "dep:rns_transport", "dep:rand_core", "dep:rmpv", "dep:hkdf", "dep:tokio-util"]
 # Removed legacy rns-net compatibility feature names are retained only so stale
@@ -28,8 +36,9 @@ live-lxmf = ["native-lxmf"]
 live-network = ["native-network"]
 legacy-live-rns-net = ["experimental-rns-net-stack"]
 chat-client = ["desktop-ui", "dep:bzip2", "dep:iced_gif", "dep:reqwest", "dep:rmpv", "dep:rusqlite"]
+chat-client-reticulum = ["chat-client-rns-clean"]
 chat-client-rns-clean = ["chat-client", "native-network"]
-chat-client-rns = ["chat-client-rns-clean"]
+chat-client-rns = ["chat-client-reticulum"]
 chat-client-rns-legacy = ["chat-client", "experimental-rns-net-stack"]
 chat-client-lxmf = ["chat-client", "native-lxmf-sdk"]
 chat-client-popout = ["chat-client"]
@@ -40,8 +49,13 @@ async-trait = "0.1"
 bzip2 = { version = "0.5.2", optional = true }
 crossterm = { version = "0.27", optional = true }
 directories = "5.0"
-iced = { version = "0.13.1", optional = true, default-features = false, features = ["canvas", "image", "tokio", "wgpu"] }
-iced_gif = { version = "0.13", optional = true }
+iced = { version = "0.14", optional = true, default-features = false, features = ["canvas", "image", "tokio", "wgpu", "x11", "wayland"] }
+iced_anim = { version = "0.3.1", optional = true, features = ["widgets"] }
+iced_aw = { version = "0.14.1", optional = true, default-features = false, features = ["badge", "card", "menu", "tabs", "tab_bar", "sidebar", "selection_list", "number_input", "labeled_frame"] }
+iced_drop = { version = "0.2.37", optional = true, features = ["helpers"] }
+iced_fonts = { version = "0.3.0", optional = true, default-features = false, features = ["lucide", "nerd", "codicon"] }
+iced_gif = { version = "0.14", optional = true }
+iced_table = { version = "0.14.0", optional = true }
 hkdf = { version = "0.12", optional = true }
 lxmf = { version = "0.6.0", optional = true, default-features = false, features = ["wire"] }
 ratatui = { version = "0.26", optional = true }

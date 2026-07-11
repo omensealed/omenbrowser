@@ -8,24 +8,24 @@ to share the same identity and storage.
 Recommended local test roots:
 
 ```text
-/tmp/omenbrowser-rs-alpha
-/tmp/omenbrowser-rs-alpha-2
-/tmp/omenchatd-alpha
+/tmp/omenbrowser-rs-test
+/tmp/omenbrowser-rs-test-2
+/tmp/omenchatd-test
 ```
 
 Check root isolation:
 
 ```bash
-bash scripts/alpha-root-sanity.sh \
-  --browser-root /tmp/omenbrowser-rs-alpha \
-  --browser-root-2 /tmp/omenbrowser-rs-alpha-2 \
-  --server-home /tmp/omenchatd-alpha
+bash scripts/release-root-sanity.sh \
+  --browser-root /tmp/omenbrowser-rs-test \
+  --browser-root-2 /tmp/omenbrowser-rs-test-2 \
+  --server-home /tmp/omenchatd-test
 ```
 
 ## Quick Test Gate
 
 ```bash
-bash scripts/alpha-check.sh quick
+bash scripts/release-check.sh quick
 ```
 
 This runs the fast repository checks used before sharing a build.
@@ -35,13 +35,13 @@ This runs the fast repository checks used before sharing a build.
 Local single-client smoke:
 
 ```bash
-bash scripts/alpha-omenchat-smoke.sh
+bash scripts/release-omenchat-smoke.sh
 ```
 
 Two-client recent-history smoke:
 
 ```bash
-bash scripts/alpha-omenchat-smoke.sh --multi-client
+bash scripts/release-omenchat-smoke.sh --multi-client
 ```
 
 Expected result:
@@ -56,10 +56,10 @@ reason: OMENchat Link opened, room joined, and message echo was observed
 Collect a redacted report bundle:
 
 ```bash
-bash scripts/alpha-collect.sh \
-  --browser-root /tmp/omenbrowser-rs-alpha \
-  --browser-root-2 /tmp/omenbrowser-rs-alpha-2 \
-  --server-home /tmp/omenchatd-alpha
+bash scripts/release-collect.sh \
+  --browser-root /tmp/omenbrowser-rs-test \
+  --browser-root-2 /tmp/omenbrowser-rs-test-2 \
+  --server-home /tmp/omenchatd-test
 ```
 
 Review the created directory before sharing it.

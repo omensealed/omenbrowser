@@ -959,8 +959,8 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_alpha_runbook_server_commands() {
-        let home = PathBuf::from("/tmp/omenchatd-alpha");
+    fn cli_parses_release_runbook_server_commands() {
+        let home = PathBuf::from("/tmp/omenchatd-test");
 
         assert_eq!(
             CliCommand::parse([
@@ -1041,11 +1041,11 @@ mod tests {
                 "--home".to_string(),
                 home.display().to_string(),
                 "--name".to_string(),
-                "Alpha OMENchat".to_string(),
+                "Release OMENchat".to_string(),
                 "--operator-label".to_string(),
-                "alpha-admin".to_string(),
+                "release-admin".to_string(),
                 "--motd".to_string(),
-                "Alpha launch message".to_string(),
+                "Release launch message".to_string(),
                 "--announce-interval".to_string(),
                 "360".to_string(),
                 "--max-message-bytes".to_string(),
@@ -1068,9 +1068,9 @@ mod tests {
                     tcp_client: None,
                 },
                 ConfigSetOptions {
-                    name: Some("Alpha OMENchat".into()),
-                    operator_label: Some("alpha-admin".into()),
-                    motd: Some("Alpha launch message".into()),
+                    name: Some("Release OMENchat".into()),
+                    operator_label: Some("release-admin".into()),
+                    motd: Some("Release launch message".into()),
                     announce_interval_minutes: Some(360),
                     upload_quota_bytes: None,
                     upload_max_file_bytes: None,

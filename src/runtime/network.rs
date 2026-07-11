@@ -481,6 +481,48 @@ pub struct OmenChatResourceData {
     pub metadata: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceProgressEvent {
+    pub transfer_id: String,
+    pub received: u64,
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceLifecycleEvent {
+    pub transfer_id: String,
+    pub state: ResourceLifecycleState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceLifecycleState {
+    Offered,
+    Complete,
+    Failed,
+    Cancelled,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LxmfCorrelationRecovery {
     pub direct_recovered: usize,

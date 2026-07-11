@@ -63,4 +63,8 @@ Thumbs.db
 /docs/23-codex-prompts.md
 /docs/CODEX_HANDOFF.md
 /docs/99-implementation-notes.md
+/docs/IMPLEMENTATION_NOTES.md
+/docs/*_PLAN.md
+/docs/*_MATRIX.md
+/docs/SMOKE_TEST_REPORT.md
 /AGENTS.md

@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod event;
+pub mod facade;
 #[cfg(feature = "native-reticulum")]
 pub mod native;
 #[cfg(feature = "native-lxmf")]
@@ -14,6 +15,10 @@ pub use event::{
     PropagationSyncEventStatus, PropagationSyncStage, RuntimeBusEvent, TickKind,
 };
 #[allow(unused_imports)]
+pub use facade::{
+    map_lxmf_status_to_app_state, LxmfAppMessageState, RuntimeCapabilities, RuntimeFacadeEvent,
+};
+#[allow(unused_imports)]
 pub use network::{
     AnnouncePayload, CancellationToken, DestinationId, DestinationInspection, DirectoryCandidate,
     InterfaceStats, LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, LxmfDeliveryProbeReport,
@@ -21,5 +26,6 @@ pub use network::{
     NetworkRuntime, NetworkSnapshot, NetworkStatus, OmenChatLinkClosed, OmenChatLinkData,
     OmenChatLinkOpened, OmenChatResourceData, OutboundDeliveryState, OutboundStatus,
     PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep, PropagationDebugSnapshot,
-    PropagationMessageSnapshot, PropagationStatus, RuntimeBackendName, RuntimeEvent, RuntimeStatus,
+    PropagationMessageSnapshot, PropagationStatus, ResourceLifecycleEvent, ResourceLifecycleState,
+    ResourceProgressEvent, RuntimeBackendName, RuntimeEvent, RuntimeStatus,
 };

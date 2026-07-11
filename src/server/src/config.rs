@@ -1050,8 +1050,8 @@ mod tests {
     }
 
     #[test]
-    fn load_or_default_recovers_mistaken_alpha_upload_quota_default() {
-        let root = temp_root("recover-alpha-upload-quota");
+    fn load_or_default_recovers_mistaken_upload_quota_default() {
+        let root = temp_root("recover-upload-quota");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("root");
         std::fs::write(

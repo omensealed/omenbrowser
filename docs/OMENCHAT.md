@@ -19,7 +19,7 @@ Default server home:
 Typical isolated test home:
 
 ```text
-/tmp/omenchatd-alpha
+/tmp/omenchatd-test
 ```
 
 The server home contains identity material, Reticulum config/storage, the SQLite
@@ -28,24 +28,24 @@ database, logs, uploads, and the NomadNet portal page.
 ## Server Commands
 
 ```bash
-omenchatd init --home /tmp/omenchatd-alpha
-omenchatd status --home /tmp/omenchatd-alpha
-omenchatd doctor --home /tmp/omenchatd-alpha
-omenchatd tui --home /tmp/omenchatd-alpha
-omenchatd run --home /tmp/omenchatd-alpha
+omenchatd init --home /tmp/omenchatd-test
+omenchatd status --home /tmp/omenchatd-test
+omenchatd doctor --home /tmp/omenchatd-test
+omenchatd tui --home /tmp/omenchatd-test
+omenchatd run --home /tmp/omenchatd-test
 ```
 
 Add a TCP gateway:
 
 ```bash
-omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-alpha
+omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-test
 ```
 
 For IFAC-protected gateways:
 
 ```bash
 omenchatd interfaces tcp-client <gateway-host:port> \
-  --home /tmp/omenchatd-alpha \
+  --home /tmp/omenchatd-test \
   --network-name <network-name> \
   --passphrase <passphrase>
 ```

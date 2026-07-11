@@ -44,9 +44,10 @@ Current browser feature intent:
   `chat-client-rns-legacy`: removed legacy feature names retained only to make
   stale commands fail clearly. They no longer pull `rns-net`, `rns-core`, or
   `rns-crypto`.
-- `chat-client-rns`: convenience alias for the current clean live path.
-- `chat-client-rns-clean`: explicit browser/client build for the clean
+- `chat-client-reticulum`: preferred browser/client build for the clean
   reticulum-rs 0.6 path.
+- `chat-client-rns` and `chat-client-rns-clean`: compatibility aliases for the
+  current clean live path.
 
 ## Current Findings
 
@@ -366,7 +367,7 @@ Latest verification after the feature split:
 - `cargo test --no-default-features --features native-network native_reticulum06_page_fetch_probe -- --nocapture`
 - `cargo test --no-default-features --features native-network reticulum06_capability_report -- --nocapture`
 - `cargo test --no-default-features --features native-network reticulum06_link_request_adapter -- --nocapture`
-- `bash scripts/alpha-check.sh quick`
+- `bash scripts/release-check.sh quick`
 
 All passed.
 
@@ -471,7 +472,7 @@ Verification:
 - `cargo check`
 - `cargo test --features chat-client-rns-clean app::tests::app_persists_browser_and_conversation_session_descriptors_to_settings -- --nocapture`
 - `cargo test --manifest-path src/server/Cargo.toml --features live-reticulum reticulum -- --nocapture`
-- `bash scripts/alpha-omenchat-smoke.sh --browser-bin target/debug/omenbrowser_rs --server-bin src/server/target/debug/omenchatd --tcp 127.0.0.1:42424 --path-wait 75 --multi-client --keep-roots --out /tmp/omenbrowser-rs-clean-smoke-route-pref`
+- `bash scripts/release-omenchat-smoke.sh --browser-bin target/debug/omenbrowser_rs --server-bin src/server/target/debug/omenchatd --tcp 127.0.0.1:42424 --path-wait 75 --multi-client --keep-roots --out /tmp/omenbrowser-rs-clean-smoke-route-pref`
 
 ## 2026-07-04 Clean OMENchat Local Gateway Smoke
 
@@ -601,7 +602,7 @@ Follow-up IFAC/private-gateway smoke result:
   TCP client plus two isolated OMENbrowser TCP clients attached to the same
   configured gateway. Both clients opened the OMENchat link, joined the room,
   and observed message echo.
-- `scripts/alpha-omenchat-smoke.sh` now has `--server-tcp-client`,
+- `scripts/release-omenchat-smoke.sh` now has `--server-tcp-client`,
   `--network-name`, and `--passphrase` options so this external-gateway topology
   remains easy to retest. Prefer `OMENCHAT_PASSPHRASE` for real secrets.
 

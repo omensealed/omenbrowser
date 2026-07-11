@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -5,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rand_core::OsRng;
+use rmpv::Value;
 use rns_transport::destination::link::LinkEvent;
 use rns_transport::destination::{DestinationName, SingleInputDestination};
 use rns_transport::hash::AddressHash;
@@ -12,6 +14,7 @@ use rns_transport::identity::PrivateIdentity;
 use rns_transport::resource::ResourceEventKind;
 use rns_transport::transport::{ReceivedPayloadMode, Transport, TransportConfig};
 use rns_transport::PacketContext;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use crate::config::ServerConfig;
@@ -504,7 +507,7 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     spawn_link_event_bridge(transport.clone(), event_tx.clone(), config.log_path());
     spawn_received_data_bridge(transport.clone(), event_tx.clone(), config.log_path());
-    spawn_resource_event_bridge(transport.clone(), event_tx, config.log_path());
+    spawn_resource_event_bridge(transport.clone(), event_tx, config.clone());
 
     let store = OmenchatStore::open(&config.database_path)?;
     let engine =
@@ -776,8 +779,9 @@ fn spawn_received_data_bridge(
 fn spawn_resource_event_bridge(
     transport: Arc<Transport>,
     event_tx: mpsc::UnboundedSender<OmenchatLinkEvent>,
-    log_path: std::path::PathBuf,
+    config: ServerConfig,
 ) {
+    let log_path = config.log_path();
     let mut events = transport.resource_events();
     tokio::spawn(async move {
         loop {
@@ -786,6 +790,72 @@ fn spawn_resource_event_bridge(
                     let ResourceEventKind::Complete(complete) = event.kind else {
                         continue;
                     };
+                    if complete.is_request {
+                        let Some(request_id) = complete.request_id.clone() else {
+                            append_server_log_path(
+                                &log_path,
+                                format!(
+                                    "reticulum-rs NomadNet resource request ignored link={} hash={} missing request_id",
+                                    event.link_id, event.hash
+                                ),
+                            );
+                            continue;
+                        };
+                        let Some(request_path) =
+                            nomadnet_request_path_for_payload(&config, complete.data.as_slice())
+                        else {
+                            append_server_log_path(
+                                &log_path,
+                                format!(
+                                    "reticulum-rs NomadNet resource request ignored link={} hash={} unknown path hash bytes={}",
+                                    event.link_id,
+                                    event.hash,
+                                    complete.data.len()
+                                ),
+                            );
+                            continue;
+                        };
+                        match nomadnet_response_resource_payload(&config, &request_id) {
+                            Ok(payload) => {
+                                let response_bytes = payload.len();
+                                match transport
+                                    .send_response_resource(
+                                        &event.link_id,
+                                        request_id,
+                                        payload,
+                                        None,
+                                    )
+                                    .await
+                                {
+                                Ok(response_hash) => append_server_log_path(
+                                    &log_path,
+                                    format!(
+                                        "reticulum-rs NomadNet response resource sent link={} request_path={} response_hash={} bytes={}",
+                                        event.link_id,
+                                        request_path,
+                                        response_hash,
+                                        response_bytes
+                                    ),
+                                ),
+                                Err(error) => append_server_log_path(
+                                    &log_path,
+                                    format!(
+                                        "reticulum-rs NomadNet response resource failed link={} request_path={} error={error:?}",
+                                        event.link_id, request_path
+                                    ),
+                                ),
+                                }
+                            }
+                            Err(error) => append_server_log_path(
+                                &log_path,
+                                format!(
+                                    "reticulum-rs NomadNet response payload failed link={} request_path={} error={error}",
+                                    event.link_id, request_path
+                                ),
+                            ),
+                        }
+                        continue;
+                    }
                     let Some(metadata) = complete.metadata.clone() else {
                         continue;
                     };
@@ -1155,6 +1225,59 @@ fn decoded_frame_summary(data: &[u8]) -> String {
     }
 }
 
+fn nomadnet_request_path_for_payload(config: &ServerConfig, payload: &[u8]) -> Option<String> {
+    let value = unpack_msgpack_value(payload).ok()?;
+    let Value::Array(items) = value else {
+        return None;
+    };
+    let path_hash = match items.get(1)? {
+        Value::Binary(bytes) if bytes.len() == 16 => {
+            let mut hash = [0u8; 16];
+            hash.copy_from_slice(bytes);
+            hash
+        }
+        _ => return None,
+    };
+    crate::config::nomadnet_portal_paths(config)
+        .into_iter()
+        .find(|path| truncated_sha256(path.as_bytes()) == path_hash)
+}
+
+fn nomadnet_response_resource_payload(
+    config: &ServerConfig,
+    request_id: &[u8],
+) -> ServerResult<Vec<u8>> {
+    if request_id.len() != 16 {
+        return Err(ServerError::Message(
+            "NomadNet request resource id must be 16 bytes".into(),
+        ));
+    }
+    let body = std::fs::read(config.nomadnet_index_page_path())?;
+    pack_msgpack_value(&Value::Array(vec![
+        Value::Binary(request_id.to_vec()),
+        Value::Binary(body),
+    ]))
+}
+
+fn unpack_msgpack_value(bytes: &[u8]) -> ServerResult<Value> {
+    rmpv::decode::read_value(&mut Cursor::new(bytes))
+        .map_err(|_| ServerError::Message("failed to decode NomadNet request msgpack".into()))
+}
+
+fn pack_msgpack_value(value: &Value) -> ServerResult<Vec<u8>> {
+    let mut packed = Vec::new();
+    rmpv::encode::write_value(&mut packed, value)
+        .map_err(|_| ServerError::Message("failed to encode NomadNet response msgpack".into()))?;
+    Ok(packed)
+}
+
+fn truncated_sha256(bytes: &[u8]) -> [u8; 16] {
+    let digest = Sha256::digest(bytes);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
 fn unix_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1164,4 +1287,62 @@ fn unix_timestamp() -> i64 {
 
 fn hex_lower(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(name: &str) -> ServerConfig {
+        ServerConfig::for_root(std::env::temp_dir().join(format!(
+            "omenchatd-reticulum-live-{name}-{}",
+            std::process::id()
+        )))
+    }
+
+    fn pack_request_for_path(path: &str) -> Vec<u8> {
+        pack_msgpack_value(&Value::Array(vec![
+            Value::F64(1.0),
+            Value::Binary(truncated_sha256(path.as_bytes()).to_vec()),
+            Value::Nil,
+        ]))
+        .expect("pack request")
+    }
+
+    #[test]
+    fn nomadnet_resource_request_matches_configured_portal_paths() {
+        let config = test_config("request-match");
+
+        assert_eq!(
+            nomadnet_request_path_for_payload(&config, &pack_request_for_path("/page/index.mu")),
+            Some("/page/index.mu".into())
+        );
+        assert_eq!(
+            nomadnet_request_path_for_payload(&config, &pack_request_for_path("/")),
+            Some("/".into())
+        );
+        assert_eq!(
+            nomadnet_request_path_for_payload(&config, &pack_request_for_path("/missing.mu")),
+            None
+        );
+    }
+
+    #[test]
+    fn nomadnet_response_resource_payload_roundtrips_request_id_and_body() {
+        let config = test_config("response-payload");
+        crate::config::init_files(&config).expect("init");
+        std::fs::write(config.nomadnet_index_page_path(), b">Smoke\nPage").expect("write page");
+
+        let request_id = [0x42u8; 16];
+        let payload = nomadnet_response_resource_payload(&config, &request_id).expect("payload");
+        let value = unpack_msgpack_value(&payload).expect("decode");
+        let Value::Array(items) = value else {
+            panic!("response must be an array");
+        };
+
+        assert_eq!(items[0], Value::Binary(request_id.to_vec()));
+        assert_eq!(items[1], Value::Binary(b">Smoke\nPage".to_vec()));
+
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
 }

@@ -35,7 +35,7 @@
 Use:
 
 ```bash
-bash scripts/alpha-collect.sh \
+bash scripts/release-collect.sh \
   --browser-root <browser-root> \
   --server-home <server-home>
 ```

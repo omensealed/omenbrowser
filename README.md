@@ -5,19 +5,12 @@ Micron, MicronPlus, and OMENchat. LXST voice is unsupported, for now.
 
 Repository: <https://github.com/omensealed/omenbrowser>
 
-This repository is in public alpha. It is a native Rust browser/client
-with pane management, isolated identities, native Reticulum/LXMF integration,
-and a built-in OMENchat client.
+This is a public Rust browser/client with pane management, isolated identities,
+native Reticulum/LXMF integration, and a built-in OMENchat client.
 
-Project was "vibe coded" not only as a test for my own curiosity with vibe coding consoles
-but if it could truly be guided to relative "quality software" in the hands of somebody
-who's been doing it for quite some time and push projects that normally take a long time
-to personally develop and thought this relatively "new" landscape on RNS and software dev
-something like this is where I'd begin testing the capability of codex.
-
-Rust was chosen for a bit of "guardrail" for the AI to chew on while developing due to the
-nature of the Rust compiler itself and what Rust offers to keep things "better". 
-The project will expand when Rust crates for RNS expand. I have no interest in the "internals" of this and intend to only stay within "desktop browser" area. I'll eventually pass some docs to the Columba dev and he can or decide not to implement a OMENchat client, which will be available in this repo when I get to the "how to" part of that. 
+The project focuses on practical Reticulum user workflows: NomadNet browsing,
+LXMF direct/propagated messaging, OMENchat rooms, interface management,
+diagnostics, and Micron/MicronPlus rendering in one desktop application.
 
 ## Screenshots
 
@@ -42,9 +35,9 @@ Click a thumbnail to open the full-size workspace screenshot.
   Micron/MicronPlus rendering, and the OMENchat plugin client.
 - `src/server`: standalone `omenchatd` server crate. It is intentionally
   independent from the browser and owns its own storage root.
-- `TESTERS.md`: concise public-alpha tester sheet included at the root of the
-  packaged archive.
-- `docs/TESTING.md`: practical alpha tester path.
+- `TESTERS.md`: concise tester sheet included at the root of the packaged
+  archive.
+- `docs/TESTING.md`: practical tester path.
 
 ## Identity And Storage Safety
 
@@ -63,17 +56,17 @@ Default server data lives under:
 For parallel testing, use separate browser roots:
 
 ```bash
-./target/release/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-alpha
-./target/release/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-alpha-2
+./target/release/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test
+./target/release/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test-2
 ```
 
 Check root isolation before a two-client run:
 
 ```bash
-bash scripts/alpha-root-sanity.sh \
-  --browser-root /tmp/omenbrowser-rs-alpha \
-  --browser-root-2 /tmp/omenbrowser-rs-alpha-2 \
-  --server-home /tmp/omenchatd-alpha
+bash scripts/release-root-sanity.sh \
+  --browser-root /tmp/omenbrowser-rs-test \
+  --browser-root-2 /tmp/omenbrowser-rs-test-2 \
+  --server-home /tmp/omenchatd-test
 ```
 
 Do not point test clients at the same app root unless you intentionally want them
@@ -94,7 +87,7 @@ Packaged releases publish:
 
 - `omenbrowser-rs_<version>_amd64.deb` for Debian-family systems.
 - `OMENbrowser_rs-<version>-x86_64.AppImage` for general Linux testing.
-- `OMENbrowser_rs-alpha-latest.tar.gz` for testers who prefer unpacked
+- `OMENbrowser_rs-<version>.tar.gz` for testers who prefer unpacked
   binaries and helper scripts.
 - Matching `.sha256` checksum files.
 
@@ -144,13 +137,15 @@ path.
 These commands are for developers working from a source checkout.
 
 Browser with desktop UI, native network, and OMENchat client using the current
-live-tested alpha path:
+live-tested path:
 
 ```bash
-cargo build --release --features chat-client-rns-clean
+cargo build --release --features chat-client-reticulum
 ```
 
-`chat-client-rns-clean` is the live-tested clean Reticulum 0.6 path. It builds
+`chat-client-reticulum` is the preferred feature name for this live-tested
+clean Reticulum 0.6 path. `chat-client-rns-clean` remains as a compatibility
+alias for older local commands. It builds
 the browser against `reticulum-rs`, `reticulum-rs-transport`, and `lxmf`
 without pulling the old `rns-net` compatibility stack into normal native
 networking builds.
@@ -161,32 +156,30 @@ Standalone OMENchat server:
 cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
 ```
 
-Public alpha bundle with both binaries and starter docs:
+Release bundle with both binaries and starter docs:
 
 ```bash
-bash scripts/alpha-package.sh
+bash scripts/release-package.sh
 ```
 
 The package helper also runs `--help` on the staged browser and server binaries
 and writes checksums plus package metadata into the bundle. It also creates a
 temporary isolated `omenchatd` home to verify `init` and `status`, then creates
 a timestamped `.tar.gz` archive and matching `.sha256` file next to the staged
-directory. The same archive is copied to `OMENbrowser_rs-alpha-latest.tar.gz`
-with a matching checksum and `OMENbrowser_rs-alpha-latest.txt` manifest for
-tester handoff.
-The bundle includes `TESTERS.md`, `scripts/alpha-collect.sh` so testers can
+directory. A versioned latest copy and manifest are written for release upload.
+The bundle includes `TESTERS.md`, `scripts/release-collect.sh` so testers can
 create redacted issue bundles without cloning this repository, and
-`scripts/alpha-omenchat-smoke.sh` for a local isolated server/client OMENchat
+`scripts/release-omenchat-smoke.sh` for a local isolated server/client OMENchat
 smoke before live network testing. It also includes
 `scripts/install-omenchatd-user-service.sh` and a systemd user-service template
 for testers who want `omenchatd` to run as a user service after manual gateway
 setup.
 
-Optional combined alpha installer for local launchers and, if requested, the
+Optional combined local installer for launchers and, if requested, the
 `omenchatd` user service:
 
 ```bash
-bash scripts/install-alpha.sh
+bash scripts/install-release.sh
 ```
 
 The installer preserves browser roots, identities, Reticulum storage, messages,
@@ -202,16 +195,16 @@ bash scripts/package-appimage.sh dist
 See [packaging/README.md](packaging/README.md) for package outputs and
 requirements. The AppImage helper requires `appimagetool`.
 
-If you are reading this from an unpacked alpha archive, use the packaged
+If you are reading this from an unpacked release archive, use the packaged
 binaries instead of source-tree build paths:
 
 ```bash
-./bin/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-alpha
-./bin/omenchatd init --home /tmp/omenchatd-alpha
-./bin/omenchatd tui --home /tmp/omenchatd-alpha
+./bin/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test
+./bin/omenchatd init --home /tmp/omenchatd-test
+./bin/omenchatd tui --home /tmp/omenchatd-test
 ```
 
-Inside the package, `TESTERS.md` and `ALPHA-START.txt` are the fastest paths.
+Inside the package, `TESTERS.md` and `START.txt` are the fastest paths.
 The `target/release/...` and `src/server/target/release/...` commands below are
 for running from this source tree.
 
@@ -223,11 +216,11 @@ Normal desktop launch:
 ./target/release/omenbrowser_rs --desktop
 ```
 
-Isolated alpha launch:
+Isolated test launch:
 
 ```bash
 ./target/release/omenbrowser_rs --version
-./target/release/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-alpha
+./target/release/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test
 ```
 
 ## Run omenchatd
@@ -236,13 +229,13 @@ Initialize an isolated server:
 
 ```bash
 ./src/server/target/release/omenchatd --version
-./src/server/target/release/omenchatd init --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd init --home /tmp/omenchatd-test
 ```
 
 Point the server at a backbone TCP gateway:
 
 ```bash
-./src/server/target/release/omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-test
 ```
 
 If the gateway uses IFAC/network credentials, include them when writing the
@@ -250,7 +243,7 @@ isolated Reticulum config:
 
 ```bash
 ./src/server/target/release/omenchatd interfaces tcp-client <gateway-host:port> \
-  --home /tmp/omenchatd-alpha \
+  --home /tmp/omenchatd-test \
   --network-name <network-name> \
   --passphrase <passphrase>
 ```
@@ -258,14 +251,14 @@ isolated Reticulum config:
 You can also set it during init/run:
 
 ```bash
-./src/server/target/release/omenchatd init --home /tmp/omenchatd-alpha --tcp-client <gateway-host:port>
-./src/server/target/release/omenchatd run --home /tmp/omenchatd-alpha --tcp-client <gateway-host:port>
+./src/server/target/release/omenchatd init --home /tmp/omenchatd-test --tcp-client <gateway-host:port>
+./src/server/target/release/omenchatd run --home /tmp/omenchatd-test --tcp-client <gateway-host:port>
 ```
 
 Start the admin TUI:
 
 ```bash
-./src/server/target/release/omenchatd tui --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd tui --home /tmp/omenchatd-test
 ```
 
 Inside the TUI, press `g` to start the live server, `c` for Monitoring, `l` for
@@ -279,7 +272,7 @@ the server rebuilds its live runtime and announces again. Check Monitoring or
 Run the live server:
 
 ```bash
-./src/server/target/release/omenchatd run --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd run --home /tmp/omenchatd-test
 ```
 
 Install an optional systemd user service:
@@ -287,7 +280,7 @@ Install an optional systemd user service:
 ```bash
 bash scripts/install-omenchatd-user-service.sh \
   --bin ./src/server/target/release/omenchatd \
-  --home /tmp/omenchatd-alpha
+  --home /tmp/omenchatd-test
 ```
 
 Remove only the user service while preserving server data:
@@ -299,13 +292,13 @@ bash scripts/install-omenchatd-user-service.sh --uninstall
 Show copyable connection targets:
 
 ```bash
-./src/server/target/release/omenchatd status --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd status --home /tmp/omenchatd-test
 ```
 
 Check server readiness before public hosting:
 
 ```bash
-./src/server/target/release/omenchatd doctor --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd doctor --home /tmp/omenchatd-test
 ```
 
 Look for:
@@ -320,31 +313,31 @@ NomadNet browser to test the quiet server MOTD/rules/launch page.
 
 ## Test
 
-Quick alpha readiness check:
+Quick release readiness check:
 
 ```bash
-bash scripts/alpha-check.sh quick
+bash scripts/release-check.sh quick
 ```
 
-Full local alpha gate:
+Full local release gate:
 
 ```bash
-bash scripts/alpha-check.sh full
+bash scripts/release-check.sh full
 ```
 
-Validate the latest packaged alpha archive:
+Validate the latest packaged release archive:
 
 ```bash
-bash scripts/alpha-check.sh package
+bash scripts/release-check.sh package
 ```
 
-Redacted alpha issue bundle:
+Redacted issue bundle:
 
 ```bash
-bash scripts/alpha-collect.sh \
-  --browser-root /tmp/omenbrowser-rs-alpha \
-  --browser-root-2 /tmp/omenbrowser-rs-alpha-2 \
-  --server-home /tmp/omenchatd-alpha
+bash scripts/release-collect.sh \
+  --browser-root /tmp/omenbrowser-rs-test \
+  --browser-root-2 /tmp/omenbrowser-rs-test-2 \
+  --server-home /tmp/omenchatd-test
 ```
 
 The collector summarizes package metadata, binary version output, root-sanity
@@ -356,7 +349,7 @@ Browser:
 
 ```bash
 cargo fmt --check
-cargo test --features chat-client-rns-clean
+cargo test --features chat-client-reticulum
 ```
 
 Server:
@@ -366,7 +359,7 @@ cargo fmt --manifest-path src/server/Cargo.toml --check
 cargo test --manifest-path src/server/Cargo.toml --features live-reticulum
 ```
 
-## Alpha Runbook
+## Release Runbook
 
 Use [TESTERS.md](TESTERS.md) as the first sheet for outside testers. Use
 [docs/TESTING.md](docs/TESTING.md) before giving the build to another tester.
@@ -376,14 +369,14 @@ OMENchat server setup, two-client OMENchat testing, and issue report bundles.
 Use [docs/QUICKSTART.md](docs/QUICKSTART.md) for the shortest build/run path
 and [docs/OMENCHAT.md](docs/OMENCHAT.md) for chat server/client setup.
 
-## Tested Alpha Paths
+## Tested Release Paths
 
 Current tested paths include NomadNet browsing, multiple tiled panes, LXMF
 conversations with attachments, OMENchat reconnect/restart recovery, room
 history sync, inline image/GIF previews, upload rejection over the configured
 per-file cap, and the external browser prompt for HTTP/HTTPS links.
 
-## Known Alpha Gaps
+## Known Release Gaps
 
 - Do not cut the next public package release until the clean Reticulum 0.6 LXMF
   path has live smoke coverage for direct sends, propagation sync, tickets, and
@@ -393,7 +386,7 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when
   the propagation node advertises a target cost. Direct peer stamp-cost
-  negotiation without a remembered ticket is still alpha work.
+  negotiation without a remembered ticket is still remaining work.
 - The compatible `.deb` has been tested on Linux Mint 21.3; broader
   Debian/Ubuntu derivative testing is still useful.
 - Some Reticulum behavior depends on what the Rust RNS/LXMF crates currently

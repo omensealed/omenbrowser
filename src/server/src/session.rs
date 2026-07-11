@@ -23,7 +23,7 @@ const ROLE_MODERATOR: u64 = 1 << 1;
 const ROLE_ADMIN: u64 = 1 << 2;
 const LINK_INLINE_HISTORY_TARGET_BYTES: usize = 384;
 const UPLOAD_INLINE_CHUNK_BYTES: usize = 256;
-const UPLOAD_INLINE_MAX_BYTES: usize = 512 * 1024;
+const UPLOAD_INLINE_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -2400,6 +2400,80 @@ mod tests {
                     && fields.get(5) == Some(&FrameValue::Bytes(b"data".to_vec()))
                     && fields.get(6) == Some(&FrameValue::Bool(true))
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stored_image_sized_upload_fetch_uses_resource_offer() {
+        let root = temp_upload_root("fetch-resource");
+        let _ = std::fs::remove_dir_all(&root);
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::with_limits(
+            store,
+            SessionLimits {
+                upload_quota_bytes: 512 * 1024,
+                upload_max_file_bytes: 512 * 1024,
+                upload_cache_root: Some(root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        let peer = peer();
+        join_lobby(&engine, &peer);
+        let payload = vec![0x51; UPLOAD_INLINE_MAX_BYTES + 1];
+        let accepted = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    3,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("image.png".into()),
+                        FrameValue::U64(payload.len() as u64),
+                        FrameValue::String("image/png".into()),
+                    ]),
+                ),
+            )
+            .expect("upload offer");
+        let FrameBody::Fields(fields) = &accepted[0].body else {
+            panic!("upload accept fields");
+        };
+        let FrameValue::String(resource_id) = &fields[0] else {
+            panic!("resource id");
+        };
+        engine
+            .handle_upload_resource(&peer, resource_id, payload.clone())
+            .expect("upload resource");
+
+        let fetched = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadFetch,
+                    4,
+                    Some(1),
+                    FrameBody::Fields(vec![FrameValue::String(resource_id.clone())]),
+                ),
+            )
+            .expect("upload fetch");
+
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(fetched[0].op, ChatOp::UploadResourceOffer);
+        assert!(matches!(
+            &fetched[0].body,
+            FrameBody::Fields(fields)
+                if fields.first() == Some(&FrameValue::String(resource_id.clone()))
+                    && fields.get(1) == Some(&FrameValue::String("image.png".into()))
+                    && fields.get(2) == Some(&FrameValue::U64(payload.len() as u64))
+                    && fields.get(3) == Some(&FrameValue::String("image/png".into()))
+        ));
+        assert_eq!(
+            engine
+                .resource_payload(resource_id)
+                .expect("resource payload")
+                .as_deref(),
+            Some(payload.as_slice())
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

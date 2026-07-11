@@ -2,6 +2,7 @@ pub mod client;
 pub mod codec;
 pub mod commands;
 pub mod descriptor;
+pub mod handoff;
 pub mod model;
 pub mod permissions;
 pub mod protocol;

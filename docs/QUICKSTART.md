@@ -6,12 +6,12 @@ Browser with desktop UI, native networking, and OMENchat using the current
 live-tested clean Reticulum 0.6 path:
 
 ```bash
-cargo build --release --features chat-client-rns-clean
+cargo build --release --features chat-client-reticulum
 ```
 
-`chat-client-rns-clean` uses the `reticulum-rs`/`lxmf` 0.6 stack without
-pulling in the old `rns-net` compatibility crates. The old compatibility
-features have been removed from the normal project manifests.
+`chat-client-reticulum` uses the `reticulum-rs`/`lxmf` 0.6 stack without
+pulling in the old `rns-net` compatibility crates. `chat-client-rns-clean`
+remains as a compatibility alias for older local commands.
 
 Standalone OMENchat server:
 
@@ -30,7 +30,7 @@ Normal profile:
 Isolated test profile:
 
 ```bash
-./target/release/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-alpha
+./target/release/omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test
 ```
 
 Use a different `--app-root` for every test client. Separate roots prevent
@@ -55,19 +55,19 @@ and usually gets Directory/announce traffic moving quickly. See
 Initialize a server home:
 
 ```bash
-./src/server/target/release/omenchatd init --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd init --home /tmp/omenchatd-test
 ```
 
 Attach a TCP gateway:
 
 ```bash
-./src/server/target/release/omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-test
 ```
 
 Start the server TUI:
 
 ```bash
-./src/server/target/release/omenchatd tui --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd tui --home /tmp/omenchatd-test
 ```
 
 Inside the TUI, press `g` to start the live server, `c` for Monitoring, `l` for
@@ -76,7 +76,7 @@ Logs, and `q` to quit.
 Show connection targets:
 
 ```bash
-./src/server/target/release/omenchatd status --home /tmp/omenchatd-alpha
+./src/server/target/release/omenchatd status --home /tmp/omenchatd-test
 ```
 
 The status output includes an `omenchat://...` client URI and a NomadNet portal

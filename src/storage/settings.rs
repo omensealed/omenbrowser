@@ -47,6 +47,7 @@ pub enum WorkspaceSectionPreference {
     Identities,
     Interfaces,
     Monitoring,
+    NetworkDoctor,
     Settings,
     Diagnostics,
     Logs,

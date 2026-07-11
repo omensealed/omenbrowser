@@ -31,12 +31,12 @@ release_status="$(
 
 if [[ "$release_status" == "404" ]]; then
   notes="$(cat <<EOF
-Public alpha package build for ${tag}.
+Public release package build for ${tag}.
 
 Downloads:
 - Debian package for Debian/Ubuntu/Mint-compatible systems
 - AppImage for portable desktop use
-- Alpha tarball for manual isolated testing
+- Release tarball for manual isolated testing
 - SHA-256 checksum files
 EOF
 )"
@@ -44,7 +44,7 @@ EOF
     --arg tag "$tag" \
     --arg name "OMENbrowser_rs ${tag#v}" \
     --arg body "$notes" \
-    '{tag_name:$tag, name:$name, body:$body, draft:false, prerelease:true, make_latest:"true"}' \
+    '{tag_name:$tag, name:$name, body:$body, draft:false, prerelease:false, make_latest:"true"}' \
     > "$release_json.request"
   curl -fsS -X POST \
     "${auth_headers[@]}" \
@@ -54,7 +54,7 @@ EOF
     > "$release_json"
 elif [[ "$release_status" == "200" ]]; then
   release_id="$(jq -r '.id' "$release_json")"
-  jq -n '{draft:false, prerelease:true, make_latest:"true"}' > "$release_json.request"
+  jq -n '{draft:false, prerelease:false, make_latest:"true"}' > "$release_json.request"
   curl -fsS -X PATCH \
     "${auth_headers[@]}" \
     -H "Content-Type: application/json" \
@@ -69,16 +69,17 @@ fi
 
 release_id="$(jq -r '.id' "$release_json")"
 upload_base="https://uploads.github.com/repos/${repo}/releases/${release_id}/assets"
+version="${tag#v}"
 
 mapfile -t assets < <(
   find "$dist_dir" -maxdepth 1 -type f \
-    \( -name 'OMENbrowser_rs-alpha-latest.tar.gz' \
-    -o -name 'OMENbrowser_rs-alpha-latest.tar.gz.sha256' \
-    -o -name 'OMENbrowser_rs-alpha-latest.txt' \
-    -o -name 'omenbrowser-rs_*.deb' \
-    -o -name 'omenbrowser-rs_*.deb.sha256' \
-    -o -name 'OMENbrowser_rs-*.AppImage' \
-    -o -name 'OMENbrowser_rs-*.AppImage.sha256' \
+    \( -name 'OMENbrowser_rs-latest.tar.gz' \
+    -o -name 'OMENbrowser_rs-latest.tar.gz.sha256' \
+    -o -name 'OMENbrowser_rs-latest.txt' \
+    -o -name "omenbrowser-rs_${version}_amd64.deb" \
+    -o -name "omenbrowser-rs_${version}_amd64.deb.sha256" \
+    -o -name "OMENbrowser_rs-${version}-x86_64.AppImage" \
+    -o -name "OMENbrowser_rs-${version}-x86_64.AppImage.sha256" \
     -o -name 'release-artifacts.sha256' \) \
     | sort
 )

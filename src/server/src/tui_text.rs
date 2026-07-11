@@ -212,7 +212,7 @@ pub(crate) fn admin_help_text() -> String {
         "",
         "Monitoring is the first place to check server health: active links, recent closes, request mix, traffic, pings, history sync, uploads, and interface state.",
         "The client ping interval is configurable. Keep it low-noise; reduce it only when live testing proves disconnect detection is too slow.",
-        "Upload quota is the rotating per-identity cache allowance. Max upload file size is the per-file rejection cap. Default alpha policy is 50 MiB quota and 512 KiB per file.",
+        "Upload quota is the rotating per-identity cache allowance. Max upload file size is the per-file rejection cap. Default policy is 50 MiB quota and 512 KiB per file.",
         "Set upload quota to 0 to disable uploads. Use Setup/Overview actions or line-console commands for scriptable setup.",
         "",
         "Keyboard",

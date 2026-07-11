@@ -110,6 +110,9 @@ fn render_workspace(frame: &mut Frame, area: Rect, app: &App) {
         WorkspaceSection::Monitoring => {
             render_placeholder(frame, area, app.workspace.active_section)
         }
+        WorkspaceSection::NetworkDoctor => {
+            render_placeholder(frame, area, app.workspace.active_section)
+        }
         WorkspaceSection::Settings => render_settings(frame, area, app),
         WorkspaceSection::Diagnostics => render_diagnostics(frame, area, app),
         WorkspaceSection::Logs => render_logs(frame, area, app),

@@ -1,3 +1,5 @@
+#![cfg(feature = "native-reticulum")]
+
 use omenbrowser_rs::error::AppError;
 use omenbrowser_rs::runtime::native::{NativePageFetchFailureStage, NativeRuntimeError};
 

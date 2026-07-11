@@ -11,7 +11,7 @@ Default root:
 Use `--app-root` for isolated testing:
 
 ```bash
-omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-alpha
+omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test
 ```
 
 Each root owns identities, Reticulum config/storage, messages, caches, plugin
@@ -28,7 +28,7 @@ Default root:
 Use `--home` for isolated servers:
 
 ```bash
-omenchatd init --home /tmp/omenchatd-alpha
+omenchatd init --home /tmp/omenchatd-test
 ```
 
 ## Interfaces
@@ -39,7 +39,7 @@ commands.
 For `omenchatd`:
 
 ```bash
-omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-alpha
+omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-test
 ```
 
 ## Tor/SOCKS

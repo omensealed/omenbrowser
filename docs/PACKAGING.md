@@ -1,9 +1,9 @@
 # Packaging
 
-## Alpha Archive
+## Release Archive
 
 ```bash
-bash scripts/alpha-package.sh
+bash scripts/release-package.sh
 ```
 
 The archive includes:

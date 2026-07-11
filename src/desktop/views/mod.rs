@@ -1,0 +1,19 @@
+pub(super) mod browser;
+pub(super) mod conversation;
+pub(super) mod diagnostics;
+pub(super) mod directory;
+pub(super) mod directory_model;
+pub(super) mod help;
+pub(super) mod identities;
+pub(super) mod interfaces;
+pub(super) mod logs;
+pub(super) mod monitoring;
+pub(super) mod network_doctor;
+mod network_doctor_model;
+#[cfg(feature = "chat-client")]
+pub(super) mod omenchat;
+pub(super) mod plugins;
+pub(super) mod settings;
+pub(super) mod shell;
+pub(super) mod status;
+pub(super) mod workspace;

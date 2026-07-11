@@ -109,7 +109,8 @@ use crate::runtime::network::{
     LxmfDeliveryProbeStage, LxmfDeliveryProbeStep, LxmfSdkRpcProbeSnapshot, NetworkRuntime,
     NetworkSnapshot, NetworkStatus, OmenChatLinkClosed, OmenChatLinkData, OmenChatLinkOpened,
     OmenChatResourceData, PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep,
-    PropagationDebugSnapshot, PropagationMessageSnapshot, PropagationStatus, RuntimeBackendName,
+    PropagationDebugSnapshot, PropagationMessageSnapshot, PropagationStatus,
+    ResourceLifecycleEvent, ResourceLifecycleState, ResourceProgressEvent, RuntimeBackendName,
 };
 #[cfg(all(feature = "native-rns-net", any()))]
 use crate::runtime::network::{
@@ -6427,9 +6428,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .lock()
                 .expect("native clean destination app-data cache lock")
                 .get(&destination.to_hex_string())
-                .is_some_and(|data| {
-                    crate::runtime::native_lxmf::codec::propagation_announce_data_is_valid(data)
-                });
+                .is_some_and(|data| clean_propagation_app_data_valid(data));
             let transfer_state = if status.path_found && known_app_data {
                 "ready"
             } else {
@@ -7138,6 +7137,18 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .send_on_link(link_id, frame_bytes, OMENCHAT_LINK_CONTEXT)
                 .await;
             if let Err(error) = &result {
+                let _ = self.event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                    ResourceLifecycleEvent {
+                        transfer_id: resource_id.clone(),
+                        state: ResourceLifecycleState::Failed,
+                        bytes: Some(payload.len() as u64),
+                        reason: Some(error.to_string()),
+                        source: Some("omenchat".into()),
+                        purpose: Some("omenchat-resource".into()),
+                        direction: Some("outbound".into()),
+                        peer: Some(hex_encode(&link_id)),
+                    },
+                ));
                 let _ =
                     self.event_tx
                         .send(RuntimeBusEvent::OmenChatLinkClosed(OmenChatLinkClosed {
@@ -7242,6 +7253,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 })?;
             let mut metadata = OMENCHAT_RESOURCE_METADATA_PREFIX.to_vec();
             metadata.extend(resource_id.as_bytes());
+            let payload_len = payload.len() as u64;
             let result = entry
                 .transport
                 .send_resource(&entry.link_id, payload, Some(metadata))
@@ -7254,6 +7266,18 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     ))
                 });
             if let Err(error) = &result {
+                let _ = self.event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                    ResourceLifecycleEvent {
+                        transfer_id: resource_id.clone(),
+                        state: ResourceLifecycleState::Failed,
+                        bytes: Some(payload_len),
+                        reason: Some(error.to_string()),
+                        source: Some("omenchat".into()),
+                        purpose: Some("omenchat-resource".into()),
+                        direction: Some("outbound".into()),
+                        peer: Some(hex_encode(&link_id)),
+                    },
+                ));
                 let _ =
                     self.event_tx
                         .send(RuntimeBusEvent::OmenChatLinkClosed(OmenChatLinkClosed {
@@ -7262,6 +7286,18 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         }));
             } else {
                 let resource_hash = result.as_ref().expect("checked success");
+                let _ = self.event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                    ResourceLifecycleEvent {
+                        transfer_id: resource_hash.to_string(),
+                        state: ResourceLifecycleState::Offered,
+                        bytes: Some(payload_len),
+                        reason: None,
+                        source: Some("omenchat".into()),
+                        purpose: Some("omenchat-resource".into()),
+                        direction: Some("outbound".into()),
+                        peer: Some(hex_encode(&link_id)),
+                    },
+                ));
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
                     "native Reticulum 0.6 OMENchat clean resource advertised link_id={} resource_id={} resource_hash={}",
                     hex_encode(&link_id),
@@ -7493,26 +7529,90 @@ async fn clean_send_request_value_and_wait(
                                     }
                                 }
                             }
-                            ResourceEventKind::Progress(_) => progress_events += 1,
+                            ResourceEventKind::Progress(progress) => {
+                                progress_events += 1;
+                                let _ = event_tx.send(RuntimeBusEvent::ResourceProgress(
+                                        ResourceProgressEvent {
+                                            transfer_id: event.hash.to_string(),
+                                            received: progress.received_bytes,
+                                            total: Some(progress.total_bytes),
+                                            source: Some("lxmf-propagation".into()),
+                                            purpose: Some("lxmf-propagation".into()),
+                                            direction: Some("inbound".into()),
+                                            peer: Some(propagation_node.to_string()),
+                                        },
+                                    ));
+                            }
                             ResourceEventKind::OutboundComplete
                                 if request_resource_hash.is_some_and(|hash| hash == event.hash) =>
                             {
+                                let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                    ResourceLifecycleEvent {
+                                        transfer_id: event.hash.to_string(),
+                                        state: ResourceLifecycleState::Complete,
+                                        bytes: None,
+                                        reason: None,
+                                        source: Some("lxmf-propagation".into()),
+                                        purpose: Some("lxmf-propagation".into()),
+                                        direction: Some("inbound".into()),
+                                        peer: Some(propagation_node.to_string()),
+                                    },
+                                ));
                                 outbound_complete = true;
                             }
                             ResourceEventKind::OutboundFailed
                                 if request_resource_hash.is_some_and(|hash| hash == event.hash) =>
                             {
+                                let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                    ResourceLifecycleEvent {
+                                        transfer_id: event.hash.to_string(),
+                                        state: ResourceLifecycleState::Failed,
+                                        bytes: None,
+                                        reason: Some(
+                                            "outbound LXMF propagation request-resource transfer failed"
+                                                .into(),
+                                        ),
+                                        source: Some("lxmf-propagation".into()),
+                                        purpose: Some("lxmf-propagation".into()),
+                                        direction: Some("inbound".into()),
+                                        peer: Some(propagation_node.to_string()),
+                                    },
+                                ));
                                 return Err(AppError::from(NativeRuntimeError::Native(
                                     "native Reticulum 0.6 LXMF propagation request-resource transfer failed"
                                         .into(),
                                 )));
                             }
                             ResourceEventKind::InboundFailed(failure) => {
+                                let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                    ResourceLifecycleEvent {
+                                        transfer_id: event.hash.to_string(),
+                                        state: ResourceLifecycleState::Failed,
+                                        bytes: None,
+                                        reason: Some(failure.reason.clone()),
+                                        source: Some("lxmf-propagation".into()),
+                                        purpose: Some("lxmf-propagation".into()),
+                                        direction: Some("inbound".into()),
+                                        peer: Some(propagation_node.to_string()),
+                                    },
+                                ));
                                 last_error = failure.reason;
                             }
                             ResourceEventKind::OutboundCancelled
                                 if request_resource_hash.is_some_and(|hash| hash == event.hash) =>
                             {
+                                let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                    ResourceLifecycleEvent {
+                                        transfer_id: event.hash.to_string(),
+                                        state: ResourceLifecycleState::Cancelled,
+                                        bytes: None,
+                                        reason: Some("cancelled".into()),
+                                        source: Some("lxmf-propagation".into()),
+                                        purpose: Some("lxmf-propagation".into()),
+                                        direction: Some("inbound".into()),
+                                        peer: Some(propagation_node.to_string()),
+                                    },
+                                ));
                                 return Err(AppError::from(NativeRuntimeError::Cancelled));
                             }
                             _ => {}
@@ -8478,10 +8578,106 @@ fn spawn_clean_omenchat_event_bridge(
                                     })
                             }
                         };
-                        let rns_transport::resource::ResourceEventKind::Complete(complete) =
-                            event.kind
-                        else {
-                            continue;
+                        let complete = match event.kind {
+                            rns_transport::resource::ResourceEventKind::Progress(progress) => {
+                                if let Some(link_id) = link_id {
+                                    let transfer_id = hex_encode(event.hash.as_slice());
+                                    let _ = event_tx.send(RuntimeBusEvent::ResourceProgress(
+                                        ResourceProgressEvent {
+                                            transfer_id: transfer_id.clone(),
+                                            received: progress.received_bytes,
+                                            total: Some(progress.total_bytes),
+                                            source: Some("omenchat".into()),
+                                            purpose: Some("omenchat-resource".into()),
+                                            direction: Some("inbound".into()),
+                                            peer: Some(hex_encode(&link_id)),
+                                        },
+                                    ));
+                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native Reticulum 0.6 OMENchat resource progress link_id={} resource={} bytes={}/{} parts={}/{}",
+                                        hex_encode(&link_id),
+                                        transfer_id,
+                                        progress.received_bytes,
+                                        progress.total_bytes,
+                                        progress.received_parts,
+                                        progress.total_parts
+                                    )));
+                                }
+                                continue;
+                            }
+                            rns_transport::resource::ResourceEventKind::Complete(complete) => {
+                                complete
+                            }
+                            rns_transport::resource::ResourceEventKind::OutboundComplete => {
+                                if let Some(link_id) = link_id {
+                                    let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                        ResourceLifecycleEvent {
+                                            transfer_id: hex_encode(event.hash.as_slice()),
+                                            state: ResourceLifecycleState::Complete,
+                                            bytes: None,
+                                            reason: None,
+                                            source: Some("omenchat".into()),
+                                            purpose: Some("omenchat-resource".into()),
+                                            direction: Some("outbound".into()),
+                                            peer: Some(hex_encode(&link_id)),
+                                        },
+                                    ));
+                                }
+                                continue;
+                            }
+                            rns_transport::resource::ResourceEventKind::OutboundFailed => {
+                                if let Some(link_id) = link_id {
+                                    let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                        ResourceLifecycleEvent {
+                                            transfer_id: hex_encode(event.hash.as_slice()),
+                                            state: ResourceLifecycleState::Failed,
+                                            bytes: None,
+                                            reason: Some(
+                                                "outbound OMENchat resource failed".into(),
+                                            ),
+                                            source: Some("omenchat".into()),
+                                            purpose: Some("omenchat-resource".into()),
+                                            direction: Some("outbound".into()),
+                                            peer: Some(hex_encode(&link_id)),
+                                        },
+                                    ));
+                                }
+                                continue;
+                            }
+                            rns_transport::resource::ResourceEventKind::InboundFailed(failure) => {
+                                if let Some(link_id) = link_id {
+                                    let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                        ResourceLifecycleEvent {
+                                            transfer_id: hex_encode(event.hash.as_slice()),
+                                            state: ResourceLifecycleState::Failed,
+                                            bytes: None,
+                                            reason: Some(failure.reason),
+                                            source: Some("omenchat".into()),
+                                            purpose: Some("omenchat-resource".into()),
+                                            direction: Some("inbound".into()),
+                                            peer: Some(hex_encode(&link_id)),
+                                        },
+                                    ));
+                                }
+                                continue;
+                            }
+                            rns_transport::resource::ResourceEventKind::OutboundCancelled => {
+                                if let Some(link_id) = link_id {
+                                    let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                        ResourceLifecycleEvent {
+                                            transfer_id: hex_encode(event.hash.as_slice()),
+                                            state: ResourceLifecycleState::Cancelled,
+                                            bytes: None,
+                                            reason: Some("cancelled".into()),
+                                            source: Some("omenchat".into()),
+                                            purpose: Some("omenchat-resource".into()),
+                                            direction: Some("outbound".into()),
+                                            peer: Some(hex_encode(&link_id)),
+                                        },
+                                    ));
+                                }
+                                continue;
+                            }
                         };
                         let is_metadata_frame =
                             complete.metadata.as_deref().is_some_and(|metadata| {
@@ -8546,6 +8742,18 @@ fn spawn_clean_omenchat_event_bridge(
                         if !is_metadata_omenchat {
                             continue;
                         }
+                        let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                            ResourceLifecycleEvent {
+                                transfer_id: hex_encode(event.hash.as_slice()),
+                                state: ResourceLifecycleState::Complete,
+                                bytes: Some(complete.data.len() as u64),
+                                reason: None,
+                                source: Some("omenchat".into()),
+                                purpose: Some("omenchat-resource".into()),
+                                direction: Some("inbound".into()),
+                                peer: Some(hex_encode(&link_id)),
+                            },
+                        ));
                         let _ = event_tx.send(RuntimeBusEvent::OmenChatResourceData(
                             OmenChatResourceData {
                                 link_id,
@@ -8734,6 +8942,17 @@ fn native_lxmf_unpack_value(bytes: &[u8]) -> AppResult<rmpv::Value> {
 
 fn should_emit_directory_announce(payload: &AnnouncePayload) -> bool {
     !matches!(payload.kind, DirectoryKind::Unknown)
+}
+
+fn clean_propagation_app_data_valid(app_data: &[u8]) -> bool {
+    #[cfg(feature = "native-lxmf")]
+    {
+        crate::runtime::native_lxmf::codec::propagation_announce_data_is_valid(app_data)
+    }
+    #[cfg(not(feature = "native-lxmf"))]
+    {
+        !app_data.is_empty()
+    }
 }
 
 #[cfg(all(feature = "native-rns-net", any()))]

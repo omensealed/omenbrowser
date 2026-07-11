@@ -9,7 +9,7 @@ Start here:
   profile.
 - [Getting Online Fast](GETTING_ONLINE.md) - first-run interface and identity
   setup for seeing Directory entries and OMEN development activity.
-- [Testing Guide](TESTING.md) - safe alpha testing with separate identities and
+- [Testing Guide](TESTING.md) - safe testing with separate identities and
   storage roots.
 - [OMENchat](OMENCHAT.md) - using the built-in chat client and running
   `omenchatd`.
@@ -17,7 +17,7 @@ Start here:
   compatibility.
 - [Configuration](CONFIGURATION.md) - identity, storage, Reticulum interfaces,
   Tor/SOCKS, and runtime paths.
-- [Packaging](PACKAGING.md) - local `.deb`, AppImage, and alpha archive builds.
+- [Packaging](PACKAGING.md) - local `.deb`, AppImage, and release archive builds.
 - [Troubleshooting](TROUBLESHOOTING.md) - common startup, link, chat, and media
   issues.
 - [Developer Notes](DEVELOPERS.md) - source layout, feature flags, and test

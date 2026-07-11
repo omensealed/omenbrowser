@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       run_package_smoke:
-        description: "Run packaged local OMENchat smoke after alpha tarball build"
+        description: "Run packaged local OMENchat smoke after release tarball build"
         required: true
         default: "true"
         type: choice
@@ -72,8 +72,8 @@ jobs:
           ln -sf /opt/appimagetool/AppRun /usr/local/bin/appimagetool
           appimagetool --version || true
 
-      - name: Build alpha tarball
-        run: bash scripts/alpha-package.sh dist
+      - name: Build release tarball
+        run: bash scripts/release-package.sh dist
 
       - name: Check conservative Linux glibc compatibility
         run: |
@@ -81,9 +81,9 @@ jobs:
             target/release/omenbrowser_rs \
             src/server/target/release/omenchatd
 
-      - name: Package alpha gate
+      - name: Package release gate
         if: ${{ inputs.run_package_smoke == 'true' }}
-        run: bash scripts/alpha-check.sh package dist/OMENbrowser_rs-alpha-latest.tar.gz
+        run: bash scripts/release-check.sh package dist/OMENbrowser_rs-latest.tar.gz
 
       - name: Build Debian package
         run: bash scripts/package-deb.sh dist
@@ -94,7 +94,7 @@ jobs:
       - name: Collect artifact checksums
         run: |
           sha256sum \
-            dist/OMENbrowser_rs-alpha-latest.tar.gz \
+            dist/OMENbrowser_rs-latest.tar.gz \
             dist/omenbrowser-rs_*.deb \
             dist/OMENbrowser_rs-*.AppImage \
             | tee dist/release-artifacts.sha256
@@ -104,9 +104,9 @@ jobs:
         with:
           name: omenbrowser-rs-release-artifacts
           path: |
-            dist/OMENbrowser_rs-alpha-latest.tar.gz
-            dist/OMENbrowser_rs-alpha-latest.tar.gz.sha256
-            dist/OMENbrowser_rs-alpha-latest.txt
+            dist/OMENbrowser_rs-latest.tar.gz
+            dist/OMENbrowser_rs-latest.tar.gz.sha256
+            dist/OMENbrowser_rs-latest.txt
             dist/omenbrowser-rs_*.deb
             dist/omenbrowser-rs_*.deb.sha256
             dist/OMENbrowser_rs-*.AppImage

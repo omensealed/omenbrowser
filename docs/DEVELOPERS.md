@@ -13,12 +13,13 @@ from the server crate.
 Common browser build:
 
 ```bash
-cargo build --features chat-client-rns-clean
+cargo build --features chat-client-reticulum
 ```
 
-`chat-client-rns-clean` is the current live-tested alpha path. It uses the
-clean `reticulum-rs`/`lxmf` 0.6 stack. The old `rns-net` compatibility crates
-are no longer part of the normal manifests.
+`chat-client-reticulum` is the current live-tested path. It uses the
+clean `reticulum-rs`/`lxmf` 0.6 stack. `chat-client-rns-clean` remains as a
+compatibility alias for older local commands. The old `rns-net` compatibility
+crates are no longer part of the normal manifests.
 
 Server live RNS build:
 
@@ -30,7 +31,7 @@ cargo build --manifest-path src/server/Cargo.toml --features live-reticulum
 
 ```bash
 cargo fmt --check
-cargo test --features chat-client-rns-clean
+cargo test --features chat-client-reticulum
 cargo fmt --manifest-path src/server/Cargo.toml --check
 cargo test --manifest-path src/server/Cargo.toml --features live-reticulum
 ```
@@ -38,7 +39,7 @@ cargo test --manifest-path src/server/Cargo.toml --features live-reticulum
 Fast pre-share gate:
 
 ```bash
-bash scripts/alpha-check.sh quick
+bash scripts/release-check.sh quick
 ```
 
 ## Source Areas

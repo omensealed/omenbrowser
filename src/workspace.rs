@@ -6,6 +6,7 @@ pub enum WorkspaceSection {
     Identities,
     Interfaces,
     Monitoring,
+    NetworkDoctor,
     Settings,
     Diagnostics,
     Logs,
@@ -14,13 +15,14 @@ pub enum WorkspaceSection {
 }
 
 impl WorkspaceSection {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Browser,
         Self::Messages,
         Self::Directory,
         Self::Identities,
         Self::Interfaces,
         Self::Monitoring,
+        Self::NetworkDoctor,
         Self::Settings,
         Self::Diagnostics,
         Self::Logs,
@@ -36,6 +38,7 @@ impl WorkspaceSection {
             Self::Identities => "Identities",
             Self::Interfaces => "Interfaces",
             Self::Monitoring => "Monitoring",
+            Self::NetworkDoctor => "Network Doctor",
             Self::Settings => "Settings",
             Self::Diagnostics => "Diagnostics",
             Self::Logs => "Logs",

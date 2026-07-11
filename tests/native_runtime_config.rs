@@ -1,3 +1,5 @@
+#![cfg(feature = "native-reticulum")]
+
 use std::path::PathBuf;
 
 use omenbrowser_rs::config::AppPaths;

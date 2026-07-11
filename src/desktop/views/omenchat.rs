@@ -1,0 +1,246 @@
+use iced::widget::{button, column, container, row, text, text_input};
+use iced::{Element, Font, Length};
+
+use super::super::*;
+
+pub(in crate::desktop) fn omenchat_view_for_session(
+    desktop: &DesktopApp,
+    session_id: ChatSessionId,
+) -> Element<'_, Message> {
+    let Some(session) = desktop.omenchat.chat_client.session(session_id) else {
+        return text("This OMENchat session was closed.")
+            .size(ui_size(14))
+            .into();
+    };
+
+    let room_list = if desktop.omenchat.omenchat_rooms_visible {
+        let mut rooms = session.rooms.clone();
+        if !rooms
+            .iter()
+            .any(|room| room.room_id == session.active_room.room_id)
+        {
+            rooms.push(session.active_room.clone());
+        }
+        rooms.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then(left.room_id.cmp(&right.room_id))
+        });
+        let mut room_column = column![].spacing(8);
+        room_column = room_column.push(text("Rooms").size(ui_size(16)));
+        for room in rooms {
+            let unread = if room.unread > 0 {
+                format!(" ({})", room.unread)
+            } else {
+                String::new()
+            };
+            let label = if room.room_id == session.active_room.room_id {
+                format!("[#{}]", room.name)
+            } else {
+                format!("#{}{}", room.name, unread)
+            };
+            let message = Message::JoinOmenChatRoom {
+                session_id: session.session_id,
+                room: room.name.clone(),
+            };
+            room_column = room_column.push(if room.unread > 0 {
+                warning_button_owned(label, message)
+            } else {
+                subtle_button_owned(label, message)
+            });
+        }
+        room_column
+            .push(subtle_button(
+                "Load Older",
+                Message::LoadOlderOmenChatHistory(session.session_id),
+            ))
+            .width(Length::Shrink)
+    } else {
+        column![].width(Length::Shrink)
+    };
+
+    let mut timeline = column![].spacing(8).width(Length::Fill);
+    for group in chat_timeline_groups(session) {
+        let header = row![
+            text(group.actor).size(ui_size(12)),
+            text(chat_event_time_label(group.at_unix)).size(ui_size(11)),
+        ]
+        .spacing(8)
+        .wrap();
+        let mut group_content = column![header].spacing(1).width(Length::Fill);
+        for body in group.bodies {
+            let media_hints = omenchat_media_hints(
+                &body.text,
+                &desktop.app.settings.clearweb,
+                desktop.clearweb.clearweb_proxy_endpoint.as_ref(),
+                desktop.app.directory_service.trust_level(
+                    &session.server.destination,
+                    Some(&session.server.display_name),
+                ) == crate::directory::TrustLevel::Trusted,
+                &desktop.omenchat.omenchat_media_cache,
+            );
+            let mut line = safe_timeline_text(body.text.clone(), 14);
+            if body.is_action {
+                line = line.font(Font {
+                    style: FontStyle::Italic,
+                    ..desktop_ui_font()
+                });
+            }
+            if let Some(upload) = body.upload.as_ref() {
+                let key = omenchat_upload_cache_key(upload.session_id, &upload.resource_id);
+                group_content = group_content.push(omenchat_upload_action_row(
+                    line,
+                    upload.clone(),
+                    desktop.omenchat.omenchat_media_cache.get(&key).cloned(),
+                ));
+            } else if let Some(resend) = body.resend {
+                group_content = group_content.push(omenchat_resend_action_row(
+                    line,
+                    resend.session_id,
+                    resend.room_id,
+                    resend.event_id,
+                    resend.body,
+                    resend.action,
+                ));
+            } else {
+                group_content = group_content.push(line);
+            }
+            for hint in media_hints {
+                if let Some(row) = omenchat_media_hint_row(hint.clone()) {
+                    group_content = group_content.push(row);
+                }
+                if let Some(path) = hint.image_path.as_ref() {
+                    if let Some(preview) = omenchat_media_hint_preview(
+                        path,
+                        hint.animated,
+                        desktop.omenchat.omenchat_gif_frames.get(path),
+                    ) {
+                        group_content = group_content.push(preview);
+                        if let Some(caption) = hint.caption {
+                            group_content =
+                                group_content.push(safe_timeline_text(caption.to_string(), 11));
+                        }
+                    }
+                }
+            }
+            if let Some(upload) = body.upload {
+                let key = omenchat_upload_cache_key(upload.session_id, &upload.resource_id);
+                let upload_state = desktop.omenchat.omenchat_media_cache.get(&key).cloned();
+                if let Some(state) = upload_state.as_ref() {
+                    if let Some(preview) = omenchat_upload_preview(
+                        state,
+                        omenchat_media_state_image_path(state)
+                            .as_ref()
+                            .and_then(|path| desktop.omenchat.omenchat_gif_frames.get(path)),
+                    ) {
+                        group_content = group_content.push(preview);
+                    }
+                }
+            }
+        }
+        timeline = timeline.push(container(group_content).padding([2, 8]).width(Length::Fill));
+    }
+
+    let mut userlist = column![text("Users").size(ui_size(16))]
+        .spacing(6)
+        .width(Length::Fixed(82.0));
+    for user in unique_chat_users(&session.users) {
+        userlist = userlist.push(text(user.display_label()).size(ui_size(13)));
+    }
+
+    let draft = desktop
+        .omenchat
+        .chat_drafts
+        .get(&session.session_id)
+        .map(String::as_str)
+        .unwrap_or_default();
+    let session_id = session.session_id;
+    let active_room_id = session.active_room.room_id;
+    let composer = row![
+        tooltip_button(
+            button(centered_toolbar_icon(ICON_MENU))
+                .on_press(Message::ToggleOmenChatRooms)
+                .padding(0)
+                .width(Length::Fixed(toolbar_icon_button_side()))
+                .height(Length::Fixed(toolbar_icon_button_side()))
+                .style(subtle_button_style),
+            "Rooms"
+        ),
+        tooltip_button(
+            button(centered_toolbar_icon(ICON_ATTACH))
+                .on_press(Message::PickOmenChatUpload(session.session_id))
+                .padding(0)
+                .width(Length::Fixed(toolbar_icon_button_side()))
+                .height(Length::Fixed(toolbar_icon_button_side()))
+                .style(subtle_button_style),
+            "Attach file"
+        ),
+        text_input(&format!("Message #{}", session.active_room.name), draft)
+            .size(ui_size(14))
+            .padding(8)
+            .width(Length::Fill)
+            .on_input(move |value| Message::OmenChatDraftChanged { session_id, value })
+            .on_submit(Message::SendOmenChatDraft(session.session_id)),
+        omen_button("Send", Message::SendOmenChatDraft(session.session_id)),
+    ]
+    .spacing(8);
+
+    let mut timeline_panel = column![].spacing(8).width(Length::Fill);
+    if let Some(motd) = desktop
+        .omenchat
+        .omenchat_motds
+        .get(&session.session_id)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|motd| !motd.is_empty())
+    {
+        timeline_panel = timeline_panel.push(
+            container(text(motd).size(ui_size(13)))
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(status_container_style),
+        );
+    }
+    timeline_panel = timeline_panel.push(
+        app_scrollable(timeline)
+            .id(omenchat_scroll_id(session.session_id, active_room_id))
+            .on_scroll(move |viewport: Viewport| Message::OmenChatScrolled {
+                session_id,
+                room_id: active_room_id,
+                offset: sanitize_scroll_offset(viewport.relative_offset()),
+            })
+            .height(Length::Fill),
+    );
+    if desktop.omenchat_is_viewing_history(session.session_id, active_room_id) {
+        timeline_panel = timeline_panel.push(
+            container(
+                column![
+                    text("You're viewing older messages").size(ui_size(12)),
+                    omen_button(
+                        "Jump To Present",
+                        Message::JumpOmenChatToPresent {
+                            session_id: session.session_id,
+                            room_id: active_room_id,
+                        },
+                    )
+                ]
+                .spacing(6)
+                .width(Length::Fill),
+            )
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(status_container_style),
+        );
+    }
+
+    column![
+        row![room_list, timeline_panel, userlist]
+            .spacing(10)
+            .height(Length::Fill),
+        composer
+    ]
+    .spacing(10)
+    .padding(10)
+    .height(Length::Fill)
+    .into()
+}

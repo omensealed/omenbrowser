@@ -10,10 +10,10 @@ if [[ ! -x "$default_bin" ]]; then
 fi
 
 browser_bin="${OMENBROWSER_BIN:-$default_bin}"
-app_root="${OMENBROWSER_ALPHA_ROOT:-/tmp/omenbrowser-rs-alpha}"
-app_root_2="${OMENBROWSER_ALPHA_ROOT_2:-/tmp/omenbrowser-rs-alpha-2}"
+app_root="${OMENBROWSER_RELEASE_ROOT:-/tmp/omenbrowser-rs-test}"
+app_root_2="${OMENBROWSER_RELEASE_ROOT_2:-/tmp/omenbrowser-rs-test-2}"
 launcher_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-install_alpha=1
+install_release=1
 install_second=0
 install_default=0
 uninstall=0
@@ -26,17 +26,17 @@ Install or remove user-level desktop launchers for OMENbrowser_rs.
 
 Options:
   --bin PATH          omenbrowser_rs binary path
-  --app-root DIR      isolated alpha app root (default: /tmp/omenbrowser-rs-alpha)
-  --app-root-2 DIR    second isolated alpha app root (default: /tmp/omenbrowser-rs-alpha-2)
+  --app-root DIR      isolated release app root (default: /tmp/omenbrowser-rs-test)
+  --app-root-2 DIR    second isolated release app root (default: /tmp/omenbrowser-rs-test-2)
   --default-profile   also install a launcher for the normal default profile
   --second-client     also install a launcher for the second isolated client
   --launcher-dir DIR  applications directory (default: XDG_DATA_HOME/applications)
   --uninstall         remove the installed launchers, preserving app data
   -h, --help          show this help
 
-The default install creates only the isolated alpha launcher:
+The default install creates only the isolated release launcher:
 
-  OMENbrowser_rs Alpha
+  OMENbrowser_rs Test Profile
 
 It does not create, delete, or modify identities. It only writes .desktop files.
 USAGE
@@ -91,13 +91,13 @@ desktop_quote() {
   printf '"%s"' "$value"
 }
 
-launcher_alpha="$launcher_dir/omenbrowser-rs-alpha.desktop"
-launcher_second="$launcher_dir/omenbrowser-rs-alpha-second.desktop"
+launcher_release="$launcher_dir/omenbrowser-rs-test.desktop"
+launcher_second="$launcher_dir/omenbrowser-rs-release-second.desktop"
 launcher_default="$launcher_dir/omenbrowser-rs.desktop"
 
 if [[ "$uninstall" -eq 1 ]]; then
   removed=0
-  for launcher in "$launcher_alpha" "$launcher_second" "$launcher_default"; do
+  for launcher in "$launcher_release" "$launcher_second" "$launcher_default"; do
     if [[ -f "$launcher" ]]; then
       rm -f "$launcher"
       removed=$((removed + 1))
@@ -143,16 +143,16 @@ EOF
 }
 
 write_launcher \
-  "$launcher_alpha" \
-  "OMENbrowser_rs Alpha" \
-  "Run OMENbrowser_rs with an isolated alpha app root" \
+  "$launcher_release" \
+  "OMENbrowser_rs Test Profile" \
+  "Run OMENbrowser_rs with an isolated release app root" \
   "$(desktop_quote "$browser_bin") --desktop --app-root $(desktop_quote "$app_root")"
 
 if [[ "$install_second" -eq 1 ]]; then
   write_launcher \
     "$launcher_second" \
-    "OMENbrowser_rs Alpha 2" \
-    "Run a second isolated OMENbrowser_rs alpha client" \
+    "OMENbrowser_rs Test Profile 2" \
+    "Run a second isolated OMENbrowser_rs release client" \
     "$(desktop_quote "$browser_bin") --desktop --app-root $(desktop_quote "$app_root_2")"
 fi
 
