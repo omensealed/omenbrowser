@@ -857,6 +857,7 @@ fn create_migration_backup(
         drop(destination);
         std::fs::OpenOptions::new()
             .read(true)
+            .write(true)
             .open(&backup_path)?
             .sync_all()?;
         Ok(())

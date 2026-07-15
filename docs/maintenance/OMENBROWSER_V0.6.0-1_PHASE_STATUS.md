@@ -75,7 +75,14 @@ reproducible`, `superseded`, and `not yet inspected`.
   absolute private identity path for the target OS and assert that its complete
   rendered form is absent. All six focused redaction tests and Windows-GNU
   strict product library Clippy pass locally. Completion gate: rerun hosted
-  Windows/MSVC and both macOS jobs successfully.
+  Windows/MSVC and both macOS jobs successfully. The next Windows standalone-
+  server gate exposed a durability portability defect: Windows rejects
+  `sync_all` on a read-only file handle even though Unix admits it. Migration
+  backups and staged database restores now reopen completed SQLite files with
+  read/write access before flushing, without changing create/replace policy.
+  The complete server-full library suite passes locally (289 passed, 3
+  explicitly ignored), as does Windows-GNU strict server-full Clippy; native
+  Windows execution remains the completion proof.
 - Bare native-LXMF feature closure: root native request/LXMF code now uses the
   feature-neutral allocation-free MessagePack preflight and shared OMENchat
   wire ceilings rather than importing the `chat-client` module. The declared

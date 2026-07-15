@@ -178,7 +178,11 @@ fn checkpoint_staged_database(path: &Path) -> ServerResult<()> {
         )));
     }
     drop(connection);
-    File::open(path)?.sync_all()?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_all()?;
     let _ = std::fs::remove_file(sidecar_path(path, "-wal"));
     let _ = std::fs::remove_file(sidecar_path(path, "-shm"));
     Ok(())
@@ -196,7 +200,11 @@ fn copy_sqlite_database(source: &Path, destination: &Path) -> ServerResult<()> {
     backup.run_to_completion(100, Duration::from_millis(10), None)?;
     drop(backup);
     drop(destination);
-    File::open(destination_path)?.sync_all()?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(destination_path)?
+        .sync_all()?;
     Ok(())
 }
 
