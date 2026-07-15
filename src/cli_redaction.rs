@@ -116,6 +116,17 @@ mod tests {
     use super::*;
     use crate::{cli_network::TcpClientOverride, storage::settings::RuntimeBackendSetting};
 
+    fn absolute_private_identity_path() -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            std::path::PathBuf::from(r"C:\private\identity")
+        }
+        #[cfg(not(windows))]
+        {
+            std::path::PathBuf::from("/private/identity")
+        }
+    }
+
     #[test]
     fn argv_redaction_preserves_exact_compatibility_shape() {
         assert_eq!(
@@ -154,8 +165,9 @@ mod tests {
 
     #[test]
     fn path_hint_preserves_metadata_without_the_private_path() {
+        let absolute_path = absolute_private_identity_path();
         assert_eq!(
-            redacted_path_hint(Path::new("/tmp/private/identity")),
+            redacted_path_hint(&absolute_path),
             serde_json::json!({
                 "redacted": true,
                 "file_name": "identity",
@@ -174,9 +186,10 @@ mod tests {
 
     #[test]
     fn override_snapshot_preserves_schema_and_redacts_credentials() {
+        let private_identity_path = absolute_private_identity_path();
         let overrides = SmokeOverrides::default()
             .with_runtime_backend(RuntimeBackendSetting::Reticulum)
-            .with_identity_path("/private/identity")
+            .with_identity_path(&private_identity_path)
             .with_tcp_client(TcpClientOverride::new(
                 "gateway.example",
                 4242,
@@ -206,7 +219,7 @@ mod tests {
             })
         );
         let rendered = snapshot.to_string();
-        assert!(!rendered.contains("/private/identity"));
+        assert!(!rendered.contains(&private_identity_path.display().to_string()));
         assert!(!rendered.contains("private-network"));
         assert!(!rendered.contains("unique-secret"));
     }

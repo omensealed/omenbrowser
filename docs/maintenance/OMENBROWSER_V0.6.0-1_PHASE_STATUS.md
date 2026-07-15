@@ -69,8 +69,13 @@ reproducible`, `superseded`, and `not yet inspected`.
   rerun passed each corrected graph gate, then Apple Silicon's all-target
   Clippy exposed 13 Rust 1.97 style failures in settings test fixtures; those
   fixtures now use equivalent direct initializers, with all 31 settings tests
-  and the complete desktop-product Clippy target passing locally. Completion
-  gate: rerun hosted Windows/MSVC and both macOS jobs successfully.
+  and the complete desktop-product Clippy target passing locally. The same
+  rerun's later Windows test gate showed that a Unix absolute-path literal was
+  relative under Windows path rules; redaction fixtures now construct an
+  absolute private identity path for the target OS and assert that its complete
+  rendered form is absent. All six focused redaction tests and Windows-GNU
+  strict product library Clippy pass locally. Completion gate: rerun hosted
+  Windows/MSVC and both macOS jobs successfully.
 - Bare native-LXMF feature closure: root native request/LXMF code now uses the
   feature-neutral allocation-free MessagePack preflight and shared OMENchat
   wire ceilings rather than importing the `chat-client` module. The declared
