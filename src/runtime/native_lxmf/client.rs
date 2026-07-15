@@ -7,7 +7,7 @@ pub struct NativeLxmfClientState {
 use crate::error::{AppError, AppResult};
 
 #[cfg(feature = "native-lxmf-sdk")]
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 #[cfg(feature = "native-lxmf-sdk")]
 use std::io;
@@ -96,8 +96,23 @@ pub struct EmbeddedNativeLxmfSdkSender {
 #[cfg(feature = "native-lxmf-sdk")]
 #[derive(Debug, Default)]
 pub struct NativeLxmfSdkTicketCache {
-    pending: Mutex<HashMap<String, Option<String>>>,
+    state: Mutex<NativeLxmfSdkTicketCacheState>,
 }
+
+#[cfg(feature = "native-lxmf-sdk")]
+#[derive(Debug, Default)]
+struct NativeLxmfSdkTicketCacheState {
+    pending: HashMap<String, Option<String>>,
+    order: VecDeque<String>,
+    ticket_bytes: usize,
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+const NATIVE_LXMF_SDK_TICKET_CACHE_MAX_ITEMS: usize = 1_024;
+#[cfg(feature = "native-lxmf-sdk")]
+const NATIVE_LXMF_SDK_TICKET_CACHE_MAX_BYTES: usize = 256 * 1024;
+#[cfg(feature = "native-lxmf-sdk")]
+const NATIVE_LXMF_SDK_TICKET_MAX_BYTES: usize = 256;
 
 #[cfg(feature = "native-lxmf-sdk")]
 pub trait NativeLxmfSdkWireSubmitter: Send + Sync {
@@ -148,28 +163,73 @@ impl EmbeddedNativeLxmfSdkSender {
 
 #[cfg(feature = "native-lxmf-sdk")]
 impl NativeLxmfSdkTicketCache {
-    pub fn capture_validate_record(&self, record: &rns_rpc::MessageRecord) {
-        self.pending
-            .lock()
-            .expect("native LXMF SDK ticket cache")
-            .insert(record.id.clone(), native_lxmf_sdk_record_ticket(record));
+    pub fn capture_validate_record(&self, record: &rns_rpc::MessageRecord) -> io::Result<()> {
+        let ticket = native_lxmf_sdk_record_ticket(record);
+        if ticket
+            .as_ref()
+            .is_some_and(|ticket| ticket.len() > NATIVE_LXMF_SDK_TICKET_MAX_BYTES)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native LXMF SDK ticket exceeds byte limit",
+            ));
+        }
+        let key = native_lxmf_sdk_ticket_cache_key(record.id.as_str());
+        let mut state = self.state.lock().expect("native LXMF SDK ticket cache");
+        if let Some(previous) = state.pending.remove(&key) {
+            state.ticket_bytes = state
+                .ticket_bytes
+                .saturating_sub(previous.as_ref().map_or(0, String::len));
+            state.order.retain(|stored| stored != &key);
+        }
+        state.ticket_bytes = state
+            .ticket_bytes
+            .saturating_add(ticket.as_ref().map_or(0, String::len));
+        state.pending.insert(key.clone(), ticket);
+        state.order.push_back(key);
+        while state.pending.len() > NATIVE_LXMF_SDK_TICKET_CACHE_MAX_ITEMS
+            || state.ticket_bytes > NATIVE_LXMF_SDK_TICKET_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = state.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = state.pending.remove(&oldest) {
+                state.ticket_bytes = state
+                    .ticket_bytes
+                    .saturating_sub(removed.as_ref().map_or(0, String::len));
+            }
+        }
+        Ok(())
     }
 
     pub fn take_ticket(&self, message_id: &str) -> Option<String> {
-        self.pending
-            .lock()
-            .expect("native LXMF SDK ticket cache")
-            .remove(message_id)
-            .flatten()
+        let key = native_lxmf_sdk_ticket_cache_key(message_id);
+        let mut state = self.state.lock().expect("native LXMF SDK ticket cache");
+        state.order.retain(|stored| stored != &key);
+        let removed = state.pending.remove(&key);
+        state.ticket_bytes = state.ticket_bytes.saturating_sub(
+            removed
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map_or(0, String::len),
+        );
+        removed.flatten()
     }
 
     #[cfg(test)]
     fn is_empty(&self) -> bool {
-        self.pending
+        self.state
             .lock()
             .expect("native LXMF SDK ticket cache")
+            .pending
             .is_empty()
     }
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn native_lxmf_sdk_ticket_cache_key(message_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex_bytes(&Sha256::digest(message_id.as_bytes()))
 }
 
 #[cfg(feature = "native-lxmf-sdk")]
@@ -190,8 +250,7 @@ impl rns_rpc::OutboundBridge for NativeLxmfSdkOutboundBridge {
         record: &rns_rpc::MessageRecord,
         _options: &rns_rpc::OutboundDeliveryOptions,
     ) -> io::Result<()> {
-        self.ticket_cache.capture_validate_record(record);
-        Ok(())
+        self.ticket_cache.capture_validate_record(record)
     }
 
     fn deliver(
@@ -602,7 +661,7 @@ impl NativeLxmfSdkSender for RpcNativeLxmfSdkSender {
                 use lxmf::sdk::SdkBackend;
 
                 let client = lxmf::sdk::RpcBackendClient::new(endpoint);
-                client.snapshot()
+                client.snapshot().map_err(|error| error.to_string())
             }
         })
         .await
@@ -632,7 +691,7 @@ impl NativeLxmfSdkSender for RpcNativeLxmfSdkSender {
             use lxmf::sdk::SdkBackend;
 
             let client = lxmf::sdk::RpcBackendClient::new(endpoint);
-            client.send(send_request)
+            client.send(send_request).map_err(|error| error.to_string())
         })
         .await
         .map_err(|err| AppError::Runtime(format!("native LXMF SDK sender task failed: {err}")))?
@@ -894,6 +953,7 @@ mod tests {
         MissingNativeLxmfSdkSender, NativeLxmfSdkOutboundBridge, NativeLxmfSdkRuntimeBoundaryKind,
         NativeLxmfSdkSender, NativeLxmfSdkSenderState, NativeLxmfSdkTicketCache,
         NativeLxmfSdkWireDelivery, NativeLxmfSdkWireSubmitter, RpcNativeLxmfSdkSender,
+        NATIVE_LXMF_SDK_TICKET_CACHE_MAX_ITEMS, NATIVE_LXMF_SDK_TICKET_MAX_BYTES,
     };
 
     struct RecordedDelivery {
@@ -928,8 +988,7 @@ mod tests {
             record: &rns_rpc::MessageRecord,
             _options: &rns_rpc::OutboundDeliveryOptions,
         ) -> Result<(), std::io::Error> {
-            self.ticket_cache.capture_validate_record(record);
-            Ok(())
+            self.ticket_cache.capture_validate_record(record)
         }
 
         fn deliver(
@@ -1170,7 +1229,9 @@ mod tests {
             native_lxmf_sdk_record_ticket(&record).as_deref(),
             Some("aabbccdd")
         );
-        cache.capture_validate_record(&record);
+        cache
+            .capture_validate_record(&record)
+            .expect("capture ticket");
 
         let mut sanitized = record.clone();
         sanitized.fields = None;
@@ -1178,6 +1239,42 @@ mod tests {
         assert_eq!(cache.take_ticket("message-1").as_deref(), Some("aabbccdd"));
         assert_eq!(cache.take_ticket("message-1"), None);
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn sdk_ticket_cache_is_item_and_byte_bounded_and_rejects_oversize() {
+        let cache = NativeLxmfSdkTicketCache::default();
+        let ticket = "ab".repeat(NATIVE_LXMF_SDK_TICKET_MAX_BYTES / 2);
+        let record = |index: usize, ticket: &str| rns_rpc::MessageRecord {
+            id: format!("message-{index}"),
+            source: "source".into(),
+            destination: "peer".into(),
+            title: String::new(),
+            content: "body".into(),
+            timestamp: 0,
+            direction: "outbound".into(),
+            fields: Some(serde_json::json!({"_lxmf": {"ticket": ticket}})),
+            receipt_status: None,
+        };
+        for index in 0..=NATIVE_LXMF_SDK_TICKET_CACHE_MAX_ITEMS {
+            cache
+                .capture_validate_record(&record(index, &ticket))
+                .expect("bounded capture");
+        }
+        assert_eq!(cache.take_ticket("message-0"), None);
+        assert_eq!(
+            cache
+                .take_ticket(&format!("message-{NATIVE_LXMF_SDK_TICKET_CACHE_MAX_ITEMS}"))
+                .as_deref(),
+            Some(ticket.as_str())
+        );
+
+        let oversized = "x".repeat(NATIVE_LXMF_SDK_TICKET_MAX_BYTES + 1);
+        let error = cache
+            .capture_validate_record(&record(9_999, &oversized))
+            .expect_err("oversized ticket");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(cache.take_ticket("message-9999"), None);
     }
 
     #[test]

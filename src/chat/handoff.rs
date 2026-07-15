@@ -6,17 +6,13 @@ pub const OMENCHAT_RESOURCE_METADATA_PREFIX: &str = "omenchat-resource:";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum OmenChatInviteRole {
+    #[default]
     Guest,
     Member,
     Mod,
     Admin,
-}
-
-impl Default for OmenChatInviteRole {
-    fn default() -> Self {
-        Self::Guest
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -2,6 +2,7 @@ use super::*;
 use iced::widget::scrollable::RelativeOffset;
 
 use crate::app::App;
+use crate::desktop::{BrowserMessage, ConversationMessage};
 use crate::storage::settings::{
     DesktopWorkspaceLayoutNode, DesktopWorkspacePaneKind, DesktopWorkspacePaneSettings,
     DesktopWorkspaceSplitAxis,
@@ -88,7 +89,7 @@ fn close_pane_does_not_close_backing_browser_tab() {
         .expect("browser pane");
     let initial_tabs = desktop.app.workspace.browser_tabs.len();
 
-    let _ = desktop.update(Message::WorkspacePaneClose(pane));
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::Close(pane)));
 
     assert_eq!(desktop.app.workspace.browser_tabs.len(), initial_tabs);
     assert!(!desktop
@@ -101,11 +102,11 @@ fn close_pane_does_not_close_backing_browser_tab() {
 #[test]
 fn close_tab_button_closes_backing_browser_tab_and_pane() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-close-tab");
-    let _ = desktop.update(Message::NewBrowserTab);
+    let _ = desktop.update(Message::Browser(BrowserMessage::NewTab));
     let closing_id = desktop.app.active_browser_tab().id;
     let initial_tabs = desktop.app.workspace.browser_tabs.len();
 
-    let _ = desktop.update(Message::CloseBrowserPaneTab(closing_id));
+    let _ = desktop.update(Message::Browser(BrowserMessage::ClosePaneTab(closing_id)));
 
     assert_eq!(desktop.app.workspace.browser_tabs.len(), initial_tabs - 1);
     assert!(!desktop
@@ -113,6 +114,45 @@ fn close_tab_button_closes_backing_browser_tab_and_pane() {
         .workspace_panes
         .iter()
         .any(|(_, pane)| *pane == DesktopPane::Browser(closing_id)));
+}
+
+#[test]
+fn target_mutation_reconciliation_removes_only_the_stale_pane() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-mutation-pane-reconcile");
+    let _ = desktop.update(Message::Browser(BrowserMessage::NewTab));
+    let stale_id = desktop.app.active_browser_tab().id;
+    let stale_pane = desktop
+        .find_workspace_pane(&DesktopPane::Browser(stale_id))
+        .expect("new browser pane");
+    let initial_panes = desktop.workspace.workspace_panes.len();
+
+    desktop.app.close_active_browser_tab();
+    assert_eq!(desktop.workspace.workspace_panes.len(), initial_panes);
+    assert_eq!(
+        desktop.workspace.workspace_panes.get(stale_pane),
+        Some(&DesktopPane::Browser(stale_id))
+    );
+
+    desktop.reconcile_workspace_panes_after_target_mutation(Some(stale_id), None);
+
+    assert_eq!(desktop.workspace.workspace_panes.len(), initial_panes - 1);
+    assert!(desktop
+        .workspace
+        .workspace_panes
+        .iter()
+        .all(|(_, pane)| *pane != DesktopPane::Browser(stale_id)));
+}
+
+#[test]
+fn monitoring_sampling_runs_only_from_dedicated_section_tick() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-monitoring-tick");
+    desktop.app.workspace.active_section = crate::workspace::WorkspaceSection::Monitoring;
+    desktop.monitoring.sample_epoch_ms = 0;
+
+    assert_eq!(desktop.monitoring.sample_epoch_ms, 0);
+
+    let _ = desktop.update_monitoring_tick();
+    assert!(desktop.monitoring.sample_epoch_ms > 0);
 }
 
 #[test]
@@ -290,10 +330,9 @@ fn desktop_workspace_layout_persists_current_split_ratio() {
         .next()
         .expect("initial split");
 
-    let _ = desktop.update(Message::WorkspacePaneResized(pane_grid::ResizeEvent {
-        split,
-        ratio: 0.64,
-    }));
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::Resized(
+        pane_grid::ResizeEvent { split, ratio: 0.64 },
+    )));
 
     let Some(DesktopWorkspaceLayoutNode::Split { axis, ratio, .. }) =
         desktop.app.settings.ui.desktop_workspace_layout.as_ref()
@@ -309,7 +348,7 @@ fn new_browser_tab_adds_workspace_pane() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-new-pane");
     let initial_panes = desktop.workspace.workspace_panes.len();
 
-    let _ = desktop.update(Message::NewBrowserTab);
+    let _ = desktop.update(Message::Browser(BrowserMessage::NewTab));
 
     assert_eq!(desktop.workspace.workspace_panes.len(), initial_panes + 1);
     let active_id = desktop.app.active_browser_tab().id;
@@ -495,13 +534,13 @@ fn hidden_omenchat_inactive_room_event_does_not_double_count_unread() {
 fn browser_pane_address_edit_targets_backing_tab() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-target-tab");
     let first_id = desktop.app.active_browser_tab().id;
-    let _ = desktop.update(Message::NewBrowserTab);
+    let _ = desktop.update(Message::Browser(BrowserMessage::NewTab));
     let second_id = desktop.app.active_browser_tab().id;
 
-    let _ = desktop.update(Message::BrowserPaneAddressChanged {
+    let _ = desktop.update(Message::Browser(BrowserMessage::PaneAddressChanged {
         tab_id: first_id,
         value: "mock.page:/first.mu".into(),
-    });
+    }));
 
     let first = desktop
         .app
@@ -540,10 +579,12 @@ fn conversation_pane_composer_targets_backing_conversation() {
     let second_id = app.active_conversation().id;
     let mut desktop = DesktopApp::new(app);
 
-    let _ = desktop.update(Message::ConversationPaneBodyChanged {
-        conversation_id: first_id,
-        value: "first body".into(),
-    });
+    let _ = desktop.update(Message::Conversation(
+        ConversationMessage::PaneBodyChanged {
+            conversation_id: first_id,
+            value: "first body".into(),
+        },
+    ));
 
     let first = desktop
         .app
@@ -591,7 +632,9 @@ fn new_conversation_button_adds_tiled_conversation_pane() {
     let initial_conversations = desktop.app.workspace.conversations.len();
     let initial_panes = desktop.workspace.workspace_panes.len();
 
-    let _ = desktop.update(Message::NewConversationPane);
+    let _ = desktop.update(Message::WorkspacePane(
+        WorkspacePaneMessage::NewConversation,
+    ));
 
     assert_eq!(
         desktop.app.workspace.conversations.len(),
@@ -622,11 +665,13 @@ fn adding_workspace_pane_preserves_existing_chat_scrollback_position() {
         .restore_workspace_scroll_locks_release_pending = false;
     desktop.conversation.scroll_restore_locks.clear();
 
-    let _ = desktop.update(Message::NewConversationPane);
-    let _ = desktop.update(Message::ConversationScrolled {
+    let _ = desktop.update(Message::WorkspacePane(
+        WorkspacePaneMessage::NewConversation,
+    ));
+    let _ = desktop.update(Message::Conversation(ConversationMessage::Scrolled {
         conversation_id,
         offset: RelativeOffset { x: 0.0, y: 0.0 },
-    });
+    }));
 
     assert_eq!(
         desktop.conversation.scroll_offsets.get(&conversation_id),
@@ -657,10 +702,10 @@ fn closing_workspace_pane_preserves_existing_chat_scrollback_position() {
     desktop.conversation.scroll_restore_locks.clear();
 
     desktop.close_workspace_pane(browser_pane);
-    let _ = desktop.update(Message::ConversationScrolled {
+    let _ = desktop.update(Message::Conversation(ConversationMessage::Scrolled {
         conversation_id,
         offset: RelativeOffset { x: 0.0, y: 0.0 },
-    });
+    }));
 
     assert_eq!(
         desktop.conversation.scroll_offsets.get(&conversation_id),
@@ -745,6 +790,31 @@ fn hidden_active_conversation_runtime_message_updates_unread_status() {
 }
 
 #[test]
+fn workspace_visibility_excludes_nonmaximized_and_inactive_section_panes() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-pane-visibility");
+    desktop.app.workspace.active_section = WorkspaceSection::Messages;
+    let panes = desktop
+        .workspace
+        .workspace_panes
+        .iter()
+        .map(|(pane, kind)| (*pane, kind.clone()))
+        .collect::<Vec<_>>();
+    assert!(panes.len() >= 2);
+    assert!(panes
+        .iter()
+        .all(|(_, kind)| desktop.workspace_pane_is_visible(kind)));
+
+    desktop.workspace.workspace_panes.maximize(panes[0].0);
+    assert!(desktop.workspace_pane_is_visible(&panes[0].1));
+    assert!(!desktop.workspace_pane_is_visible(&panes[1].1));
+
+    desktop.app.workspace.active_section = WorkspaceSection::Settings;
+    assert!(!desktop.workspace_pane_is_visible(&panes[0].1));
+    desktop.workspace.workspace_panes.restore();
+    assert!(!desktop.workspace_pane_is_visible(&panes[1].1));
+}
+
+#[test]
 fn red_x_delete_conversation_removes_pane_instead_of_retargeting_to_next_thread() {
     let root = std::env::temp_dir().join(format!(
         "omenbrowser-rs-desktop-delete-conversation-pane-{}",
@@ -772,7 +842,9 @@ fn red_x_delete_conversation_removes_pane_instead_of_retargeting_to_next_thread(
         .iter()
         .any(|(_, pane)| *pane == DesktopPane::Conversation(second_id)));
 
-    let _ = desktop.update(Message::CloseConversationPaneTab(second_id));
+    let _ = desktop.update(Message::WorkspacePane(
+        WorkspacePaneMessage::CloseConversationTab(second_id),
+    ));
 
     assert!(desktop
         .app
@@ -815,7 +887,9 @@ fn red_x_delete_last_blank_conversation_does_not_leave_restore_tab() {
     let mut desktop = DesktopApp::new(app);
     let conversation_id = desktop.app.active_conversation().id;
 
-    let _ = desktop.update(Message::CloseConversationPaneTab(conversation_id));
+    let _ = desktop.update(Message::WorkspacePane(
+        WorkspacePaneMessage::CloseConversationTab(conversation_id),
+    ));
 
     assert!(desktop.hidden_conversation_panes().is_empty());
     assert!(desktop

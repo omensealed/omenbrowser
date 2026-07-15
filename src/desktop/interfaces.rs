@@ -1,6 +1,6 @@
 use iced::Task;
 
-use super::{DesktopApp, Message};
+use super::{DesktopApp, InterfaceMessage, Message};
 
 impl DesktopApp {
     pub(super) fn dispatch_interface_message(
@@ -8,107 +8,122 @@ impl DesktopApp {
         message: Message,
     ) -> Result<Task<Message>, Message> {
         match message {
-            Message::CreateTcpClientInterface => {
+            Message::Interface(InterfaceMessage::CreateTcpClient) => {
                 self.update_create_tcp_client_interface();
                 Ok(Task::none())
             }
-            Message::CreateI2pInterface => {
+            Message::Interface(InterfaceMessage::CreateI2p) => {
                 self.update_create_i2p_interface();
                 Ok(Task::none())
             }
-            Message::CreateRNodeInterface => {
+            Message::Interface(InterfaceMessage::CreateRNode) => {
                 self.update_create_rnode_interface();
                 Ok(Task::none())
             }
-            Message::CreateGatewayPreset(gateway_id) => {
+            Message::Interface(InterfaceMessage::CreateGatewayPreset(gateway_id)) => {
                 self.update_create_gateway_preset(gateway_id);
                 Ok(Task::none())
             }
-            Message::SelectInterfaceProfile(index) => {
+            Message::Interface(InterfaceMessage::SelectProfile(index)) => {
                 self.update_select_interface_profile(index);
                 Ok(Task::none())
             }
-            Message::ToggleInterfaceEnabled(index) => {
+            Message::Interface(InterfaceMessage::ToggleEnabled(index)) => {
                 self.update_toggle_interface_enabled(index);
                 Ok(Task::none())
             }
-            Message::DeleteInterfaceProfile(index) => {
+            Message::Interface(InterfaceMessage::DeleteProfile(index)) => {
                 self.update_delete_interface_profile(index);
                 Ok(Task::none())
             }
-            Message::ConfirmInterfaceDelete => {
+            Message::Interface(InterfaceMessage::ConfirmDelete) => {
                 self.update_confirm_interface_delete();
                 Ok(Task::none())
             }
-            Message::CancelInterfaceDelete => {
+            Message::Interface(InterfaceMessage::CancelDelete) => {
                 self.update_cancel_interface_delete();
                 Ok(Task::none())
             }
-            Message::InterfaceNameChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::NameChanged { profile_id, value }) => {
                 self.update_interface_name_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::TcpClientHostChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::TcpClientHostChanged { profile_id, value }) => {
                 self.update_tcp_client_host_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::TcpClientPortChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::TcpClientPortChanged { profile_id, value }) => {
                 self.update_tcp_client_port_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::TcpClientIfacNetworkChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::TcpClientIfacNetworkChanged {
+                profile_id,
+                value,
+            }) => {
                 self.update_tcp_client_ifac_network_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::TcpClientIfacPassphraseChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::TcpClientIfacPassphraseChanged {
+                profile_id,
+                value,
+            }) => {
                 self.update_tcp_client_ifac_passphrase_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::TcpServerHostChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::TcpServerHostChanged { profile_id, value }) => {
                 self.update_tcp_server_host_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::TcpServerPortChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::TcpServerPortChanged { profile_id, value }) => {
                 self.update_tcp_server_port_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::TcpServerIfacNetworkChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::TcpServerIfacNetworkChanged {
+                profile_id,
+                value,
+            }) => {
                 self.update_tcp_server_ifac_network_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::TcpServerIfacPassphraseChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::TcpServerIfacPassphraseChanged {
+                profile_id,
+                value,
+            }) => {
                 self.update_tcp_server_ifac_passphrase_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::ToggleI2pConnectable(index) => {
+            Message::Interface(InterfaceMessage::ToggleI2pConnectable(index)) => {
                 self.update_toggle_i2p_connectable(index);
                 Ok(Task::none())
             }
-            Message::I2pPeersChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::I2pPeersChanged { profile_id, value }) => {
                 self.update_i2p_peers_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::RNodeDevicePortChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::RNodeDevicePortChanged { profile_id, value }) => {
                 self.update_rnode_device_port_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::RNodeFrequencyChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::RNodeFrequencyChanged { profile_id, value }) => {
                 self.update_rnode_frequency_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::RNodeBandwidthChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::RNodeBandwidthChanged { profile_id, value }) => {
                 self.update_rnode_bandwidth_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::RNodeTxPowerChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::RNodeTxPowerChanged { profile_id, value }) => {
                 self.update_rnode_tx_power_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::RNodeSpreadingFactorChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::RNodeSpreadingFactorChanged {
+                profile_id,
+                value,
+            }) => {
                 self.update_rnode_spreading_factor_changed(profile_id, value);
                 Ok(Task::none())
             }
-            Message::RNodeCodingRateChanged { profile_id, value } => {
+            Message::Interface(InterfaceMessage::RNodeCodingRateChanged { profile_id, value }) => {
                 self.update_rnode_coding_rate_changed(profile_id, value);
                 Ok(Task::none())
             }

@@ -3,7 +3,7 @@ use iced::Task;
 use crate::runtime::InterfaceStats;
 use crate::storage::settings::RuntimeBackendSetting;
 
-use super::{DesktopApp, Message};
+use super::{DesktopApp, Message, RuntimeMessage};
 
 impl DesktopApp {
     pub(super) fn dispatch_runtime_message(
@@ -11,23 +11,23 @@ impl DesktopApp {
         message: Message,
     ) -> Result<Task<Message>, Message> {
         match message {
-            Message::ToggleAutoSyncAfterPropagationAccept => {
+            Message::Runtime(RuntimeMessage::ToggleAutoSyncAfterPropagationAccept) => {
                 self.update_toggle_auto_sync_after_propagation_accept();
                 Ok(Task::none())
             }
-            Message::SelectNativeBackend => {
+            Message::Runtime(RuntimeMessage::SelectNativeBackend) => {
                 self.update_select_native_backend();
                 Ok(Task::none())
             }
-            Message::StartNativeRuntime => {
+            Message::Runtime(RuntimeMessage::StartNativeRuntime) => {
                 self.update_start_native_runtime();
                 Ok(Task::none())
             }
-            Message::NativeQuickstart => {
+            Message::Runtime(RuntimeMessage::NativeQuickstart) => {
                 self.update_native_quickstart();
                 Ok(Task::none())
             }
-            Message::InterfaceStatsSampled(result) => {
+            Message::Runtime(RuntimeMessage::InterfaceStatsSampled(result)) => {
                 self.update_interface_stats_sampled(result);
                 Ok(Task::none())
             }
@@ -44,7 +44,7 @@ impl DesktopApp {
                     .await
                     .map_err(|error| error.to_string())
             },
-            Message::InterfaceStatsSampled,
+            |result| Message::Runtime(RuntimeMessage::InterfaceStatsSampled(result)),
         )
     }
 

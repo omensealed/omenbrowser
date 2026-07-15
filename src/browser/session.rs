@@ -8,13 +8,19 @@ use crate::browser::{BrowserAddress, BrowserPage, DownloadedFile, PageSource};
 #[cfg(feature = "chat-client")]
 use crate::chat::descriptor::lower_omenchat_blocks;
 use crate::error::{AppError, AppResult};
-use crate::micron::parser::Fragment;
+use crate::micron::parser::{
+    Fragment, MICRON_CONTROL_MAX_ITEMS, MICRON_CONTROL_MAX_OWNED_BYTES,
+    MICRON_CONTROL_NAME_MAX_BYTES, MICRON_CONTROL_VALUE_MAX_BYTES,
+};
 use crate::micron::{parse_micron, Document};
 use crate::plugins::micronplus::{
-    extract_micronplus_layout, has_micronplus_markup, lower_micronplus_markup,
-    parse_micronplus_tree,
+    has_micronplus_markup, lower_micronplus_markup, try_extract_micronplus_layout,
+    try_parse_micronplus_tree,
 };
 use crate::runtime::{CancellationToken, NetworkRuntime};
+
+pub const BROWSER_HISTORY_MAX_ITEMS: usize = 512;
+pub const BROWSER_HISTORY_MAX_OWNED_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct BrowserSession {
@@ -68,7 +74,9 @@ impl BrowserSession {
             runtime: None,
             downloads_dir: None,
         };
-        session.update_page_state(page);
+        session
+            .update_page_state(page)
+            .expect("static mock home page satisfies browser admission limits");
         session
     }
 
@@ -120,28 +128,35 @@ impl BrowserSession {
         self.history.len()
     }
 
+    pub fn history_owned_bytes(&self) -> usize {
+        navigation_history_owned_bytes(&self.history)
+    }
+
     pub fn restore_navigation(
         &mut self,
         current_url: impl Into<String>,
         title: impl Into<String>,
         history: Vec<String>,
         history_index: isize,
-    ) {
+    ) -> AppResult<()> {
         let current_url = current_url.into();
         let title = title.into();
         let mut page = BrowserPage::mock_home(current_url.clone());
         page.title = title;
-        self.restore_page(page, history, history_index);
+        self.restore_page(page, history, history_index)
     }
 
-    pub fn restore_page(&mut self, page: BrowserPage, history: Vec<String>, history_index: isize) {
-        self.update_page_state(page);
+    pub fn restore_page(
+        &mut self,
+        page: BrowserPage,
+        history: Vec<String>,
+        history_index: isize,
+    ) -> AppResult<()> {
+        let (history, history_index) = admit_restored_navigation_history(history, history_index)?;
+        self.update_page_state(page)?;
         self.history = history;
-        self.history_index = if self.history.is_empty() {
-            -1
-        } else {
-            history_index.clamp(0, self.history.len().saturating_sub(1) as isize)
-        };
+        self.history_index = history_index;
+        Ok(())
     }
 
     pub fn resolve_url(&self, input: &str) -> Option<String> {
@@ -200,6 +215,12 @@ impl BrowserSession {
         let resolved = self
             .resolve_url(url)
             .ok_or_else(|| AppError::Browser(format!("invalid address: {url}")))?;
+        if resolved.len() > crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES {
+            return Err(AppError::Browser(format!(
+                "browser address exceeds {} bytes",
+                crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES
+            )));
+        }
         if Self::is_clearweb_url(&resolved) {
             return Err(AppError::Browser(format!(
                 "clearweb URLs require explicit external open: {resolved}"
@@ -228,8 +249,8 @@ impl BrowserSession {
                     metadata: record.metadata,
                     request_data: None,
                 };
-                let page = self.normalize_page(page);
-                self.set_page_and_history(page.clone(), add_history);
+                let page = self.normalize_page(page)?;
+                self.set_page_and_history(page.clone(), add_history)?;
                 return Ok(page);
             }
         }
@@ -247,6 +268,7 @@ impl BrowserSession {
         let page = runtime
             .fetch_page(&resolved, request_data.clone(), cancel)
             .await?;
+        page.validate_retained().map_err(AppError::Browser)?;
         if !has_explicit_request_data {
             let ttl = cache_ttl_for_markup(&page.markup);
             if let Some(cache) = &self.cache {
@@ -259,8 +281,8 @@ impl BrowserSession {
                 )?;
             }
         }
-        let page = self.normalize_page(page);
-        self.set_page_and_history(page.clone(), add_history);
+        let page = self.normalize_page(page)?;
+        self.set_page_and_history(page.clone(), add_history)?;
         Ok(page)
     }
 
@@ -282,7 +304,9 @@ impl BrowserSession {
             .runtime
             .as_ref()
             .ok_or_else(|| AppError::Browser("browser session has no runtime".into()))?;
-        runtime.fetch_page(&resolved, request_data, cancel).await
+        let page = runtime.fetch_page(&resolved, request_data, cancel).await?;
+        page.validate_retained().map_err(AppError::Browser)?;
+        Ok(page)
     }
 
     pub async fn back(&mut self, cancel: CancellationToken) -> AppResult<Option<BrowserPage>> {
@@ -331,15 +355,24 @@ impl BrowserSession {
             .unwrap_or_default()
     }
 
-    pub fn set_field_value(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        self.field_values.insert(name.into(), value.into());
+    pub fn set_field_value(&mut self, name: impl Into<String>, value: impl Into<String>) -> bool {
+        let name = name.into();
+        let value = value.into();
+        if !insert_bounded_field_value(&mut self.field_values, name, value) {
+            return false;
+        }
         self.sync_document_control_state();
+        true
+    }
+
+    pub fn can_set_field_value(&self, name: &str, value: &str) -> bool {
+        bounded_field_value_is_admitted(&self.field_values, name, value)
     }
 
     pub fn apply_field_values(&mut self, values: &BTreeMap<String, String>) {
         for (name, value) in values {
             if self.field_values.contains_key(name) {
-                self.field_values.insert(name.clone(), value.clone());
+                insert_bounded_field_value(&mut self.field_values, name.clone(), value.clone());
             }
         }
         self.sync_document_control_state();
@@ -379,13 +412,21 @@ impl BrowserSession {
                 {
                     self.field_values.remove(name);
                 } else {
-                    self.field_values.insert(name.into(), value.into());
+                    if !insert_bounded_field_value(
+                        &mut self.field_values,
+                        name.into(),
+                        value.into(),
+                    ) {
+                        return false;
+                    }
                 }
                 self.sync_document_control_state();
                 true
             }
             "radio" => {
-                self.field_values.insert(name.into(), value.into());
+                if !insert_bounded_field_value(&mut self.field_values, name.into(), value.into()) {
+                    return false;
+                }
                 self.sync_document_control_state();
                 true
             }
@@ -456,11 +497,23 @@ impl BrowserSession {
             .await
     }
 
+    pub fn try_apply_page(&mut self, page: BrowserPage, add_history: bool) -> AppResult<()> {
+        self.set_page_and_history(page, add_history)
+    }
+
+    #[cfg(test)]
     pub fn apply_page(&mut self, page: BrowserPage, add_history: bool) {
-        self.set_page_and_history(page, add_history);
+        self.try_apply_page(page, add_history)
+            .expect("test page satisfies browser admission limits");
     }
 
     pub fn apply_partial_content(&mut self, slot: &str, content: &str) -> AppResult<BrowserPage> {
+        if content.len() > crate::browser::page::BROWSER_PAGE_MARKUP_MAX_BYTES {
+            return Err(AppError::Browser(format!(
+                "partial content exceeds {} bytes",
+                crate::browser::page::BROWSER_PAGE_MARKUP_MAX_BYTES
+            )));
+        }
         let Some(current_page) = self.current_page.clone() else {
             return Err(AppError::Browser(
                 "no page available for partial composition".into(),
@@ -468,21 +521,21 @@ impl BrowserSession {
         };
         let existing_micronplus_layout = current_page.metadata.get("micronplus_layout").cloned();
         let existing_micronplus_tree = current_page.metadata.get("micronplus_tree").cloned();
-        self.partial_contents
-            .insert(slot.to_string(), content.to_string());
+        let mut next_partial_contents = self.partial_contents.clone();
+        next_partial_contents.insert(slot.to_string(), content.to_string());
         let base_markup = self
             .partial_base_markup
             .as_deref()
             .unwrap_or(current_page.markup.as_str());
         let markup =
-            compose_markup_with_partials(base_markup, &self.partials, &self.partial_contents);
+            compose_markup_with_partials(base_markup, &self.partials, &next_partial_contents);
         let mut next_page = BrowserPage {
             markup,
             source: PageSource::Network,
             ..current_page
         };
         next_page.metadata.remove("micronplus_source");
-        let page = self.normalize_page(next_page);
+        let page = self.normalize_page(next_page)?;
         let page = if existing_micronplus_layout.is_some() || existing_micronplus_tree.is_some() {
             let mut page = page;
             if let Some(layout) = existing_micronplus_layout {
@@ -502,6 +555,8 @@ impl BrowserSession {
             page.metadata.remove("micronplus_tree");
             page
         };
+        page.validate_retained().map_err(AppError::Browser)?;
+        self.partial_contents = next_partial_contents;
         self.current_document = Some(parse_micron(&page.markup));
         self.current_page = Some(page.clone());
         self.refresh_field_values();
@@ -512,8 +567,8 @@ impl BrowserSession {
         self.generation == generation
     }
 
-    fn set_page_and_history(&mut self, page: BrowserPage, add_history: bool) {
-        self.update_page_state(page.clone());
+    fn set_page_and_history(&mut self, page: BrowserPage, add_history: bool) -> AppResult<()> {
+        self.update_page_state(page.clone())?;
         if add_history
             && (self.history_index < 0
                 || self
@@ -525,11 +580,13 @@ impl BrowserSession {
                 .truncate((self.history_index + 1).max(0) as usize);
             self.history.push(page.url);
             self.history_index += 1;
+            trim_live_navigation_history(&mut self.history, &mut self.history_index);
         }
+        Ok(())
     }
 
-    fn update_page_state(&mut self, page: BrowserPage) {
-        let page = self.normalize_page(page);
+    fn update_page_state(&mut self, page: BrowserPage) -> AppResult<()> {
+        let page = self.normalize_page(page)?;
         self.current_document = Some(parse_micron(&page.markup));
         self.partials = extract_partial_specs(&page.markup);
         self.partial_base_markup = Some(page.markup.clone());
@@ -537,12 +594,14 @@ impl BrowserSession {
         self.current_page = Some(page);
         self.generation += 1;
         self.refresh_field_values();
+        Ok(())
     }
 
     fn refresh_field_values(&mut self) {
         let existing = self.field_values.clone();
-        self.field_values.clear();
+        let mut field_values = BTreeMap::new();
         let Some(document) = &self.current_document else {
+            self.field_values.clear();
             return;
         };
         for row in &document.rows {
@@ -551,7 +610,8 @@ impl BrowserSession {
                     continue;
                 };
                 if control.kind == "field" {
-                    self.field_values.insert(
+                    insert_bounded_field_value(
+                        &mut field_values,
                         control.name.clone(),
                         existing
                             .get(&control.name)
@@ -561,11 +621,15 @@ impl BrowserSession {
                 } else if matches!(control.kind.as_str(), "checkbox" | "radio")
                     && control.prechecked
                 {
-                    self.field_values
-                        .insert(control.name.clone(), control.value.clone());
+                    insert_bounded_field_value(
+                        &mut field_values,
+                        control.name.clone(),
+                        control.value.clone(),
+                    );
                 }
             }
         }
+        self.field_values = field_values;
         self.sync_document_control_state();
     }
 
@@ -619,7 +683,8 @@ impl BrowserSession {
         }
     }
 
-    fn normalize_page(&self, mut page: BrowserPage) -> BrowserPage {
+    fn normalize_page(&self, mut page: BrowserPage) -> AppResult<BrowserPage> {
+        page.validate_retained().map_err(AppError::Browser)?;
         let micronplus_source = if self.micronplus_allowed_for_page(&page) {
             page.metadata
                 .get("micronplus_source")
@@ -636,27 +701,39 @@ impl BrowserSession {
                 "micronplus_source".into(),
                 serde_json::Value::String(source_markup.clone()),
             );
-            let layout = extract_micronplus_layout(&source_markup);
-            if !layout.windows.is_empty() {
-                page.metadata.insert(
-                    "micronplus_layout".into(),
-                    serde_json::to_value(&layout).expect("MicronPlus layout serializes"),
-                );
+            page.metadata.remove("micronplus_layout");
+            page.metadata.remove("micronplus_tree");
+            let mut structural_diagnostics = Vec::new();
+            match try_extract_micronplus_layout(&source_markup) {
+                Ok(layout) if !layout.windows.is_empty() => {
+                    page.metadata.insert(
+                        "micronplus_layout".into(),
+                        serde_json::to_value(&layout).expect("MicronPlus layout serializes"),
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => structural_diagnostics.push(error),
             }
-            let tree = parse_micronplus_tree(&source_markup);
-            if !tree.nodes.is_empty() {
-                page.metadata.insert(
-                    "micronplus_tree".into(),
-                    serde_json::to_value(&tree).expect("MicronPlus tree serializes"),
-                );
+            match try_parse_micronplus_tree(&source_markup) {
+                Ok(tree) if !tree.nodes.is_empty() => {
+                    page.metadata.insert(
+                        "micronplus_tree".into(),
+                        serde_json::to_value(&tree).expect("MicronPlus tree serializes"),
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => structural_diagnostics.push(error),
             }
             let lowered = lower_micronplus_markup(&source_markup);
-            if lowered.diagnostics.is_empty() {
+            structural_diagnostics.extend(lowered.diagnostics);
+            structural_diagnostics.sort();
+            structural_diagnostics.dedup();
+            if structural_diagnostics.is_empty() {
                 page.metadata.remove("micronplus_diagnostics");
             } else {
                 page.metadata.insert(
                     "micronplus_diagnostics".into(),
-                    serde_json::to_value(&lowered.diagnostics)
+                    serde_json::to_value(&structural_diagnostics)
                         .expect("MicronPlus diagnostics serialize"),
                 );
             }
@@ -671,7 +748,8 @@ impl BrowserSession {
         {
             page.markup = lower_omenchat_blocks(&page.markup);
         }
-        page
+        page.validate_retained().map_err(AppError::Browser)?;
+        Ok(page)
     }
 
     fn micronplus_allowed_for_page(&self, page: &BrowserPage) -> bool {
@@ -689,6 +767,140 @@ impl BrowserSession {
             .map(|address| trusted_nodes.contains(&address.destination))
             .unwrap_or(false)
     }
+}
+
+fn navigation_history_owned_bytes(history: &[String]) -> usize {
+    history
+        .iter()
+        .fold(0usize, |owned, url| owned.saturating_add(url.len()))
+}
+
+fn trim_live_navigation_history(history: &mut Vec<String>, history_index: &mut isize) {
+    let mut owned = navigation_history_owned_bytes(history);
+    let mut remove = 0usize;
+    while history.len().saturating_sub(remove) > BROWSER_HISTORY_MAX_ITEMS
+        || owned > BROWSER_HISTORY_MAX_OWNED_BYTES
+    {
+        owned = owned.saturating_sub(history[remove].len());
+        remove += 1;
+    }
+    if remove > 0 {
+        history.drain(..remove);
+        *history_index -= remove as isize;
+    }
+    *history_index = if history.is_empty() {
+        -1
+    } else {
+        (*history_index).clamp(0, history.len().saturating_sub(1) as isize)
+    };
+}
+
+fn admit_restored_navigation_history(
+    mut history: Vec<String>,
+    history_index: isize,
+) -> AppResult<(Vec<String>, isize)> {
+    if history.is_empty() {
+        return Ok((Vec::new(), -1));
+    }
+    let selected = history_index.clamp(0, history.len().saturating_sub(1) as isize) as usize;
+    if history[selected].len() > crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES {
+        return Err(AppError::Browser(format!(
+            "selected browser history URL exceeds {} bytes",
+            crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES
+        )));
+    }
+
+    let mut left = selected;
+    let mut right = selected;
+    let mut items = 1usize;
+    let mut owned = history[selected].len();
+    let mut left_open = left > 0;
+    let mut right_open = right + 1 < history.len();
+    while items < BROWSER_HISTORY_MAX_ITEMS && (left_open || right_open) {
+        let mut admitted = false;
+        if left_open {
+            let candidate = left - 1;
+            let bytes = history[candidate].len();
+            if bytes <= crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES
+                && owned.saturating_add(bytes) <= BROWSER_HISTORY_MAX_OWNED_BYTES
+            {
+                left = candidate;
+                owned += bytes;
+                items += 1;
+                admitted = true;
+                left_open = left > 0;
+            } else {
+                left_open = false;
+            }
+        }
+        if items >= BROWSER_HISTORY_MAX_ITEMS {
+            break;
+        }
+        if right_open {
+            let candidate = right + 1;
+            let bytes = history[candidate].len();
+            if bytes <= crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES
+                && owned.saturating_add(bytes) <= BROWSER_HISTORY_MAX_OWNED_BYTES
+            {
+                right = candidate;
+                owned += bytes;
+                items += 1;
+                admitted = true;
+                right_open = right + 1 < history.len();
+            } else {
+                right_open = false;
+            }
+        }
+        if !admitted {
+            break;
+        }
+    }
+
+    let retained = history.drain(left..=right).collect::<Vec<_>>();
+    Ok((retained, (selected - left) as isize))
+}
+
+fn insert_bounded_field_value(
+    fields: &mut BTreeMap<String, String>,
+    name: String,
+    value: String,
+) -> bool {
+    if !bounded_field_value_is_admitted(fields, &name, &value) {
+        return false;
+    }
+    fields.insert(name, value);
+    true
+}
+
+fn bounded_field_value_is_admitted(
+    fields: &BTreeMap<String, String>,
+    name: &str,
+    value: &str,
+) -> bool {
+    if name.is_empty()
+        || name.len() > MICRON_CONTROL_NAME_MAX_BYTES
+        || value.len() > MICRON_CONTROL_VALUE_MAX_BYTES
+        || (!fields.contains_key(name) && fields.len() >= MICRON_CONTROL_MAX_ITEMS)
+    {
+        return false;
+    }
+    let retained_bytes = fields
+        .iter()
+        .fold(0usize, |total, (current_name, current_value)| {
+            if current_name == name {
+                total
+            } else {
+                total.saturating_add(current_name.len().saturating_add(current_value.len()))
+            }
+        });
+    if retained_bytes
+        .checked_add(name.len())
+        .and_then(|total| total.checked_add(value.len()))
+        .is_none_or(|total| total > MICRON_CONTROL_MAX_OWNED_BYTES)
+    {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -965,6 +1177,71 @@ mod tests {
     }
 
     #[test]
+    fn oversized_controls_and_field_updates_do_not_enter_session_state() {
+        let oversized_name = "n".repeat(MICRON_CONTROL_NAME_MAX_BYTES + 1);
+        let page = BrowserPage {
+            url: "mock.node:/bounded-form.mu".into(),
+            title: "Bounded Form".into(),
+            markup: format!("`<12|nickname`mesh>\n`<{oversized_name}`rejected>"),
+            source: PageSource::Network,
+            metadata: BTreeMap::new(),
+            request_data: None,
+        };
+        let mut session = BrowserSession::new("mock.node:/");
+        session.apply_page(page, true);
+
+        assert_eq!(session.field_values.len(), 1);
+        assert_eq!(
+            session.field_values.get("nickname").map(String::as_str),
+            Some("mesh")
+        );
+        assert_eq!(session.interactive_controls().len(), 1);
+        assert!(
+            !session.set_field_value("nickname", "v".repeat(MICRON_CONTROL_VALUE_MAX_BYTES + 1))
+        );
+        assert_eq!(
+            session.field_values.get("nickname").map(String::as_str),
+            Some("mesh")
+        );
+        assert!(!session.set_field_value(oversized_name, "value"));
+
+        session.apply_field_values(&BTreeMap::from([(
+            "nickname".into(),
+            "v".repeat(MICRON_CONTROL_VALUE_MAX_BYTES + 1),
+        )]));
+        assert_eq!(
+            session.field_values.get("nickname").map(String::as_str),
+            Some("mesh")
+        );
+    }
+
+    #[test]
+    fn browser_field_state_is_item_and_aggregate_bounded() {
+        let mut session = BrowserSession::new("mock.node:/");
+        for index in 0..MICRON_CONTROL_MAX_ITEMS {
+            assert!(session.set_field_value(format!("field-{index}"), "value"));
+        }
+        assert!(!session.set_field_value("one-too-many", "value"));
+        assert_eq!(session.field_values.len(), MICRON_CONTROL_MAX_ITEMS);
+
+        let mut session = BrowserSession::new("mock.node:/");
+        let value = "v".repeat(MICRON_CONTROL_VALUE_MAX_BYTES);
+        let mut admitted = 0usize;
+        while session.set_field_value(format!("field-{admitted}"), value.clone()) {
+            admitted += 1;
+        }
+        assert!(admitted > 0 && admitted < MICRON_CONTROL_MAX_ITEMS);
+        assert!(
+            session
+                .field_values
+                .iter()
+                .map(|(name, value)| name.len() + value.len())
+                .sum::<usize>()
+                <= MICRON_CONTROL_MAX_OWNED_BYTES
+        );
+    }
+
+    #[test]
     fn partial_content_composes_without_advancing_generation() {
         let page = BrowserPage {
             url: "mock.node:/partial.mu".into(),
@@ -1099,6 +1376,45 @@ Side content
             .any(|link| link.fields == vec!["message"]));
     }
 
+    #[test]
+    fn micronplus_structural_rejection_is_diagnostic_and_drops_stale_metadata() {
+        let depth = crate::browser::micronplus::MICRONPLUS_TREE_MAX_DEPTH;
+        let mut markup = "[box]\n".repeat(depth);
+        markup.push_str("leaf\n");
+        markup.push_str(&"[/box]\n".repeat(depth));
+        let page = BrowserPage {
+            url: "mock.node:/micronplus-depth.mu".into(),
+            title: "Bounded MicronPlus".into(),
+            markup,
+            source: PageSource::Network,
+            metadata: BTreeMap::from([
+                ("micronplus_tree".into(), serde_json::json!({"stale": true})),
+                (
+                    "micronplus_layout".into(),
+                    serde_json::json!({"stale": true}),
+                ),
+            ]),
+            request_data: None,
+        };
+        let mut session = BrowserSession::new("mock.node:/");
+
+        session.apply_page(page, true);
+
+        let page = session
+            .current_page()
+            .expect("bounded page remains visible");
+        assert!(!page.metadata.contains_key("micronplus_tree"));
+        assert!(!page.metadata.contains_key("micronplus_layout"));
+        assert!(page
+            .metadata
+            .get("micronplus_diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|diagnostics| diagnostics.iter().any(|diagnostic| diagnostic
+                .as_str()
+                .is_some_and(|diagnostic| diagnostic.contains("exceeds depth")))));
+        assert!(page.markup.contains("leaf"));
+    }
+
     #[tokio::test]
     async fn download_uses_runtime_and_safe_download_path() {
         let session = runtime_session("download");
@@ -1156,15 +1472,215 @@ Side content
     }
 
     #[test]
+    fn live_navigation_history_retains_newest_item_window() {
+        let mut session = BrowserSession::new("mock.node:/");
+        for index in 0..=BROWSER_HISTORY_MAX_ITEMS {
+            session.apply_page(
+                BrowserPage::mock_home(format!("mock.node:/page/{index}.mu")),
+                true,
+            );
+        }
+
+        assert_eq!(session.history_len(), BROWSER_HISTORY_MAX_ITEMS);
+        assert_eq!(
+            session.history_index,
+            BROWSER_HISTORY_MAX_ITEMS as isize - 1
+        );
+        assert_eq!(
+            session.history.first().map(String::as_str),
+            Some("mock.node:/page/1.mu")
+        );
+        assert_eq!(
+            session.history.last().map(String::as_str),
+            Some("mock.node:/page/512.mu")
+        );
+        assert!(session.history_owned_bytes() <= BROWSER_HISTORY_MAX_OWNED_BYTES);
+    }
+
+    #[test]
+    fn live_navigation_history_enforces_aggregate_url_bytes() {
+        let mut session = BrowserSession::new("mock.node:/");
+        let prefix = "mock.node:/";
+        for index in 0..130 {
+            let suffix = format!("/{index}");
+            let url = format!(
+                "{prefix}{}{suffix}",
+                "x".repeat(
+                    crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES - prefix.len() - suffix.len()
+                )
+            );
+            session.apply_page(BrowserPage::mock_home(url), true);
+        }
+
+        assert_eq!(session.history_len(), 128);
+        assert_eq!(
+            session.history_owned_bytes(),
+            BROWSER_HISTORY_MAX_OWNED_BYTES
+        );
+        assert!(session
+            .history
+            .first()
+            .is_some_and(|url| url.ends_with("/2")));
+        assert!(session
+            .history
+            .last()
+            .is_some_and(|url| url.ends_with("/129")));
+        assert_eq!(session.history_index, 127);
+    }
+
+    #[test]
+    fn restored_navigation_retains_contiguous_window_around_pointer() {
+        let history = (0..700)
+            .map(|index| format!("mock.node:/page/{index}.mu"))
+            .collect::<Vec<_>>();
+        let selected = 350usize;
+        let mut session = BrowserSession::new("mock.node:/");
+
+        session
+            .restore_page(
+                BrowserPage::mock_home(history[selected].clone()),
+                history.clone(),
+                selected as isize,
+            )
+            .expect("bounded history restore");
+
+        assert_eq!(session.history_len(), BROWSER_HISTORY_MAX_ITEMS);
+        assert_eq!(session.history, history[94..606]);
+        assert_eq!(session.history_index, 256);
+        assert_eq!(
+            session.history[session.history_index as usize],
+            history[selected]
+        );
+        assert!(session.history_owned_bytes() <= BROWSER_HISTORY_MAX_OWNED_BYTES);
+    }
+
+    #[test]
+    fn restored_navigation_rejects_oversized_selected_url_atomically() {
+        let mut session = BrowserSession::new("mock.node:/");
+        session.apply_page(BrowserPage::mock_home("mock.node:/before.mu"), true);
+        let before_page = session.current_page().cloned();
+        let before_history = session.history.clone();
+        let before_generation = session.generation;
+        let oversized = "x".repeat(crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES + 1);
+
+        let error = session
+            .restore_page(
+                BrowserPage::mock_home("mock.node:/after.mu"),
+                vec![oversized],
+                0,
+            )
+            .expect_err("oversized selected history URL must fail");
+
+        assert!(error.to_string().contains("selected browser history URL"));
+        assert_eq!(session.current_page(), before_page.as_ref());
+        assert_eq!(session.history, before_history);
+        assert_eq!(session.generation, before_generation);
+    }
+
+    #[test]
+    fn restored_navigation_does_not_skip_across_invalid_adjacent_edge() {
+        let oversized = "x".repeat(crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES + 1);
+        let mut session = BrowserSession::new("mock.node:/");
+
+        session
+            .restore_page(
+                BrowserPage::mock_home("mock.node:/selected.mu"),
+                vec![
+                    "mock.node:/unreachable-left.mu".into(),
+                    oversized,
+                    "mock.node:/selected.mu".into(),
+                    "mock.node:/right.mu".into(),
+                ],
+                2,
+            )
+            .expect("selected and valid adjacent edge remain restorable");
+
+        assert_eq!(
+            session.history,
+            vec!["mock.node:/selected.mu", "mock.node:/right.mu"]
+        );
+        assert_eq!(session.history_index, 0);
+    }
+
+    #[tokio::test]
+    async fn open_rejects_oversized_resolved_url_before_runtime_dispatch() {
+        let mut session = runtime_session("oversized-open-url");
+        let before_history = session.history.clone();
+        let oversized = format!(
+            "mock.node:/{}",
+            "x".repeat(crate::browser::page::BROWSER_PAGE_URL_MAX_BYTES)
+        );
+
+        let error = session
+            .open(&oversized, None, true, false, CancellationToken::new())
+            .await
+            .expect_err("oversized URL must fail before fetch");
+
+        assert!(error.to_string().contains("browser address exceeds"));
+        assert_eq!(session.history, before_history);
+    }
+
+    #[test]
+    fn rejected_page_admission_preserves_current_state_and_history() {
+        let mut session = BrowserSession::new("mock.node:/");
+        let current_page = session.current_page().cloned();
+        let generation = session.generation;
+        let history = session.history.clone();
+        let mut oversized = BrowserPage::mock_home("mock.node:/oversized.mu");
+        oversized.markup = "x".repeat(crate::browser::page::BROWSER_PAGE_MARKUP_MAX_BYTES + 1);
+
+        let error = session
+            .try_apply_page(oversized, true)
+            .expect_err("oversized page must be rejected");
+
+        assert!(error.to_string().contains("page markup"));
+        assert_eq!(session.current_page(), current_page.as_ref());
+        assert_eq!(session.generation, generation);
+        assert_eq!(session.history, history);
+    }
+
+    #[test]
+    fn rejected_partial_admission_does_not_retain_candidate_content() {
+        let page = BrowserPage {
+            url: "mock.node:/partial-admission.mu".into(),
+            title: "Partial".into(),
+            markup: "before\n`{mock.node:/feed`2`pid=feed}\nafter".into(),
+            source: PageSource::Network,
+            metadata: BTreeMap::new(),
+            request_data: None,
+        };
+        let mut session = BrowserSession::new("mock.node:/");
+        session.apply_page(page, true);
+        let slot = session.partials[0].slot.clone();
+        let before = session.current_page().cloned();
+
+        assert!(session
+            .apply_partial_content(
+                &slot,
+                &"x".repeat(crate::browser::page::BROWSER_PAGE_MARKUP_MAX_BYTES + 1),
+            )
+            .is_err());
+        assert_eq!(session.current_page(), before.as_ref());
+
+        let page = session
+            .apply_partial_content(&slot, "accepted")
+            .expect("later bounded partial remains applicable");
+        assert!(page.markup.contains("accepted"));
+        assert!(!page.markup.contains(&"x".repeat(1024)));
+    }
+
+    #[test]
     fn restore_navigation_clamps_history_without_runtime_state() {
         let mut session = BrowserSession::new("mock.node:/");
 
-        session.restore_navigation(
-            "mock.node:/two.mu",
-            "Two",
-            vec!["mock.node:/one.mu".into(), "mock.node:/two.mu".into()],
-            99,
-        );
+        session
+            .restore_navigation(
+                "mock.node:/two.mu",
+                "Two",
+                vec!["mock.node:/one.mu".into(), "mock.node:/two.mu".into()],
+                99,
+            )
+            .expect("restore navigation");
 
         assert_eq!(session.current_url(), Some("mock.node:/two.mu"));
         assert_eq!(
@@ -1187,11 +1703,13 @@ Side content
             request_data: None,
         };
 
-        session.restore_page(
-            page,
-            vec!["mock.node:/".into(), "mock.node:/cached.mu".into()],
-            1,
-        );
+        session
+            .restore_page(
+                page,
+                vec!["mock.node:/".into(), "mock.node:/cached.mu".into()],
+                1,
+            )
+            .expect("restore page");
 
         assert_eq!(session.current_url(), Some("mock.node:/cached.mu"));
         assert_eq!(

@@ -22,4 +22,9 @@ pub use message::{
 #[allow(unused_imports)]
 pub use service::MessagingService;
 #[allow(unused_imports)]
-pub use store::MessageStore;
+pub use store::{
+    MessageStore, MESSAGE_STORE_CORRUPT_BACKUP_MAX_FILES,
+    MESSAGE_STORE_CORRUPT_BACKUP_MAX_TOTAL_BYTES, MESSAGE_STORE_MAX_SCAN_ENTRIES,
+    MESSAGE_STORE_MAX_THREADS, MESSAGE_STORE_MAX_TOTAL_BYTES, MESSAGE_STORE_PEER_KEY_MAX_BYTES,
+    MESSAGE_STORE_THREAD_MAX_BYTES, MESSAGE_STORE_THREAD_MAX_MESSAGES,
+};

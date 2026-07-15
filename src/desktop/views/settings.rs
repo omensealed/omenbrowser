@@ -5,8 +5,9 @@ use crate::interfaces::InterfaceKind;
 
 use super::super::{
     action_grid, app_scrollable, omen_button, omen_button_owned, section_card, subtle_button,
-    subtle_button_owned, ui_size, wrapped_panel_text, wrapped_text_owned, DesktopApp, Message,
-    DESKTOP_THEME_CHOICES,
+    subtle_button_owned, ui_size, wrapped_panel_text, wrapped_text_owned, ClearwebMessage,
+    DesktopApp, DiagnosticsMessage, ExternalBrowserMessage, IdentityMessage, InterfaceMessage,
+    Message, RuntimeMessage, ThemeMessage, DESKTOP_THEME_CHOICES,
 };
 
 pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Message> {
@@ -56,7 +57,10 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
         .enumerate()
         .fold(column![].spacing(4), |column, (index, profile)| {
             let summary = row![
-                subtle_button("Select", Message::SelectInterfaceProfile(index)),
+                subtle_button(
+                    "Select",
+                    Message::Interface(InterfaceMessage::SelectProfile(index))
+                ),
                 wrapped_text_owned(
                     format!(
                         "{} | {:?} | {}",
@@ -88,16 +92,20 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
                         row![
                             text("TCP host").size(ui_size(14)),
                             text_input("host", &profile.target_host)
-                                .on_input(move |value| Message::TcpClientHostChanged {
-                                    profile_id: host_id.clone(),
-                                    value,
+                                .on_input(move |value| {
+                                    Message::Interface(InterfaceMessage::TcpClientHostChanged {
+                                        profile_id: host_id.clone(),
+                                        value,
+                                    })
                                 })
                                 .width(Length::FillPortion(2)),
                             text("port").size(ui_size(14)),
                             text_input("port", &profile.target_port.to_string())
-                                .on_input(move |value| Message::TcpClientPortChanged {
-                                    profile_id: port_id.clone(),
-                                    value,
+                                .on_input(move |value| {
+                                    Message::Interface(InterfaceMessage::TcpClientPortChanged {
+                                        profile_id: port_id.clone(),
+                                        value,
+                                    })
                                 })
                                 .width(Length::FillPortion(1)),
                         ]
@@ -108,16 +116,24 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
                         row![
                             text("IFAC").size(ui_size(14)),
                             text_input("network name", &profile.network_name)
-                                .on_input(move |value| Message::TcpClientIfacNetworkChanged {
-                                    profile_id: ifac_network_id.clone(),
-                                    value,
+                                .on_input(move |value| {
+                                    Message::Interface(
+                                        InterfaceMessage::TcpClientIfacNetworkChanged {
+                                            profile_id: ifac_network_id.clone(),
+                                            value,
+                                        },
+                                    )
                                 })
                                 .width(Length::FillPortion(2)),
                             text_input("passphrase", &profile.passphrase)
                                 .secure(true)
-                                .on_input(move |value| Message::TcpClientIfacPassphraseChanged {
-                                    profile_id: ifac_pass_id.clone(),
-                                    value,
+                                .on_input(move |value| {
+                                    Message::Interface(
+                                        InterfaceMessage::TcpClientIfacPassphraseChanged {
+                                            profile_id: ifac_pass_id.clone(),
+                                            value,
+                                        },
+                                    )
                                 })
                                 .width(Length::FillPortion(2)),
                         ]
@@ -134,16 +150,20 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
                         row![
                             text("TCP listen").size(ui_size(14)),
                             text_input("listen IP", &profile.target_host)
-                                .on_input(move |value| Message::TcpServerHostChanged {
-                                    profile_id: host_id.clone(),
-                                    value,
+                                .on_input(move |value| {
+                                    Message::Interface(InterfaceMessage::TcpServerHostChanged {
+                                        profile_id: host_id.clone(),
+                                        value,
+                                    })
                                 })
                                 .width(Length::FillPortion(2)),
                             text("port").size(ui_size(14)),
                             text_input("port", &profile.target_port.to_string())
-                                .on_input(move |value| Message::TcpServerPortChanged {
-                                    profile_id: port_id.clone(),
-                                    value,
+                                .on_input(move |value| {
+                                    Message::Interface(InterfaceMessage::TcpServerPortChanged {
+                                        profile_id: port_id.clone(),
+                                        value,
+                                    })
                                 })
                                 .width(Length::FillPortion(1)),
                         ]
@@ -154,16 +174,24 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
                         row![
                             text("IFAC").size(ui_size(14)),
                             text_input("network name", &profile.network_name)
-                                .on_input(move |value| Message::TcpServerIfacNetworkChanged {
-                                    profile_id: ifac_network_id.clone(),
-                                    value,
+                                .on_input(move |value| {
+                                    Message::Interface(
+                                        InterfaceMessage::TcpServerIfacNetworkChanged {
+                                            profile_id: ifac_network_id.clone(),
+                                            value,
+                                        },
+                                    )
                                 })
                                 .width(Length::FillPortion(2)),
                             text_input("passphrase", &profile.passphrase)
                                 .secure(true)
-                                .on_input(move |value| Message::TcpServerIfacPassphraseChanged {
-                                    profile_id: ifac_pass_id.clone(),
-                                    value,
+                                .on_input(move |value| {
+                                    Message::Interface(
+                                        InterfaceMessage::TcpServerIfacPassphraseChanged {
+                                            profile_id: ifac_pass_id.clone(),
+                                            value,
+                                        },
+                                    )
                                 })
                                 .width(Length::FillPortion(2)),
                         ]
@@ -180,9 +208,15 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
         .fold(row![].spacing(8), |row, theme| {
             let theme_name = *theme;
             let button = if theme_name == desktop.app.settings.ui.theme_name {
-                omen_button(theme, Message::SetTheme(theme_name.into()))
+                omen_button(
+                    theme,
+                    Message::Theme(ThemeMessage::SetTheme(theme_name.into())),
+                )
             } else {
-                subtle_button(theme, Message::SetTheme(theme_name.into()))
+                subtle_button(
+                    theme,
+                    Message::Theme(ThemeMessage::SetTheme(theme_name.into())),
+                )
             };
             row.push(button)
         })
@@ -194,22 +228,47 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
     .spacing(8);
 
     let font_size = desktop.app.settings.ui.font_size.clamp(10, 24);
+    let reduce_motion = desktop.app.settings.ui.reduce_motion;
     let appearance = column![
         themes,
         row![
             wrapped_text_owned(format!("Font size: {font_size}px"), 14),
             subtle_button(
                 "-",
-                Message::SetFontSize(font_size.saturating_sub(1).max(10)),
+                Message::Theme(ThemeMessage::SetFontSize(
+                    font_size.saturating_sub(1).max(10),
+                )),
             ),
             omen_button(
                 "+",
-                Message::SetFontSize(font_size.saturating_add(1).min(24)),
+                Message::Theme(ThemeMessage::SetFontSize(
+                    font_size.saturating_add(1).min(24),
+                )),
             ),
         ]
         .spacing(8)
         .wrap(),
         wrapped_text_owned("Font size applies on next launch.", 13),
+        row![
+            wrapped_text_owned(
+                format!(
+                    "Reduce motion: {}",
+                    if reduce_motion { "On" } else { "Off" }
+                ),
+                14
+            ),
+            if reduce_motion {
+                omen_button("Disable", Message::Theme(ThemeMessage::ToggleReducedMotion))
+            } else {
+                subtle_button("Enable", Message::Theme(ThemeMessage::ToggleReducedMotion))
+            },
+        ]
+        .spacing(8)
+        .wrap(),
+        wrapped_text_owned(
+            "Reduced motion pauses animated media previews while preserving a static image.",
+            13
+        ),
     ]
     .spacing(8);
 
@@ -225,9 +284,15 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
                     .as_deref();
             let label = format!("{} ({})", browser.label, browser.command);
             let button = if selected {
-                omen_button_owned(label, Message::SelectPreferredExternalBrowser(index))
+                omen_button_owned(
+                    label,
+                    Message::ExternalBrowser(ExternalBrowserMessage::SelectPreferred(index)),
+                )
             } else {
-                subtle_button_owned(label, Message::SelectPreferredExternalBrowser(index))
+                subtle_button_owned(
+                    label,
+                    Message::ExternalBrowser(ExternalBrowserMessage::SelectPreferred(index)),
+                )
             };
             row.push(button)
         },
@@ -243,7 +308,7 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
                     } else {
                         "Enable SOCKS5"
                     },
-                    Message::ToggleClearwebSocksProxy,
+                    Message::Clearweb(ClearwebMessage::ToggleSocksProxy),
                 ),
                 subtle_button(
                     if clearweb.remote_media_enabled {
@@ -251,9 +316,12 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
                     } else {
                         "Enable Remote Media"
                     },
-                    Message::ToggleClearwebRemoteMedia,
+                    Message::Clearweb(ClearwebMessage::ToggleRemoteMedia),
                 ),
-                subtle_button("Clear Browser", Message::ClearPreferredExternalBrowser),
+                subtle_button(
+                    "Clear Browser",
+                    Message::ExternalBrowser(ExternalBrowserMessage::ClearPreferred),
+                ),
             ]
             .spacing(8)
             .wrap(),
@@ -294,14 +362,29 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
 
     let theme_card = section_card("Appearance", appearance);
     let mut native_setup_actions = vec![
-        omen_button("Create Identity", Message::CreateIdentity),
-        omen_button("Add TCP Gateway", Message::CreateTcpClientInterface),
+        omen_button(
+            "Create Identity",
+            Message::Identity(IdentityMessage::Create),
+        ),
+        omen_button(
+            "Add TCP Gateway",
+            Message::Interface(InterfaceMessage::CreateTcpClient),
+        ),
     ];
     native_setup_actions.extend(desktop.gateway_preset_buttons());
     native_setup_actions.extend([
-        omen_button("Select Native Backend", Message::SelectNativeBackend),
-        omen_button("Start Native Runtime", Message::StartNativeRuntime),
-        omen_button("Full Quickstart", Message::NativeQuickstart),
+        omen_button(
+            "Select Native Backend",
+            Message::Runtime(RuntimeMessage::SelectNativeBackend),
+        ),
+        omen_button(
+            "Start Native Runtime",
+            Message::Runtime(RuntimeMessage::StartNativeRuntime),
+        ),
+        omen_button(
+            "Full Quickstart",
+            Message::Runtime(RuntimeMessage::NativeQuickstart),
+        ),
     ]);
     let native_card = section_card(
         "First Run / Native Setup",
@@ -309,13 +392,34 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
             action_grid(native_setup_actions, 3),
             action_grid(
                 vec![
-                    subtle_button("Preview Config", Message::PreviewManagedConfig),
-                    subtle_button("Export Config", Message::ExportManagedConfig),
-                    subtle_button("Preflight", Message::NativePreflight),
-                    subtle_button("Dry Smoke", Message::NativeSmokeDryRun),
-                    subtle_button("Live Probe", Message::NativeSmokeLiveProbe),
-                    omen_button("Live Fetch", Message::NativeLiveFetchValidate),
-                    subtle_button("Known Destinations", Message::BeginKnownDestinationsPreload),
+                    subtle_button(
+                        "Preview Config",
+                        Message::Diagnostics(DiagnosticsMessage::PreviewManagedConfig)
+                    ),
+                    subtle_button(
+                        "Export Config",
+                        Message::Diagnostics(DiagnosticsMessage::ExportManagedConfig)
+                    ),
+                    subtle_button(
+                        "Preflight",
+                        Message::Diagnostics(DiagnosticsMessage::NativePreflight)
+                    ),
+                    subtle_button(
+                        "Dry Smoke",
+                        Message::Diagnostics(DiagnosticsMessage::NativeSmokeDryRun)
+                    ),
+                    subtle_button(
+                        "Live Probe",
+                        Message::Diagnostics(DiagnosticsMessage::NativeSmokeLiveProbe)
+                    ),
+                    omen_button(
+                        "Live Fetch",
+                        Message::Diagnostics(DiagnosticsMessage::NativeLiveFetchValidate)
+                    ),
+                    subtle_button(
+                        "Known Destinations",
+                        Message::Diagnostics(DiagnosticsMessage::BeginKnownDestinationsPreload)
+                    ),
                 ],
                 3,
             ),
@@ -377,9 +481,12 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
                     } else {
                         "Enable Auto Sync"
                     },
-                    Message::ToggleAutoSyncAfterPropagationAccept,
+                    Message::Runtime(RuntimeMessage::ToggleAutoSyncAfterPropagationAccept),
                 ),
-                subtle_button("Sync Now", Message::SyncPropagationNow),
+                subtle_button(
+                    "Sync Now",
+                    Message::Diagnostics(DiagnosticsMessage::SyncPropagationNow)
+                ),
             ]
             .spacing(8)
             .wrap(),

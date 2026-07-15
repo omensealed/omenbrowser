@@ -1,14 +1,15 @@
 use iced::{event, keyboard, window};
 
-use super::{BrowserFieldKey, DesktopApp, Message};
+use super::{
+    BrowserFieldKey, BrowserMessage, DesktopApp, IdentityMessage, Message, RuntimeMessage,
+    ShellMessage,
+};
 
 impl DesktopApp {
     pub(super) fn apply_browser_field_key(&mut self, key: BrowserFieldKey) {
         match key {
             BrowserFieldKey::Insert(text) => {
-                for ch in text.chars() {
-                    self.app.edit_address_char(ch);
-                }
+                self.app.edit_address_text(&text);
             }
             BrowserFieldKey::Backspace => self.app.address_backspace(),
             BrowserFieldKey::Delete => self.app.input_delete(),
@@ -34,13 +35,13 @@ pub(super) fn map_keyboard_modifier_event(
     _window: window::Id,
 ) -> Option<Message> {
     match event {
-        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
-            Some(Message::KeyboardModifiersChanged(modifiers))
-        }
+        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => Some(
+            Message::Shell(ShellMessage::KeyboardModifiersChanged(modifiers)),
+        ),
         iced::Event::Keyboard(keyboard::Event::KeyPressed { modifiers, .. })
-        | iced::Event::Keyboard(keyboard::Event::KeyReleased { modifiers, .. }) => {
-            Some(Message::KeyboardModifiersChanged(modifiers))
-        }
+        | iced::Event::Keyboard(keyboard::Event::KeyReleased { modifiers, .. }) => Some(
+            Message::Shell(ShellMessage::KeyboardModifiersChanged(modifiers)),
+        ),
         _ => None,
     }
 }
@@ -51,18 +52,18 @@ pub(super) fn map_browser_field_keyboard_event(
     _window: window::Id,
 ) -> Option<Message> {
     match event {
-        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
-            Some(Message::KeyboardModifiersChanged(modifiers))
-        }
+        iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => Some(
+            Message::Shell(ShellMessage::KeyboardModifiersChanged(modifiers)),
+        ),
         iced::Event::Keyboard(keyboard::Event::KeyPressed {
             key,
             modifiers,
             text,
             ..
         }) => map_browser_field_key_event_press(key, modifiers, text.as_deref()),
-        iced::Event::Keyboard(keyboard::Event::KeyReleased { modifiers, .. }) => {
-            Some(Message::KeyboardModifiersChanged(modifiers))
-        }
+        iced::Event::Keyboard(keyboard::Event::KeyReleased { modifiers, .. }) => Some(
+            Message::Shell(ShellMessage::KeyboardModifiersChanged(modifiers)),
+        ),
         _ => None,
     }
 }
@@ -78,8 +79,8 @@ pub(super) fn map_browser_field_key_event_press(
     if let Some(text) =
         text.filter(|text| !text.is_empty() && text.chars().all(|ch| !ch.is_control()))
     {
-        return Some(Message::BrowserFieldKey(BrowserFieldKey::Insert(
-            text.to_string(),
+        return Some(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::Insert(text.to_string()),
         )));
     }
     map_browser_field_key_press(key, modifiers)
@@ -90,33 +91,61 @@ pub(super) fn map_key_press(key: keyboard::Key, modifiers: keyboard::Modifiers) 
     use keyboard::Key;
 
     match key.as_ref() {
-        Key::Named(Named::PageDown) => Some(Message::ScrollBrowserPage { direction: 1 }),
-        Key::Named(Named::PageUp) => Some(Message::ScrollBrowserPage { direction: -1 }),
-        Key::Named(Named::F9) => Some(Message::ToggleNavigation),
-        Key::Named(Named::Tab) => Some(Message::FocusBrowserItem {
+        Key::Named(Named::PageDown) => Some(Message::Browser(BrowserMessage::ScrollPage {
+            direction: 1,
+        })),
+        Key::Named(Named::PageUp) => Some(Message::Browser(BrowserMessage::ScrollPage {
+            direction: -1,
+        })),
+        Key::Named(Named::F9) => Some(Message::Shell(ShellMessage::ToggleNavigation)),
+        Key::Named(Named::Tab) => Some(Message::Browser(BrowserMessage::FocusItem {
             reverse: modifiers.shift(),
-        }),
+        })),
         Key::Named(Named::Enter) | Key::Named(Named::Space) => {
-            Some(Message::ActivateFocusedBrowserItem)
+            Some(Message::Browser(BrowserMessage::ActivateFocusedItem))
         }
-        Key::Named(Named::ArrowLeft) if modifiers.alt() => Some(Message::BrowserBack),
-        Key::Named(Named::ArrowRight) if modifiers.alt() => Some(Message::BrowserForward),
-        Key::Character("b") if modifiers.command() => Some(Message::ToggleNavigation),
+        Key::Named(Named::ArrowLeft) if modifiers.alt() => {
+            Some(Message::Browser(BrowserMessage::Back))
+        }
+        Key::Named(Named::ArrowRight) if modifiers.alt() => {
+            Some(Message::Browser(BrowserMessage::Forward))
+        }
+        Key::Character("b") if modifiers.command() => {
+            Some(Message::Shell(ShellMessage::ToggleNavigation))
+        }
         Key::Character("+") | Key::Character("=") if modifiers.command() => {
-            Some(Message::BrowserZoom { direction: 1 })
+            Some(Message::Browser(BrowserMessage::Zoom { direction: 1 }))
         }
         Key::Character("-") | Key::Character("_") if modifiers.command() => {
-            Some(Message::BrowserZoom { direction: -1 })
+            Some(Message::Browser(BrowserMessage::Zoom { direction: -1 }))
         }
-        Key::Character("t") if modifiers.command() => Some(Message::NewBrowserTab),
-        Key::Character("w") if modifiers.command() => Some(Message::CloseBrowserTab),
-        Key::Character("r") if modifiers.command() => Some(Message::ReloadBrowser),
-        Key::Character("l") if modifiers.command() => Some(Message::OpenAddress),
-        Key::Character("d") if modifiers.command() => Some(Message::WarmPath),
-        Key::Character("x") if modifiers.command() => Some(Message::LiveProbe),
-        Key::Character("p") if modifiers.command() => Some(Message::PathDiagnostics),
-        Key::Character("i") if modifiers.command() => Some(Message::CreateIdentity),
-        Key::Character("g") if modifiers.command() => Some(Message::NativeQuickstart),
+        Key::Character("t") if modifiers.command() => {
+            Some(Message::Browser(BrowserMessage::NewTab))
+        }
+        Key::Character("w") if modifiers.command() => {
+            Some(Message::Browser(BrowserMessage::CloseTab))
+        }
+        Key::Character("r") if modifiers.command() => {
+            Some(Message::Browser(BrowserMessage::Reload))
+        }
+        Key::Character("l") if modifiers.command() => {
+            Some(Message::Browser(BrowserMessage::OpenAddress))
+        }
+        Key::Character("d") if modifiers.command() => {
+            Some(Message::Browser(BrowserMessage::WarmPath))
+        }
+        Key::Character("x") if modifiers.command() => {
+            Some(Message::Browser(BrowserMessage::LiveProbe))
+        }
+        Key::Character("p") if modifiers.command() => {
+            Some(Message::Browser(BrowserMessage::PathDiagnostics))
+        }
+        Key::Character("i") if modifiers.command() => {
+            Some(Message::Identity(IdentityMessage::Create))
+        }
+        Key::Character("g") if modifiers.command() => {
+            Some(Message::Runtime(RuntimeMessage::NativeQuickstart))
+        }
         _ => None,
     }
 }
@@ -136,22 +165,36 @@ pub(super) fn map_browser_field_key_press(
         Key::Character(text) => {
             let text = shifted_browser_field_text(text, modifiers);
             if text.chars().all(|ch| !ch.is_control()) {
-                Some(Message::BrowserFieldKey(BrowserFieldKey::Insert(text)))
+                Some(Message::Browser(BrowserMessage::FieldKey(
+                    BrowserFieldKey::Insert(text),
+                )))
             } else {
                 None
             }
         }
-        Key::Named(Named::Space) => Some(Message::BrowserFieldKey(BrowserFieldKey::Insert(
-            " ".into(),
+        Key::Named(Named::Space) => Some(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::Insert(" ".into()),
         ))),
-        Key::Named(Named::Backspace) => Some(Message::BrowserFieldKey(BrowserFieldKey::Backspace)),
-        Key::Named(Named::Delete) => Some(Message::BrowserFieldKey(BrowserFieldKey::Delete)),
-        Key::Named(Named::ArrowLeft) => Some(Message::BrowserFieldKey(BrowserFieldKey::MoveLeft)),
-        Key::Named(Named::ArrowRight) => Some(Message::BrowserFieldKey(BrowserFieldKey::MoveRight)),
-        Key::Named(Named::Home) => Some(Message::BrowserFieldKey(BrowserFieldKey::MoveHome)),
-        Key::Named(Named::End) => Some(Message::BrowserFieldKey(BrowserFieldKey::MoveEnd)),
-        Key::Named(Named::Enter) => Some(Message::SubmitBrowserFieldDraft),
-        Key::Named(Named::Escape) => Some(Message::CancelBrowserFieldDraft),
+        Key::Named(Named::Backspace) => Some(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::Backspace,
+        ))),
+        Key::Named(Named::Delete) => Some(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::Delete,
+        ))),
+        Key::Named(Named::ArrowLeft) => Some(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::MoveLeft,
+        ))),
+        Key::Named(Named::ArrowRight) => Some(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::MoveRight,
+        ))),
+        Key::Named(Named::Home) => Some(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::MoveHome,
+        ))),
+        Key::Named(Named::End) => Some(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::MoveEnd,
+        ))),
+        Key::Named(Named::Enter) => Some(Message::Browser(BrowserMessage::SubmitFieldDraft)),
+        Key::Named(Named::Escape) => Some(Message::Browser(BrowserMessage::CancelFieldDraft)),
         _ => map_key_press(key, modifiers),
     }
 }
@@ -238,12 +281,12 @@ mod tests {
         let tab_id = desktop.app.active_browser_tab().id;
         apply_profile_field_page(&mut desktop);
 
-        let _ = desktop.update(Message::BrowserPaneAddressChanged {
+        let _ = desktop.update(Message::Browser(BrowserMessage::PaneAddressChanged {
             tab_id,
             value: "mock.node:/other.mu".into(),
-        });
-        let _ = desktop.update(Message::BrowserFieldKey(BrowserFieldKey::Insert(
-            "x".into(),
+        }));
+        let _ = desktop.update(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::Insert("x".into()),
         )));
 
         assert!(desktop.app.active_browser_field_editor().is_none());
@@ -267,12 +310,92 @@ mod tests {
         let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-new-browser-clears-field");
         apply_profile_field_page(&mut desktop);
 
-        let _ = desktop.update(Message::NewBrowserTab);
+        let _ = desktop.update(Message::Browser(BrowserMessage::NewTab));
 
         assert!(desktop.app.active_browser_field_editor().is_none());
         assert_eq!(
             desktop.app.active_browser_tab().address_input,
             desktop.app.settings.default_start_page
+        );
+    }
+
+    #[test]
+    fn browser_field_insert_is_utf8_atomic_at_the_value_limit() {
+        let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-field-value-limit");
+        apply_profile_field_page(&mut desktop);
+        let limit = crate::micron::parser::MICRON_CONTROL_VALUE_MAX_BYTES;
+        let initial = "a".repeat(limit - 1);
+        assert!(desktop.app.set_active_browser_field_draft(initial.clone()));
+
+        let _ = desktop.update(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::Insert("é".into()),
+        )));
+
+        let editor = desktop
+            .app
+            .active_browser_field_editor()
+            .expect("field editor remains active");
+        assert_eq!(editor.value, initial);
+        assert_eq!(
+            desktop
+                .app
+                .active_browser_tab()
+                .session
+                .field_values
+                .get("nickname")
+                .map(String::as_str),
+            Some(editor.value.as_str())
+        );
+        assert_eq!(
+            desktop.app.status.task,
+            "page field limit reached; input was not changed"
+        );
+
+        let _ = desktop.update(Message::Browser(BrowserMessage::FieldKey(
+            BrowserFieldKey::Insert("b".into()),
+        )));
+        assert_eq!(
+            desktop
+                .app
+                .active_browser_field_editor()
+                .expect("field editor")
+                .value
+                .len(),
+            limit
+        );
+    }
+
+    #[test]
+    fn browser_field_draft_preserves_ui_and_session_at_aggregate_limit() {
+        let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-field-aggregate-limit");
+        apply_profile_field_page(&mut desktop);
+        let value = "v".repeat(crate::micron::parser::MICRON_CONTROL_VALUE_MAX_BYTES);
+        for index in 0..63 {
+            assert!(desktop
+                .app
+                .active_browser_tab_mut()
+                .session
+                .set_field_value(format!("f{index}"), value.clone()));
+        }
+
+        assert!(!desktop.app.set_active_browser_field_draft(value));
+        assert_eq!(
+            desktop
+                .app
+                .active_browser_field_editor()
+                .expect("field editor")
+                .value,
+            "saved"
+        );
+        assert_eq!(
+            desktop
+                .app
+                .active_browser_tab()
+                .session
+                .field_values
+                .get("nickname")
+                .map(String::as_str),
+            Some("saved")
         );
     }
 
@@ -283,32 +406,36 @@ mod tests {
                 keyboard::Key::Named(Named::Tab),
                 keyboard::Modifiers::empty()
             ),
-            Some(Message::FocusBrowserItem { reverse: false })
+            Some(Message::Browser(BrowserMessage::FocusItem {
+                reverse: false
+            }))
         ));
         assert!(matches!(
             map_key_press(keyboard::Key::Named(Named::Tab), keyboard::Modifiers::SHIFT),
-            Some(Message::FocusBrowserItem { reverse: true })
+            Some(Message::Browser(BrowserMessage::FocusItem {
+                reverse: true
+            }))
         ));
         assert!(matches!(
             map_key_press(
                 keyboard::Key::Named(Named::Enter),
                 keyboard::Modifiers::empty()
             ),
-            Some(Message::ActivateFocusedBrowserItem)
+            Some(Message::Browser(BrowserMessage::ActivateFocusedItem))
         ));
         assert!(matches!(
             map_key_press(
                 keyboard::Key::Named(Named::Space),
                 keyboard::Modifiers::empty()
             ),
-            Some(Message::ActivateFocusedBrowserItem)
+            Some(Message::Browser(BrowserMessage::ActivateFocusedItem))
         ));
         assert!(matches!(
             map_key_press(
                 keyboard::Key::Named(Named::F9),
                 keyboard::Modifiers::empty(),
             ),
-            Some(Message::ToggleNavigation)
+            Some(Message::Shell(ShellMessage::ToggleNavigation))
         ));
     }
 
@@ -319,35 +446,37 @@ mod tests {
                 keyboard::Key::Character("t".into()),
                 keyboard::Modifiers::COMMAND
             ),
-            Some(Message::NewBrowserTab)
+            Some(Message::Browser(BrowserMessage::NewTab))
         ));
         assert!(matches!(
             map_key_press(
                 keyboard::Key::Named(Named::PageDown),
                 keyboard::Modifiers::empty()
             ),
-            Some(Message::ScrollBrowserPage { direction: 1 })
+            Some(Message::Browser(BrowserMessage::ScrollPage {
+                direction: 1
+            }))
         ));
         assert!(matches!(
             map_key_press(
                 keyboard::Key::Character("+".into()),
                 keyboard::Modifiers::COMMAND
             ),
-            Some(Message::BrowserZoom { direction: 1 })
+            Some(Message::Browser(BrowserMessage::Zoom { direction: 1 }))
         ));
         assert!(matches!(
             map_key_press(
                 keyboard::Key::Character("=".into()),
                 keyboard::Modifiers::COMMAND
             ),
-            Some(Message::BrowserZoom { direction: 1 })
+            Some(Message::Browser(BrowserMessage::Zoom { direction: 1 }))
         ));
         assert!(matches!(
             map_key_press(
                 keyboard::Key::Character("-".into()),
                 keyboard::Modifiers::COMMAND
             ),
-            Some(Message::BrowserZoom { direction: -1 })
+            Some(Message::Browser(BrowserMessage::Zoom { direction: -1 }))
         ));
     }
 
@@ -358,7 +487,7 @@ mod tests {
                 keyboard::Key::Character("r".into()),
                 keyboard::Modifiers::COMMAND
             ),
-            Some(Message::ReloadBrowser)
+            Some(Message::Browser(BrowserMessage::Reload))
         ));
         assert!(map_key_press(
             keyboard::Key::Character("n".into()),
@@ -370,14 +499,14 @@ mod tests {
                 keyboard::Key::Character("x".into()),
                 keyboard::Modifiers::COMMAND
             ),
-            Some(Message::LiveProbe)
+            Some(Message::Browser(BrowserMessage::LiveProbe))
         ));
         assert!(matches!(
             map_key_press(
                 keyboard::Key::Character("p".into()),
                 keyboard::Modifiers::COMMAND
             ),
-            Some(Message::PathDiagnostics)
+            Some(Message::Browser(BrowserMessage::PathDiagnostics))
         ));
     }
 
@@ -388,35 +517,37 @@ mod tests {
                 keyboard::Key::Character("a".into()),
                 keyboard::Modifiers::empty(),
             ),
-            Some(Message::BrowserFieldKey(BrowserFieldKey::Insert(value))) if value == "a"
+            Some(Message::Browser(BrowserMessage::FieldKey(BrowserFieldKey::Insert(value)))) if value == "a"
         ));
         assert!(matches!(
             map_browser_field_key_press(
                 keyboard::Key::Named(Named::Backspace),
                 keyboard::Modifiers::empty(),
             ),
-            Some(Message::BrowserFieldKey(BrowserFieldKey::Backspace))
+            Some(Message::Browser(BrowserMessage::FieldKey(
+                BrowserFieldKey::Backspace
+            )))
         ));
         assert!(matches!(
             map_browser_field_key_press(
                 keyboard::Key::Named(Named::Enter),
                 keyboard::Modifiers::empty(),
             ),
-            Some(Message::SubmitBrowserFieldDraft)
+            Some(Message::Browser(BrowserMessage::SubmitFieldDraft))
         ));
         assert!(matches!(
             map_browser_field_key_press(
                 keyboard::Key::Named(Named::Escape),
                 keyboard::Modifiers::empty(),
             ),
-            Some(Message::CancelBrowserFieldDraft)
+            Some(Message::Browser(BrowserMessage::CancelFieldDraft))
         ));
         assert!(matches!(
             map_browser_field_key_press(
                 keyboard::Key::Character("t".into()),
                 keyboard::Modifiers::COMMAND,
             ),
-            Some(Message::NewBrowserTab)
+            Some(Message::Browser(BrowserMessage::NewTab))
         ));
     }
 
@@ -438,7 +569,7 @@ mod tests {
                 event::Status::Captured,
                 window::Id::unique(),
             ),
-            Some(Message::BrowserFieldKey(BrowserFieldKey::Insert(value))) if value == "a"
+            Some(Message::Browser(BrowserMessage::FieldKey(BrowserFieldKey::Insert(value)))) if value == "a"
         ));
     }
 
@@ -460,7 +591,7 @@ mod tests {
                 event::Status::Captured,
                 window::Id::unique(),
             ),
-            Some(Message::BrowserFieldKey(BrowserFieldKey::Insert(value))) if value == "x"
+            Some(Message::Browser(BrowserMessage::FieldKey(BrowserFieldKey::Insert(value)))) if value == "x"
         ));
         assert!(matches!(
             map_browser_field_key_event_press(
@@ -468,7 +599,9 @@ mod tests {
                 keyboard::Modifiers::empty(),
                 None,
             ),
-            Some(Message::BrowserFieldKey(BrowserFieldKey::Backspace))
+            Some(Message::Browser(BrowserMessage::FieldKey(
+                BrowserFieldKey::Backspace
+            )))
         ));
     }
 
@@ -479,21 +612,21 @@ mod tests {
                 keyboard::Key::Character("a".into()),
                 keyboard::Modifiers::SHIFT,
             ),
-            Some(Message::BrowserFieldKey(BrowserFieldKey::Insert(value))) if value == "A"
+            Some(Message::Browser(BrowserMessage::FieldKey(BrowserFieldKey::Insert(value)))) if value == "A"
         ));
         assert!(matches!(
             map_browser_field_key_press(
                 keyboard::Key::Character("1".into()),
                 keyboard::Modifiers::SHIFT,
             ),
-            Some(Message::BrowserFieldKey(BrowserFieldKey::Insert(value))) if value == "!"
+            Some(Message::Browser(BrowserMessage::FieldKey(BrowserFieldKey::Insert(value)))) if value == "!"
         ));
         assert!(matches!(
             map_browser_field_key_press(
                 keyboard::Key::Character("/".into()),
                 keyboard::Modifiers::SHIFT,
             ),
-            Some(Message::BrowserFieldKey(BrowserFieldKey::Insert(value))) if value == "?"
+            Some(Message::Browser(BrowserMessage::FieldKey(BrowserFieldKey::Insert(value)))) if value == "?"
         ));
         assert_eq!(
             shifted_browser_field_text("A", keyboard::Modifiers::SHIFT),

@@ -3,9 +3,17 @@ use iced::{Element, Font, Length};
 
 use super::super::*;
 
+pub(in crate::desktop) fn omenchat_media_animation_allowed(
+    pane_visible: bool,
+    reduce_motion: bool,
+) -> bool {
+    pane_visible && !reduce_motion
+}
+
 pub(in crate::desktop) fn omenchat_view_for_session(
     desktop: &DesktopApp,
     session_id: ChatSessionId,
+    animate_media: bool,
 ) -> Element<'_, Message> {
     let Some(session) = desktop.omenchat.chat_client.session(session_id) else {
         return text("This OMENchat session was closed.")
@@ -39,10 +47,10 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             } else {
                 format!("#{}{}", room.name, unread)
             };
-            let message = Message::JoinOmenChatRoom {
+            let message = Message::OmenChat(OmenChatMessage::JoinRoom {
                 session_id: session.session_id,
                 room: room.name.clone(),
-            };
+            });
             room_column = room_column.push(if room.unread > 0 {
                 warning_button_owned(label, message)
             } else {
@@ -52,7 +60,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         room_column
             .push(subtle_button(
                 "Load Older",
-                Message::LoadOlderOmenChatHistory(session.session_id),
+                Message::OmenChat(OmenChatMessage::LoadOlderHistory(session.session_id)),
             ))
             .width(Length::Shrink)
     } else {
@@ -113,7 +121,9 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     if let Some(preview) = omenchat_media_hint_preview(
                         path,
                         hint.animated,
-                        desktop.omenchat.omenchat_gif_frames.get(path),
+                        animate_media
+                            .then(|| desktop.omenchat.omenchat_gif_frames.get(path))
+                            .flatten(),
                     ) {
                         group_content = group_content.push(preview);
                         if let Some(caption) = hint.caption {
@@ -131,7 +141,11 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                         state,
                         omenchat_media_state_image_path(state)
                             .as_ref()
-                            .and_then(|path| desktop.omenchat.omenchat_gif_frames.get(path)),
+                            .and_then(|path| {
+                                animate_media
+                                    .then(|| desktop.omenchat.omenchat_gif_frames.get(path))
+                                    .flatten()
+                            }),
                     ) {
                         group_content = group_content.push(preview);
                     }
@@ -159,7 +173,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     let composer = row![
         tooltip_button(
             button(centered_toolbar_icon(ICON_MENU))
-                .on_press(Message::ToggleOmenChatRooms)
+                .on_press(Message::OmenChat(OmenChatMessage::ToggleRooms))
                 .padding(0)
                 .width(Length::Fixed(toolbar_icon_button_side()))
                 .height(Length::Fixed(toolbar_icon_button_side()))
@@ -168,7 +182,9 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         ),
         tooltip_button(
             button(centered_toolbar_icon(ICON_ATTACH))
-                .on_press(Message::PickOmenChatUpload(session.session_id))
+                .on_press(Message::OmenChat(OmenChatMessage::PickUpload(
+                    session.session_id,
+                )))
                 .padding(0)
                 .width(Length::Fixed(toolbar_icon_button_side()))
                 .height(Length::Fixed(toolbar_icon_button_side()))
@@ -179,9 +195,16 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             .size(ui_size(14))
             .padding(8)
             .width(Length::Fill)
-            .on_input(move |value| Message::OmenChatDraftChanged { session_id, value })
-            .on_submit(Message::SendOmenChatDraft(session.session_id)),
-        omen_button("Send", Message::SendOmenChatDraft(session.session_id)),
+            .on_input(move |value| {
+                Message::OmenChat(OmenChatMessage::DraftChanged { session_id, value })
+            })
+            .on_submit(Message::OmenChat(OmenChatMessage::SendDraft(
+                session.session_id,
+            ))),
+        omen_button(
+            "Send",
+            Message::OmenChat(OmenChatMessage::SendDraft(session.session_id)),
+        ),
     ]
     .spacing(8);
 
@@ -204,10 +227,12 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     timeline_panel = timeline_panel.push(
         app_scrollable(timeline)
             .id(omenchat_scroll_id(session.session_id, active_room_id))
-            .on_scroll(move |viewport: Viewport| Message::OmenChatScrolled {
-                session_id,
-                room_id: active_room_id,
-                offset: sanitize_scroll_offset(viewport.relative_offset()),
+            .on_scroll(move |viewport: Viewport| {
+                Message::OmenChat(OmenChatMessage::Scrolled {
+                    session_id,
+                    room_id: active_room_id,
+                    offset: sanitize_scroll_offset(viewport.relative_offset()),
+                })
             })
             .height(Length::Fill),
     );
@@ -218,10 +243,10 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     text("You're viewing older messages").size(ui_size(12)),
                     omen_button(
                         "Jump To Present",
-                        Message::JumpOmenChatToPresent {
+                        Message::OmenChat(OmenChatMessage::JumpToPresent {
                             session_id: session.session_id,
                             room_id: active_room_id,
-                        },
+                        }),
                     )
                 ]
                 .spacing(6)
@@ -243,4 +268,17 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     .padding(10)
     .height(Length::Fill)
     .into()
+}
+
+#[cfg(test)]
+mod accessibility_tests {
+    use super::omenchat_media_animation_allowed;
+
+    #[test]
+    fn reduced_motion_and_hidden_panes_withhold_animated_media() {
+        assert!(omenchat_media_animation_allowed(true, false));
+        assert!(!omenchat_media_animation_allowed(false, false));
+        assert!(!omenchat_media_animation_allowed(true, true));
+        assert!(!omenchat_media_animation_allowed(false, true));
+    }
 }

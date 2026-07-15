@@ -280,7 +280,7 @@ fn actionable_cells_keep_page_authored_colors_until_focused() {
 fn unstyled_cells_inherit_document_default_foreground() {
     let cell = Cell {
         ch: 'x',
-        style: TextStyle::default(),
+        style: std::sync::Arc::new(TextStyle::default()),
         link: None,
         control: None,
         cursor: false,

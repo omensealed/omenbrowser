@@ -6,9 +6,11 @@ use crate::chat::protocol::RoomId;
 use crate::chat::ChatSessionId;
 use crate::micron::LinkAction;
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+use super::OmenChatTransportCompletionMessage;
 use super::{
     normalize_omenchat_manual_target, omenchat_scroll_id, sanitize_scroll_offset, DesktopApp,
-    DesktopPane, Message,
+    DesktopPane, Message, OmenChatMessage,
 };
 
 impl DesktopApp {
@@ -17,90 +19,99 @@ impl DesktopApp {
         message: Message,
     ) -> Result<Task<Message>, Message> {
         match message {
-            Message::NewOmenChatPane => Ok(self.update_new_omenchat_pane()),
-            Message::OmenChatServerEntryChanged(value) => {
+            Message::OmenChat(OmenChatMessage::NewPane) => Ok(self.update_new_omenchat_pane()),
+            Message::OmenChat(OmenChatMessage::ServerEntryChanged(value)) => {
                 self.update_omenchat_server_entry_changed(value);
                 Ok(Task::none())
             }
-            Message::OpenOmenChatServerEntry => Ok(self.update_open_omenchat_server_entry()),
-            Message::ToggleOmenChatRooms => {
+            Message::OmenChat(OmenChatMessage::OpenServerEntry) => {
+                Ok(self.update_open_omenchat_server_entry())
+            }
+            Message::OmenChat(OmenChatMessage::ToggleRooms) => {
                 self.update_toggle_omenchat_rooms();
                 Ok(Task::none())
             }
-            Message::JoinOmenChatRoom { session_id, room } => {
+            Message::OmenChat(OmenChatMessage::JoinRoom { session_id, room }) => {
                 Ok(self.update_join_omenchat_room(session_id, room))
             }
-            Message::OmenChatDraftChanged { session_id, value } => {
+            Message::OmenChat(OmenChatMessage::DraftChanged { session_id, value }) => {
                 self.update_omenchat_draft_changed(session_id, value);
                 Ok(Task::none())
             }
-            Message::OmenChatScrolled {
+            Message::OmenChat(OmenChatMessage::Scrolled {
                 session_id,
                 room_id,
                 offset,
-            } => Ok(self.update_omenchat_scrolled(session_id, room_id, offset)),
-            Message::JumpOmenChatToPresent {
+            }) => Ok(self.update_omenchat_scrolled(session_id, room_id, offset)),
+            Message::OmenChat(OmenChatMessage::JumpToPresent {
                 session_id,
                 room_id,
-            } => Ok(self.update_jump_omenchat_to_present(session_id, room_id)),
-            Message::SendOmenChatDraft(session_id) => {
+            }) => Ok(self.update_jump_omenchat_to_present(session_id, room_id)),
+            Message::OmenChat(OmenChatMessage::SendDraft(session_id)) => {
                 self.update_send_omenchat_draft(session_id);
                 Ok(Task::none())
             }
-            Message::ResendOmenChatLocalEcho {
+            Message::OmenChat(OmenChatMessage::ResendLocalEcho {
                 session_id,
                 room_id,
                 event_id,
                 body,
                 action,
-            } => {
+            }) => {
                 self.update_resend_omenchat_local_echo(session_id, room_id, event_id, body, action);
                 Ok(Task::none())
             }
-            Message::LoadOlderOmenChatHistory(session_id) => {
+            Message::OmenChat(OmenChatMessage::LoadOlderHistory(session_id)) => {
                 self.update_load_older_omenchat_history(session_id);
                 Ok(Task::none())
             }
-            Message::CloseOmenChatSession(session_id) => {
+            Message::OmenChat(OmenChatMessage::CloseSession(session_id)) => {
                 self.update_close_omenchat_session(session_id);
                 Ok(Task::none())
             }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            Message::RequestOmenChatPath(session_id) => {
+            Message::OmenChat(OmenChatMessage::RequestPath(session_id)) => {
                 Ok(self.update_request_omenchat_path(session_id))
             }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            Message::ReconnectOmenChatSession(session_id) => {
+            Message::OmenChat(OmenChatMessage::ReconnectSession(session_id)) => {
                 Ok(self.update_reconnect_omenchat_session(session_id))
             }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            Message::ReconnectOmenChatSessionIfDisconnected(session_id) => {
+            Message::OmenChat(OmenChatMessage::ReconnectSessionIfDisconnected(session_id)) => {
                 Ok(self.update_reconnect_omenchat_session_if_disconnected(session_id))
             }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            Message::OmenChatPathRequestResult {
-                session_id,
-                destination,
-                result,
-            } => Ok(self.update_omenchat_path_request_result(session_id, destination, result)),
+            Message::OmenChatTransportCompletion(
+                OmenChatTransportCompletionMessage::PathRequest {
+                    session_id,
+                    destination,
+                    result,
+                },
+            ) => Ok(self.update_omenchat_path_request_result(session_id, destination, result)),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            Message::OmenChatLiveOpenResult { descriptor, result } => {
-                Ok(self.update_omenchat_live_open_result(descriptor, result))
+            Message::OmenChatTransportCompletion(OmenChatTransportCompletionMessage::LiveOpen(
+                completion,
+            )) => {
+                Ok(self.update_omenchat_live_open_result(completion.descriptor, completion.result))
             }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            Message::OmenChatLiveReconnectResult {
-                session_id,
-                generation,
-                descriptor,
-                result,
-            } => Ok(self
-                .update_omenchat_live_reconnect_result(session_id, generation, descriptor, result)),
+            Message::OmenChatTransportCompletion(
+                OmenChatTransportCompletionMessage::LiveReconnect(completion),
+            ) => Ok(self.update_omenchat_live_reconnect_result(
+                completion.session_id,
+                completion.generation,
+                completion.descriptor,
+                completion.result,
+            )),
             _ => self.dispatch_omenchat_media_message(message),
         }
     }
 
     pub(super) fn update_new_omenchat_pane(&mut self) -> Task<Message> {
-        let session_id = self.create_blank_omenchat_session();
+        let Some(session_id) = self.create_blank_omenchat_session() else {
+            return Task::none();
+        };
         self.ensure_pane_for_omenchat(session_id);
         self.persist_workspace_panes("workspace panes");
         self.restore_visible_workspace_scrolls()
@@ -202,7 +213,7 @@ impl DesktopApp {
 
     pub(super) fn update_close_omenchat_session(&mut self, session_id: ChatSessionId) {
         self.close_omenchat_session(session_id);
-        self.remove_workspace_panes_for_missing_targets(None, None);
+        self.reconcile_workspace_panes_after_target_mutation(None, None);
         self.persist_workspace_panes("workspace panes");
     }
 }

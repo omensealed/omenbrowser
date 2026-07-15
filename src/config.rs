@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 
 use crate::error::{AppError, AppResult};
-use crate::identity::{hash_for_bytes, IdentityProfile};
+use crate::identity::{hash_for_bytes, read_identity_material, IdentityProfile};
 use crate::storage::settings::AppSettings;
 
 #[derive(Clone, Debug)]
@@ -106,7 +106,7 @@ impl AppPaths {
     }
 
     pub fn storage_root_for_identity_path(&self, identity_path: &std::path::Path) -> PathBuf {
-        let hash = std::fs::read(identity_path)
+        let hash = read_identity_material(identity_path)
             .ok()
             .map(|raw| hash_for_bytes(&raw));
         self.identity_storage_dir

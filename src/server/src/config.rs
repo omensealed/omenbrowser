@@ -1,5 +1,8 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+
+use serde::Deserialize;
 
 use crate::error::{ServerError, ServerResult};
 use crate::session::SessionLimits;
@@ -13,6 +16,89 @@ pub const NOMADNET_PORTAL_PATH: &str = "/page/index.mu";
 pub const DEFAULT_UPLOAD_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_MAX_FILE_BYTES: u64 = 512 * 1024;
 pub const DEFAULT_PING_INTERVAL_SECONDS: u64 = 30;
+static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ConfigDocument {
+    version: Option<u32>,
+    server: Option<ServerDocument>,
+    destinations: Option<DestinationsDocument>,
+    limits: Option<LimitsDocument>,
+    compression: Option<CompressionDocument>,
+    policy: Option<PolicyDocument>,
+    // Version-0 files could place supported values at the document root.
+    name: Option<String>,
+    operator_label: Option<String>,
+    motd: Option<String>,
+    identity_path: Option<PathBuf>,
+    database_path: Option<PathBuf>,
+    reticulum_config_path: Option<PathBuf>,
+    announce_interval_minutes: Option<u64>,
+    ping_interval_seconds: Option<u64>,
+    upload_quota_bytes: Option<u64>,
+    upload_max_file_bytes: Option<u64>,
+    max_message_bytes: Option<usize>,
+    history_batch_size: Option<usize>,
+    join_backlog_events: Option<usize>,
+    large_batch_threshold_bytes: Option<usize>,
+    rate_messages_per_minute: Option<usize>,
+    rate_commands_per_minute: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ServerDocument {
+    name: Option<String>,
+    operator_label: Option<String>,
+    motd: Option<String>,
+    identity_path: Option<PathBuf>,
+    database_path: Option<PathBuf>,
+    reticulum_config_path: Option<PathBuf>,
+    announce_interval_minutes: Option<u64>,
+    ping_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DestinationsDocument {
+    nomadnet_enabled: Option<bool>,
+    lxmf_enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LimitsDocument {
+    max_rooms_per_session: Option<usize>,
+    max_message_bytes: Option<usize>,
+    history_batch_size: Option<usize>,
+    join_backlog_events: Option<usize>,
+    large_batch_threshold_bytes: Option<usize>,
+    upload_quota_bytes: Option<u64>,
+    upload_max_file_bytes: Option<u64>,
+    max_userlist_inline_users: Option<usize>,
+    rate_messages_per_minute: Option<usize>,
+    rate_commands_per_minute: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompressionDocument {
+    history: Option<String>,
+    userlist: Option<String>,
+    compression_level: Option<u8>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PolicyDocument {
+    allow_public_rooms: Option<bool>,
+    allow_contact_exchange: Option<bool>,
+    contact_visibility_default: Option<String>,
+    require_invite_for_private_rooms: Option<bool>,
+    allow_typing_indicators: Option<bool>,
+    allow_read_receipts: Option<bool>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -128,13 +214,15 @@ impl ServerConfig {
 
     pub fn render_toml(&self) -> String {
         format!(
-            r#"[server]
-name = "{name}"
-operator_label = "{operator}"
-motd = "{motd}"
-identity_path = "{identity}"
-database_path = "{database}"
-reticulum_config_path = "{reticulum}"
+            r#"version = 1
+
+[server]
+name = {name}
+operator_label = {operator}
+motd = {motd}
+identity_path = {identity}
+database_path = {database}
+reticulum_config_path = {reticulum}
 announce_interval_minutes = {announce_interval_minutes}
 ping_interval_seconds = {ping_interval_seconds}
 
@@ -170,12 +258,12 @@ require_invite_for_private_rooms = true
 allow_typing_indicators = false
 allow_read_receipts = false
 "#,
-            name = self.name,
-            operator = self.operator_label,
-            motd = escape_toml_string(&self.motd),
-            identity = self.identity_path.display(),
-            database = self.database_path.display(),
-            reticulum = self.reticulum_config_path.display(),
+            name = toml_string(&self.name),
+            operator = toml_string(&self.operator_label),
+            motd = toml_string(&self.motd),
+            identity = toml_string(&self.identity_path.to_string_lossy()),
+            database = toml_string(&self.database_path.to_string_lossy()),
+            reticulum = toml_string(&self.reticulum_config_path.to_string_lossy()),
             announce_interval_minutes = self.announce_interval_minutes,
             upload_quota_bytes = self.upload_quota_bytes,
             upload_max_file_bytes = self.upload_max_file_bytes,
@@ -195,74 +283,107 @@ allow_read_receipts = false
             return Ok(config);
         }
         let contents = std::fs::read_to_string(&config.config_path)?;
-        let mut saw_upload_max_file_bytes = false;
-        for line in contents.lines() {
-            let Some((key, value)) = parse_toml_assignment(line) else {
-                continue;
-            };
-            match key {
-                "name" => config.name = value,
-                "operator_label" => config.operator_label = value,
-                "motd" => config.motd = value,
-                "identity_path" => config.identity_path = PathBuf::from(value),
-                "database_path" => config.database_path = PathBuf::from(value),
-                "reticulum_config_path" => config.reticulum_config_path = PathBuf::from(value),
-                "announce_interval_minutes" => {
-                    if let Ok(minutes) = value.parse::<u64>() {
-                        config.announce_interval_minutes = minutes.max(1);
-                    }
-                }
-                "upload_quota_bytes" => {
-                    if let Ok(bytes) = value.parse::<u64>() {
-                        config.upload_quota_bytes = bytes.min(10 * 1024 * 1024 * 1024);
-                    }
-                }
-                "upload_max_file_bytes" => {
-                    saw_upload_max_file_bytes = true;
-                    if let Ok(bytes) = value.parse::<u64>() {
-                        config.upload_max_file_bytes = bytes.clamp(1, 10 * 1024 * 1024);
-                    }
-                }
-                "ping_interval_seconds" => {
-                    if let Ok(seconds) = value.parse::<u64>() {
-                        config.ping_interval_seconds = seconds.clamp(5, 600);
-                    }
-                }
-                "chat_aspect" | "nomadnet_page_path" => {}
-                "max_message_bytes" => {
-                    if let Ok(bytes) = value.parse::<usize>() {
-                        config.limits.max_message_bytes = bytes.clamp(1, 262_144);
-                    }
-                }
-                "history_batch_size" => {
-                    if let Ok(size) = value.parse::<usize>() {
-                        config.limits.history_batch_size = size.clamp(1, 500);
-                    }
-                }
-                "join_backlog_events" => {
-                    if let Ok(size) = value.parse::<usize>() {
-                        config.limits.join_backlog_events = size.clamp(0, 500);
-                    }
-                }
-                "large_batch_threshold_bytes" => {
-                    if let Ok(bytes) = value.parse::<usize>() {
-                        config.limits.large_batch_threshold_bytes = bytes.clamp(256, 1_048_576);
-                    }
-                }
-                "rate_messages_per_minute" => {
-                    if let Ok(rate) = value.parse::<usize>() {
-                        config.limits.rate_messages_per_minute = rate.min(600);
-                    }
-                }
-                "rate_commands_per_minute" => {
-                    if let Ok(rate) = value.parse::<usize>() {
-                        config.limits.rate_commands_per_minute = rate.min(600);
-                    }
-                }
-                _ => {}
-            }
+        let document = parse_config_document(&contents, &config.config_path)?;
+        let server = document.server.as_ref();
+        let limits = document.limits.as_ref();
+        if let Some(value) = server
+            .and_then(|value| value.name.clone())
+            .or(document.name)
+        {
+            config.name = value;
         }
-        if !saw_upload_max_file_bytes && config.upload_quota_bytes == DEFAULT_UPLOAD_MAX_FILE_BYTES
+        if let Some(value) = server
+            .and_then(|value| value.operator_label.clone())
+            .or(document.operator_label)
+        {
+            config.operator_label = value;
+        }
+        if let Some(value) = server
+            .and_then(|value| value.motd.clone())
+            .or(document.motd)
+        {
+            config.motd = value;
+        }
+        if let Some(value) = server
+            .and_then(|value| value.identity_path.clone())
+            .or(document.identity_path)
+        {
+            config.identity_path = value;
+        }
+        if let Some(value) = server
+            .and_then(|value| value.database_path.clone())
+            .or(document.database_path)
+        {
+            config.database_path = value;
+        }
+        if let Some(value) = server
+            .and_then(|value| value.reticulum_config_path.clone())
+            .or(document.reticulum_config_path)
+        {
+            config.reticulum_config_path = value;
+        }
+        if let Some(value) = server
+            .and_then(|value| value.announce_interval_minutes)
+            .or(document.announce_interval_minutes)
+        {
+            config.announce_interval_minutes = value.max(1);
+        }
+        if let Some(value) = server
+            .and_then(|value| value.ping_interval_seconds)
+            .or(document.ping_interval_seconds)
+        {
+            config.ping_interval_seconds = value.clamp(5, 600);
+        }
+        if let Some(value) = limits
+            .and_then(|value| value.upload_quota_bytes)
+            .or(document.upload_quota_bytes)
+        {
+            config.upload_quota_bytes = value.min(10 * 1024 * 1024 * 1024);
+        }
+        let upload_max_file_bytes = limits
+            .and_then(|value| value.upload_max_file_bytes)
+            .or(document.upload_max_file_bytes);
+        if let Some(value) = upload_max_file_bytes {
+            config.upload_max_file_bytes = value.clamp(1, 10 * 1024 * 1024);
+        }
+        if let Some(value) = limits
+            .and_then(|value| value.max_message_bytes)
+            .or(document.max_message_bytes)
+        {
+            config.limits.max_message_bytes = value.clamp(1, 262_144);
+        }
+        if let Some(value) = limits
+            .and_then(|value| value.history_batch_size)
+            .or(document.history_batch_size)
+        {
+            config.limits.history_batch_size = value.clamp(1, 500);
+        }
+        if let Some(value) = limits
+            .and_then(|value| value.join_backlog_events)
+            .or(document.join_backlog_events)
+        {
+            config.limits.join_backlog_events = value.clamp(0, 500);
+        }
+        if let Some(value) = limits
+            .and_then(|value| value.large_batch_threshold_bytes)
+            .or(document.large_batch_threshold_bytes)
+        {
+            config.limits.large_batch_threshold_bytes = value.clamp(256, 1_048_576);
+        }
+        if let Some(value) = limits
+            .and_then(|value| value.rate_messages_per_minute)
+            .or(document.rate_messages_per_minute)
+        {
+            config.limits.rate_messages_per_minute = value.min(600);
+        }
+        if let Some(value) = limits
+            .and_then(|value| value.rate_commands_per_minute)
+            .or(document.rate_commands_per_minute)
+        {
+            config.limits.rate_commands_per_minute = value.min(600);
+        }
+        if upload_max_file_bytes.is_none()
+            && config.upload_quota_bytes == DEFAULT_UPLOAD_MAX_FILE_BYTES
         {
             config.upload_quota_bytes = DEFAULT_UPLOAD_QUOTA_BYTES;
         }
@@ -270,8 +391,32 @@ allow_read_receipts = false
     }
 
     pub fn save(&self) -> ServerResult<()> {
-        std::fs::create_dir_all(self.root_dir())?;
-        std::fs::write(&self.config_path, self.render_toml())?;
+        let rendered = self.render_toml();
+        parse_config_document(&rendered, &self.config_path)?;
+        self.save_rendered_with_rename(rendered.as_bytes(), &mut |from, to| {
+            std::fs::rename(from, to)
+        })
+    }
+
+    fn save_rendered_with_rename<F>(&self, rendered: &[u8], rename: &mut F) -> ServerResult<()>
+    where
+        F: FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    {
+        let root = self.root_dir();
+        std::fs::create_dir_all(&root)?;
+        if self.config_path.exists() {
+            let previous = std::fs::read(&self.config_path)?;
+            let previous_text = std::str::from_utf8(&previous).map_err(|error| {
+                ServerError::Message(format!(
+                    "existing omenchatd config {} is not UTF-8: {error}",
+                    self.config_path.display()
+                ))
+            })?;
+            parse_config_document(previous_text, &self.config_path)?;
+            atomic_write_private(&config_backup_path(&self.config_path), &previous, rename)?;
+        }
+        atomic_write_private(&self.config_path, rendered, rename)?;
+        sync_directory(&root)?;
         Ok(())
     }
 
@@ -296,28 +441,158 @@ allow_read_receipts = false
     }
 }
 
-fn parse_toml_assignment(line: &str) -> Option<(&str, String)> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('[') {
-        return None;
-    }
-    let (key, raw_value) = trimmed.split_once('=')?;
-    let key = key.trim();
-    let raw_value = raw_value.trim();
-    let value = raw_value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(raw_value)
-        .trim()
-        .to_string();
-    if key.is_empty() || value.is_empty() {
-        return None;
-    }
-    Some((key, value))
+fn parse_config_document(contents: &str, path: &std::path::Path) -> ServerResult<ConfigDocument> {
+    let document: ConfigDocument = toml::from_str(contents).map_err(|error| {
+        ServerError::Message(format!(
+            "invalid omenchatd config {}: {error}",
+            path.display()
+        ))
+    })?;
+    validate_fixed_document(&document)?;
+    Ok(document)
 }
 
-fn escape_toml_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+fn config_backup_path(path: &std::path::Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("config.toml");
+    path.with_file_name(format!("{filename}.bak"))
+}
+
+fn atomic_write_private<F>(path: &std::path::Path, bytes: &[u8], rename: &mut F) -> ServerResult<()>
+where
+    F: FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+{
+    use std::io::Write;
+
+    let sequence = CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("config.toml");
+    let temporary =
+        path.with_file_name(format!(".{filename}.tmp-{}-{sequence}", std::process::id()));
+    let result = (|| -> ServerResult<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        enforce_private_file(&temporary)?;
+        drop(file);
+        rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn sync_directory(path: &std::path::Path) -> ServerResult<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn validate_fixed_document(document: &ConfigDocument) -> ServerResult<()> {
+    if document.version.unwrap_or(0) > 1 {
+        return Err(ServerError::Message(format!(
+            "omenchatd config version {} is newer than supported version 1",
+            document.version.unwrap_or_default()
+        )));
+    }
+    if let Some(destinations) = &document.destinations {
+        require_fixed(
+            destinations.nomadnet_enabled,
+            true,
+            "destinations.nomadnet_enabled",
+        )?;
+        require_fixed(destinations.lxmf_enabled, true, "destinations.lxmf_enabled")?;
+    }
+    if let Some(limits) = &document.limits {
+        require_fixed(
+            limits.max_rooms_per_session,
+            16,
+            "limits.max_rooms_per_session",
+        )?;
+        require_fixed(
+            limits.max_userlist_inline_users,
+            96,
+            "limits.max_userlist_inline_users",
+        )?;
+    }
+    if let Some(compression) = &document.compression {
+        require_fixed(
+            compression.history.as_deref(),
+            "bzip2",
+            "compression.history",
+        )?;
+        require_fixed(
+            compression.userlist.as_deref(),
+            "bzip2",
+            "compression.userlist",
+        )?;
+        require_fixed(
+            compression.compression_level,
+            6,
+            "compression.compression_level",
+        )?;
+    }
+    if let Some(policy) = &document.policy {
+        require_fixed(policy.allow_public_rooms, true, "policy.allow_public_rooms")?;
+        require_fixed(
+            policy.allow_contact_exchange,
+            true,
+            "policy.allow_contact_exchange",
+        )?;
+        require_fixed(
+            policy.contact_visibility_default.as_deref(),
+            "on_request",
+            "policy.contact_visibility_default",
+        )?;
+        require_fixed(
+            policy.require_invite_for_private_rooms,
+            true,
+            "policy.require_invite_for_private_rooms",
+        )?;
+        require_fixed(
+            policy.allow_typing_indicators,
+            false,
+            "policy.allow_typing_indicators",
+        )?;
+        require_fixed(
+            policy.allow_read_receipts,
+            false,
+            "policy.allow_read_receipts",
+        )?;
+    }
+    Ok(())
+}
+
+fn require_fixed<T>(actual: Option<T>, expected: T, path: &str) -> ServerResult<()>
+where
+    T: PartialEq + std::fmt::Debug,
+{
+    if let Some(actual) = actual.filter(|actual| actual != &expected) {
+        return Err(ServerError::Message(format!(
+            "unsupported omenchatd config value for {path}: {actual:?}; required value is {expected:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_owned()).to_string()
 }
 
 pub fn init_files(config: &ServerConfig) -> ServerResult<()> {
@@ -336,6 +611,7 @@ pub fn init_files(config: &ServerConfig) -> ServerResult<()> {
         &config.reticulum_config_file(),
         render_reticulum_base_config(config).as_bytes(),
     )?;
+    enforce_private_file(&config.reticulum_config_file())?;
     touch_log_file(config)?;
     write_identity_if_missing(&config.identity_path)?;
 
@@ -541,7 +817,7 @@ pub fn write_reticulum_tcp_server_config(
     std::fs::create_dir_all(&config.reticulum_config_path)?;
     let config_path = config.reticulum_config_file();
     let rendered = render_reticulum_tcp_server_config(config, tcp_server);
-    std::fs::write(config_path, rendered)?;
+    write_private_atomic(&config_path, rendered.as_bytes())?;
     Ok(())
 }
 
@@ -552,7 +828,7 @@ pub fn write_reticulum_tcp_client_config(
     std::fs::create_dir_all(&config.reticulum_config_path)?;
     let config_path = config.reticulum_config_file();
     let rendered = render_reticulum_tcp_client_config(config, tcp_client);
-    std::fs::write(config_path, rendered)?;
+    write_private_atomic(&config_path, rendered.as_bytes())?;
     Ok(())
 }
 
@@ -651,6 +927,10 @@ loglevel = 4
 
 pub fn render_status(config: &ServerConfig) -> String {
     let rooms = list_rooms(config).unwrap_or_default();
+    render_status_with_room_count(config, rooms.len())
+}
+
+pub fn render_status_with_room_count(config: &ServerConfig, room_count: usize) -> String {
     let reticulum_config_file = config.reticulum_config_file();
     let destination_status = render_destination_status(config);
     let portal_file_status = render_portal_file_status(config);
@@ -681,7 +961,7 @@ pub fn render_status(config: &ServerConfig) -> String {
         },
         upload_max_file = human_bytes(config.upload_max_file_bytes),
         upload_cache = config.upload_cache_path().display(),
-        rooms = rooms.len(),
+        rooms = room_count,
         limits = limits,
     )
 }
@@ -772,6 +1052,40 @@ fn write_if_missing(path: &PathBuf, bytes: &[u8]) -> ServerResult<()> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+fn write_private_atomic(path: &std::path::Path, bytes: &[u8]) -> ServerResult<()> {
+    use std::io::Write;
+
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    enforce_private_file(&temporary)?;
+    drop(file);
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn enforce_private_file(path: &std::path::Path) -> ServerResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 #[cfg(all(feature = "live-rns-net", any()))]
@@ -870,6 +1184,49 @@ mod tests {
         assert!(rendered.contains("[interfaces]"));
         assert!(rendered.contains("omenchatd interfaces tcp-client"));
         assert!(!rendered.contains(".reticulum"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(config.reticulum_config_file())
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tcp_client_rewrite_repairs_reticulum_config_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("private-reticulum-config");
+        let config = ServerConfig::for_root(root.clone());
+        init_files(&config).expect("init");
+        std::fs::set_permissions(
+            config.reticulum_config_file(),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("permissive mode");
+        write_reticulum_tcp_client_config(
+            &config,
+            &TcpClientOverride {
+                target_host: "gateway.example".into(),
+                target_port: 42420,
+                network_name: Some("private".into()),
+                passphrase: Some("do-not-expose".into()),
+            },
+        )
+        .expect("rewrite");
+
+        let mode = std::fs::metadata(config.reticulum_config_file())
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1013,6 +1370,175 @@ mod tests {
         assert_eq!(loaded.limits.rate_commands_per_minute, 17);
         assert_eq!(loaded.identity_path, config.identity_path);
         assert_eq!(loaded.reticulum_config_path, config.reticulum_config_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typed_config_round_trips_escaped_unicode_strings() {
+        let root = temp_root("typed-config-strings");
+        let mut config = ServerConfig::for_root(root.clone());
+        config.name = "Quoted \"node\" ☃".into();
+        config.operator_label = r"ops\field".into();
+        config.motd = "line one\nline two ☃ \\ \"quoted\"".into();
+        config.save().expect("save typed config");
+
+        let loaded = ServerConfig::load_or_default(root.clone()).expect("load typed config");
+        assert_eq!(loaded.name, config.name);
+        assert_eq!(loaded.operator_label, config.operator_label);
+        assert_eq!(loaded.motd, config.motd);
+        let rendered = std::fs::read_to_string(root.join("config.toml")).expect("rendered");
+        assert!(rendered.starts_with("version = 1\n"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typed_config_rejects_unknown_and_malformed_security_limits() {
+        let root = temp_root("typed-config-invalid");
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("config.toml");
+        std::fs::write(
+            &path,
+            "[limits]\nupload_qouta_bytes = 1024\nupload_max_file_bytes = 512\n",
+        )
+        .expect("unknown-key config");
+        let unknown = ServerConfig::load_or_default(root.clone())
+            .expect_err("misspelled quota must fail")
+            .to_string();
+        assert!(unknown.contains("upload_qouta_bytes"));
+
+        std::fs::write(&path, "[limits]\nupload_quota_bytes = \"unlimited\"\n")
+            .expect("malformed config");
+        let malformed = ServerConfig::load_or_default(root.clone())
+            .expect_err("malformed quota must fail")
+            .to_string();
+        assert!(malformed.contains("upload_quota_bytes"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typed_config_rejects_future_versions_and_unsupported_fixed_values() {
+        let root = temp_root("typed-config-version");
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("config.toml");
+        std::fs::write(&path, "version = 2\n").expect("future config");
+        assert!(ServerConfig::load_or_default(root.clone())
+            .expect_err("future version")
+            .to_string()
+            .contains("newer than supported"));
+
+        std::fs::write(&path, "[policy]\nallow_public_rooms = false\n")
+            .expect("unsupported policy");
+        assert!(ServerConfig::load_or_default(root.clone())
+            .expect_err("unsupported fixed policy")
+            .to_string()
+            .contains("policy.allow_public_rooms"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_save_atomically_replaces_and_retains_last_known_good() {
+        let root = temp_root("atomic-config-save");
+        let mut config = ServerConfig::for_root(root.clone());
+        config.name = "first".into();
+        config.save().expect("initial save");
+        let first = std::fs::read(&config.config_path).expect("first config");
+
+        config.name = "second".into();
+        config.save().expect("replacement save");
+        let backup_path = config_backup_path(&config.config_path);
+        assert_eq!(std::fs::read(&backup_path).expect("backup"), first);
+        assert_eq!(
+            ServerConfig::load_or_default(root.clone())
+                .expect("replacement config")
+                .name,
+            "second"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&config.config_path, &backup_path] {
+                assert_eq!(
+                    std::fs::metadata(path)
+                        .expect("config metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_config_commit_preserves_previous_valid_file() {
+        let root = temp_root("failed-config-save");
+        let mut config = ServerConfig::for_root(root.clone());
+        config.name = "previous".into();
+        config.save().expect("initial save");
+        let previous = std::fs::read(&config.config_path).expect("previous config");
+
+        config.name = "replacement".into();
+        let config_path = config.config_path.clone();
+        let rendered = config.render_toml();
+        let error = config
+            .save_rendered_with_rename(rendered.as_bytes(), &mut |from, to| {
+                if to == config_path {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected config commit failure",
+                    ));
+                }
+                std::fs::rename(from, to)
+            })
+            .expect_err("injected save failure");
+        assert!(error.to_string().contains("injected config commit failure"));
+        assert_eq!(
+            std::fs::read(&config.config_path).expect("preserved config"),
+            previous
+        );
+        assert_eq!(
+            std::fs::read(config_backup_path(&config.config_path)).expect("preserved backup"),
+            previous
+        );
+        assert_eq!(
+            ServerConfig::load_or_default(root.clone())
+                .expect("load previous config")
+                .name,
+            "previous"
+        );
+        assert!(std::fs::read_dir(&root)
+            .expect("root entries")
+            .all(|entry| !entry
+                .expect("root entry")
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-")));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_save_refuses_to_replace_invalid_existing_file() {
+        let root = temp_root("invalid-existing-config");
+        std::fs::create_dir_all(&root).expect("root");
+        let config = ServerConfig::for_root(root.clone());
+        let invalid = b"[limits]\nupload_qouta_bytes = 123\n";
+        std::fs::write(&config.config_path, invalid).expect("invalid config");
+
+        config
+            .save()
+            .expect_err("invalid existing config must block save");
+        assert_eq!(
+            std::fs::read(&config.config_path).expect("unchanged invalid config"),
+            invalid
+        );
+        assert!(!config_backup_path(&config.config_path).exists());
+
         let _ = std::fs::remove_dir_all(root);
     }
 

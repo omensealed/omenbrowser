@@ -1,7 +1,7 @@
 use iced::Task;
 use std::path::PathBuf;
 
-use super::{DesktopApp, Message};
+use super::{DesktopApp, IdentityMessage, Message};
 
 impl DesktopApp {
     pub(super) fn dispatch_identity_message(
@@ -9,39 +9,41 @@ impl DesktopApp {
         message: Message,
     ) -> Result<Task<Message>, Message> {
         match message {
-            Message::CreateIdentity => {
+            Message::Identity(IdentityMessage::Create) => {
                 self.update_create_identity();
                 Ok(Task::none())
             }
-            Message::ActivateManagedIdentity(path) => {
+            Message::Identity(IdentityMessage::ActivateManaged(path)) => {
                 self.update_activate_managed_identity(path);
                 Ok(Task::none())
             }
-            Message::ActiveIdentityLabelChanged(label) => {
+            Message::Identity(IdentityMessage::ActiveLabelChanged(label)) => {
                 self.update_active_identity_label_changed(label);
                 Ok(Task::none())
             }
-            Message::DeleteActiveIdentity => {
+            Message::Identity(IdentityMessage::DeleteActive) => {
                 self.update_delete_active_identity();
                 Ok(Task::none())
             }
-            Message::ConfirmDeleteActiveIdentity => {
+            Message::Identity(IdentityMessage::ConfirmDeleteActive) => {
                 self.update_confirm_delete_active_identity();
                 Ok(Task::none())
             }
-            Message::CancelDeleteActiveIdentity => {
+            Message::Identity(IdentityMessage::CancelDeleteActive) => {
                 self.update_cancel_delete_active_identity();
                 Ok(Task::none())
             }
-            Message::ClearActiveIdentity => {
+            Message::Identity(IdentityMessage::ClearActive) => {
                 self.update_clear_active_identity();
                 Ok(Task::none())
             }
-            Message::AnnounceIdentityNow => {
+            Message::Identity(IdentityMessage::AnnounceNow) => {
                 self.update_announce_identity_now();
                 Ok(Task::none())
             }
-            Message::CopyActiveIdentityHash => Ok(self.update_copy_active_identity_hash()),
+            Message::Identity(IdentityMessage::CopyActiveHash) => {
+                Ok(self.update_copy_active_identity_hash())
+            }
             _ => Err(message),
         }
     }
@@ -113,7 +115,7 @@ mod tests {
         });
         let mut desktop = DesktopApp::new(app);
 
-        let _ = desktop.update(Message::CopyActiveIdentityHash);
+        let _ = desktop.update(Message::Identity(IdentityMessage::CopyActiveHash));
         assert_eq!(desktop.app.status.task, "no active identity hash to copy");
 
         desktop.app.runtime_status.active_identity = Some(IdentityProfile {
@@ -122,7 +124,7 @@ mod tests {
             hash_hex: "0123456789abcdef0123456789abcdef".into(),
             managed: true,
         });
-        let _ = desktop.update(Message::CopyActiveIdentityHash);
+        let _ = desktop.update(Message::Identity(IdentityMessage::CopyActiveHash));
         assert_eq!(
             desktop.app.status.task,
             "copied active identity hash to clipboard"

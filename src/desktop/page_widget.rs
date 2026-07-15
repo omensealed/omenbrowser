@@ -6,7 +6,9 @@ use std::rc::Rc;
 use crate::micron::parser::TextStyle;
 #[cfg(test)]
 use crate::micron::render::render_document;
-use crate::micron::render::{render_document_with_field_cursor, Cell, HitAction, RenderedRow};
+use crate::micron::render::{
+    default_render_style, render_document_with_field_cursor, Cell, HitAction, RenderedRow,
+};
 use crate::micron::Document;
 
 pub(crate) use super::page_widget_canvas::color_from_style;
@@ -137,21 +139,24 @@ fn fallback_rows(fallback: Option<&str>) -> Vec<RenderedRow> {
     fallback
         .unwrap_or("No page loaded yet.")
         .lines()
-        .map(|line| RenderedRow {
-            cells: line
-                .chars()
-                .map(|ch| Cell {
-                    ch,
-                    style: TextStyle::default(),
-                    link: None,
-                    control: None,
-                    cursor: false,
-                })
-                .collect(),
-            align: crate::micron::parser::Alignment::Left,
-            depth: 0,
-            base_style: TextStyle::default(),
-            wrap: false,
+        .map(|line| {
+            let style = default_render_style();
+            RenderedRow {
+                cells: line
+                    .chars()
+                    .map(|ch| Cell {
+                        ch,
+                        style: style.clone(),
+                        link: None,
+                        control: None,
+                        cursor: false,
+                    })
+                    .collect(),
+                align: crate::micron::parser::Alignment::Left,
+                depth: 0,
+                base_style: TextStyle::default(),
+                wrap: false,
+            }
         })
         .collect()
 }
@@ -186,52 +191,39 @@ impl<'a> canvas::Program<PageMessage> for NomadNetPageProgram<'a> {
                 let metrics = PageMetrics::new(self.zoom_percent);
                 let width = metrics.width_cells_for_bounds(bounds);
                 let rows = self.rendered_rows(width);
-                let Some(position) = cursor.position_in(bounds) else {
-                    return None;
-                };
+                let position = cursor.position_in(bounds)?;
                 let first_row = clamped_scroll_offset(
                     self.scroll_offset,
                     rows.len(),
                     metrics.height_rows_for_bounds(bounds),
                 );
                 let visible_rows = rows.len().saturating_sub(first_row);
-                let Some((visible_row, col)) = metrics.cell_at(position, visible_rows, width)
-                else {
-                    return None;
-                };
+                let (visible_row, col) = metrics.cell_at(position, visible_rows, width)?;
                 let document_row = first_row.saturating_add(visible_row as usize);
-                let Some(cell) = rows
+                let cell = rows
                     .get(document_row)
-                    .and_then(|rendered| rendered.cells.get(col as usize))
-                else {
-                    return None;
-                };
+                    .and_then(|rendered| rendered.cells.get(col as usize))?;
                 if cell.link.is_none() && cell.control.is_none() {
                     return None;
                 }
                 let action = cell
                     .link
-                    .clone()
+                    .as_deref()
+                    .cloned()
                     .map(HitAction::Link)
                     .or_else(|| cell.control.clone().map(HitAction::Control));
-                if let Some(action) = action {
-                    Some(
-                        canvas::Action::publish(PageMessage::Activate {
-                            row: visible_row,
-                            col,
-                            width,
-                            action,
-                        })
-                        .and_capture(),
-                    )
-                } else {
-                    None
-                }
+                action.map(|action| {
+                    canvas::Action::publish(PageMessage::Activate {
+                        row: visible_row,
+                        col,
+                        width,
+                        action,
+                    })
+                    .and_capture()
+                })
             }
             canvas::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                if cursor.position_in(bounds).is_none() {
-                    return None;
-                }
+                cursor.position_in(bounds)?;
                 let wheel_delta = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
                     mouse::ScrollDelta::Pixels { y, .. } => {

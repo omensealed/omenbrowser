@@ -1,14 +1,30 @@
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::{AppError, AppResult};
+use crate::storage::files::atomic_replace;
 
 const ANNOUNCE_STREAM_MAXLENGTH: usize = 256;
 const TRANSIENT_ENTRY_RETENTION_SECONDS: f64 = 6.0 * 60.0 * 60.0;
 const TRANSIENT_ENTRY_MAXCOUNT: usize = 1024;
 const DUPLICATE_ANNOUNCE_SAVE_COOLDOWN_SECONDS: f64 = 5.0 * 60.0;
 const LIVE_ANNOUNCE_SAVE_DEBOUNCE_SECONDS: f64 = 30.0;
+pub const DIRECTORY_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub const DIRECTORY_CORRUPT_BACKUP_MAX_FILES: usize = 4;
+pub const DIRECTORY_CORRUPT_BACKUP_MAX_TOTAL_BYTES: u64 =
+    DIRECTORY_CORRUPT_BACKUP_MAX_FILES as u64 * DIRECTORY_FILE_MAX_BYTES;
+pub const DIRECTORY_BACKUP_MAX_SCAN_ENTRIES: usize = 4096;
+pub const DIRECTORY_MAX_ENTRIES: usize = 4096;
+pub const DIRECTORY_MAX_DESTINATION_BYTES: usize = 1024;
+pub const DIRECTORY_MAX_DISPLAY_NAME_BYTES: usize = 16 * 1024;
+pub const DIRECTORY_MAX_ASSOCIATED_HASH_BYTES: usize = 1024;
+static DIRECTORY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -131,6 +147,12 @@ impl DirectoryService {
     pub fn new(path: PathBuf) -> crate::error::AppResult<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            if !std::fs::symlink_metadata(parent)?.file_type().is_dir() {
+                return Err(AppError::Settings(format!(
+                    "directory-store parent must be a directory: {}",
+                    parent.display()
+                )));
+            }
         }
         let mut service = Self {
             path,
@@ -148,8 +170,13 @@ impl DirectoryService {
     }
 
     pub fn clear_transient_announces(&mut self) -> crate::error::AppResult<()> {
+        let previous = self.announce_stream.clone();
         self.announce_stream.clear();
-        self.save()
+        if let Err(error) = self.save() {
+            self.announce_stream = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn ingest_announce(
@@ -180,12 +207,19 @@ impl DirectoryService {
         lxmf_stamp_cost: Option<u8>,
     ) -> crate::error::AppResult<DirectoryEntry> {
         let destination_hash = destination_hash.into();
+        let display_name = display_name.into();
+        validate_directory_strings(
+            &destination_hash,
+            &display_name,
+            associated_hash.as_deref(),
+            node_associated_hash.as_deref(),
+        )?;
         let existing = self.entries.get(&destination_hash).cloned();
         let now = timestamp_secs();
         let mut entry = DirectoryEntry::new(
             destination_hash.clone(),
             preferred_display_name(
-                Some(display_name.into()),
+                Some(display_name),
                 existing.as_ref().map(|entry| entry.display_name.as_str()),
                 &destination_hash,
             ),
@@ -258,8 +292,7 @@ impl DirectoryService {
             return Ok(None);
         };
         entry.saved = true;
-        self.entries.insert(destination_hash.into(), entry.clone());
-        self.save()?;
+        self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
 
@@ -275,8 +308,7 @@ impl DirectoryService {
         entry.trust_level = TrustLevel::Unknown;
         entry.identify_on_connect = false;
         entry.preferred_delivery = None;
-        self.entries.insert(destination_hash.into(), entry.clone());
-        self.save()?;
+        self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
 
@@ -307,8 +339,7 @@ impl DirectoryService {
         if trust_level == TrustLevel::Trusted {
             entry.saved = true;
         }
-        self.entries.insert(destination_hash.into(), entry.clone());
-        self.save()?;
+        self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
 
@@ -345,8 +376,7 @@ impl DirectoryService {
         };
         entry.preferred_delivery = preferred_delivery;
         entry.saved = true;
-        self.entries.insert(destination_hash.into(), entry.clone());
-        self.save()?;
+        self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
 
@@ -360,8 +390,7 @@ impl DirectoryService {
         };
         entry.identify_on_connect = enabled;
         entry.saved = true;
-        self.entries.insert(destination_hash.into(), entry.clone());
-        self.save()?;
+        self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
 
@@ -497,34 +526,32 @@ impl DirectoryService {
     }
 
     fn load(&mut self) -> crate::error::AppResult<()> {
-        if !self.path.exists() {
+        let Some(raw) = read_bounded_directory_file(&self.path)? else {
             return Ok(());
-        }
-        let raw = std::fs::read_to_string(&self.path)?;
-        match serde_json::from_str::<DirectoryFile>(&raw) {
-            Ok(file) => {
-                self.entries = file
-                    .entries
-                    .into_iter()
-                    .map(|entry| (entry.destination_hash.clone(), entry))
-                    .collect();
-                self.announce_stream = file.announce_stream;
-                if self.announce_stream.is_empty() && !self.entries.is_empty() {
-                    self.rebuild_announce_stream_from_entries();
-                }
-                self.trim_announce_stream();
-                if self.prune_transient_entries() {
-                    self.save()?;
-                }
-                Ok(())
-            }
-            Err(_) => {
-                backup_corrupt_file(&self.path)?;
+        };
+        let file = match serde_json::from_slice::<DirectoryFile>(&raw) {
+            Ok(file) if validate_directory_file(&file).is_ok() => file,
+            _ => {
+                backup_corrupt_file(&self.path, &raw)?;
                 self.entries.clear();
                 self.announce_stream.clear();
-                Ok(())
+                return Ok(());
             }
+        };
+        self.entries = file
+            .entries
+            .into_iter()
+            .map(|entry| (entry.destination_hash.clone(), entry))
+            .collect();
+        self.announce_stream = file.announce_stream;
+        if self.announce_stream.is_empty() && !self.entries.is_empty() {
+            self.rebuild_announce_stream_from_entries();
         }
+        self.trim_announce_stream();
+        if self.prune_transient_entries() {
+            self.save()?;
+        }
+        Ok(())
     }
 
     pub fn flush_due_save(&mut self) -> crate::error::AppResult<bool> {
@@ -533,6 +560,14 @@ impl DirectoryService {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    pub fn pending_save_due_epoch_ms(&self) -> Option<u64> {
+        self.pending_live_save.then(|| {
+            (self.pending_live_save_due.max(0.0) * 1_000.0)
+                .ceil()
+                .min(u64::MAX as f64) as u64
+        })
     }
 
     pub fn flush_pending_save(&mut self) -> crate::error::AppResult<bool> {
@@ -555,16 +590,38 @@ impl DirectoryService {
                 .cloned()
                 .collect(),
         };
-        let temp = self
-            .path
-            .with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(
-            &temp,
-            serde_json::to_vec_pretty(&file).expect("directory serializes"),
-        )?;
-        std::fs::rename(temp, &self.path)?;
+        validate_directory_file(&file)?;
+        let mut raw = serde_json::to_vec_pretty(&file)
+            .map_err(|error| AppError::Settings(error.to_string()))?;
+        raw.push(b'\n');
+        if raw.len() as u64 > DIRECTORY_FILE_MAX_BYTES {
+            return Err(AppError::Settings(format!(
+                "directory store exceeds the {DIRECTORY_FILE_MAX_BYTES} byte limit"
+            )));
+        }
+        publish_directory_bytes(&self.path, &raw, PublishMode::Replace, || Ok(()))?;
         self.pending_live_save = false;
         self.pending_live_save_due = 0.0;
+        Ok(())
+    }
+
+    fn persist_entry_change(
+        &mut self,
+        destination_hash: &str,
+        entry: DirectoryEntry,
+    ) -> AppResult<()> {
+        let previous = self.entries.insert(destination_hash.into(), entry);
+        if let Err(error) = self.save() {
+            match previous {
+                Some(previous) => {
+                    self.entries.insert(destination_hash.into(), previous);
+                }
+                None => {
+                    self.entries.remove(destination_hash);
+                }
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -757,15 +814,303 @@ fn is_placeholder_name(display_name: &str, destination_hash: &str) -> bool {
         || (normalized.starts_with('<') && normalized.ends_with('>'))
 }
 
-fn backup_corrupt_file(path: &Path) -> crate::error::AppResult<()> {
-    let backup = path.with_file_name(format!(
-        "{}.corrupt.{}.bak",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("directory.json"),
-        timestamp_millis()
+fn validate_directory_file(file: &DirectoryFile) -> AppResult<()> {
+    if file.entries.len() > DIRECTORY_MAX_ENTRIES {
+        return Err(AppError::Settings(format!(
+            "directory store exceeds the {DIRECTORY_MAX_ENTRIES} entry limit"
+        )));
+    }
+    for entry in file.entries.iter().chain(&file.announce_stream) {
+        validate_directory_entry(entry)?;
+    }
+    Ok(())
+}
+
+fn validate_directory_entry(entry: &DirectoryEntry) -> AppResult<()> {
+    validate_directory_strings(
+        &entry.destination_hash,
+        &entry.display_name,
+        entry.associated_hash.as_deref(),
+        entry.node_associated_hash.as_deref(),
+    )?;
+    if !entry.last_seen.is_finite() {
+        return Err(AppError::Settings(
+            "directory store contains a non-finite last-seen timestamp".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_directory_strings(
+    destination_hash: &str,
+    display_name: &str,
+    associated_hash: Option<&str>,
+    node_associated_hash: Option<&str>,
+) -> AppResult<()> {
+    if destination_hash.len() > DIRECTORY_MAX_DESTINATION_BYTES {
+        return Err(AppError::Settings(
+            "directory destination exceeds its byte limit".into(),
+        ));
+    }
+    if display_name.len() > DIRECTORY_MAX_DISPLAY_NAME_BYTES {
+        return Err(AppError::Settings(
+            "directory display name exceeds its byte limit".into(),
+        ));
+    }
+    if associated_hash
+        .into_iter()
+        .chain(node_associated_hash)
+        .any(|hash| hash.len() > DIRECTORY_MAX_ASSOCIATED_HASH_BYTES)
+    {
+        return Err(AppError::Settings(
+            "directory associated hash exceeds its byte limit".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_bounded_directory_file(path: &Path) -> AppResult<Option<Vec<u8>>> {
+    let path_metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !path_metadata.file_type().is_file() {
+        return Err(AppError::Settings(format!(
+            "directory-store path must be a regular file: {}",
+            path.display()
+        )));
+    }
+    if path_metadata.len() > DIRECTORY_FILE_MAX_BYTES {
+        return Err(AppError::Settings(format!(
+            "directory store exceeds the {DIRECTORY_FILE_MAX_BYTES} byte limit: {}",
+            path.display()
+        )));
+    }
+    let file = File::open(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() {
+        return Err(AppError::Settings(format!(
+            "directory-store path must open as a regular file: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if path_metadata.dev() != opened_metadata.dev()
+            || path_metadata.ino() != opened_metadata.ino()
+        {
+            return Err(AppError::Settings(format!(
+                "directory-store path changed while it was being opened: {}",
+                path.display()
+            )));
+        }
+    }
+    let mut raw = Vec::with_capacity(path_metadata.len() as usize);
+    file.take(DIRECTORY_FILE_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut raw)?;
+    if raw.len() as u64 > DIRECTORY_FILE_MAX_BYTES {
+        return Err(AppError::Settings(format!(
+            "directory store exceeds the {DIRECTORY_FILE_MAX_BYTES} byte limit: {}",
+            path.display()
+        )));
+    }
+    Ok(Some(raw))
+}
+
+#[derive(Clone, Copy)]
+enum PublishMode {
+    CreateNew,
+    Replace,
+}
+
+fn publish_directory_bytes(
+    path: &Path,
+    raw: &[u8],
+    mode: PublishMode,
+    before_commit: impl FnOnce() -> std::io::Result<()>,
+) -> AppResult<()> {
+    if raw.len() as u64 > DIRECTORY_FILE_MAX_BYTES {
+        return Err(AppError::Settings(format!(
+            "directory store exceeds the {DIRECTORY_FILE_MAX_BYTES} byte limit"
+        )));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "directory-store path has no parent",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    if !std::fs::symlink_metadata(parent)?.file_type().is_dir() {
+        return Err(AppError::Settings(format!(
+            "directory-store parent must be a directory: {}",
+            parent.display()
+        )));
+    }
+    match (mode, std::fs::symlink_metadata(path)) {
+        (PublishMode::CreateNew, Ok(_)) => {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "directory-store destination already exists",
+            )
+            .into());
+        }
+        (PublishMode::Replace, Ok(metadata)) if !metadata.file_type().is_file() => {
+            return Err(AppError::Settings(format!(
+                "directory-store target must be a regular file: {}",
+                path.display()
+            )));
+        }
+        (_, Err(error)) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "directory-store path has no safe filename",
+            )
+        })?;
+    let sequence = DIRECTORY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{file_name}.{}.{}.directory.tmp",
+        std::process::id(),
+        sequence
     ));
-    std::fs::copy(path, backup)?;
+    let result = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(raw)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        before_commit()?;
+        match mode {
+            PublishMode::CreateNew => {
+                std::fs::hard_link(&temporary, path)?;
+                sync_directory(parent)?;
+                std::fs::remove_file(&temporary)?;
+            }
+            PublishMode::Replace => atomic_replace(&temporary, path)?,
+        }
+        sync_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(Into::into)
+}
+
+fn backup_corrupt_file(path: &Path, raw: &[u8]) -> AppResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "directory-store path has no parent",
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "directory-store path has no safe filename",
+            )
+        })?;
+    let sequence = DIRECTORY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let backup = parent.join(format!(
+        "{file_name}.corrupt.{}.{}.{}.bak",
+        timestamp_nanos(),
+        std::process::id(),
+        sequence
+    ));
+    publish_directory_bytes(&backup, raw, PublishMode::CreateNew, || Ok(()))?;
+    prune_corrupt_backups(path)
+}
+
+fn prune_corrupt_backups(path: &Path) -> AppResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "directory-store path has no parent",
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "directory-store path has no safe filename",
+            )
+        })?;
+    let prefix = format!("{file_name}.corrupt.");
+    let mut backups = Vec::new();
+    let mut total_bytes = 0_u64;
+    for (scanned, entry) in std::fs::read_dir(parent)?.enumerate() {
+        if scanned == DIRECTORY_BACKUP_MAX_SCAN_ENTRIES {
+            return Err(AppError::Settings(format!(
+                "directory-store backup discovery exceeds the {} entry scan limit",
+                DIRECTORY_BACKUP_MAX_SCAN_ENTRIES
+            )));
+        }
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(body) = name
+            .strip_prefix(&prefix)
+            .and_then(|name| name.strip_suffix(".bak"))
+        else {
+            continue;
+        };
+        if body.split('.').count() != 3
+            || !body
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+            || !entry.file_type()?.is_file()
+        {
+            continue;
+        }
+        let bytes = entry.metadata()?.len();
+        total_bytes = total_bytes.saturating_add(bytes);
+        backups.push((name.to_owned(), entry.path(), bytes));
+    }
+    backups.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut retained = backups.len();
+    let mut removed = false;
+    for (_, backup, bytes) in backups {
+        if retained <= DIRECTORY_CORRUPT_BACKUP_MAX_FILES
+            && total_bytes <= DIRECTORY_CORRUPT_BACKUP_MAX_TOTAL_BYTES
+        {
+            break;
+        }
+        std::fs::remove_file(backup)?;
+        retained = retained.saturating_sub(1);
+        total_bytes = total_bytes.saturating_sub(bytes);
+        removed = true;
+    }
+    if removed {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -776,9 +1121,38 @@ fn timestamp_secs() -> f64 {
         .as_secs_f64()
 }
 
-fn timestamp_millis() -> u128 {
+fn timestamp_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis()
+        .as_nanos()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{publish_directory_bytes, PublishMode};
+
+    #[test]
+    fn failed_replace_preserves_prior_directory_and_removes_stage() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-directory-replace-fault-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create fixture");
+        let target = root.join("directory.json");
+        std::fs::write(&target, b"previous").expect("seed directory");
+
+        let result = publish_directory_bytes(&target, b"replacement", PublishMode::Replace, || {
+            Err(std::io::Error::other("injected pre-commit failure"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&target).expect("read prior directory"),
+            b"previous"
+        );
+        assert_eq!(std::fs::read_dir(&root).expect("list fixture").count(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

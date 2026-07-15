@@ -19,7 +19,7 @@ use crate::messaging::{
     AttachmentSummary, DeliveryMode, MessageEnvelope, MessageSummary, TransportMethod,
 };
 use crate::runtime::RuntimeBusEvent;
-use crate::storage::files::next_available_download_path;
+use crate::storage::files::{atomic_write_new_bounded, next_available_download_path};
 
 const SAMPLE_INDEX: &str = r#"#!c=60
 >Welcome to OMENbrowser
@@ -881,7 +881,11 @@ impl NetworkRuntime for MockNetworkRuntime {
             return Err(crate::error::AppError::Runtime("download cancelled".into()));
         }
         let path = next_available_download_path(downloads_dir, "mock-download.txt")?;
-        std::fs::write(&path, format!("Downloaded from {url}\n"))?;
+        atomic_write_new_bounded(
+            path.clone(),
+            format!("Downloaded from {url}\n").into_bytes(),
+        )
+        .await?;
         Ok(DownloadedFile {
             url: url.into(),
             path,

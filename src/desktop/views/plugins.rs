@@ -3,7 +3,7 @@ use iced::{Element, Length};
 
 use super::super::{
     action_grid, app_scrollable, omen_button, section_card, subtle_button, ui_size, warning_button,
-    wrapped_text_owned, DesktopApp, Message,
+    wrapped_text_owned, DesktopApp, Message, PluginMessage,
 };
 
 pub(in crate::desktop) fn plugins_view(desktop: &DesktopApp) -> Element<'_, Message> {
@@ -27,9 +27,12 @@ pub(in crate::desktop) fn plugins_view(desktop: &DesktopApp) -> Element<'_, Mess
                 title,
                 column![
                     row![
-                        subtle_button("Select", Message::SelectPlugin(index)),
-                        subtle_button("Toggle", Message::TogglePlugin(index)),
-                        warning_button("Remove", Message::BeginPluginRemove(index)),
+                        subtle_button("Select", Message::Plugin(PluginMessage::Select(index))),
+                        subtle_button("Toggle", Message::Plugin(PluginMessage::Toggle(index))),
+                        warning_button(
+                            "Remove",
+                            Message::Plugin(PluginMessage::BeginRemove(index)),
+                        ),
                     ]
                     .spacing(8)
                     .wrap(),
@@ -81,11 +84,23 @@ pub(in crate::desktop) fn plugins_view(desktop: &DesktopApp) -> Element<'_, Mess
                 column![
                     action_grid(
                         vec![
-                            omen_button("Install Trusted Folder", Message::BeginPluginInstall),
-                            subtle_button("Toggle Selected", Message::ToggleSelectedPlugin),
-                            warning_button("Remove Selected", Message::BeginSelectedPluginRemove),
-                            subtle_button("Refresh", Message::RefreshPlugins),
-                            subtle_button("Open Plugin Logs", Message::ShowPluginLogs),
+                            omen_button(
+                                "Install Trusted Folder",
+                                Message::Plugin(PluginMessage::BeginInstall),
+                            ),
+                            subtle_button(
+                                "Toggle Selected",
+                                Message::Plugin(PluginMessage::ToggleSelected),
+                            ),
+                            warning_button(
+                                "Remove Selected",
+                                Message::Plugin(PluginMessage::BeginSelectedRemove),
+                            ),
+                            subtle_button("Refresh", Message::Plugin(PluginMessage::Refresh),),
+                            subtle_button(
+                                "Open Plugin Logs",
+                                Message::Plugin(PluginMessage::ShowLogs),
+                            ),
                         ],
                         5,
                     ),

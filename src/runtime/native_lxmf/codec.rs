@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rand_core::RngCore;
 use reticulum_rs::core::identity::{Identity, PrivateIdentity};
@@ -11,6 +14,7 @@ use crate::messaging::{
     AttachmentSummary, DeliveryMode, MessageEnvelope, MessageSummary, NativeLxmfReplyTicket,
     TransportMethod as AppTransportMethod,
 };
+use crate::storage::files::atomic_replace;
 
 const FIELD_EMBEDDED_LXMS: i64 = 0x01;
 const FIELD_TELEMETRY: i64 = 0x02;
@@ -46,6 +50,28 @@ const PROPAGATION_WORKBLOCK_EXPAND_ROUNDS: u32 = 1000;
 pub const DEFAULT_PROPAGATION_STAMP_TARGET_COST: u8 = 16;
 pub const DEFAULT_PROPAGATION_STAMP_MAX_ATTEMPTS: u64 = 1 << 22;
 pub const DEFAULT_DIRECT_STAMP_MAX_ATTEMPTS: u64 = 1 << 22;
+const MAX_LXMF_ANNOUNCE_BYTES: usize = 4 * 1024;
+const MAX_LXMF_ANNOUNCE_CONTAINER_ITEMS: usize = 64;
+const MAX_LXMF_ANNOUNCE_TOTAL_VALUES: usize = 256;
+const MAX_LXMF_ANNOUNCE_DEPTH: usize = 8;
+pub const MAX_LXMF_PROPAGATION_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_LXMF_PROPAGATION_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_LXMF_PROPAGATION_CONTAINER_ITEMS: usize = 256;
+const MAX_LXMF_PROPAGATION_TOTAL_VALUES: usize = 512;
+const MAX_LXMF_PROPAGATION_DEPTH: usize = 4;
+const MAX_LXMF_WIRE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LXMF_WIRE_SCALAR_BYTES: usize = 8 * 1024 * 1024;
+const MAX_LXMF_WIRE_CONTAINER_ITEMS: usize = 4096;
+const MAX_LXMF_WIRE_TOTAL_VALUES: usize = 8192;
+const MAX_LXMF_WIRE_DEPTH: usize = 16;
+const LXMF_RAW_WIRE_HEADER_BYTES: usize = 16 + 16 + 64;
+const LXMF_STORAGE_MAGIC: &[u8; 8] = b"LXMFSTR0";
+pub const MAX_LXMF_ATTACHMENT_ITEMS: usize = 64;
+pub const MAX_LXMF_ATTACHMENT_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_LXMF_ATTACHMENT_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_LXMF_ATTACHMENT_NAME_BYTES: usize = 4 * 1024;
+const MAX_LXMF_ATTACHMENT_PATH_COMPONENT_BYTES: usize = 200;
+static LXMF_ATTACHMENT_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeLxmfWireApi {
@@ -93,12 +119,14 @@ pub fn native_delivery_type_name() -> &'static str {
 }
 
 pub fn delivery_display_name_from_app_data(app_data: &[u8]) -> Option<String> {
+    validate_lxmf_announce_msgpack(app_data).ok()?;
     lxmf::wire::announce::display_name_from_delivery_app_data(app_data)
         .ok()
         .flatten()
 }
 
 pub fn delivery_announce_stamp_cost(app_data: &[u8]) -> Option<u8> {
+    validate_lxmf_announce_msgpack(app_data).ok()?;
     let mut cursor = std::io::Cursor::new(app_data);
     let value = rmpv::decode::read_value(&mut cursor).ok()?;
     if cursor.position() != app_data.len() as u64 {
@@ -350,6 +378,7 @@ fn stamp_valid(stamp: &[u8], target_cost: u8, workblock: &[u8]) -> bool {
 }
 
 fn parse_propagation_announce_data(app_data: &[u8]) -> Option<Vec<rmpv::Value>> {
+    validate_lxmf_announce_msgpack(app_data).ok()?;
     let mut cursor = std::io::Cursor::new(app_data);
     let value = rmpv::decode::read_value(&mut cursor).ok()?;
     if cursor.position() != app_data.len() as u64 {
@@ -374,6 +403,18 @@ fn parse_propagation_announce_data(app_data: &[u8]) -> Option<Vec<rmpv::Value>> 
     value_as_u64(&costs[2])?;
     items[6].as_map()?;
     Some(items)
+}
+
+fn validate_lxmf_announce_msgpack(app_data: &[u8]) -> AppResult<()> {
+    crate::msgpack::validate_msgpack_with_limits(
+        app_data,
+        MAX_LXMF_ANNOUNCE_BYTES,
+        MAX_LXMF_ANNOUNCE_BYTES,
+        MAX_LXMF_ANNOUNCE_CONTAINER_ITEMS,
+        MAX_LXMF_ANNOUNCE_TOTAL_VALUES,
+        MAX_LXMF_ANNOUNCE_DEPTH,
+    )
+    .map_err(|error| AppError::Runtime(format!("LXMF announce decode rejected: {error}")))
 }
 
 fn value_as_u64(value: &rmpv::Value) -> Option<u64> {
@@ -597,7 +638,7 @@ fn decode_wire_message_inner(
     let attachments = if let Some(attachments_dir) = attachments_dir {
         store_attachments_from_fields(message.fields.as_ref(), attachments_dir, &message_id)?
     } else {
-        attachment_summaries_from_fields(message.fields.as_ref())
+        attachment_summaries_from_fields(message.fields.as_ref())?
     };
     let fields = native_lxmf_summary_fields_from_message_fields(message.fields.as_ref());
 
@@ -763,6 +804,15 @@ fn decode_propagated_lxmf_data_inner(
 }
 
 pub fn propagation_envelope_entries(bytes: &[u8]) -> AppResult<Vec<Vec<u8>>> {
+    crate::msgpack::validate_msgpack_with_limits(
+        bytes,
+        MAX_LXMF_PROPAGATION_ENVELOPE_BYTES,
+        MAX_LXMF_PROPAGATION_ENTRY_BYTES,
+        MAX_LXMF_PROPAGATION_CONTAINER_ITEMS,
+        MAX_LXMF_PROPAGATION_TOTAL_VALUES,
+        MAX_LXMF_PROPAGATION_DEPTH,
+    )
+    .map_err(|error| AppError::Runtime(format!("LXMF propagation envelope rejected: {error}")))?;
     let mut cursor = std::io::Cursor::new(bytes);
     let value = rmpv::decode::read_value(&mut cursor)
         .map_err(|_| AppError::Runtime("LXMF propagation envelope decode failed".into()))?;
@@ -776,6 +826,7 @@ pub fn propagation_envelope_entries(bytes: &[u8]) -> AppResult<Vec<Vec<u8>>> {
 }
 
 fn decode_wire_and_message(bytes: &[u8]) -> AppResult<(lxmf::WireMessage, lxmf::Message)> {
+    preflight_lxmf_wire(bytes)?;
     if let Ok(wire) = lxmf::WireMessage::unpack_storage(bytes) {
         let packed = wire.pack().map_err(|err| {
             AppError::Runtime(format!("LXMF wire re-pack failed during decode: {err}"))
@@ -791,26 +842,107 @@ fn decode_wire_and_message(bytes: &[u8]) -> AppResult<(lxmf::WireMessage, lxmf::
     Ok((wire, message))
 }
 
+fn preflight_lxmf_wire(bytes: &[u8]) -> AppResult<()> {
+    if bytes.len() > MAX_LXMF_WIRE_BYTES {
+        return Err(AppError::Runtime("LXMF wire exceeds byte limit".into()));
+    }
+    if bytes.starts_with(LXMF_STORAGE_MAGIC) {
+        if bytes.len() < 10 + 32 {
+            return Err(AppError::Runtime("LXMF storage wire is truncated".into()));
+        }
+        let signature_bytes = if bytes[9] & 0x01 != 0 { 64 } else { 0 };
+        let payload_start = 10usize.saturating_add(32).saturating_add(signature_bytes);
+        let payload = bytes
+            .get(payload_start..)
+            .ok_or_else(|| AppError::Runtime("LXMF storage payload is truncated".into()))?;
+        return validate_lxmf_payload_msgpack(payload);
+    }
+
+    if crate::msgpack::validate_msgpack_with_limits(
+        bytes,
+        MAX_LXMF_WIRE_BYTES,
+        MAX_LXMF_WIRE_BYTES,
+        32,
+        64,
+        4,
+    )
+    .is_ok()
+    {
+        let mut cursor = std::io::Cursor::new(bytes);
+        if let Ok(rmpv::Value::Map(fields)) = rmpv::decode::read_value(&mut cursor) {
+            if let Some(inner) = fields.iter().find_map(|(key, value)| {
+                matches!(key, rmpv::Value::String(key) if key.as_str() == Some("lxmf_bytes"))
+                    .then_some(value)
+            }) {
+                let rmpv::Value::Binary(inner) = inner else {
+                    return Err(AppError::Runtime(
+                        "LXMF Python storage payload was not binary".into(),
+                    ));
+                };
+                return preflight_raw_lxmf_wire(inner);
+            }
+        }
+    }
+    preflight_raw_lxmf_wire(bytes)
+}
+
+fn preflight_raw_lxmf_wire(bytes: &[u8]) -> AppResult<()> {
+    let payload = bytes
+        .get(LXMF_RAW_WIRE_HEADER_BYTES..)
+        .ok_or_else(|| AppError::Runtime("LXMF raw wire is truncated".into()))?;
+    validate_lxmf_payload_msgpack(payload)
+}
+
+fn validate_lxmf_payload_msgpack(payload: &[u8]) -> AppResult<()> {
+    crate::msgpack::validate_msgpack_with_limits(
+        payload,
+        MAX_LXMF_WIRE_BYTES,
+        MAX_LXMF_WIRE_SCALAR_BYTES,
+        MAX_LXMF_WIRE_CONTAINER_ITEMS,
+        MAX_LXMF_WIRE_TOTAL_VALUES,
+        MAX_LXMF_WIRE_DEPTH,
+    )
+    .map_err(|error| AppError::Runtime(format!("LXMF payload rejected: {error}")))
+}
+
 fn attachment_fields_from_paths(
     paths: &[std::path::PathBuf],
 ) -> AppResult<(Option<rmpv::Value>, Vec<AttachmentSummary>)> {
+    if paths.len() > MAX_LXMF_ATTACHMENT_ITEMS {
+        return Err(AppError::Runtime(format!(
+            "LXMF attachments exceed the {MAX_LXMF_ATTACHMENT_ITEMS} item limit"
+        )));
+    }
     let mut field_entries = Vec::new();
     let mut summaries = Vec::new();
+    let mut total_bytes = 0_u64;
 
     for path in paths {
-        if !path.is_file() {
+        let Some(data) = read_lxmf_attachment(path)? else {
             continue;
-        }
-        let data = std::fs::read(path)
-            .map_err(|err| AppError::Runtime(format!("failed to read LXMF attachment: {err}")))?;
+        };
+        let size = data.len() as u64;
         let name = attachment_file_name(path);
+        if name.len() > MAX_LXMF_ATTACHMENT_NAME_BYTES {
+            return Err(AppError::Runtime(format!(
+                "LXMF attachment name exceeds the {MAX_LXMF_ATTACHMENT_NAME_BYTES} byte limit"
+            )));
+        }
+        total_bytes = total_bytes.checked_add(size).ok_or_else(|| {
+            AppError::Runtime("LXMF attachment aggregate byte count overflow".into())
+        })?;
+        if total_bytes > MAX_LXMF_ATTACHMENT_TOTAL_BYTES {
+            return Err(AppError::Runtime(format!(
+                "LXMF attachments exceed the {MAX_LXMF_ATTACHMENT_TOTAL_BYTES} byte aggregate limit"
+            )));
+        }
         field_entries.push(rmpv::Value::Array(vec![
             rmpv::Value::String(name.clone().into()),
-            rmpv::Value::Binary(data.clone()),
+            rmpv::Value::Binary(data),
         ]));
         summaries.push(AttachmentSummary {
             name,
-            size: data.len() as u64,
+            size,
             path: Some(path.clone()),
         });
     }
@@ -826,6 +958,52 @@ fn attachment_fields_from_paths(
         )])),
         summaries,
     ))
+}
+
+fn read_lxmf_attachment(path: &Path) -> AppResult<Option<Vec<u8>>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AppError::Runtime(
+            "LXMF attachment must be a regular non-symlink file".into(),
+        ));
+    }
+    if metadata.len() > MAX_LXMF_ATTACHMENT_BYTES {
+        return Err(AppError::Runtime(format!(
+            "LXMF attachment exceeds the {MAX_LXMF_ATTACHMENT_BYTES} byte limit"
+        )));
+    }
+
+    let mut file = File::open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() > MAX_LXMF_ATTACHMENT_BYTES {
+        return Err(AppError::Runtime(
+            "LXMF attachment changed or exceeded its byte limit during admission".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.dev() != opened.dev() || metadata.ino() != opened.ino() {
+            return Err(AppError::Runtime(
+                "LXMF attachment changed during admission".into(),
+            ));
+        }
+    }
+
+    let mut data = Vec::with_capacity(opened.len() as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_LXMF_ATTACHMENT_BYTES + 1)
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_LXMF_ATTACHMENT_BYTES {
+        return Err(AppError::Runtime(format!(
+            "LXMF attachment exceeds the {MAX_LXMF_ATTACHMENT_BYTES} byte limit"
+        )));
+    }
+    Ok(Some(data))
 }
 
 fn insert_lxmf_field(fields: &mut Option<rmpv::Value>, field: i64, value: rmpv::Value) {
@@ -865,15 +1043,17 @@ fn attachment_file_name(path: &Path) -> String {
         .to_string()
 }
 
-fn attachment_summaries_from_fields(fields: Option<&rmpv::Value>) -> Vec<AttachmentSummary> {
-    attachment_entries_from_fields(fields)
+fn attachment_summaries_from_fields(
+    fields: Option<&rmpv::Value>,
+) -> AppResult<Vec<AttachmentSummary>> {
+    Ok(attachment_entries_from_fields(fields)?
         .into_iter()
         .map(|entry| AttachmentSummary {
             name: entry.name,
             size: entry.data.len() as u64,
             path: None,
         })
-        .collect()
+        .collect())
 }
 
 fn store_attachments_from_fields(
@@ -881,18 +1061,19 @@ fn store_attachments_from_fields(
     attachments_dir: &Path,
     message_id: &str,
 ) -> AppResult<Vec<AttachmentSummary>> {
-    let entries = attachment_entries_from_fields(fields);
+    let entries = attachment_entries_from_fields(fields)?;
     if entries.is_empty() {
         return Ok(Vec::new());
     }
 
+    ensure_private_attachment_dir(attachments_dir)?;
     let message_dir = attachments_dir.join(safe_path_component(message_id));
-    std::fs::create_dir_all(&message_dir)?;
+    ensure_private_attachment_dir(&message_dir)?;
     let mut summaries = Vec::with_capacity(entries.len());
     for (index, entry) in entries.into_iter().enumerate() {
         let file_name = format!("{}_{}", index, safe_path_component(&entry.name));
-        let stored_path = next_available_path(&message_dir, &file_name);
-        std::fs::write(&stored_path, &entry.data)?;
+        let stored_path = message_dir.join(file_name);
+        write_private_attachment(&stored_path, &entry.data)?;
         summaries.push(AttachmentSummary {
             name: entry.name,
             size: entry.data.len() as u64,
@@ -908,9 +1089,9 @@ struct AttachmentEntry {
     data: Vec<u8>,
 }
 
-fn attachment_entries_from_fields(fields: Option<&rmpv::Value>) -> Vec<AttachmentEntry> {
+fn attachment_entries_from_fields(fields: Option<&rmpv::Value>) -> AppResult<Vec<AttachmentEntry>> {
     let Some(rmpv::Value::Map(entries)) = fields else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(value) = entries.iter().find_map(|(key, value)| {
         if field_key_matches_file_attachments(key) {
@@ -919,17 +1100,41 @@ fn attachment_entries_from_fields(fields: Option<&rmpv::Value>) -> Vec<Attachmen
             None
         }
     }) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let rmpv::Value::Array(items) = value else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
+    if items.len() > MAX_LXMF_ATTACHMENT_ITEMS {
+        return Err(AppError::Runtime(format!(
+            "LXMF attachments exceed the {MAX_LXMF_ATTACHMENT_ITEMS} item limit"
+        )));
+    }
 
-    items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| attachment_entry_from_value(index, item))
-        .collect()
+    let mut total_bytes = 0_u64;
+    let mut retained = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let Some(entry) = attachment_entry_from_value(index, item) else {
+            continue;
+        };
+        if entry.name.len() > MAX_LXMF_ATTACHMENT_NAME_BYTES
+            || entry.data.len() as u64 > MAX_LXMF_ATTACHMENT_BYTES
+        {
+            return Err(AppError::Runtime(
+                "LXMF attachment exceeds its name or byte limit".into(),
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(entry.data.len() as u64)
+            .ok_or_else(|| AppError::Runtime("LXMF attachment byte count overflow".into()))?;
+        if total_bytes > MAX_LXMF_ATTACHMENT_TOTAL_BYTES {
+            return Err(AppError::Runtime(format!(
+                "LXMF attachments exceed the {MAX_LXMF_ATTACHMENT_TOTAL_BYTES} byte aggregate limit"
+            )));
+        }
+        retained.push(entry);
+    }
+    Ok(retained)
 }
 
 fn field_key_matches_file_attachments(key: &rmpv::Value) -> bool {
@@ -1151,37 +1356,126 @@ fn safe_path_component(value: &str) -> String {
         })
         .collect();
     let sanitized = sanitized.trim_matches('.');
-    if sanitized.is_empty() {
+    let sanitized = if sanitized.is_empty() {
         "attachment".into()
     } else {
         sanitized.to_string()
+    };
+    if sanitized.len() <= MAX_LXMF_ATTACHMENT_PATH_COMPONENT_BYTES {
+        return sanitized;
     }
+    let digest = Sha256::digest(value.as_bytes());
+    let suffix = hex_bytes(&digest[..8]);
+    let prefix_bytes = MAX_LXMF_ATTACHMENT_PATH_COMPONENT_BYTES - suffix.len() - 1;
+    format!("{}-{suffix}", &sanitized[..prefix_bytes])
 }
 
-fn next_available_path(dir: &Path, file_name: &str) -> std::path::PathBuf {
-    let candidate = dir.join(file_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-
-    let path = Path::new(file_name);
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("attachment");
-    let extension = path.extension().and_then(|extension| extension.to_str());
-    for index in 1.. {
-        let name = if let Some(extension) = extension {
-            format!("{stem}-{index}.{extension}")
-        } else {
-            format!("{stem}-{index}")
-        };
-        let candidate = dir.join(name);
-        if !candidate.exists() {
-            return candidate;
+fn ensure_private_attachment_dir(path: &Path) -> AppResult<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AppError::Runtime(
+                    "LXMF attachment storage path must be a real directory".into(),
+                ));
+            }
         }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(path)?;
+        }
+        Err(error) => return Err(error.into()),
     }
-    unreachable!("unbounded attachment path search")
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AppError::Runtime(
+            "LXMF attachment storage path must be a real directory".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_private_attachment(path: &Path, bytes: &[u8]) -> AppResult<()> {
+    write_private_attachment_with(path, bytes, || Ok(()))
+}
+
+fn write_private_attachment_with(
+    path: &Path,
+    bytes: &[u8],
+    before_commit: impl FnOnce() -> std::io::Result<()>,
+) -> AppResult<()> {
+    if bytes.len() as u64 > MAX_LXMF_ATTACHMENT_BYTES {
+        return Err(AppError::Runtime(format!(
+            "LXMF attachment exceeds the {MAX_LXMF_ATTACHMENT_BYTES} byte limit"
+        )));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        AppError::Runtime("LXMF attachment destination has no parent directory".into())
+    })?;
+    ensure_private_attachment_dir(parent)?;
+    validate_attachment_destination(path)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::Runtime("LXMF attachment destination is invalid".into()))?;
+    let sequence = LXMF_ATTACHMENT_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    let result = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        before_commit()?;
+        validate_attachment_destination_io(path)?;
+        atomic_replace(&temporary, path)?;
+        #[cfg(unix)]
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(Into::into)
+}
+
+fn validate_attachment_destination(path: &Path) -> AppResult<()> {
+    validate_attachment_destination_io(path).map_err(|error| {
+        AppError::Runtime(format!("LXMF attachment destination rejected: {error}"))
+    })
+}
+
+fn validate_attachment_destination_io(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(std::io::Error::other("must be a regular non-symlink file"))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn propagation_entries_from_value(value: &rmpv::Value) -> AppResult<Vec<Vec<u8>>> {
@@ -1315,6 +1609,37 @@ mod tests {
     }
 
     #[test]
+    fn lxmf_wire_preflight_rejects_unbounded_raw_and_storage_payloads() {
+        let oversized_payload = [0xc6, 0x00, 0x80, 0x00, 0x01];
+        let mut raw = vec![0; LXMF_RAW_WIRE_HEADER_BYTES];
+        raw.extend(oversized_payload);
+        assert!(preflight_lxmf_wire(&raw).is_err());
+
+        let mut fixed_storage = LXMF_STORAGE_MAGIC.to_vec();
+        fixed_storage.extend([1, 0]);
+        fixed_storage.extend([0; 32]);
+        fixed_storage.extend(oversized_payload);
+        assert!(preflight_lxmf_wire(&fixed_storage).is_err());
+
+        let mut python_storage = Vec::new();
+        rmpv::encode::write_value(
+            &mut python_storage,
+            &rmpv::Value::Map(vec![(
+                rmpv::Value::String("lxmf_bytes".into()),
+                rmpv::Value::Binary(raw),
+            )]),
+        )
+        .expect("encode Python storage container");
+        assert!(preflight_lxmf_wire(&python_storage).is_err());
+
+        let mut deep = vec![0x91; MAX_LXMF_WIRE_DEPTH + 2];
+        deep.push(0xc0);
+        let mut raw_deep = vec![0; LXMF_RAW_WIRE_HEADER_BYTES];
+        raw_deep.extend(deep);
+        assert!(preflight_lxmf_wire(&raw_deep).is_err());
+    }
+
+    #[test]
     fn delivery_announce_app_data_extracts_display_name() {
         let encoded = encode_delivery_display_name_app_data("Alice Relay")
             .expect("encoded delivery app data");
@@ -1371,6 +1696,35 @@ mod tests {
         assert_eq!(propagation_announce_stamp_costs(&encoded), vec![16, 3, 18]);
         assert_eq!(propagation_announce_target_stamp_cost(&encoded), Some(16));
         assert_eq!(propagation_display_name_from_app_data(b"not-msgpack"), None);
+    }
+
+    #[test]
+    fn lxmf_announce_parsers_reject_unbounded_or_trailing_msgpack() {
+        let mut valid_delivery = Vec::new();
+        rmpv::encode::write_value(
+            &mut valid_delivery,
+            &rmpv::Value::Array(vec![
+                rmpv::Value::Binary(b"Relay".to_vec()),
+                rmpv::Value::from(8_u64),
+            ]),
+        )
+        .expect("encode delivery announce");
+        valid_delivery.push(0xc0);
+        assert_eq!(delivery_display_name_from_app_data(&valid_delivery), None);
+        assert_eq!(delivery_announce_stamp_cost(&valid_delivery), None);
+
+        let oversized_scalar = [0xdb, 0x00, 0x00, 0x10, 0x01];
+        assert_eq!(delivery_announce_stamp_cost(&oversized_scalar), None);
+        assert!(!propagation_announce_data_is_valid(&oversized_scalar));
+
+        let mut deep = vec![0x91; MAX_LXMF_ANNOUNCE_DEPTH + 2];
+        deep.push(0xc0);
+        assert!(!propagation_announce_data_is_valid(&deep));
+        assert!(!propagation_announce_data_is_valid(&vec![
+            0xc0;
+            MAX_LXMF_ANNOUNCE_BYTES
+                + 1
+        ]));
     }
 
     #[test]
@@ -1911,7 +2265,7 @@ mod tests {
 
         let outbound = build_outbound_message(&envelope, &source).expect("outbound");
         let fields = outbound.message.fields.as_ref().expect("attachment fields");
-        let summaries = attachment_summaries_from_fields(Some(fields));
+        let summaries = attachment_summaries_from_fields(Some(fields)).expect("summaries");
         let wire = encode_signed_wire_message(&outbound, &private).expect("encode");
         let decoded = decode_wire_message(&wire).expect("decode");
         let stored_dir = unique_test_path("omenbrowser-lxmf-stored-attachments");
@@ -1943,6 +2297,52 @@ mod tests {
             b"attached bytes"
         );
         assert!(stored_path.starts_with(&stored_dir));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(stored_path)
+                    .expect("stored metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(stored_path.parent().expect("message directory"))
+                    .expect("message directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        let replayed =
+            decode_wire_message_storing_attachments(&wire, &stored_dir).expect("decode replay");
+        assert_eq!(replayed.attachments[0].path.as_ref(), Some(stored_path));
+        assert_eq!(
+            std::fs::read_dir(stored_path.parent().expect("message directory"))
+                .expect("list stored attachments")
+                .count(),
+            1
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let referent = stored_dir.join("outside-referent.bin");
+            std::fs::write(&referent, b"outside").expect("referent");
+            std::fs::remove_file(stored_path).expect("remove stored file");
+            symlink(&referent, stored_path).expect("stored-path symlink");
+            let error = decode_wire_message_storing_attachments(&wire, &stored_dir)
+                .expect_err("unsafe stored path");
+            assert!(error.to_string().contains("non-symlink"));
+            assert_eq!(
+                std::fs::read(&referent).expect("referent remains"),
+                b"outside"
+            );
+        }
 
         let _ = std::fs::remove_file(attachment);
         let _ = std::fs::remove_dir(attachment_dir);
@@ -1965,6 +2365,191 @@ mod tests {
 
         assert!(outbound.message.fields.is_none());
         assert!(outbound.attachments.is_empty());
+    }
+
+    #[test]
+    fn outbound_attachment_rejects_sparse_next_byte_file_before_reading() {
+        let root = unique_test_path("omenbrowser-lxmf-oversized-attachment");
+        std::fs::create_dir_all(&root).expect("fixture root");
+        let path = root.join("oversized.bin");
+        File::create(&path)
+            .and_then(|file| file.set_len(MAX_LXMF_ATTACHMENT_BYTES + 1))
+            .expect("sparse oversized attachment");
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            attachments: vec![path.clone()],
+        };
+
+        let error = build_outbound_message(&envelope, SRC).expect_err("oversized attachment");
+
+        assert!(error.to_string().contains("byte limit"));
+        assert_eq!(
+            std::fs::metadata(path).expect("source metadata").len(),
+            MAX_LXMF_ATTACHMENT_BYTES + 1
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outbound_attachments_accept_exact_per_file_and_aggregate_limits() {
+        let root = unique_test_path("omenbrowser-lxmf-exact-attachments");
+        std::fs::create_dir_all(&root).expect("fixture root");
+        let first = root.join("first.bin");
+        let second = root.join("second.bin");
+        for path in [&first, &second] {
+            File::create(path)
+                .and_then(|file| file.set_len(MAX_LXMF_ATTACHMENT_BYTES))
+                .expect("sparse exact attachment");
+        }
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            attachments: vec![first, second],
+        };
+
+        let outbound = build_outbound_message(&envelope, SRC).expect("exact attachment limits");
+
+        assert_eq!(outbound.attachments.len(), 2);
+        assert_eq!(
+            outbound
+                .attachments
+                .iter()
+                .map(|item| item.size)
+                .sum::<u64>(),
+            MAX_LXMF_ATTACHMENT_TOTAL_BYTES
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outbound_attachment_item_limit_rejects_before_file_access() {
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            attachments: (0..=MAX_LXMF_ATTACHMENT_ITEMS)
+                .map(|index| unique_test_path(&format!("missing-{index}")))
+                .collect(),
+        };
+
+        let error = build_outbound_message(&envelope, SRC).expect_err("attachment item limit");
+
+        assert!(error.to_string().contains("item limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn outbound_attachment_symlink_is_rejected_without_reading_referent() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_path("omenbrowser-lxmf-symlink-attachment");
+        std::fs::create_dir_all(&root).expect("fixture root");
+        let referent = root.join("referent.bin");
+        let link = root.join("linked.bin");
+        std::fs::write(&referent, b"private referent").expect("referent");
+        symlink(&referent, &link).expect("attachment symlink");
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Subject".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            attachments: vec![link],
+        };
+
+        let error = build_outbound_message(&envelope, SRC).expect_err("symlink rejected");
+
+        assert!(error.to_string().contains("non-symlink"));
+        assert_eq!(
+            std::fs::read(referent).expect("referent remains"),
+            b"private referent"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inbound_attachment_collection_limits_reject_atomically() {
+        let excessive_items = rmpv::Value::Map(vec![(
+            rmpv::Value::Integer(FIELD_FILE_ATTACHMENTS.into()),
+            rmpv::Value::Array(
+                (0..=MAX_LXMF_ATTACHMENT_ITEMS)
+                    .map(|index| {
+                        rmpv::Value::Array(vec![
+                            rmpv::Value::String(format!("{index}.bin").into()),
+                            rmpv::Value::Binary(Vec::new()),
+                        ])
+                    })
+                    .collect(),
+            ),
+        )]);
+        let error = attachment_entries_from_fields(Some(&excessive_items))
+            .expect_err("excessive attachment items");
+        assert!(error.to_string().contains("item limit"));
+
+        let excessive_bytes = rmpv::Value::Map(vec![(
+            rmpv::Value::Integer(FIELD_FILE_ATTACHMENTS.into()),
+            rmpv::Value::Array(vec![
+                rmpv::Value::Array(vec![
+                    rmpv::Value::String("first.bin".into()),
+                    rmpv::Value::Binary(vec![0; MAX_LXMF_ATTACHMENT_BYTES as usize]),
+                ]),
+                rmpv::Value::Array(vec![
+                    rmpv::Value::String("second.bin".into()),
+                    rmpv::Value::Binary(vec![0; MAX_LXMF_ATTACHMENT_BYTES as usize]),
+                ]),
+                rmpv::Value::Array(vec![
+                    rmpv::Value::String("next.bin".into()),
+                    rmpv::Value::Binary(vec![0]),
+                ]),
+            ]),
+        )]);
+        let error = attachment_entries_from_fields(Some(&excessive_bytes))
+            .expect_err("excessive attachment bytes");
+        assert!(error.to_string().contains("aggregate limit"));
+    }
+
+    #[test]
+    fn attachment_storage_component_is_bounded_and_collision_resistant() {
+        let first = format!("{}a", "long-name-".repeat(500));
+        let second = format!("{}b", "long-name-".repeat(500));
+
+        let first_component = safe_path_component(&first);
+        let second_component = safe_path_component(&second);
+
+        assert!(first_component.len() <= MAX_LXMF_ATTACHMENT_PATH_COMPONENT_BYTES);
+        assert!(second_component.len() <= MAX_LXMF_ATTACHMENT_PATH_COMPONENT_BYTES);
+        assert_ne!(first_component, second_component);
+        assert_eq!(first_component, safe_path_component(&first));
+    }
+
+    #[test]
+    fn private_attachment_fault_preserves_previous_file_and_removes_stage() {
+        let root = unique_test_path("omenbrowser-lxmf-attachment-fault");
+        std::fs::create_dir_all(&root).expect("fixture root");
+        let path = root.join("attachment.bin");
+        std::fs::write(&path, b"previous").expect("previous attachment");
+
+        let result = write_private_attachment_with(&path, b"replacement", || {
+            Err(std::io::Error::other("injected pre-commit failure"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).expect("previous remains"), b"previous");
+        assert_eq!(std::fs::read_dir(&root).expect("list fixture").count(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2070,6 +2655,28 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(entries[0].starts_with(b"lxmf-data"));
         assert!(entries[0].ends_with(&[0xAB; 32]));
+    }
+
+    #[test]
+    fn propagation_envelope_rejects_unbounded_or_trailing_msgpack() {
+        let mut trailing = lxmf::WireMessage::pack_propagation_envelope(42.0, b"lxmf-data", None)
+            .expect("envelope");
+        trailing.push(0xc0);
+        assert!(propagation_envelope_entries(&trailing).is_err());
+
+        let oversized_scalar = [0xc6, 0x00, 0x80, 0x00, 0x01];
+        assert!(propagation_envelope_entries(&oversized_scalar).is_err());
+
+        let oversized_container = [0xdd, 0x00, 0x00, 0x01, 0x01];
+        assert!(propagation_envelope_entries(&oversized_container).is_err());
+
+        let mut deep = vec![0x91; MAX_LXMF_PROPAGATION_DEPTH + 2];
+        deep.push(0xc0);
+        assert!(propagation_envelope_entries(&deep).is_err());
+        assert!(
+            propagation_envelope_entries(&vec![0xc0; MAX_LXMF_PROPAGATION_ENVELOPE_BYTES + 1])
+                .is_err()
+        );
     }
 
     #[test]

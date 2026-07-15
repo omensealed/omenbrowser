@@ -88,17 +88,17 @@ impl DesktopApp {
                     let previous = self
                         .conversation
                         .message_counts
-                        .get(&conversation_id)
+                        .get(conversation_id)
                         .copied()
                         .unwrap_or(0);
-                    let current = current_counts.get(&conversation_id).copied().unwrap_or(0);
+                    let current = current_counts.get(conversation_id).copied().unwrap_or(0);
                     if current <= previous {
                         return None;
                     }
                     let was_following_bottom = self
                         .conversation
                         .scroll_offsets
-                        .get(&conversation_id)
+                        .get(conversation_id)
                         .copied()
                         .map(scroll_offset_is_at_bottom)
                         .unwrap_or(true);

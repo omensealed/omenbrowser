@@ -1,0 +1,88 @@
+name: Native checks
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+
+jobs:
+  native:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86_64
+            runner: windows-2025
+          - name: macOS Intel
+            runner: macos-15-intel
+          - name: macOS Apple Silicon
+            runner: macos-15
+    env:
+      CARGO_BUILD_JOBS: "2"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-07-11
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            .
+            src/server
+
+      - name: Verify product dependency identity
+        shell: bash
+        run: |
+          bash scripts/verify-product-features.sh
+          bash scripts/verify-tui-dependencies.sh
+
+      - name: Check and test browser product
+        shell: bash
+        run: |
+          cargo check --locked --no-default-features --features native-lxmf
+          cargo clippy --locked --lib --no-default-features --features native-lxmf -- -D warnings
+          cargo check --locked --no-default-features --features desktop-product
+          cargo test --locked --no-default-features --features desktop-product
+          cargo clippy --locked --no-default-features --features desktop-product -- -D warnings
+
+      - name: Validate native atomic cache replacement
+        shell: bash
+        run: |
+          cargo test --locked --no-default-features --features desktop-product --test storage_files atomic_replace_replaces_existing_file_without_source_residue
+          cargo test --locked --no-default-features --features desktop-product --test browser_cache cache_store_load_delete_round_trip
+          cargo test --locked --no-default-features --features desktop-product --test browser_form_state form_state_round_trips_by_page_url
+
+      - name: Check and test root terminal UI
+        shell: bash
+        run: |
+          cargo check --locked --no-default-features --features tui
+          cargo test --locked --no-default-features --features tui
+          cargo clippy --locked --no-default-features --features tui --all-targets -- -D warnings
+
+      - name: Run isolated terminal lifecycle smoke
+        shell: bash
+        run: bash scripts/test-tui-lifecycle.sh
+
+      - name: Check and test headless omenchatd
+        shell: bash
+        run: |
+          cargo check --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
+          cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
+          cargo clippy --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless -- -D warnings
+
+      - name: Check and test full omenchatd
+        shell: bash
+        run: |
+          cargo check --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full
+          cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full
+          cargo clippy --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full -- -D warnings

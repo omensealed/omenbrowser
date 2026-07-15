@@ -15,9 +15,7 @@ use crate::chat::{ChatClientRequest, ChatSessionId, ChatSessionView};
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use crate::app::current_epoch_ms;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-use crate::chat::rns::{
-    replay_pending_resource_offers, resource_id_from_metadata, ChatLinkTransport,
-};
+use crate::chat::rns::{resource_id_from_metadata, ChatLinkTransport};
 #[cfg(feature = "chat-client")]
 use crate::chat::store::{ChatStore, SqliteChatStore};
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -103,7 +101,11 @@ pub(in crate::desktop) fn delayed_omenchat_reconnect_if_disconnected_task(
             tokio::time::sleep(Duration::from_millis(OMENCHAT_PATH_RECONNECT_DELAY_MS)).await;
             session_id
         },
-        Message::ReconnectOmenChatSessionIfDisconnected,
+        |session_id| {
+            Message::OmenChat(super::OmenChatMessage::ReconnectSessionIfDisconnected(
+                session_id,
+            ))
+        },
     )
 }
 
@@ -112,10 +114,21 @@ pub(in crate::desktop) fn delayed_omenchat_reconnect_if_disconnected_task(
 pub(in crate::desktop) struct DesktopOmenChatTransport {
     pub(in crate::desktop) link_id: [u8; 16],
     pub(in crate::desktop) incoming_frames: VecDeque<Vec<u8>>,
+    pub(in crate::desktop) incoming_frame_bytes: usize,
     pub(in crate::desktop) resources: BTreeMap<String, Vec<u8>>,
+    pub(in crate::desktop) resource_order: VecDeque<String>,
+    pub(in crate::desktop) resource_cached_bytes: usize,
     pub(in crate::desktop) pending_resource_offers: BTreeMap<String, VecDeque<Vec<u8>>>,
+    pub(in crate::desktop) pending_resource_offer_bytes: usize,
+    pub(in crate::desktop) rejected_resources: u64,
+    pub(in crate::desktop) rejected_resource_offers: u64,
+    pub(in crate::desktop) rejected_incoming_frames: u64,
+    pub(in crate::desktop) rejected_outgoing_frames: u64,
+    pub(in crate::desktop) rejected_outgoing_resources: u64,
     pub(in crate::desktop) outgoing_frames: Vec<Vec<u8>>,
+    pub(in crate::desktop) outgoing_frame_bytes: usize,
     pub(in crate::desktop) outgoing_resources: Vec<(String, Vec<u8>)>,
+    pub(in crate::desktop) outgoing_resource_bytes: usize,
     pub(in crate::desktop) last_rx_epoch_ms: u64,
     pub(in crate::desktop) last_tx_epoch_ms: u64,
     pub(in crate::desktop) last_ping_epoch_ms: u64,
@@ -163,11 +176,15 @@ impl DesktopOmenChatTransport {
         }
     }
 
-    pub(in crate::desktop) fn push_incoming_frame(&mut self, bytes: Vec<u8>, now_ms: u64) {
+    pub(in crate::desktop) fn push_incoming_frame(&mut self, bytes: Vec<u8>, now_ms: u64) -> bool {
         self.frames_in = self.frames_in.saturating_add(1);
         self.bytes_in = self.bytes_in.saturating_add(bytes.len() as u64);
-        let op = self.note_incoming_frame(&bytes);
         self.last_rx_epoch_ms = now_ms;
+        if !self.incoming_frame_has_capacity(bytes.len()) {
+            self.rejected_incoming_frames = self.rejected_incoming_frames.saturating_add(1);
+            return false;
+        }
+        let op = self.note_incoming_frame(&bytes);
         if matches!(op, Some(crate::chat::protocol::ChatOp::Pong)) {
             self.last_pong_epoch_ms = now_ms;
             if self.last_ping_epoch_ms > 0 {
@@ -177,7 +194,25 @@ impl DesktopOmenChatTransport {
         } else if op.is_some() {
             self.awaiting_pong = false;
         }
+        self.incoming_frame_bytes = self.incoming_frame_bytes.saturating_add(bytes.len());
         self.incoming_frames.push_back(bytes);
+        true
+    }
+
+    fn incoming_frame_has_capacity(&self, bytes: usize) -> bool {
+        bytes <= crate::chat::codec::MAX_FRAME_BYTES
+            && self.incoming_frames.len() < super::OMENCHAT_TRANSPORT_FRAME_QUEUE_MAX_ITEMS
+            && self.incoming_frame_bytes.saturating_add(bytes)
+                <= super::OMENCHAT_TRANSPORT_FRAME_QUEUE_MAX_BYTES
+    }
+
+    fn push_replayed_incoming_frame(&mut self, bytes: Vec<u8>) {
+        if !self.incoming_frame_has_capacity(bytes.len()) {
+            self.rejected_incoming_frames = self.rejected_incoming_frames.saturating_add(1);
+            return;
+        }
+        self.incoming_frame_bytes = self.incoming_frame_bytes.saturating_add(bytes.len());
+        self.incoming_frames.push_front(bytes);
     }
 
     pub(in crate::desktop) fn push_resource(
@@ -185,11 +220,15 @@ impl DesktopOmenChatTransport {
         metadata: Option<Vec<u8>>,
         data: Vec<u8>,
         now_ms: u64,
-    ) {
+    ) -> bool {
         self.last_rx_epoch_ms = now_ms;
         self.awaiting_pong = false;
         self.resources_in = self.resources_in.saturating_add(1);
         self.resource_bytes_in = self.resource_bytes_in.saturating_add(data.len() as u64);
+        if data.len() > super::OMENCHAT_RESOURCE_MAX_BYTES {
+            self.rejected_resources = self.rejected_resources.saturating_add(1);
+            return false;
+        }
         let inferred_resource_id = if metadata.is_none() && self.pending_resource_offer_count() == 1
         {
             self.pending_resource_offers.keys().next().cloned()
@@ -205,17 +244,48 @@ impl DesktopOmenChatTransport {
                     .upload_resource_bytes_in
                     .saturating_add(data.len() as u64);
             }
+            if let Some(previous) = self.resources.remove(&resource_id) {
+                self.resource_cached_bytes =
+                    self.resource_cached_bytes.saturating_sub(previous.len());
+                self.resource_order.retain(|stored| stored != &resource_id);
+            }
+            while self.resources.len() >= super::OMENCHAT_RESOURCE_CACHE_MAX_ITEMS
+                || self.resource_cached_bytes.saturating_add(data.len())
+                    > super::OMENCHAT_RESOURCE_CACHE_MAX_BYTES
+            {
+                let Some(oldest) = self.resource_order.pop_front() else {
+                    self.rejected_resources = self.rejected_resources.saturating_add(1);
+                    return false;
+                };
+                if let Some(removed) = self.resources.remove(&oldest) {
+                    self.resource_cached_bytes =
+                        self.resource_cached_bytes.saturating_sub(removed.len());
+                }
+            }
+            self.resource_cached_bytes = self.resource_cached_bytes.saturating_add(data.len());
+            self.resource_order.push_back(resource_id.clone());
             self.resources.insert(resource_id.clone(), data);
-            replay_pending_resource_offers(
-                &mut self.incoming_frames,
-                &mut self.pending_resource_offers,
-                &resource_id,
-            );
+            if let Some(offers) = self.pending_resource_offers.get(&resource_id) {
+                let released = offers
+                    .iter()
+                    .fold(0usize, |total, frame| total.saturating_add(frame.len()));
+                self.pending_resource_offer_bytes =
+                    self.pending_resource_offer_bytes.saturating_sub(released);
+            }
+            if let Some(mut offers) = self.pending_resource_offers.remove(&resource_id) {
+                while let Some(frame) = offers.pop_back() {
+                    self.push_replayed_incoming_frame(frame);
+                }
+            }
+            return true;
         }
+        self.rejected_resources = self.rejected_resources.saturating_add(1);
+        false
     }
 
     pub(in crate::desktop) fn take_outgoing_frames(&mut self) -> Vec<Vec<u8>> {
         let frames = std::mem::take(&mut self.outgoing_frames);
+        self.outgoing_frame_bytes = 0;
         if !frames.is_empty() {
             self.last_tx_epoch_ms = current_epoch_ms();
         }
@@ -224,6 +294,7 @@ impl DesktopOmenChatTransport {
 
     pub(in crate::desktop) fn take_outgoing_resources(&mut self) -> Vec<(String, Vec<u8>)> {
         let resources = std::mem::take(&mut self.outgoing_resources);
+        self.outgoing_resource_bytes = 0;
         if !resources.is_empty() {
             self.last_tx_epoch_ms = current_epoch_ms();
         }
@@ -323,23 +394,57 @@ impl DesktopOmenChatTransport {
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 impl ChatLinkTransport for DesktopOmenChatTransport {
     fn send_frame(&mut self, frame_bytes: Vec<u8>) -> anyhow::Result<()> {
+        let next_bytes = self
+            .outgoing_frame_bytes
+            .checked_add(frame_bytes.len())
+            .ok_or_else(|| anyhow::anyhow!("OMENchat outgoing frame byte overflow"))?;
+        if frame_bytes.len() > crate::chat::codec::MAX_FRAME_BYTES
+            || self.outgoing_frames.len() >= super::OMENCHAT_TRANSPORT_FRAME_QUEUE_MAX_ITEMS
+            || next_bytes > super::OMENCHAT_TRANSPORT_FRAME_QUEUE_MAX_BYTES
+        {
+            self.rejected_outgoing_frames = self.rejected_outgoing_frames.saturating_add(1);
+            anyhow::bail!("OMENchat outgoing frame queue budget exceeded");
+        }
         self.frames_out = self.frames_out.saturating_add(1);
         self.bytes_out = self.bytes_out.saturating_add(frame_bytes.len() as u64);
         self.note_outgoing_frame(&frame_bytes);
+        self.outgoing_frame_bytes = next_bytes;
         self.outgoing_frames.push(frame_bytes);
         Ok(())
     }
 
     fn recv_frame(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
-        Ok(self.incoming_frames.pop_front())
+        let frame = self.incoming_frames.pop_front();
+        if let Some(bytes) = frame.as_ref() {
+            self.incoming_frame_bytes = self.incoming_frame_bytes.saturating_sub(bytes.len());
+        }
+        Ok(frame)
     }
 
     fn fetch_resource(&mut self, resource_id: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        Ok(self.resources.get(resource_id).cloned())
+        let resource = self.resources.remove(resource_id);
+        if let Some(bytes) = resource.as_ref() {
+            self.resource_cached_bytes = self.resource_cached_bytes.saturating_sub(bytes.len());
+            self.resource_order.retain(|stored| stored != resource_id);
+        }
+        Ok(resource)
     }
 
     fn send_resource(&mut self, resource_id: &str, payload: Vec<u8>) -> anyhow::Result<()> {
+        let next_bytes = self
+            .outgoing_resource_bytes
+            .checked_add(payload.len())
+            .ok_or_else(|| anyhow::anyhow!("OMENchat outgoing Resource byte overflow"))?;
+        if resource_id.len() > super::OMENCHAT_TRANSPORT_RESOURCE_ID_MAX_BYTES
+            || payload.len() > super::OMENCHAT_RESOURCE_MAX_BYTES
+            || self.outgoing_resources.len() >= super::OMENCHAT_TRANSPORT_RESOURCE_QUEUE_MAX_ITEMS
+            || next_bytes > super::OMENCHAT_TRANSPORT_RESOURCE_QUEUE_MAX_BYTES
+        {
+            self.rejected_outgoing_resources = self.rejected_outgoing_resources.saturating_add(1);
+            anyhow::bail!("OMENchat outgoing Resource queue budget exceeded");
+        }
         self.bytes_out = self.bytes_out.saturating_add(payload.len() as u64);
+        self.outgoing_resource_bytes = next_bytes;
         self.outgoing_resources
             .push((resource_id.to_owned(), payload));
         Ok(())
@@ -350,6 +455,19 @@ impl ChatLinkTransport for DesktopOmenChatTransport {
         resource_id: &str,
         frame_bytes: Vec<u8>,
     ) -> anyhow::Result<()> {
+        let next_bytes = self
+            .pending_resource_offer_bytes
+            .checked_add(frame_bytes.len())
+            .ok_or_else(|| anyhow::anyhow!("OMENchat pending Resource offer byte overflow"))?;
+        if frame_bytes.len() > crate::chat::codec::MAX_FRAME_BYTES
+            || self.pending_resource_offer_count()
+                >= super::OMENCHAT_PENDING_RESOURCE_OFFER_MAX_ITEMS
+            || next_bytes > super::OMENCHAT_PENDING_RESOURCE_OFFER_MAX_BYTES
+        {
+            self.rejected_resource_offers = self.rejected_resource_offers.saturating_add(1);
+            anyhow::bail!("OMENchat pending Resource offer budget exceeded");
+        }
+        self.pending_resource_offer_bytes = next_bytes;
         self.pending_resource_offers
             .entry(resource_id.to_owned())
             .or_default()

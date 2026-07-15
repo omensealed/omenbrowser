@@ -155,7 +155,7 @@ impl DiagnosticsService {
                     .map(|directory| directory.list_live_entries().len())
                     .unwrap_or_default(),
                 cache_files: cache
-                    .map(count_cache_files)
+                    .map(PageCache::entry_count)
                     .transpose()?
                     .unwrap_or_default(),
                 interface_profiles: interfaces.len(),
@@ -220,13 +220,6 @@ fn identity_diagnostics(identity: &IdentityProfile) -> IdentityDiagnostics {
             .into(),
         managed: identity.managed,
     }
-}
-
-fn count_cache_files(cache: &PageCache) -> AppResult<usize> {
-    Ok(std::fs::read_dir(cache.cache_dir())?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_file())
-        .count())
 }
 
 #[cfg(test)]

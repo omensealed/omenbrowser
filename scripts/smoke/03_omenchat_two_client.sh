@@ -9,8 +9,8 @@ if [[ ! -x scripts/release-omenchat-smoke.sh ]]; then
   smoke_skip "scripts/release-omenchat-smoke.sh is missing or not executable"
 fi
 
-smoke_run "build browser release" cargo build --release --features chat-client-reticulum --bin omenbrowser_rs
-smoke_run "build server release" cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
+smoke_run "build browser release" cargo build --release --locked --no-default-features --features desktop-product --bin omenbrowser_rs
+smoke_run "build server release" cargo build --release --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
 
 smoke_run "omenchat two client smoke" \
   bash scripts/release-omenchat-smoke.sh \

@@ -46,14 +46,29 @@ impl DesktopApp {
             rows,
             action_grid(
                 vec![
-                    omen_button("Retry Startup", Message::StartNativeRuntime),
-                    omen_button("Auto Configure", Message::NativeQuickstart),
-                    subtle_button("Create Identity", Message::CreateIdentity),
-                    subtle_button("Use Native", Message::SelectNativeBackend),
-                    subtle_button("Add TCP", Message::CreateTcpClientInterface),
+                    omen_button(
+                        "Retry Startup",
+                        Message::Runtime(RuntimeMessage::StartNativeRuntime),
+                    ),
+                    omen_button(
+                        "Auto Configure",
+                        Message::Runtime(RuntimeMessage::NativeQuickstart),
+                    ),
+                    subtle_button(
+                        "Create Identity",
+                        Message::Identity(IdentityMessage::Create),
+                    ),
+                    subtle_button(
+                        "Use Native",
+                        Message::Runtime(RuntimeMessage::SelectNativeBackend),
+                    ),
+                    subtle_button(
+                        "Add TCP",
+                        Message::Interface(super::super::InterfaceMessage::CreateTcpClient)
+                    ),
                     subtle_button(
                         "Interfaces",
-                        Message::SwitchSection(WorkspaceSection::Interfaces)
+                        Message::Shell(ShellMessage::SwitchSection(WorkspaceSection::Interfaces))
                     ),
                 ],
                 6,
@@ -65,15 +80,18 @@ impl DesktopApp {
                     inert_address_display(browser_address.clone())
                 } else {
                     text_input("destination:/path", &browser_address)
-                        .on_input(Message::AddressChanged)
-                        .on_submit(Message::OpenSetupAddress)
+                        .on_input(|value| Message::Browser(BrowserMessage::AddressChanged(value)))
+                        .on_submit(Message::Browser(BrowserMessage::OpenSetupAddress))
                         .width(Length::Fill)
                         .into()
                 };
                 row![
                     text("Open live NomadNet").size(ui_size(14)),
                     input,
-                    omen_button("Open Address", Message::OpenSetupAddress),
+                    omen_button(
+                        "Open Address",
+                        Message::Browser(BrowserMessage::OpenSetupAddress),
+                    ),
                 ]
                 .spacing(8)
                 .wrap()
@@ -82,15 +100,24 @@ impl DesktopApp {
                 vec![
                     subtle_button(
                         "Directory",
-                        Message::SwitchSection(WorkspaceSection::Directory)
+                        Message::Shell(ShellMessage::SwitchSection(WorkspaceSection::Directory))
                     ),
                     subtle_button(
                         "Diagnostics",
-                        Message::SwitchSection(WorkspaceSection::Diagnostics)
+                        Message::Shell(ShellMessage::SwitchSection(WorkspaceSection::Diagnostics))
                     ),
-                    subtle_button("Preflight", Message::NativePreflight),
-                    subtle_button("Live Probe", Message::NativeSmokeLiveProbe),
-                    omen_button("Live Fetch", Message::NativeLiveFetchValidate),
+                    subtle_button(
+                        "Preflight",
+                        Message::Diagnostics(DiagnosticsMessage::NativePreflight)
+                    ),
+                    subtle_button(
+                        "Live Probe",
+                        Message::Diagnostics(DiagnosticsMessage::NativeSmokeLiveProbe)
+                    ),
+                    omen_button(
+                        "Live Fetch",
+                        Message::Diagnostics(DiagnosticsMessage::NativeLiveFetchValidate)
+                    ),
                 ],
                 5,
             ),

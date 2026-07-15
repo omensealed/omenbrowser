@@ -3,7 +3,10 @@ use iced::Task;
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use crate::app::current_epoch_ms;
+#[cfg(feature = "chat-client")]
+use crate::chat::client::CHAT_CLIENT_MAX_SESSIONS;
 use crate::chat::protocol::RoomId;
+use crate::chat::store::ChatStore;
 use crate::chat::{ChatClientEvent, ChatSessionId, OmenChatDescriptor};
 
 use super::{
@@ -56,10 +59,14 @@ impl DesktopApp {
                     .map_err(|error| error.to_string());
                 (session_id, destination, result)
             },
-            |(session_id, destination, result)| Message::OmenChatPathRequestResult {
-                session_id,
-                destination,
-                result,
+            |(session_id, destination, result)| {
+                Message::OmenChatTransportCompletion(
+                    super::OmenChatTransportCompletionMessage::PathRequest {
+                        session_id,
+                        destination,
+                        result,
+                    },
+                )
             },
         )
     }
@@ -129,11 +136,11 @@ impl DesktopApp {
     }
 
     #[cfg(feature = "chat-client")]
-    pub(in crate::desktop) fn open_omenchat_status_session(
+    pub(in crate::desktop) fn try_open_omenchat_status_session(
         &mut self,
         descriptor: OmenChatDescriptor,
         status: String,
-    ) -> ChatSessionId {
+    ) -> Option<ChatSessionId> {
         let server_destination = descriptor.server_destination;
         if let Some(session) = self
             .omenchat
@@ -145,7 +152,7 @@ impl DesktopApp {
             let session_id = session.session_id;
             self.set_omenchat_session_status(session_id, status);
             self.omenchat.chat_drafts.entry(session_id).or_default();
-            return session_id;
+            return Some(session_id);
         }
 
         let session_id = self.omenchat.chat_client.reserve_session_id();
@@ -169,7 +176,10 @@ impl DesktopApp {
             unread: 0,
             joined: false,
         };
-        self.omenchat
+        let session_capacity_reached =
+            self.omenchat.chat_client.sessions().len() >= CHAT_CLIENT_MAX_SESSIONS;
+        if !self
+            .omenchat
             .chat_client
             .push_session(crate::chat::ChatSessionView {
                 session_id,
@@ -179,14 +189,32 @@ impl DesktopApp {
                 users: Vec::new(),
                 events: Vec::new(),
                 status,
-            });
+            })
+        {
+            self.app.status.task = if session_capacity_reached {
+                "OMENchat session limit reached; close a chat before opening another".into()
+            } else {
+                "OMENchat descriptor metadata exceeds client limits".into()
+            };
+            return None;
+        }
         self.omenchat.chat_drafts.entry(session_id).or_default();
         self.persist_omenchat_session(session_id);
-        session_id
+        Some(session_id)
+    }
+
+    #[cfg(all(test, feature = "chat-client"))]
+    pub(in crate::desktop) fn open_omenchat_status_session(
+        &mut self,
+        descriptor: OmenChatDescriptor,
+        status: String,
+    ) -> ChatSessionId {
+        self.try_open_omenchat_status_session(descriptor, status)
+            .expect("isolated test session catalog must have capacity")
     }
 
     #[cfg(feature = "chat-client")]
-    pub(in crate::desktop) fn create_blank_omenchat_session(&mut self) -> ChatSessionId {
+    pub(in crate::desktop) fn create_blank_omenchat_session(&mut self) -> Option<ChatSessionId> {
         let session_id = self.omenchat.chat_client.reserve_session_id();
         let server_destination = format!("{OMENCHAT_PENDING_DESTINATION_PREFIX}{session_id}");
         let server = crate::chat::model::ChatServerSummary {
@@ -202,7 +230,8 @@ impl DesktopApp {
             unread: 0,
             joined: false,
         };
-        self.omenchat
+        if !self
+            .omenchat
             .chat_client
             .push_session(crate::chat::ChatSessionView {
                 session_id,
@@ -212,11 +241,16 @@ impl DesktopApp {
                 users: Vec::new(),
                 events: Vec::new(),
                 status: "enter an OMENchat destination hash, then press Open".into(),
-            });
+            })
+        {
+            self.app.status.task =
+                "OMENchat session limit reached; close a chat before opening another".into();
+            return None;
+        }
         self.omenchat.chat_drafts.entry(session_id).or_default();
         self.remember_omenchat_bottom(session_id);
         self.app.status.task = "created blank OMENchat client pane".into();
-        session_id
+        Some(session_id)
     }
 
     #[cfg(feature = "chat-client")]
@@ -387,9 +421,16 @@ impl DesktopApp {
                         self.persist_omenchat_session(*session_id);
                     }
                 }
-                ChatClientEvent::HistoryPrepended { session_id, .. } => {
+                ChatClientEvent::HistoryPrepended { session_id, events } => {
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     self.mark_omenchat_recent_sync_complete(*session_id);
+                    if let Some(store) = self.omenchat.chat_store.as_mut() {
+                        if let Err(error) = store.append_events(events.clone()) {
+                            tracing::warn!(
+                                "failed to persist received OMENchat history batch for session {session_id}: {error}"
+                            );
+                        }
+                    }
                     self.persist_omenchat_session(*session_id);
                 }
                 ChatClientEvent::HistorySynced { session_id, .. } => {

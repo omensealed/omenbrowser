@@ -2,7 +2,9 @@ use crate::app::TabId;
 use crate::desktop::page_widget::PageMessage;
 use crate::workspace::WorkspaceSection;
 
-use super::{BrowserFieldKey, DesktopApp, Message};
+#[cfg(test)]
+use super::ShellMessage;
+use super::{BrowserFieldKey, BrowserMessage, DesktopApp, Message};
 use iced::Task;
 
 impl DesktopApp {
@@ -11,162 +13,166 @@ impl DesktopApp {
         message: Message,
     ) -> Result<Task<Message>, Message> {
         match message {
-            Message::SelectBrowserTab(index) => {
+            Message::Browser(BrowserMessage::SelectTab(index)) => {
                 self.update_select_browser_tab(index);
                 Ok(Task::none())
             }
-            Message::NewBrowserTab => Ok(self.update_new_browser_tab()),
-            Message::CloseBrowserTab => {
+            Message::Browser(BrowserMessage::NewTab) => Ok(self.update_new_browser_tab()),
+            Message::Browser(BrowserMessage::CloseTab) => {
                 self.update_close_active_browser_tab();
                 Ok(Task::none())
             }
-            Message::CloseBrowserPaneTab(tab_id) => {
+            Message::Browser(BrowserMessage::ClosePaneTab(tab_id)) => {
                 self.update_close_browser_pane_tab(tab_id);
                 Ok(Task::none())
             }
-            Message::AddressChanged(value) => {
+            Message::Browser(BrowserMessage::AddressChanged(value)) => {
                 self.update_active_browser_address_changed(value);
                 Ok(Task::none())
             }
-            Message::BrowserPaneAddressChanged { tab_id, value } => {
+            Message::Browser(BrowserMessage::PaneAddressChanged { tab_id, value }) => {
                 self.update_browser_pane_address_changed(tab_id, value);
                 Ok(Task::none())
             }
-            Message::OpenAddress => {
+            Message::Browser(BrowserMessage::OpenAddress) => {
                 self.update_open_active_browser_address();
                 Ok(Task::none())
             }
-            Message::OpenBrowserPaneAddress(tab_id) => {
+            Message::Browser(BrowserMessage::OpenPaneAddress(tab_id)) => {
                 self.update_open_browser_pane_address(tab_id);
                 Ok(Task::none())
             }
-            Message::ReloadBrowserPane(tab_id) => {
+            Message::Browser(BrowserMessage::ReloadPane(tab_id)) => {
                 self.update_browser_pane_reload(tab_id);
                 Ok(Task::none())
             }
-            Message::BrowserPaneBack(tab_id) => {
+            Message::Browser(BrowserMessage::PaneBack(tab_id)) => {
                 self.update_browser_pane_back(tab_id);
                 Ok(Task::none())
             }
-            Message::BrowserPaneForward(tab_id) => {
+            Message::Browser(BrowserMessage::PaneForward(tab_id)) => {
                 self.update_browser_pane_forward(tab_id);
                 Ok(Task::none())
             }
-            Message::BrowserPaneTop(tab_id) => {
+            Message::Browser(BrowserMessage::PaneTop(tab_id)) => {
                 self.update_browser_pane_top(tab_id);
                 Ok(Task::none())
             }
-            Message::StopBrowserPaneTask(tab_id) => {
+            Message::Browser(BrowserMessage::StopPaneTask(tab_id)) => {
                 self.update_browser_pane_stop(tab_id);
                 Ok(Task::none())
             }
-            Message::InlineProbeBrowserPane(tab_id) => {
+            Message::Browser(BrowserMessage::InlineProbePane(tab_id)) => {
                 self.update_browser_pane_inline_probe(tab_id);
                 Ok(Task::none())
             }
-            Message::LiveProbeBrowserPane(tab_id) => {
+            Message::Browser(BrowserMessage::LiveProbePane(tab_id)) => {
                 self.update_browser_pane_live_probe(tab_id);
                 Ok(Task::none())
             }
-            Message::WarmBrowserPanePath(tab_id) => {
+            Message::Browser(BrowserMessage::WarmPanePath(tab_id)) => {
                 self.update_browser_pane_warm_path(tab_id);
                 Ok(Task::none())
             }
-            Message::RetryBrowserPaneAfterPath(tab_id) => {
+            Message::Browser(BrowserMessage::RetryPaneAfterPath(tab_id)) => {
                 self.update_browser_pane_retry_after_path(tab_id);
                 Ok(Task::none())
             }
-            Message::BrowserPanePathDiagnostics(tab_id) => {
+            Message::Browser(BrowserMessage::PanePathDiagnostics(tab_id)) => {
                 self.update_browser_pane_path_diagnostics(tab_id);
                 Ok(Task::none())
             }
-            Message::CaptureBrowserPaneRender(tab_id) => {
+            Message::Browser(BrowserMessage::CapturePaneRender(tab_id)) => {
                 self.update_browser_pane_capture_render(tab_id);
                 Ok(Task::none())
             }
-            Message::DismissBrowserPaneWarning(tab_id) => {
+            Message::Browser(BrowserMessage::DismissPaneWarning(tab_id)) => {
                 self.update_browser_pane_dismiss_warning(tab_id);
                 Ok(Task::none())
             }
-            Message::DismissBrowserPaneRequest(tab_id) => {
+            Message::Browser(BrowserMessage::DismissPaneRequest(tab_id)) => {
                 self.update_browser_pane_dismiss_request(tab_id);
                 Ok(Task::none())
             }
-            Message::ToggleBrowserPaneIdentify(tab_id) => {
+            Message::Browser(BrowserMessage::TogglePaneIdentify(tab_id)) => {
                 self.update_browser_pane_toggle_identify(tab_id);
                 Ok(Task::none())
             }
-            Message::OpenSetupAddress => {
+            Message::Browser(BrowserMessage::OpenSetupAddress) => {
                 self.update_open_setup_address();
                 Ok(Task::none())
             }
-            Message::ReloadBrowser => {
+            Message::Browser(BrowserMessage::Reload) => {
                 self.update_active_browser_reload();
                 Ok(Task::none())
             }
-            Message::BrowserBack => {
+            Message::Browser(BrowserMessage::Back) => {
                 self.update_active_browser_back();
                 Ok(Task::none())
             }
-            Message::BrowserForward => {
+            Message::Browser(BrowserMessage::Forward) => {
                 self.update_active_browser_forward();
                 Ok(Task::none())
             }
-            Message::StopBrowserTask => {
+            Message::Browser(BrowserMessage::StopTask) => {
                 self.update_active_browser_stop();
                 Ok(Task::none())
             }
-            Message::InlineProbe => {
+            Message::Browser(BrowserMessage::InlineProbe) => {
                 self.update_active_browser_inline_probe();
                 Ok(Task::none())
             }
-            Message::LiveProbe => {
+            Message::Browser(BrowserMessage::LiveProbe) => {
                 self.update_active_browser_live_probe();
                 Ok(Task::none())
             }
-            Message::WarmPath => {
+            Message::Browser(BrowserMessage::WarmPath) => {
                 self.update_active_browser_warm_path();
                 Ok(Task::none())
             }
-            Message::RetryAfterPath => {
+            Message::Browser(BrowserMessage::RetryAfterPath) => {
                 self.update_active_browser_retry_after_path();
                 Ok(Task::none())
             }
-            Message::PathDiagnostics => {
+            Message::Browser(BrowserMessage::PathDiagnostics) => {
                 self.update_active_browser_path_diagnostics();
                 Ok(Task::none())
             }
-            Message::CaptureBrowserRender => {
+            Message::Browser(BrowserMessage::CaptureRender) => {
                 self.update_active_browser_capture_render();
                 Ok(Task::none())
             }
-            Message::BrowserFieldKey(key) => {
+            Message::Browser(BrowserMessage::FieldKey(key)) => {
                 self.update_browser_field_key(key);
                 Ok(Task::none())
             }
-            Message::SubmitBrowserFieldDraft => {
+            Message::Browser(BrowserMessage::SubmitFieldDraft) => {
                 self.update_submit_browser_field_draft();
                 Ok(Task::none())
             }
-            Message::CancelBrowserFieldDraft => {
+            Message::Browser(BrowserMessage::CancelFieldDraft) => {
                 self.update_cancel_browser_field_draft();
                 Ok(Task::none())
             }
-            Message::FocusBrowserItem { reverse } => {
+            Message::Browser(BrowserMessage::FocusItem { reverse }) => {
                 self.update_focus_browser_item(reverse);
                 Ok(Task::none())
             }
-            Message::ActivateFocusedBrowserItem => Ok(self.update_activate_focused_browser_item()),
-            Message::ScrollBrowserPage { direction } => {
+            Message::Browser(BrowserMessage::ActivateFocusedItem) => {
+                Ok(self.update_activate_focused_browser_item())
+            }
+            Message::Browser(BrowserMessage::ScrollPage { direction }) => {
                 self.update_scroll_browser_page(direction);
                 Ok(Task::none())
             }
-            Message::BrowserZoom { direction } => {
+            Message::Browser(BrowserMessage::Zoom { direction }) => {
                 self.update_browser_zoom(direction);
                 Ok(Task::none())
             }
-            Message::Page(page) => Ok(self.update_active_page_message(page)),
-            Message::PageForTab { tab_id, page } => {
+            Message::Browser(BrowserMessage::Page(page)) => {
+                Ok(self.update_active_page_message(page))
+            }
+            Message::Browser(BrowserMessage::PageForTab { tab_id, page }) => {
                 Ok(self.update_page_message_for_tab(tab_id, page))
             }
             _ => Err(message),
@@ -489,9 +495,13 @@ mod tests {
         });
         let mut desktop = DesktopApp::new(app);
 
-        let _ = desktop.update(Message::SwitchSection(WorkspaceSection::Settings));
-        let _ = desktop.update(Message::AddressChanged("mock.page:/page/gallery.mu".into()));
-        let _ = desktop.update(Message::OpenSetupAddress);
+        let _ = desktop.update(Message::Shell(ShellMessage::SwitchSection(
+            WorkspaceSection::Settings,
+        )));
+        let _ = desktop.update(Message::Browser(BrowserMessage::AddressChanged(
+            "mock.page:/page/gallery.mu".into(),
+        )));
+        let _ = desktop.update(Message::Browser(BrowserMessage::OpenSetupAddress));
 
         assert_eq!(
             desktop.app.workspace.active_section,

@@ -5,7 +5,8 @@ use iced::widget::{column, container, row, text};
 use iced::{Element, Length};
 
 use super::super::{
-    human_bytes, status_container_style, ui_size, Message, ICON_OPEN, ICON_WINDOW_CLOSE,
+    human_bytes, status_container_style, ui_size, ConversationMessage, Message, ICON_OPEN,
+    ICON_WINDOW_CLOSE,
 };
 use super::inline_icon_button_owned;
 
@@ -46,15 +47,15 @@ pub(in crate::desktop) fn conversation_attachment_draft_rows(
                 inline_icon_button_owned(
                     ICON_OPEN,
                     "Open attachment",
-                    Message::OpenConversationAttachment(path.clone())
+                    Message::Conversation(ConversationMessage::OpenAttachment(path.clone()))
                 ),
                 inline_icon_button_owned(
                     ICON_WINDOW_CLOSE,
                     "Remove attachment",
-                    Message::RemoveConversationAttachment {
+                    Message::Conversation(ConversationMessage::RemoveAttachment {
                         conversation_id,
                         index,
-                    }
+                    })
                 ),
             ]
             .spacing(6)
@@ -95,7 +96,7 @@ pub(in crate::desktop) fn conversation_message_attachment_rows<'a>(
             row = row.push(inline_icon_button_owned(
                 ICON_OPEN,
                 "Open attachment",
-                Message::OpenConversationAttachment(path.clone()),
+                Message::Conversation(ConversationMessage::OpenAttachment(path.clone())),
             ));
         }
         rows = rows.push(row.wrap());

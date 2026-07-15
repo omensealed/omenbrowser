@@ -136,8 +136,8 @@ mod tests {
         app.set_active_conversation_draft_body("do not lose this".into());
         let mut desktop = DesktopApp::new(app);
 
-        let _ = desktop.update(crate::desktop::Message::SendConversationPaneDraft(
-            conversation_id,
+        let _ = desktop.update(crate::desktop::Message::Conversation(
+            crate::desktop::ConversationMessage::SendPaneDraft(conversation_id),
         ));
 
         let conversation = desktop.app.active_conversation();

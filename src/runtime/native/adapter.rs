@@ -1,5 +1,11 @@
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+#[cfg(feature = "native-lxmf")]
+use std::path::PathBuf;
+#[cfg(feature = "native-lxmf")]
+use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(all(feature = "native-rns-net", any()))]
@@ -12,9 +18,9 @@ use rand_core::OsRng;
 use rns_transport::resource::ResourceEventKind;
 #[cfg(feature = "native-lxmf")]
 use sha2::{Digest, Sha256};
-use tokio::sync::broadcast;
 #[cfg(not(all(feature = "native-rns-net", any())))]
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{broadcast, Semaphore};
 
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
 const NATIVE_LXMF_PROPAGATED_TERMINAL_RETENTION_SECS: f64 = 3600.0;
@@ -47,6 +53,29 @@ const OMENCHAT_RESOURCE_METADATA_PREFIX: &[u8] = b"omenchat-resource:";
 #[cfg(not(all(feature = "native-rns-net", any())))]
 const OMENCHAT_FRAME_RESOURCE_METADATA: &[u8] = b"omenchat-frame:";
 #[cfg(not(all(feature = "native-rns-net", any())))]
+const OMENCHAT_CLEAN_RESOURCE_MAX_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(feature = "native-lxmf")]
+const PROPAGATION_STAMP_BLOCKING_JOBS: usize = 2;
+#[cfg(feature = "native-lxmf")]
+static PROPAGATION_STAMP_BLOCKING_GATE: Semaphore =
+    Semaphore::const_new(PROPAGATION_STAMP_BLOCKING_JOBS);
+#[cfg(feature = "native-lxmf")]
+const NATIVE_LXMF_DECODE_BLOCKING_JOBS: usize = 2;
+#[cfg(feature = "native-lxmf")]
+static NATIVE_LXMF_DECODE_BLOCKING_GATE: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(NATIVE_LXMF_DECODE_BLOCKING_JOBS)));
+#[cfg(not(all(feature = "native-rns-net", any())))]
+fn clean_omenchat_resource_limit(metadata: Option<&[u8]>) -> Option<usize> {
+    let metadata = metadata?;
+    if metadata.starts_with(OMENCHAT_FRAME_RESOURCE_METADATA) {
+        Some(crate::protocol_limits::OMENCHAT_FRAME_MAX_BYTES)
+    } else if metadata.starts_with(OMENCHAT_RESOURCE_METADATA_PREFIX) {
+        Some(OMENCHAT_CLEAN_RESOURCE_MAX_BYTES)
+    } else {
+        None
+    }
+}
+#[cfg(not(all(feature = "native-rns-net", any())))]
 const OMENCHAT_RNS_APP_NAME: &str = "omenchat";
 #[cfg(not(all(feature = "native-rns-net", any())))]
 const OMENCHAT_NODE_ASPECT: &str = "node";
@@ -61,7 +90,9 @@ use crate::error::{AppError, AppResult};
 use crate::identity::IdentityProfile;
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
 use crate::messaging::DeliveryMode;
-use crate::messaging::{AttachmentSummary, MessageEnvelope, MessageSummary, TransportMethod};
+#[cfg(feature = "native-lxmf-sdk")]
+use crate::messaging::TransportMethod;
+use crate::messaging::{AttachmentSummary, MessageEnvelope, MessageSummary};
 #[cfg(all(feature = "native-rns-net", any()))]
 use crate::runtime::native::announce::display_name_for_kind;
 use crate::runtime::native::announce::{payload_from_announce_event, NativeAnnounceState};
@@ -121,7 +152,7 @@ use crate::runtime::PathEvent;
 use crate::runtime::RuntimeBusEvent;
 #[cfg(feature = "native-lxmf")]
 use crate::runtime::{PropagationSyncEvent, PropagationSyncEventStatus, PropagationSyncStage};
-use crate::storage::files::next_available_download_path;
+use crate::storage::files::{atomic_write_new_bounded, next_available_download_path};
 #[cfg(feature = "native-lxmf")]
 use crate::storage::transient_ids::{
     DeliveredTransientIdStore, LXMF_LOCAL_DELIVERY_CACHE_MAX_AGE_SECS,
@@ -197,6 +228,11 @@ struct CleanReticulumLxmfWireSubmitter {
 }
 
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+fn clean_lxmf_direct_payload(delivery: &NativeLxmfSdkWireDelivery) -> Cow<'_, [u8]> {
+    Cow::Borrowed(delivery.wire_bytes.as_slice())
+}
+
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
 impl CleanReticulumLxmfWireSubmitter {
     fn new(
         transport: Arc<reticulum_rs::runtime::Transport>,
@@ -224,7 +260,7 @@ impl CleanReticulumLxmfWireSubmitter {
         })
     }
 
-    async fn submit_wire_async(&self, delivery: NativeLxmfSdkWireDelivery) -> AppResult<()> {
+    async fn submit_wire_async(&self, delivery: &NativeLxmfSdkWireDelivery) -> AppResult<()> {
         let method = delivery.method.as_deref().unwrap_or("direct");
         if !matches!(method, "direct" | "propagated") {
             return Err(AppError::Unsupported(format!(
@@ -310,7 +346,7 @@ impl CleanReticulumLxmfWireSubmitter {
                             "default_missing_app_data",
                         )
                 };
-                let (lxm_data, transient_id) = wire
+                let (mut lxm_data, transient_id) = wire
                     .pack_propagation_transient_with_rng(&lxmf_identity, OsRng)
                     .map_err(|error| {
                         AppError::Runtime(format!(
@@ -320,19 +356,24 @@ impl CleanReticulumLxmfWireSubmitter {
                     })?;
                 let stamp = if let Some(target_cost) = target_stamp_cost {
                     let transient_id_array: [u8; 32] = transient_id;
-                    let lxm_data_for_stamp = lxm_data.clone();
-                    let stamp = tokio::task::spawn_blocking(move || {
-                        crate::runtime::native_lxmf::codec::generate_propagation_stamp_for_transient(
-                            &lxm_data_for_stamp,
-                            transient_id_array,
-                            target_cost,
-                            crate::runtime::native_lxmf::codec::DEFAULT_PROPAGATION_STAMP_MAX_ATTEMPTS,
-                        )
+                    let permit = PROPAGATION_STAMP_BLOCKING_GATE
+                        .acquire()
+                        .await
+                        .map_err(|_| {
+                            AppError::Runtime("propagation stamp blocking gate closed".into())
+                        })?;
+                    let (stamp, returned_lxm_data) = tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        generate_propagation_stamp_owned(lxm_data, transient_id_array, target_cost)
                     })
                     .await
                     .map_err(|error| {
-                        AppError::Runtime(format!("clean LXMF propagation stamp task failed: {error}"))
-                    })??;
+                        AppError::Runtime(format!(
+                            "clean LXMF propagation stamp task failed: {error}"
+                        ))
+                    })?;
+                    lxm_data = returned_lxm_data;
+                    let stamp = stamp?;
                     let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
                         "clean LXMF propagation stamp generated destination={} propagation_node={} transient_id={} target_cost={} source={} stamp_value={} attempts={}",
                         delivery.destination_hash,
@@ -366,7 +407,7 @@ impl CleanReticulumLxmfWireSubmitter {
                 (
                     propagation_hash,
                     propagation_identity,
-                    envelope,
+                    Cow::Owned(envelope),
                     "propagation",
                     "propagation-envelope",
                     Some(hex_encode(&transient_id)),
@@ -375,7 +416,7 @@ impl CleanReticulumLxmfWireSubmitter {
                 (
                     destination_hash,
                     identity,
-                    delivery.wire_bytes.clone(),
+                    clean_lxmf_direct_payload(delivery),
                     "delivery",
                     "direct-wire",
                     None,
@@ -395,7 +436,7 @@ impl CleanReticulumLxmfWireSubmitter {
         let result = rns_transport::delivery::send_via_link(
             &self.transport,
             destination,
-            send_payload.as_slice(),
+            send_payload.as_ref(),
             self.timeout,
         )
         .await
@@ -432,7 +473,7 @@ impl CleanReticulumLxmfWireSubmitter {
 impl NativeLxmfSdkWireSubmitter for CleanReticulumLxmfWireSubmitter {
     fn submit_wire(&self, delivery: &NativeLxmfSdkWireDelivery) -> std::io::Result<()> {
         self.runtime
-            .block_on(self.submit_wire_async(delivery.clone()))
+            .block_on(self.submit_wire_async(delivery))
             .map_err(|error| std::io::Error::other(error.to_string()))
     }
 }
@@ -2560,7 +2601,7 @@ fn spawn_announce_listener(
                         let destination = event.destination.lock().await;
                         (
                             destination.desc.address_hash.to_hex_string(),
-                            destination.identity.clone(),
+                            destination.identity,
                         )
                     };
                     #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -3201,13 +3242,14 @@ impl NetworkRuntime for NativeNetworkRuntime {
         };
         let filename = filename_from_native_download_path(&plan.request.path);
         let path = next_available_download_path(downloads_dir, &filename)?;
-        std::fs::write(&path, &response.body)?;
+        let content_type = response
+            .content_type
+            .unwrap_or_else(|| "application/octet-stream".into());
+        atomic_write_new_bounded(path.clone(), response.body).await?;
         Ok(DownloadedFile {
             url: plan.request.url,
             path,
-            content_type: response
-                .content_type
-                .unwrap_or_else(|| "application/octet-stream".into()),
+            content_type,
         })
     }
 
@@ -3240,7 +3282,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .map(|profile| profile.path.clone())
                 .or_else(|| self.config.identity_path.clone())
                 .ok_or_else(|| AppError::from(NativeRuntimeError::IdentityMissing))?;
-            let identity_bytes = std::fs::read(&identity_path)
+            let identity_bytes = crate::identity::read_identity_material(&identity_path)
                 .map_err(|_| AppError::from(NativeRuntimeError::IdentityMissing))?;
             if matches!(envelope.delivery_mode, DeliveryMode::Propagated) {
                 return self
@@ -3825,7 +3867,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     (sender.send_plan(plan).await?, status.name.to_string())
                 } else {
                     let handle = self.active_transport()?;
-                    let identity_bytes = std::fs::read(identity_path)
+                    let identity_bytes = crate::identity::read_identity_material(identity_path)
                         .map_err(|_| AppError::from(NativeRuntimeError::IdentityMissing))?;
                     let submitter = Arc::new(CleanReticulumLxmfWireSubmitter::new(
                         handle.transport.clone(),
@@ -3842,7 +3884,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         identity_bytes.as_slice(),
                         None,
                     )?;
-                    submitter.submit_wire_async(delivery.clone()).await?;
+                    submitter.submit_wire_async(&delivery).await?;
                     (
                         crate::runtime::native_lxmf::client::NativeLxmfSdkSendReceipt {
                             message_id: Some(delivery.message_id),
@@ -3917,7 +3959,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }
             #[cfg(not(feature = "native-lxmf-sdk"))]
             {
-                let _ = source_hash;
+                let _ = (source_hash, envelope);
                 Err(unsupported("send_message"))
             }
         }
@@ -4150,7 +4192,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 }
                 let identity_key =
                     load_rns_net_proof_signing_key_file(&identity_path).map_err(AppError::from)?;
-                let identity_bytes = std::fs::read(&identity_path)
+                let identity_bytes = crate::identity::read_identity_material(&identity_path)
                     .map_err(|_| AppError::from(NativeRuntimeError::IdentityMissing))?;
                 let local_lxmf_destination_hash =
                     crate::runtime::native_lxmf::codec::lxmf_delivery_destination_hash_from_private_identity_bytes(
@@ -4560,8 +4602,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 let mut deferred_count = 0usize;
                 let mut cache_changed = false;
                 for payload in payloads {
-                    let payload_candidates = native_lxmf_payload_candidates(payload.as_slice())
-                        .unwrap_or_else(|_| vec![payload.clone()]);
+                    let payload_candidates = native_lxmf_payload_candidates(payload);
                     for lxmf_data in payload_candidates {
                         let mut transient_id = native_lxmf_transient_id(lxmf_data.as_slice());
                         let mut decode_data = lxmf_data;
@@ -4597,11 +4638,14 @@ impl NetworkRuntime for NativeNetworkRuntime {
                                 continue;
                             }
                         }
-                        match crate::runtime::native_lxmf::codec::decode_propagated_lxmf_data_storing_attachments(
-                            decode_data.as_slice(),
-                            identity_bytes.as_slice(),
-                            &self.config.attachments_dir,
-                        ) {
+                        let decoded = decode_propagated_lxmf_payload_bounded(
+                            decode_data,
+                            identity_bytes.clone(),
+                            self.config.attachments_dir.clone(),
+                        )
+                        .await?;
+                        let decode_data = decoded.bytes;
+                        match decoded.message {
                             Ok(message) => {
                                 let direct_evidence = native_lxmf_inbound_peer_evidence(
                                     &message,
@@ -4888,7 +4932,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .map(|profile| profile.path.clone())
                     .or_else(|| self.config.identity_path.clone())
                     .ok_or_else(|| AppError::from(NativeRuntimeError::IdentityMissing))?;
-                let identity_bytes = std::fs::read(&identity_path)
+                let identity_bytes = crate::identity::read_identity_material(&identity_path)
                     .map_err(|_| AppError::from(NativeRuntimeError::IdentityMissing))?;
                 let identify_identity =
                     load_transport_private_identity_file(&identity_path).map_err(AppError::from)?;
@@ -5001,12 +5045,14 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     &handle.transport,
                     &link,
                     link_id,
-                    "/get",
-                    &rmpv::Value::Array(vec![rmpv::Value::Nil, rmpv::Value::Nil]),
-                    Duration::from_secs(20),
-                    cancel.clone(),
                     &self.event_tx,
-                    &hash,
+                    CleanRequestWait {
+                        path: "/get",
+                        value: rmpv::Value::Array(vec![rmpv::Value::Nil, rmpv::Value::Nil]),
+                        timeout: Duration::from_secs(20),
+                        cancel: cancel.clone(),
+                        propagation_node: &hash,
+                    },
                 )
                 .await?;
                 let available = native_lxmf_parse_transient_id_list(&list_response.body)?;
@@ -5046,12 +5092,14 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             &handle.transport,
                             &link,
                             link_id,
-                            "/get",
-                            &rmpv::Value::Array(vec![rmpv::Value::Nil, haves_value]),
-                            Duration::from_secs(10),
-                            CancellationToken::new(),
                             &self.event_tx,
-                            &hash,
+                            CleanRequestWait {
+                                path: "/get",
+                                value: rmpv::Value::Array(vec![rmpv::Value::Nil, haves_value]),
+                                timeout: Duration::from_secs(10),
+                                cancel: CancellationToken::new(),
+                                propagation_node: &hash,
+                            },
                         )
                         .await;
                     }
@@ -5095,16 +5143,18 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     &handle.transport,
                     &link,
                     link_id,
-                    "/get",
-                    &rmpv::Value::Array(vec![
-                        wants_value,
-                        rmpv::Value::Array(Vec::new()),
-                        rmpv::Value::F64(10240.0),
-                    ]),
-                    Duration::from_secs(45),
-                    cancel,
                     &self.event_tx,
-                    &hash,
+                    CleanRequestWait {
+                        path: "/get",
+                        value: rmpv::Value::Array(vec![
+                            wants_value,
+                            rmpv::Value::Array(Vec::new()),
+                            rmpv::Value::F64(10240.0),
+                        ]),
+                        timeout: Duration::from_secs(45),
+                        cancel,
+                        propagation_node: &hash,
+                    },
                 )
                 .await?;
                 let payloads = native_lxmf_parse_propagation_payloads(&get_response.body)?;
@@ -5115,8 +5165,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 let mut deferred_count = 0usize;
                 let mut cache_changed = false;
                 for payload in payloads {
-                    let payload_candidates = native_lxmf_payload_candidates(payload.as_slice())
-                        .unwrap_or_else(|_| vec![payload.clone()]);
+                    let payload_candidates = native_lxmf_payload_candidates(payload);
                     for lxmf_data in payload_candidates {
                         let transient_id = native_lxmf_transient_id(lxmf_data.as_slice());
                         let decode_data = lxmf_data;
@@ -5136,11 +5185,14 @@ impl NetworkRuntime for NativeNetworkRuntime {
                                 continue;
                             }
                         }
-                        match crate::runtime::native_lxmf::codec::decode_propagated_lxmf_data_storing_attachments(
-                            decode_data.as_slice(),
-                            identity_bytes.as_slice(),
-                            &self.config.attachments_dir,
-                        ) {
+                        let decoded = decode_propagated_lxmf_payload_bounded(
+                            decode_data,
+                            identity_bytes.clone(),
+                            self.config.attachments_dir.clone(),
+                        )
+                        .await?;
+                        let decode_data = decoded.bytes;
+                        match decoded.message {
                             Ok(message) => {
                                 if !DeliveredTransientIdStore::has_delivered(
                                     &delivered_ids,
@@ -5226,12 +5278,14 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         &handle.transport,
                         &link,
                         link_id,
-                        "/get",
-                        &rmpv::Value::Array(vec![rmpv::Value::Nil, haves_value]),
-                        Duration::from_secs(10),
-                        CancellationToken::new(),
                         &self.event_tx,
-                        &hash,
+                        CleanRequestWait {
+                            path: "/get",
+                            value: rmpv::Value::Array(vec![rmpv::Value::Nil, haves_value]),
+                            timeout: Duration::from_secs(10),
+                            cancel: CancellationToken::new(),
+                            propagation_node: &hash,
+                        },
                     )
                     .await;
                 }
@@ -5973,7 +6027,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 ));
                 return Ok(report);
             };
-            let Ok(identity_bytes) = std::fs::read(&identity_path) else {
+            let Ok(identity_bytes) = crate::identity::read_identity_material(&identity_path) else {
                 report.steps.push(LxmfDeliveryProbeStep::failed(
                     LxmfDeliveryProbeStage::SourceIdentity,
                     "active identity file could not be read",
@@ -6783,7 +6837,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             .map_err(AppError::from)?;
             let pre_wait_path_status = handle.transport.path_status(&destination_hash).await;
             let needs_fresh_announce = !pre_wait_path_status.path_found
-                || pre_wait_path_status.hops.map_or(true, |hops| hops > 1);
+                || pre_wait_path_status.hops.is_none_or(|hops| hops > 1);
             let destination_hex = destination_hash.to_hex_string();
             if needs_fresh_announce && pre_wait_path_status.path_found {
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
@@ -6871,7 +6925,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 )));
             }
             let status_after_wait = handle.transport.path_status(&destination_hash).await;
-            if needs_fresh_announce && status_after_wait.hops.map_or(true, |hops| hops > 1) {
+            if needs_fresh_announce && status_after_wait.hops.is_none_or(|hops| hops > 1) {
                 let announce_detail = self
                     .clean_recent_omenchat_announces
                     .lock()
@@ -7357,23 +7411,34 @@ impl NetworkRuntime for NativeNetworkRuntime {
 }
 
 #[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
+struct CleanRequestWait<'a> {
+    path: &'a str,
+    value: rmpv::Value,
+    timeout: Duration,
+    cancel: CancellationToken,
+    propagation_node: &'a str,
+}
+
+#[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
 async fn clean_send_request_value_and_wait(
     transport: &Arc<reticulum_rs::runtime::Transport>,
     link: &Arc<AsyncMutex<rns_transport::destination::link::Link>>,
     link_id: rns_transport::hash::AddressHash,
-    path: &str,
-    value: &rmpv::Value,
-    timeout: Duration,
-    cancel: CancellationToken,
     event_tx: &broadcast::Sender<RuntimeBusEvent>,
-    propagation_node: &str,
+    request: CleanRequestWait<'_>,
 ) -> AppResult<NativeLinkResponseFrame> {
+    let CleanRequestWait {
+        path,
+        value,
+        timeout,
+        cancel,
+        propagation_node,
+    } = request;
     if cancel.is_cancelled() {
         return Err(AppError::from(NativeRuntimeError::Cancelled));
     }
-    let frame =
-        NativeLinkRequestFrame::build_with_value(path, value.clone(), native_unix_timestamp())
-            .map_err(AppError::from)?;
+    let frame = NativeLinkRequestFrame::build_with_value(path, value, native_unix_timestamp())
+        .map_err(AppError::from)?;
     let mut resource_events = transport.resource_events();
     let mut received_data_events = transport.received_data_events();
     let (request_id, request_resource_hash) = if frame.requires_request_resource() {
@@ -8001,8 +8066,7 @@ async fn clean_wait_for_destination_path(
                 .unwrap_or_else(|| "-".into())
         )));
     }
-    if initial_status.path_found && max_hops.map_or(true, |hops| initial_status.hops <= Some(hops))
-    {
+    if initial_status.path_found && max_hops.is_none_or(|hops| initial_status.hops <= Some(hops)) {
         return Ok(true);
     }
 
@@ -8031,11 +8095,11 @@ async fn clean_wait_for_destination_path(
                 )));
             }
             return Ok(final_status.path_found
-                && max_hops.map_or(true, |hops| final_status.hops <= Some(hops)));
+                && max_hops.is_none_or(|hops| final_status.hops <= Some(hops)));
         }
         tokio::time::sleep((deadline - now).min(OMENCHAT_CLEAN_LINK_PATH_WAIT_STEP)).await;
         let status = transport.path_status(&destination_hash).await;
-        if status.path_found && max_hops.map_or(true, |hops| status.hops <= Some(hops)) {
+        if status.path_found && max_hops.is_none_or(|hops| status.hops <= Some(hops)) {
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
                     "native Reticulum 0.6 OMENchat clean path acquired destination={} hops={:?} next_hop={} iface={}",
@@ -8287,10 +8351,13 @@ fn spawn_clean_omenchat_event_bridge(
                                 if !is_omenchat {
                                     #[cfg(feature = "native-lxmf")]
                                     if clean_omenchat_frame_context(payload.context()) {
-                                        match decode_native_lxmf_payload(
-                                            payload.as_slice(),
-                                            &attachments_dir,
-                                        ) {
+                                        match decode_native_lxmf_payload_bounded(
+                                            payload.as_slice().to_vec(),
+                                            attachments_dir.clone(),
+                                        )
+                                        .await
+                                        .and_then(|decoded| decoded.message)
+                                        {
                                             Ok(message) => {
                                                 let should_emit = clean_lxmf_should_emit_message(
                                                     &clean_lxmf_seen_messages,
@@ -8393,10 +8460,13 @@ fn spawn_clean_omenchat_event_bridge(
                             if !is_omenchat {
                                 #[cfg(feature = "native-lxmf")]
                                 if clean_omenchat_frame_context(payload.context()) {
-                                    match decode_native_lxmf_payload(
-                                        payload.as_slice(),
-                                        &attachments_dir,
-                                    ) {
+                                    match decode_native_lxmf_payload_bounded(
+                                        payload.as_slice().to_vec(),
+                                        attachments_dir.clone(),
+                                    )
+                                    .await
+                                    .and_then(|decoded| decoded.message)
+                                    {
                                         Ok(message) => {
                                             let should_emit = clean_lxmf_should_emit_message(
                                                 &clean_lxmf_seen_messages,
@@ -8467,10 +8537,13 @@ fn spawn_clean_omenchat_event_bridge(
                             == rns_transport::transport::ReceivedPayloadMode::FullWire
                         {
                             #[cfg(feature = "native-lxmf")]
-                            match decode_native_lxmf_payload(
-                                event.data.as_slice(),
-                                &attachments_dir,
-                            ) {
+                            match decode_native_lxmf_payload_bounded(
+                                event.data.as_slice().to_vec(),
+                                attachments_dir.clone(),
+                            )
+                            .await
+                            .and_then(|decoded| decoded.message)
+                            {
                                 Ok(message) => {
                                     let should_emit = clean_lxmf_should_emit_message(
                                         &clean_lxmf_seen_messages,
@@ -8578,7 +8651,7 @@ fn spawn_clean_omenchat_event_bridge(
                                     })
                             }
                         };
-                        let complete = match event.kind {
+                        let mut complete = match event.kind {
                             rns_transport::resource::ResourceEventKind::Progress(progress) => {
                                 if let Some(link_id) = link_id {
                                     let transfer_id = hex_encode(event.hash.as_slice());
@@ -8679,6 +8752,34 @@ fn spawn_clean_omenchat_event_bridge(
                                 continue;
                             }
                         };
+                        if let Some(limit) =
+                            clean_omenchat_resource_limit(complete.metadata.as_deref())
+                        {
+                            if complete.data.len() > limit {
+                                let transfer_id = hex_encode(event.hash.as_slice());
+                                if let Some(link_id) = link_id {
+                                    let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                        ResourceLifecycleEvent {
+                                            transfer_id: transfer_id.clone(),
+                                            state: ResourceLifecycleState::Failed,
+                                            bytes: Some(complete.data.len() as u64),
+                                            reason: Some(format!(
+                                                "inbound OMENchat resource exceeds {limit} byte limit"
+                                            )),
+                                            source: Some("omenchat".into()),
+                                            purpose: Some("omenchat-resource".into()),
+                                            direction: Some("inbound".into()),
+                                            peer: Some(hex_encode(&link_id)),
+                                        },
+                                    ));
+                                }
+                                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native Reticulum 0.6 OMENchat resource rejected before application event forwarding resource={transfer_id} bytes={} limit={limit}",
+                                    complete.data.len()
+                                )));
+                                continue;
+                            }
+                        }
                         let is_metadata_frame =
                             complete.metadata.as_deref().is_some_and(|metadata| {
                                 metadata.starts_with(OMENCHAT_FRAME_RESOURCE_METADATA)
@@ -8706,7 +8807,22 @@ fn spawn_clean_omenchat_event_bridge(
                             });
                         #[cfg(feature = "native-lxmf")]
                         if !is_metadata_omenchat {
-                            match decode_native_lxmf_payload(&complete.data, &attachments_dir) {
+                            let decoded = match decode_native_lxmf_payload_bounded(
+                                std::mem::take(&mut complete.data),
+                                attachments_dir.clone(),
+                            )
+                            .await
+                            {
+                                Ok(decoded) => decoded,
+                                Err(error) => {
+                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native Reticulum 0.6 clean LXMF blocking decode failed: {error}"
+                                    )));
+                                    continue;
+                                }
+                            };
+                            complete.data = decoded.bytes;
+                            match decoded.message {
                                 Ok(message) => {
                                     let should_emit = clean_lxmf_should_emit_message(
                                         &clean_lxmf_seen_messages,
@@ -8877,7 +8993,7 @@ async fn cleanup_native_lxmf_propagation_sync_link(
 
 #[cfg(feature = "native-lxmf")]
 fn native_lxmf_parse_transient_id_list(bytes: &[u8]) -> AppResult<Vec<[u8; 32]>> {
-    let value = native_lxmf_unpack_value(bytes)?;
+    let value = native_lxmf_unpack_value(bytes, 256 * 1024, 32, 4096, 4097, 2)?;
     let rmpv::Value::Array(items) = value else {
         return Err(AppError::Runtime(
             "LXMF propagation list response was not an array".into(),
@@ -8904,7 +9020,14 @@ fn native_lxmf_parse_transient_id_list(bytes: &[u8]) -> AppResult<Vec<[u8; 32]>>
 
 #[cfg(feature = "native-lxmf")]
 fn native_lxmf_parse_propagation_payloads(bytes: &[u8]) -> AppResult<Vec<Vec<u8>>> {
-    let value = native_lxmf_unpack_value(bytes)?;
+    let value = native_lxmf_unpack_value(
+        bytes,
+        32 * 1024 * 1024,
+        crate::runtime::native_lxmf::codec::MAX_LXMF_PROPAGATION_ENTRY_BYTES,
+        4096,
+        8192,
+        4,
+    )?;
     let rmpv::Value::Array(items) = value else {
         return Err(AppError::Runtime(
             "LXMF propagation get response was not an array".into(),
@@ -8922,13 +9045,53 @@ fn native_lxmf_parse_propagation_payloads(bytes: &[u8]) -> AppResult<Vec<Vec<u8>
 }
 
 #[cfg(feature = "native-lxmf")]
-fn native_lxmf_payload_candidates(bytes: &[u8]) -> AppResult<Vec<Vec<u8>>> {
-    crate::runtime::native_lxmf::codec::propagation_envelope_entries(bytes)
-        .or_else(|_| Ok(vec![bytes.to_vec()]))
+fn native_lxmf_payload_candidates(bytes: Vec<u8>) -> Vec<Vec<u8>> {
+    match crate::runtime::native_lxmf::codec::propagation_envelope_entries(&bytes) {
+        Ok(entries) => entries,
+        Err(_) => vec![bytes],
+    }
 }
 
 #[cfg(feature = "native-lxmf")]
-fn native_lxmf_unpack_value(bytes: &[u8]) -> AppResult<rmpv::Value> {
+fn generate_propagation_stamp_owned(
+    lxm_data: Vec<u8>,
+    transient_id: [u8; 32],
+    target_cost: u8,
+) -> (
+    AppResult<crate::runtime::native_lxmf::codec::GeneratedPropagationStamp>,
+    Vec<u8>,
+) {
+    let stamp = crate::runtime::native_lxmf::codec::generate_propagation_stamp_for_transient(
+        &lxm_data,
+        transient_id,
+        target_cost,
+        crate::runtime::native_lxmf::codec::DEFAULT_PROPAGATION_STAMP_MAX_ATTEMPTS,
+    );
+    (stamp, lxm_data)
+}
+
+#[cfg(feature = "native-lxmf")]
+fn native_lxmf_unpack_value(
+    bytes: &[u8],
+    max_bytes: usize,
+    max_scalar_bytes: usize,
+    max_container_items: usize,
+    max_total_values: usize,
+    max_depth: usize,
+) -> AppResult<rmpv::Value> {
+    crate::msgpack::validate_msgpack_with_limits(
+        bytes,
+        max_bytes,
+        max_scalar_bytes,
+        max_container_items,
+        max_total_values,
+        max_depth,
+    )
+    .map_err(|error| {
+        AppError::Runtime(format!(
+            "LXMF propagation msgpack response rejected: {error}"
+        ))
+    })?;
     let mut cursor = std::io::Cursor::new(bytes);
     let value = rmpv::decode::read_value(&mut cursor)
         .map_err(|_| AppError::Runtime("LXMF propagation msgpack decode failed".into()))?;
@@ -9286,6 +9449,59 @@ fn decode_native_lxmf_payload(bytes: &[u8], attachments_dir: &Path) -> AppResult
     {
         direct
     }
+}
+
+#[cfg(feature = "native-lxmf")]
+struct NativeLxmfBlockingDecode {
+    message: AppResult<MessageSummary>,
+    bytes: Vec<u8>,
+}
+
+#[cfg(feature = "native-lxmf")]
+async fn run_native_lxmf_blocking<T: Send + 'static>(
+    gate: Arc<Semaphore>,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> AppResult<T> {
+    let permit = gate
+        .acquire_owned()
+        .await
+        .map_err(|_| AppError::Runtime("native LXMF blocking gate closed".into()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        job()
+    })
+    .await
+    .map_err(|error| AppError::Runtime(format!("native LXMF blocking task failed: {error}")))
+}
+
+#[cfg(feature = "native-lxmf")]
+async fn decode_native_lxmf_payload_bounded(
+    bytes: Vec<u8>,
+    attachments_dir: PathBuf,
+) -> AppResult<NativeLxmfBlockingDecode> {
+    run_native_lxmf_blocking(NATIVE_LXMF_DECODE_BLOCKING_GATE.clone(), move || {
+        let message = decode_native_lxmf_payload(&bytes, &attachments_dir);
+        NativeLxmfBlockingDecode { message, bytes }
+    })
+    .await
+}
+
+#[cfg(feature = "native-lxmf")]
+async fn decode_propagated_lxmf_payload_bounded(
+    bytes: Vec<u8>,
+    identity_bytes: Vec<u8>,
+    attachments_dir: PathBuf,
+) -> AppResult<NativeLxmfBlockingDecode> {
+    run_native_lxmf_blocking(NATIVE_LXMF_DECODE_BLOCKING_GATE.clone(), move || {
+        let message =
+            crate::runtime::native_lxmf::codec::decode_propagated_lxmf_data_storing_attachments(
+                &bytes,
+                &identity_bytes,
+                &attachments_dir,
+            );
+        NativeLxmfBlockingDecode { message, bytes }
+    })
+    .await
 }
 
 #[cfg(feature = "native-lxmf")]
@@ -10219,6 +10435,87 @@ mod tests {
         AppPaths::from_root(root)
     }
 
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    #[test]
+    fn clean_omenchat_resource_admission_distinguishes_frame_payload_and_other_metadata() {
+        assert_eq!(
+            clean_omenchat_resource_limit(Some(b"omenchat-frame:room")),
+            Some(crate::protocol_limits::OMENCHAT_FRAME_MAX_BYTES)
+        );
+        assert_eq!(
+            clean_omenchat_resource_limit(Some(b"omenchat-resource:upload:1")),
+            Some(OMENCHAT_CLEAN_RESOURCE_MAX_BYTES)
+        );
+        assert_eq!(clean_omenchat_resource_limit(Some(b"lxmf-resource")), None);
+        assert_eq!(clean_omenchat_resource_limit(None), None);
+        assert!(
+            crate::protocol_limits::OMENCHAT_FRAME_MAX_BYTES < OMENCHAT_CLEAN_RESOURCE_MAX_BYTES
+        );
+    }
+
+    #[cfg(feature = "native-lxmf")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn native_lxmf_blocking_gate_caps_concurrency_and_releases_permits() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gate = Arc::new(Semaphore::new(NATIVE_LXMF_DECODE_BLOCKING_JOBS));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let gate = gate.clone();
+            let active = active.clone();
+            let peak = peak.clone();
+            tasks.push(tokio::spawn(async move {
+                run_native_lxmf_blocking(gate, move || {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(current, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("blocking-gate task join")
+                .expect("blocking-gate job");
+        }
+
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            NATIVE_LXMF_DECODE_BLOCKING_JOBS
+        );
+        assert_eq!(gate.available_permits(), NATIVE_LXMF_DECODE_BLOCKING_JOBS);
+    }
+
+    #[cfg(feature = "native-lxmf")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_lxmf_waiter_does_not_leak_blocking_permit() {
+        let gate = Arc::new(Semaphore::new(1));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task_gate = gate.clone();
+        let task = tokio::spawn(async move {
+            run_native_lxmf_blocking(task_gate, move || {
+                let _ = started_tx.send(());
+                std::thread::sleep(Duration::from_millis(50));
+            })
+            .await
+        });
+        started_rx.await.expect("blocking job started");
+        task.abort();
+        let _ = task.await;
+        assert_eq!(gate.available_permits(), 0);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while gate.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled blocking job released permit");
+    }
+
     #[cfg(all(feature = "native-rns-net", any()))]
     #[test]
     fn omenchat_link_close_events_only_emit_for_active_omenchat_links() {
@@ -11057,6 +11354,56 @@ enable_transport = No
                 .get("native_request_backend")
                 .and_then(serde_json::Value::as_str),
             Some("reticulum-transport")
+        );
+    }
+
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    #[tokio::test]
+    async fn native_download_atomically_publishes_transport_bytes() {
+        let paths = temp_paths("atomic-download");
+        let runtime = NativeNetworkRuntime::with_page_transport(
+            NativeRuntimeConfig::from_paths(&paths),
+            Arc::new(StaticPageTransport {
+                response: NativePageResponse {
+                    body: b"complete transport bytes".to_vec(),
+                    content_type: Some("application/octet-stream".into()),
+                },
+            }),
+        );
+        runtime.start(None, Vec::new()).expect("start runtime");
+        let destination = "00112233445566778899aabbccddeeff";
+        let downloads = paths.downloads_dir.join("atomic-downloads");
+        std::fs::create_dir_all(&downloads).expect("download directory");
+        std::fs::write(downloads.join("archive.bin"), b"previous").expect("existing download");
+
+        let downloaded = runtime
+            .download_file(
+                &format!("{destination}:/files/archive.bin"),
+                &downloads,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("native download");
+
+        assert_eq!(
+            downloaded.path.file_name().and_then(|name| name.to_str()),
+            Some("archive-1.bin")
+        );
+        assert_eq!(
+            std::fs::read(&downloaded.path).expect("download bytes"),
+            b"complete transport bytes"
+        );
+        assert_eq!(
+            std::fs::read(downloads.join("archive.bin")).expect("existing bytes"),
+            b"previous"
+        );
+        assert_eq!(
+            std::fs::read_dir(downloads)
+                .expect("temporary listing")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0
         );
     }
 
@@ -12188,6 +12535,85 @@ enable_transport = No
             native_lxmf_parse_propagation_payloads(payload_bytes.as_slice()).expect("payloads"),
             vec![b"lxmf-a".to_vec(), b"lxmf-b".to_vec()]
         );
+    }
+
+    #[cfg(feature = "native-lxmf")]
+    #[test]
+    fn native_lxmf_adapter_propagation_decoders_enforce_shape_budgets() {
+        let id = [0x42u8; 32];
+        let mut valid_ids = Vec::new();
+        rmpv::encode::write_value(
+            &mut valid_ids,
+            &rmpv::Value::Array(vec![rmpv::Value::Binary(id.to_vec())]),
+        )
+        .expect("pack ids");
+        assert_eq!(
+            native_lxmf_parse_transient_id_list(&valid_ids).expect("ids"),
+            vec![id]
+        );
+        let mut trailing = valid_ids;
+        trailing.push(0xc0);
+        assert!(native_lxmf_parse_transient_id_list(&trailing).is_err());
+
+        let id_scalar_too_wide = [0xc4, 33];
+        assert!(native_lxmf_parse_transient_id_list(&id_scalar_too_wide).is_err());
+        let list_too_wide = [0xdd, 0x00, 0x00, 0x10, 0x01];
+        assert!(native_lxmf_parse_transient_id_list(&list_too_wide).is_err());
+
+        let payload_scalar_too_wide = [0xc6, 0x00, 0x80, 0x00, 0x01];
+        assert!(native_lxmf_parse_propagation_payloads(&payload_scalar_too_wide).is_err());
+        let mut deep = vec![0x91; 6];
+        deep.push(0xc0);
+        assert!(native_lxmf_parse_propagation_payloads(&deep).is_err());
+    }
+
+    #[cfg(feature = "native-lxmf")]
+    #[test]
+    fn native_lxmf_payload_candidates_move_raw_fallback_and_expand_envelopes() {
+        let raw = vec![0x55; 1024 * 1024];
+        let raw_ptr = raw.as_ptr();
+        let candidates = native_lxmf_payload_candidates(raw);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].as_ptr(), raw_ptr);
+
+        let envelope =
+            lxmf::WireMessage::pack_propagation_envelope(42.0, b"lxmf-data", Some(&[0xAB; 32]))
+                .expect("propagation envelope");
+        let mut stamped = b"lxmf-data".to_vec();
+        stamped.extend_from_slice(&[0xAB; 32]);
+        assert_eq!(native_lxmf_payload_candidates(envelope), vec![stamped]);
+    }
+
+    #[cfg(feature = "native-lxmf")]
+    #[test]
+    fn propagation_stamp_worker_returns_the_original_buffer() {
+        let lxm_data = vec![0x42; 1024 * 1024];
+        let data_ptr = lxm_data.as_ptr();
+
+        let (stamp, returned) = generate_propagation_stamp_owned(lxm_data, [0x11; 32], 0);
+
+        assert!(stamp.is_ok());
+        assert_eq!(returned.as_ptr(), data_ptr);
+        assert_eq!(PROPAGATION_STAMP_BLOCKING_JOBS, 2);
+    }
+
+    #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+    #[test]
+    fn clean_direct_submit_payload_borrows_signed_wire_allocation() {
+        let delivery = NativeLxmfSdkWireDelivery {
+            wire_bytes: vec![0x77; 1024 * 1024],
+            message_id: "message-id".into(),
+            destination_hash: "00112233445566778899aabbccddeeff".into(),
+            method: Some("direct".into()),
+            include_ticket: false,
+            reply_ticket_used: false,
+        };
+        let wire_ptr = delivery.wire_bytes.as_ptr();
+
+        let payload = clean_lxmf_direct_payload(&delivery);
+
+        assert!(matches!(payload, Cow::Borrowed(_)));
+        assert_eq!(payload.as_ptr(), wire_ptr);
     }
 
     #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]

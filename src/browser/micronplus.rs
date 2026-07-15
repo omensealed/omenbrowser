@@ -1,8 +1,14 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::browser::partials::strip_partial_document_headers;
+use crate::micron::parser::{
+    collect_bounded_link_fields, MICRON_CONTROL_NAME_MAX_BYTES, MICRON_CONTROL_VALUE_MAX_BYTES,
+    MICRON_LINK_FIELDS_MAX_BYTES, MICRON_LINK_FIELD_MAX_BYTES, MICRON_LINK_MAX_FIELDS,
+    MICRON_LINK_TARGET_MAX_BYTES,
+};
 use crate::micron::render::{
-    render_document, render_document_with_field_cursor, Cell, RenderedRow,
+    default_render_style, render_document, render_document_with_field_cursor, Cell, RenderedRow,
 };
 use crate::micron::{parse_micron, Alignment, TextStyle};
 use serde::{Deserialize, Serialize};
@@ -10,6 +16,34 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_COLUMN_GAP: &str = "   ";
 const DEFAULT_CONTROL_WIDTH: usize = 24;
 const MAX_EXPLICIT_CONTROL_WIDTH: usize = 96;
+pub const MICRONPLUS_SOURCE_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const MICRONPLUS_SOURCE_MAX_LINES: usize = 16 * 1024;
+pub const MICRONPLUS_SOURCE_LINE_MAX_BYTES: usize = 256 * 1024;
+pub const MICRONPLUS_TREE_MAX_DEPTH: usize = 32;
+pub const MICRONPLUS_TREE_MAX_NODES: usize = 8 * 1024;
+pub const MICRONPLUS_TREE_MAX_COLUMNS: usize = 512;
+pub const MICRONPLUS_TREE_MAX_OWNED_BYTES: usize = 8 * 1024 * 1024;
+pub const MICRONPLUS_LAYOUT_MAX_WINDOWS: usize = 64;
+pub const MICRONPLUS_LAYOUT_MAX_GROUPS: usize = 256;
+pub const MICRONPLUS_LAYOUT_MAX_COLUMNS: usize = 512;
+pub const MICRONPLUS_LAYOUT_MAX_OWNED_BYTES: usize = 8 * 1024 * 1024;
+pub const MICRONPLUS_ATTRIBUTE_MAX_ITEMS: usize = 64;
+pub const MICRONPLUS_ATTRIBUTE_KEY_MAX_BYTES: usize = 256;
+pub const MICRONPLUS_ATTRIBUTE_VALUE_MAX_BYTES: usize = 64 * 1024;
+pub const MICRONPLUS_ATTRIBUTE_MAX_OWNED_BYTES: usize = 128 * 1024;
+pub const MICRONPLUS_WIDGET_ID_MAX_BYTES: usize = 256;
+pub const MICRONPLUS_WIDGET_TEXT_MAX_BYTES: usize = 16 * 1024;
+pub const MICRONPLUS_WIDGET_STYLE_MAX_BYTES: usize = 64;
+pub const MICRONPLUS_WIDGET_MARKUP_MAX_BYTES: usize = 256 * 1024;
+pub const MICRONPLUS_WIDGET_STORE_MAX_WIDGETS: usize = 256;
+pub const MICRONPLUS_WIDGET_STATE_MAX_ITEMS: usize = 1024;
+pub const MICRONPLUS_WIDGET_STATE_MAX_OWNED_BYTES: usize = 1024 * 1024;
+pub const MICRONPLUS_WIDGET_STORE_MAX_ITEMS: usize = 4096;
+pub const MICRONPLUS_WIDGET_STORE_MAX_OWNED_BYTES: usize = 4 * 1024 * 1024;
+pub const MICRONPLUS_EXTRACTED_EVENT_MAX_ITEMS: usize = 256;
+pub const MICRONPLUS_EXTRACTED_EVENT_MAX_OWNED_BYTES: usize = 1024 * 1024;
+pub const MICRONPLUS_CONTROL_EVENT_HISTORY_MAX_ITEMS: usize = 256;
+pub const MICRONPLUS_CONTROL_EVENT_HISTORY_MAX_OWNED_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WidgetMarkupMode {
@@ -66,6 +100,16 @@ pub struct MicronPlusControlEvent {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MicronPlusWidgetStore {
     widgets: BTreeMap<String, MicronPlusWidgetState>,
+    #[serde(default, skip)]
+    rejected_events: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MicronPlusWidgetStoreMetrics {
+    pub widgets: usize,
+    pub items: usize,
+    pub owned_bytes: usize,
+    pub rejected_events: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,33 +259,298 @@ pub struct MicronPlusColumnLayout {
 }
 
 impl MicronPlusWidgetStore {
-    pub fn apply_event(&mut self, event: MicronPlusWidgetEvent) {
+    pub fn apply_event(&mut self, event: MicronPlusWidgetEvent) -> bool {
+        if validate_widget_event(&event).is_err() {
+            self.rejected_events = self.rejected_events.saturating_add(1);
+            return false;
+        }
+        let id = widget_event_id(&event).to_string();
+        if !self.widgets.contains_key(&id)
+            && self.widgets.len() >= MICRONPLUS_WIDGET_STORE_MAX_WIDGETS
+        {
+            self.rejected_events = self.rejected_events.saturating_add(1);
+            return false;
+        }
+        let mut candidate = self.clone();
+        let is_append = matches!(
+            &event,
+            MicronPlusWidgetEvent::ScrollboxAppend { .. } | MicronPlusWidgetEvent::LogAppend { .. }
+        );
+        let append_had_items = match &event {
+            MicronPlusWidgetEvent::ScrollboxAppend { items, .. }
+            | MicronPlusWidgetEvent::LogAppend { items, .. } => !items.is_empty(),
+            _ => false,
+        };
         match event {
             MicronPlusWidgetEvent::StatusUpdate { id, text, style } => {
-                let state = self.widgets.entry(id).or_default();
+                let state = candidate.widgets.entry(id).or_default();
                 state.text = Some(text);
                 state.style = style;
             }
             MicronPlusWidgetEvent::ScrollboxSet { id, items } => {
-                let state = self.widgets.entry(id).or_default();
+                let state = candidate.widgets.entry(id).or_default();
                 state.replace = true;
                 state.items = items;
             }
             MicronPlusWidgetEvent::ScrollboxAppend { id, items } => {
-                let state = self.widgets.entry(id).or_default();
+                let state = candidate.widgets.entry(id).or_default();
                 state.items.extend(items);
             }
             MicronPlusWidgetEvent::LogAppend { id, items } => {
-                let state = self.widgets.entry(id).or_default();
+                let state = candidate.widgets.entry(id).or_default();
                 state.replace = false;
                 state.items.extend(items);
             }
         }
+        if is_append
+            && matches!(
+                candidate.widgets.get(&id),
+                Some(MicronPlusWidgetState { items, .. }) if items.len() > MICRONPLUS_WIDGET_STATE_MAX_ITEMS
+            )
+        {
+            trim_widget_append_state(&mut candidate, &id);
+        }
+        if is_append && validate_widget_store(&candidate).is_err() {
+            trim_widget_append_state(&mut candidate, &id);
+        }
+        if append_had_items
+            && candidate
+                .widgets
+                .get(&id)
+                .is_none_or(|state| state.items.is_empty())
+        {
+            self.rejected_events = self.rejected_events.saturating_add(1);
+            return false;
+        }
+        if validate_widget_store(&candidate).is_err() {
+            self.rejected_events = self.rejected_events.saturating_add(1);
+            return false;
+        }
+        candidate.rejected_events = self.rejected_events;
+        *self = candidate;
+        true
     }
 
     pub fn get(&self, id: &str) -> Option<&MicronPlusWidgetState> {
         self.widgets.get(id)
     }
+
+    pub fn metrics(&self) -> MicronPlusWidgetStoreMetrics {
+        let (items, owned_bytes) = widget_store_usage(self).unwrap_or((usize::MAX, usize::MAX));
+        MicronPlusWidgetStoreMetrics {
+            widgets: self.widgets.len(),
+            items,
+            owned_bytes,
+            rejected_events: self.rejected_events,
+        }
+    }
+}
+
+fn widget_event_id(event: &MicronPlusWidgetEvent) -> &str {
+    match event {
+        MicronPlusWidgetEvent::StatusUpdate { id, .. }
+        | MicronPlusWidgetEvent::ScrollboxSet { id, .. }
+        | MicronPlusWidgetEvent::ScrollboxAppend { id, .. }
+        | MicronPlusWidgetEvent::LogAppend { id, .. } => id,
+    }
+}
+
+fn validate_widget_event(event: &MicronPlusWidgetEvent) -> Result<usize, String> {
+    let id = widget_event_id(event);
+    if id.is_empty() || id.len() > MICRONPLUS_WIDGET_ID_MAX_BYTES {
+        return Err(format!(
+            "MicronPlus widget id must contain 1..={MICRONPLUS_WIDGET_ID_MAX_BYTES} bytes"
+        ));
+    }
+    let mut owned = id.len();
+    match event {
+        MicronPlusWidgetEvent::StatusUpdate { text, style, .. } => {
+            validate_widget_scalar("text", text, MICRONPLUS_WIDGET_TEXT_MAX_BYTES)?;
+            owned = owned.saturating_add(text.len());
+            if let Some(style) = style {
+                validate_widget_scalar("style", style, MICRONPLUS_WIDGET_STYLE_MAX_BYTES)?;
+                owned = owned.saturating_add(style.len());
+            }
+        }
+        MicronPlusWidgetEvent::ScrollboxSet { items, .. }
+        | MicronPlusWidgetEvent::ScrollboxAppend { items, .. }
+        | MicronPlusWidgetEvent::LogAppend { items, .. } => {
+            if items.len() > MICRONPLUS_WIDGET_STATE_MAX_ITEMS {
+                return Err(format!(
+                    "MicronPlus widget event exceeds {MICRONPLUS_WIDGET_STATE_MAX_ITEMS} items"
+                ));
+            }
+            for item in items {
+                owned = owned
+                    .checked_add(widget_item_owned_bytes(item)?)
+                    .ok_or_else(|| {
+                        "MicronPlus widget event byte accounting overflow".to_string()
+                    })?;
+            }
+            validate_widget_items_structure(items)?;
+        }
+    }
+    if owned > MICRONPLUS_WIDGET_STATE_MAX_OWNED_BYTES {
+        return Err(format!(
+            "MicronPlus widget event exceeds {MICRONPLUS_WIDGET_STATE_MAX_OWNED_BYTES} owned bytes"
+        ));
+    }
+    Ok(owned)
+}
+
+fn validate_widget_scalar(label: &str, value: &str, maximum: usize) -> Result<(), String> {
+    if value.len() > maximum {
+        Err(format!("MicronPlus widget {label} exceeds {maximum} bytes"))
+    } else {
+        Ok(())
+    }
+}
+
+fn widget_item_owned_bytes(item: &MicronPlusWidgetItem) -> Result<usize, String> {
+    validate_widget_scalar("item text", &item.text, MICRONPLUS_WIDGET_TEXT_MAX_BYTES)?;
+    let mut owned = item.text.len();
+    if let Some(style) = &item.style {
+        validate_widget_scalar("item style", style, MICRONPLUS_WIDGET_STYLE_MAX_BYTES)?;
+        owned = owned.saturating_add(style.len());
+    }
+    if let Some(markup) = &item.markup {
+        validate_widget_scalar("item markup", markup, MICRONPLUS_WIDGET_MARKUP_MAX_BYTES)?;
+        validate_micronplus_source(markup)?;
+        owned = owned.saturating_add(markup.len());
+    }
+    Ok(owned)
+}
+
+fn widget_state_owned_bytes(state: &MicronPlusWidgetState) -> Result<usize, String> {
+    if state.items.len() > MICRONPLUS_WIDGET_STATE_MAX_ITEMS {
+        return Err(format!(
+            "MicronPlus widget state exceeds {MICRONPLUS_WIDGET_STATE_MAX_ITEMS} items"
+        ));
+    }
+    let mut owned = 0usize;
+    if let Some(text) = &state.text {
+        validate_widget_scalar("text", text, MICRONPLUS_WIDGET_TEXT_MAX_BYTES)?;
+        owned = owned.saturating_add(text.len());
+    }
+    if let Some(style) = &state.style {
+        validate_widget_scalar("style", style, MICRONPLUS_WIDGET_STYLE_MAX_BYTES)?;
+        owned = owned.saturating_add(style.len());
+    }
+    for item in &state.items {
+        owned = owned
+            .checked_add(widget_item_owned_bytes(item)?)
+            .ok_or_else(|| "MicronPlus widget state byte accounting overflow".to_string())?;
+    }
+    validate_widget_items_structure(&state.items)?;
+    if owned > MICRONPLUS_WIDGET_STATE_MAX_OWNED_BYTES {
+        return Err(format!(
+            "MicronPlus widget state exceeds {MICRONPLUS_WIDGET_STATE_MAX_OWNED_BYTES} owned bytes"
+        ));
+    }
+    Ok(owned)
+}
+
+fn validate_widget_items_structure(items: &[MicronPlusWidgetItem]) -> Result<(), String> {
+    let mut nodes = 0usize;
+    let mut columns = 0usize;
+    for item in items {
+        if let Some(markup) = &item.markup {
+            let tree = try_parse_micronplus_tree(markup)?;
+            let stats = micronplus_tree_stats(&tree)?;
+            nodes = nodes.saturating_add(stats.nodes);
+            columns = columns.saturating_add(stats.columns);
+        } else {
+            nodes = nodes.saturating_add(1);
+        }
+        if nodes > MICRONPLUS_TREE_MAX_NODES || columns > MICRONPLUS_TREE_MAX_COLUMNS {
+            return Err(format!(
+                "MicronPlus widget items exceed {MICRONPLUS_TREE_MAX_NODES} derived nodes or {MICRONPLUS_TREE_MAX_COLUMNS} columns"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn widget_store_usage(store: &MicronPlusWidgetStore) -> Result<(usize, usize), String> {
+    if store.widgets.len() > MICRONPLUS_WIDGET_STORE_MAX_WIDGETS {
+        return Err(format!(
+            "MicronPlus widget store exceeds {MICRONPLUS_WIDGET_STORE_MAX_WIDGETS} widgets"
+        ));
+    }
+    let mut items = 0usize;
+    let mut owned = 0usize;
+    for (id, state) in &store.widgets {
+        if id.is_empty() || id.len() > MICRONPLUS_WIDGET_ID_MAX_BYTES {
+            return Err("MicronPlus widget store contains an invalid id".into());
+        }
+        items = items.saturating_add(state.items.len());
+        owned = owned
+            .checked_add(id.len().saturating_add(widget_state_owned_bytes(state)?))
+            .ok_or_else(|| "MicronPlus widget store byte accounting overflow".to_string())?;
+    }
+    Ok((items, owned))
+}
+
+fn validate_widget_store(store: &MicronPlusWidgetStore) -> Result<(), String> {
+    let (items, owned) = widget_store_usage(store)?;
+    if items > MICRONPLUS_WIDGET_STORE_MAX_ITEMS {
+        return Err(format!(
+            "MicronPlus widget store exceeds {MICRONPLUS_WIDGET_STORE_MAX_ITEMS} items"
+        ));
+    }
+    if owned > MICRONPLUS_WIDGET_STORE_MAX_OWNED_BYTES {
+        return Err(format!(
+            "MicronPlus widget store exceeds {MICRONPLUS_WIDGET_STORE_MAX_OWNED_BYTES} owned bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn trim_widget_append_state(store: &mut MicronPlusWidgetStore, id: &str) {
+    let mut other_items = 0usize;
+    let mut other_owned = 0usize;
+    for (other_id, state) in &store.widgets {
+        if other_id == id {
+            continue;
+        }
+        other_items = other_items.saturating_add(state.items.len());
+        let Ok(state_owned) = widget_state_owned_bytes(state) else {
+            return;
+        };
+        other_owned = other_owned.saturating_add(other_id.len().saturating_add(state_owned));
+    }
+    let Some(state) = store.widgets.get_mut(id) else {
+        return;
+    };
+    let base_owned =
+        state.text.as_ref().map_or(0, String::len) + state.style.as_ref().map_or(0, String::len);
+    let allowed_items = MICRONPLUS_WIDGET_STATE_MAX_ITEMS
+        .min(MICRONPLUS_WIDGET_STORE_MAX_ITEMS.saturating_sub(other_items));
+    let allowed_owned = MICRONPLUS_WIDGET_STATE_MAX_OWNED_BYTES.min(
+        MICRONPLUS_WIDGET_STORE_MAX_OWNED_BYTES
+            .saturating_sub(other_owned)
+            .saturating_sub(id.len()),
+    );
+    if base_owned > allowed_owned {
+        state.items.clear();
+        return;
+    }
+    let mut retained_owned = base_owned;
+    let mut retained_items = 0usize;
+    for item in state.items.iter().rev() {
+        let Ok(item_owned) = widget_item_owned_bytes(item) else {
+            break;
+        };
+        if retained_items >= allowed_items
+            || retained_owned.saturating_add(item_owned) > allowed_owned
+        {
+            break;
+        }
+        retained_items += 1;
+        retained_owned += item_owned;
+    }
+    let remove = state.items.len().saturating_sub(retained_items);
+    state.items.drain(..remove);
 }
 
 impl MicronPlusWidgetItem {
@@ -306,13 +615,100 @@ pub fn widget_event_from_control_event(
     None
 }
 
+pub fn retain_micronplus_control_event(
+    history: &mut Vec<MicronPlusControlEvent>,
+    event: MicronPlusControlEvent,
+) -> bool {
+    if micronplus_control_event_owned_bytes(&event).is_err() {
+        return false;
+    }
+    history.push(event);
+    while history.len() > MICRONPLUS_CONTROL_EVENT_HISTORY_MAX_ITEMS
+        || micronplus_control_event_history_owned_bytes(history)
+            > MICRONPLUS_CONTROL_EVENT_HISTORY_MAX_OWNED_BYTES
+    {
+        history.remove(0);
+    }
+    true
+}
+
+fn micronplus_control_event_history_owned_bytes(history: &[MicronPlusControlEvent]) -> usize {
+    history.iter().fold(0usize, |owned, event| {
+        owned.saturating_add(micronplus_control_event_owned_bytes(event).unwrap_or(usize::MAX))
+    })
+}
+
+fn micronplus_control_event_owned_bytes(event: &MicronPlusControlEvent) -> Result<usize, String> {
+    validate_control_event_scalar("event", &event.event, MICRONPLUS_WIDGET_ID_MAX_BYTES)?;
+    validate_control_event_scalar("source", &event.source, MICRON_CONTROL_NAME_MAX_BYTES)?;
+    let mut owned = event.event.len().saturating_add(event.source.len());
+    if let Some(name) = &event.name {
+        validate_control_event_scalar("name", name, MICRON_CONTROL_NAME_MAX_BYTES)?;
+        owned = owned.saturating_add(name.len());
+    }
+    if let Some(action) = &event.action {
+        validate_control_event_scalar("action", action, MICRON_LINK_TARGET_MAX_BYTES)?;
+        owned = owned.saturating_add(action.len());
+    }
+    if let Some(value) = &event.value {
+        if value.len() > MICRON_CONTROL_VALUE_MAX_BYTES {
+            return Err(format!(
+                "MicronPlus control event value exceeds {MICRON_CONTROL_VALUE_MAX_BYTES} bytes"
+            ));
+        }
+        owned = owned.saturating_add(value.len());
+    }
+    if event.fields.len() > MICRON_LINK_MAX_FIELDS {
+        return Err(format!(
+            "MicronPlus control event exceeds {MICRON_LINK_MAX_FIELDS} fields"
+        ));
+    }
+    let mut field_owned = 0usize;
+    for field in &event.fields {
+        validate_control_event_scalar("field", field, MICRON_LINK_FIELD_MAX_BYTES)?;
+        field_owned = field_owned.saturating_add(field.len());
+    }
+    if field_owned > MICRON_LINK_FIELDS_MAX_BYTES {
+        return Err(format!(
+            "MicronPlus control event fields exceed {MICRON_LINK_FIELDS_MAX_BYTES} bytes"
+        ));
+    }
+    Ok(owned.saturating_add(field_owned))
+}
+
+fn validate_control_event_scalar(label: &str, value: &str, maximum: usize) -> Result<(), String> {
+    if value.is_empty() || value.len() > maximum {
+        Err(format!(
+            "MicronPlus control event {label} must contain 1..={maximum} bytes"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn extract_micronplus_widget_events(markup: &str) -> (String, Vec<MicronPlusWidgetEvent>) {
+    if validate_micronplus_source(markup).is_err() {
+        return (markup.to_string(), Vec::new());
+    }
     let mut retained = Vec::new();
     let mut events = Vec::new();
+    let mut event_owned = 0usize;
 
     for line in markup.lines() {
         if let Some(event) = parse_widget_event_line(line) {
-            events.push(event);
+            let admitted = validate_widget_event(&event).ok().is_some_and(|owned| {
+                events.len() < MICRONPLUS_EXTRACTED_EVENT_MAX_ITEMS
+                    && event_owned.saturating_add(owned)
+                        <= MICRONPLUS_EXTRACTED_EVENT_MAX_OWNED_BYTES
+            });
+            if admitted {
+                event_owned = event_owned.saturating_add(
+                    validate_widget_event(&event).expect("admitted widget event validates"),
+                );
+                events.push(event);
+            } else {
+                retained.push(line.to_string());
+            }
         } else {
             retained.push(line.to_string());
         }
@@ -370,12 +766,19 @@ pub fn lower_micronplus_markup(markup: &str) -> MicronPlusLowering {
 }
 
 pub fn parse_micronplus_tree(markup: &str) -> MicronPlusWidgetTree {
-    let source = dedent_micronplus_source(markup);
+    try_parse_micronplus_tree(markup).unwrap_or_default()
+}
+
+pub fn try_parse_micronplus_tree(markup: &str) -> Result<MicronPlusWidgetTree, String> {
+    let source = admitted_micronplus_source(markup)?;
     let lines = source.lines().collect::<Vec<_>>();
     let mut index = 0usize;
-    MicronPlusWidgetTree {
-        nodes: parse_micronplus_nodes(&lines, &mut index, None),
-    }
+    let mut budget = MicronPlusTreeBudget::default();
+    let tree = MicronPlusWidgetTree {
+        nodes: parse_micronplus_nodes(&lines, &mut index, None, 1, &mut budget)?,
+    };
+    validate_micronplus_tree_owned_bytes(&tree)?;
+    Ok(tree)
 }
 
 pub fn has_micronplus_markup(markup: &str) -> bool {
@@ -404,8 +807,41 @@ pub fn apply_micronplus_tree_partial(
     slot: &str,
     content: &str,
 ) -> bool {
-    let fragment = parse_micronplus_tree(strip_partial_document_headers(content));
-    apply_micronplus_nodes_partial(&mut tree.nodes, slot, fragment.nodes)
+    let Ok(fragment) = try_parse_micronplus_tree(strip_partial_document_headers(content)) else {
+        return false;
+    };
+    let Ok(existing) = micronplus_tree_stats(tree) else {
+        return false;
+    };
+    let Ok(fragment_stats) = micronplus_tree_stats(&fragment) else {
+        return false;
+    };
+    let (matches, deepest_target) = micronplus_live_matches(tree, slot);
+    if matches == 0
+        || existing
+            .nodes
+            .saturating_add(fragment_stats.nodes.saturating_mul(matches))
+            > MICRONPLUS_TREE_MAX_NODES
+        || existing
+            .columns
+            .saturating_add(fragment_stats.columns.saturating_mul(matches))
+            > MICRONPLUS_TREE_MAX_COLUMNS
+        || existing
+            .owned_bytes
+            .saturating_add(fragment_stats.owned_bytes.saturating_mul(matches))
+            > MICRONPLUS_TREE_MAX_OWNED_BYTES
+        || deepest_target.saturating_add(fragment_stats.max_depth) > MICRONPLUS_TREE_MAX_DEPTH
+    {
+        return false;
+    }
+    let mut candidate = tree.clone();
+    if !apply_micronplus_nodes_partial(&mut candidate.nodes, slot, &fragment.nodes)
+        || micronplus_tree_stats(&candidate).is_err()
+    {
+        return false;
+    }
+    *tree = candidate;
+    true
 }
 
 pub fn lower_micronplus_markup_with_widgets(
@@ -422,6 +858,13 @@ fn lower_micronplus_markup_inner(
     field_values: Option<&BTreeMap<String, String>>,
     implicit_control_width: Option<usize>,
 ) -> MicronPlusLowering {
+    if let Err(error) = validate_micronplus_source(markup) {
+        return MicronPlusLowering {
+            markup: markup.to_string(),
+            diagnostics: vec![error],
+            ..MicronPlusLowering::default()
+        };
+    }
     let mut lives = Vec::new();
     let mut inputs = Vec::new();
     let mut buttons = Vec::new();
@@ -559,7 +1002,15 @@ fn lower_micronplus_markup_inner(
                     .get("refresh")
                     .and_then(|value| parse_refresh_secs(value));
                 let loop_count = attrs.get("loop").and_then(|value| parse_loop_count(value));
-                let fields = split_fields(attrs.get("fields").map(String::as_str));
+                let Some(fields) = split_fields(attrs.get("fields").map(String::as_str)) else {
+                    diagnostics.push(format!(
+                        "line {}: <live> fields exceed Micron link limits",
+                        index + 1
+                    ));
+                    output.push(line.to_string());
+                    index += 1;
+                    continue;
+                };
                 lives.push(MicronPlusLive {
                     id: id.clone(),
                     src: src.clone(),
@@ -579,7 +1030,15 @@ fn lower_micronplus_markup_inner(
                 if let Some(value) = field_values.and_then(|values| values.get(&name)) {
                     attrs.insert("value".into(), value.clone());
                 }
-                let fields = split_fields(attrs.get("fields").map(String::as_str));
+                let Some(fields) = split_fields(attrs.get("fields").map(String::as_str)) else {
+                    diagnostics.push(format!(
+                        "line {}: <{tag}> fields exceed Micron link limits",
+                        index + 1
+                    ));
+                    output.push(line.to_string());
+                    index += 1;
+                    continue;
+                };
                 inputs.push(MicronPlusInput {
                     name: name.clone(),
                     action: attrs.get("action").cloned(),
@@ -607,7 +1066,15 @@ fn lower_micronplus_markup_inner(
                     .unwrap_or_else(|| "Button".into());
                 let action = attrs.get("action").cloned();
                 let event = attrs.get("event").cloned();
-                let fields = split_fields(attrs.get("fields").map(String::as_str));
+                let Some(fields) = split_fields(attrs.get("fields").map(String::as_str)) else {
+                    diagnostics.push(format!(
+                        "line {}: <button> fields exceed Micron link limits",
+                        index + 1
+                    ));
+                    output.push(line.to_string());
+                    index += 1;
+                    continue;
+                };
                 let target = action.clone().unwrap_or_else(|| {
                     event
                         .as_ref()
@@ -637,10 +1104,16 @@ fn lower_micronplus_markup_inner(
 }
 
 pub fn extract_micronplus_layout(markup: &str) -> MicronPlusLayout {
-    let lines = markup.lines().collect::<Vec<_>>();
+    try_extract_micronplus_layout(markup).unwrap_or_default()
+}
+
+pub fn try_extract_micronplus_layout(markup: &str) -> Result<MicronPlusLayout, String> {
+    let source = admitted_micronplus_source(markup)?;
+    let lines = source.lines().collect::<Vec<_>>();
     let mut windows = Vec::new();
     let mut root_groups = Vec::new();
     let mut index = 0usize;
+    let mut budget = MicronPlusLayoutBudget::default();
 
     while index < lines.len() {
         let Some((tag, attrs)) = parse_tag(lines[index]) else {
@@ -654,8 +1127,10 @@ pub fn extract_micronplus_layout(markup: &str) -> MicronPlusLayout {
                     index += 1;
                     continue;
                 };
-                let column_groups = extract_column_groups_from_lines(&lines[index + 1..end_index]);
+                let column_groups =
+                    extract_column_groups_from_lines(&lines[index + 1..end_index], &mut budget)?;
                 if !column_groups.is_empty() {
+                    budget.admit_window()?;
                     windows.push(MicronPlusWindowLayout {
                         title: attrs.get("title").cloned(),
                         column_groups,
@@ -668,7 +1143,9 @@ pub fn extract_micronplus_layout(markup: &str) -> MicronPlusLayout {
                     index += 1;
                     continue;
                 };
-                if let Some(group) = parse_column_group(&lines[index + 1..end_index]) {
+                if let Some(group) =
+                    parse_column_group_bounded(&lines[index + 1..end_index], &mut budget)?
+                {
                     root_groups.push(group);
                 }
                 index = end_index + 1;
@@ -678,13 +1155,16 @@ pub fn extract_micronplus_layout(markup: &str) -> MicronPlusLayout {
     }
 
     if !root_groups.is_empty() {
+        budget.admit_window()?;
         windows.push(MicronPlusWindowLayout {
             title: None,
             column_groups: root_groups,
         });
     }
 
-    MicronPlusLayout { windows }
+    let layout = MicronPlusLayout { windows };
+    validate_micronplus_layout_owned_bytes(&layout)?;
+    Ok(layout)
 }
 
 pub fn apply_micronplus_layout_partial(
@@ -692,9 +1172,33 @@ pub fn apply_micronplus_layout_partial(
     slot: &str,
     content: &str,
 ) -> bool {
+    if slot.len() > crate::browser::partials::PARTIAL_ID_MAX_BYTES
+        || validate_micronplus_source(content).is_err()
+    {
+        return false;
+    }
+    let Ok(existing_owned) = micronplus_layout_owned_bytes(layout) else {
+        return false;
+    };
     let content = strip_partial_document_headers(content);
+    let matches = micronplus_layout_partial_matches(layout, slot);
+    let marker_bytes = partial_marker("BEGIN", slot)
+        .len()
+        .saturating_add(partial_marker("END", slot).len())
+        .saturating_add(4);
+    if matches == 0
+        || existing_owned.saturating_add(
+            content
+                .len()
+                .saturating_add(marker_bytes)
+                .saturating_mul(matches),
+        ) > MICRONPLUS_LAYOUT_MAX_OWNED_BYTES
+    {
+        return false;
+    }
+    let mut candidate = layout.clone();
     let mut changed = false;
-    for window in &mut layout.windows {
+    for window in &mut candidate.windows {
         for group in &mut window.column_groups {
             for column in &mut group.columns {
                 let mut output = Vec::new();
@@ -740,7 +1244,43 @@ pub fn apply_micronplus_layout_partial(
             }
         }
     }
-    changed
+    if !changed || validate_micronplus_layout_owned_bytes(&candidate).is_err() {
+        return false;
+    }
+    *layout = candidate;
+    true
+}
+
+fn micronplus_layout_partial_matches(layout: &MicronPlusLayout, slot: &str) -> usize {
+    let mut matches = 0usize;
+    for window in &layout.windows {
+        for group in &window.column_groups {
+            for column in &group.columns {
+                let lines = column.raw_markup.lines().collect::<Vec<_>>();
+                let mut index = 0usize;
+                while index < lines.len() {
+                    let line = lines[index];
+                    if partial_marker_matches(line, "BEGIN", slot) {
+                        matches = matches.saturating_add(1);
+                        index = find_partial_marker_end(&lines, index + 1, slot)
+                            .map_or(index + 1, |end| end + 1);
+                        continue;
+                    }
+                    if parse_tag(line).is_some_and(|(tag, attrs)| {
+                        tag == "live"
+                            && attrs
+                                .get("id")
+                                .map(|id| id == slot)
+                                .unwrap_or(slot == "live")
+                    }) {
+                        matches = matches.saturating_add(1);
+                    }
+                    index += 1;
+                }
+            }
+        }
+    }
+    matches
 }
 
 fn partial_marker(kind: &str, slot: &str) -> String {
@@ -897,7 +1437,49 @@ struct TreeRenderContext<'a> {
     field_cursor: Option<(&'a str, usize)>,
 }
 
-fn extract_column_groups_from_lines(lines: &[&str]) -> Vec<MicronPlusColumnGroup> {
+#[derive(Default)]
+struct MicronPlusLayoutBudget {
+    windows: usize,
+    groups: usize,
+    columns: usize,
+}
+
+impl MicronPlusLayoutBudget {
+    fn admit_window(&mut self) -> Result<(), String> {
+        self.windows = self.windows.saturating_add(1);
+        if self.windows > MICRONPLUS_LAYOUT_MAX_WINDOWS {
+            return Err(format!(
+                "MicronPlus layout exceeds {MICRONPLUS_LAYOUT_MAX_WINDOWS} windows"
+            ));
+        }
+        Ok(())
+    }
+
+    fn admit_group(&mut self) -> Result<(), String> {
+        self.groups = self.groups.saturating_add(1);
+        if self.groups > MICRONPLUS_LAYOUT_MAX_GROUPS {
+            return Err(format!(
+                "MicronPlus layout exceeds {MICRONPLUS_LAYOUT_MAX_GROUPS} column groups"
+            ));
+        }
+        Ok(())
+    }
+
+    fn admit_column(&mut self) -> Result<(), String> {
+        self.columns = self.columns.saturating_add(1);
+        if self.columns > MICRONPLUS_LAYOUT_MAX_COLUMNS {
+            return Err(format!(
+                "MicronPlus layout exceeds {MICRONPLUS_LAYOUT_MAX_COLUMNS} columns"
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn extract_column_groups_from_lines(
+    lines: &[&str],
+    budget: &mut MicronPlusLayoutBudget,
+) -> Result<Vec<MicronPlusColumnGroup>, String> {
     let mut groups = Vec::new();
     let mut index = 0usize;
     while index < lines.len() {
@@ -913,15 +1495,24 @@ fn extract_column_groups_from_lines(lines: &[&str]) -> Vec<MicronPlusColumnGroup
             index += 1;
             continue;
         };
-        if let Some(group) = parse_column_group(&lines[index + 1..end_index]) {
+        if let Some(group) = parse_column_group_bounded(&lines[index + 1..end_index], budget)? {
             groups.push(group);
         }
         index = end_index + 1;
     }
-    groups
+    Ok(groups)
 }
 
 fn parse_column_group(lines: &[&str]) -> Option<MicronPlusColumnGroup> {
+    parse_column_group_bounded(lines, &mut MicronPlusLayoutBudget::default())
+        .ok()
+        .flatten()
+}
+
+fn parse_column_group_bounded(
+    lines: &[&str],
+    budget: &mut MicronPlusLayoutBudget,
+) -> Result<Option<MicronPlusColumnGroup>, String> {
     let mut columns = Vec::new();
     let mut index = 0usize;
     while index < lines.len() {
@@ -937,6 +1528,7 @@ fn parse_column_group(lines: &[&str]) -> Option<MicronPlusColumnGroup> {
             index += 1;
             continue;
         };
+        budget.admit_column()?;
         columns.push(MicronPlusColumnLayout {
             title: attrs.get("title").or_else(|| attrs.get("label")).cloned(),
             width: attrs
@@ -953,7 +1545,57 @@ fn parse_column_group(lines: &[&str]) -> Option<MicronPlusColumnGroup> {
         index = end_index + 1;
     }
 
-    (!columns.is_empty()).then_some(MicronPlusColumnGroup { columns })
+    if columns.is_empty() {
+        Ok(None)
+    } else {
+        budget.admit_group()?;
+        Ok(Some(MicronPlusColumnGroup { columns }))
+    }
+}
+
+fn validate_micronplus_layout_owned_bytes(layout: &MicronPlusLayout) -> Result<(), String> {
+    micronplus_layout_owned_bytes(layout).map(|_| ())
+}
+
+fn micronplus_layout_owned_bytes(layout: &MicronPlusLayout) -> Result<usize, String> {
+    let mut owned = 0usize;
+    for window in &layout.windows {
+        if let Some(title) = &window.title {
+            if title.len() > crate::browser::page::BROWSER_PAGE_TITLE_MAX_BYTES {
+                return Err(format!(
+                    "MicronPlus layout title exceeds {} bytes",
+                    crate::browser::page::BROWSER_PAGE_TITLE_MAX_BYTES
+                ));
+            }
+            owned = owned
+                .checked_add(title.len())
+                .ok_or_else(|| "MicronPlus layout byte accounting overflow".to_string())?;
+        }
+        for group in &window.column_groups {
+            for column in &group.columns {
+                if let Some(title) = &column.title {
+                    if title.len() > crate::browser::page::BROWSER_PAGE_TITLE_MAX_BYTES {
+                        return Err(format!(
+                            "MicronPlus column title exceeds {} bytes",
+                            crate::browser::page::BROWSER_PAGE_TITLE_MAX_BYTES
+                        ));
+                    }
+                    owned = owned
+                        .checked_add(title.len())
+                        .ok_or_else(|| "MicronPlus layout byte accounting overflow".to_string())?;
+                }
+                owned = owned
+                    .checked_add(column.raw_markup.len())
+                    .ok_or_else(|| "MicronPlus layout byte accounting overflow".to_string())?;
+                if owned > MICRONPLUS_LAYOUT_MAX_OWNED_BYTES {
+                    return Err(format!(
+                        "MicronPlus layout exceeds {MICRONPLUS_LAYOUT_MAX_OWNED_BYTES} owned bytes"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(owned)
 }
 
 fn distribute_column_widths(group: &MicronPlusColumnGroup, available: usize) -> Vec<usize> {
@@ -1418,7 +2060,7 @@ fn box_border_row(
             .take(inner_width)
             .map(|ch| {
                 let mut cell = plain_cell(ch);
-                cell.style.bold = true;
+                Arc::make_mut(&mut cell.style).bold = true;
                 cell
             })
             .collect::<Vec<_>>();
@@ -1648,7 +2290,7 @@ fn gutter_cells(gutter: &str) -> Vec<Cell> {
 fn plain_cell(ch: char) -> Cell {
     Cell {
         ch,
-        style: TextStyle::default(),
+        style: default_render_style(),
         link: None,
         control: None,
         cursor: false,
@@ -1910,11 +2552,46 @@ fn widget_items_to_markup(
         .collect()
 }
 
+#[derive(Default)]
+struct MicronPlusTreeBudget {
+    nodes: usize,
+    columns: usize,
+}
+
+impl MicronPlusTreeBudget {
+    fn admit_node(&mut self, depth: usize) -> Result<(), String> {
+        if depth > MICRONPLUS_TREE_MAX_DEPTH {
+            return Err(format!(
+                "MicronPlus tree exceeds depth {MICRONPLUS_TREE_MAX_DEPTH}"
+            ));
+        }
+        self.nodes = self.nodes.saturating_add(1);
+        if self.nodes > MICRONPLUS_TREE_MAX_NODES {
+            return Err(format!(
+                "MicronPlus tree exceeds {MICRONPLUS_TREE_MAX_NODES} nodes"
+            ));
+        }
+        Ok(())
+    }
+
+    fn admit_column(&mut self) -> Result<(), String> {
+        self.columns = self.columns.saturating_add(1);
+        if self.columns > MICRONPLUS_TREE_MAX_COLUMNS {
+            return Err(format!(
+                "MicronPlus tree exceeds {MICRONPLUS_TREE_MAX_COLUMNS} columns"
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn parse_micronplus_nodes(
     lines: &[&str],
     index: &mut usize,
     end_tag: Option<&str>,
-) -> Vec<MicronPlusNode> {
+    depth: usize,
+    budget: &mut MicronPlusTreeBudget,
+) -> Result<Vec<MicronPlusNode>, String> {
     let mut nodes = Vec::new();
     while *index < lines.len() {
         let line = lines[*index];
@@ -1927,6 +2604,7 @@ fn parse_micronplus_nodes(
         }
 
         let Some((tag, attrs)) = parse_tag(line) else {
+            budget.admit_node(depth)?;
             nodes.push(MicronPlusNode::Text {
                 text: line.to_string(),
             });
@@ -1937,46 +2615,72 @@ fn parse_micronplus_nodes(
         match tag.as_str() {
             "window" => {
                 *index += 1;
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Window {
                     title: non_empty_attr(&attrs, "title"),
-                    children: parse_micronplus_nodes(lines, index, Some("window")),
+                    children: parse_micronplus_nodes(
+                        lines,
+                        index,
+                        Some("window"),
+                        depth + 1,
+                        budget,
+                    )?,
                 });
             }
             "box" => {
                 *index += 1;
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Box {
                     title: non_empty_attr(&attrs, "title")
                         .or_else(|| non_empty_attr(&attrs, "label")),
-                    children: parse_micronplus_nodes(lines, index, Some("box")),
+                    children: parse_micronplus_nodes(lines, index, Some("box"), depth + 1, budget)?,
                 });
             }
             "columns" => {
                 *index += 1;
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Columns {
-                    columns: parse_micronplus_column_nodes(lines, index),
+                    columns: parse_micronplus_column_nodes(lines, index, depth + 1, budget)?,
                 });
             }
             "scrollbox" => {
                 *index += 1;
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Scrollbox {
                     id: non_empty_attr(&attrs, "id"),
                     title: non_empty_attr(&attrs, "title")
                         .or_else(|| non_empty_attr(&attrs, "label")),
                     height: parse_usize_attr(&attrs, "height"),
                     max: parse_usize_attr(&attrs, "max"),
-                    children: parse_micronplus_nodes(lines, index, Some("scrollbox")),
+                    children: parse_micronplus_nodes(
+                        lines,
+                        index,
+                        Some("scrollbox"),
+                        depth + 1,
+                        budget,
+                    )?,
                 });
             }
             "log" => {
                 *index += 1;
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Log {
                     id: non_empty_attr(&attrs, "id"),
                     height: parse_usize_attr(&attrs, "height"),
                     max: parse_usize_attr(&attrs, "max"),
-                    children: parse_micronplus_nodes(lines, index, Some("log")),
+                    children: parse_micronplus_nodes(lines, index, Some("log"), depth + 1, budget)?,
                 });
             }
             "input" | "textbox" => {
+                let Some(fields) = split_fields(attrs.get("fields").map(String::as_str)) else {
+                    budget.admit_node(depth)?;
+                    nodes.push(MicronPlusNode::Text {
+                        text: line.to_string(),
+                    });
+                    *index += 1;
+                    continue;
+                };
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Input {
                     name: attrs
                         .get("name")
@@ -1994,7 +2698,7 @@ fn parse_micronplus_nodes(
                     submit: non_empty_attr(&attrs, "submit"),
                     event: non_empty_attr(&attrs, "event"),
                     action: non_empty_attr(&attrs, "action"),
-                    fields: split_fields(attrs.get("fields").map(String::as_str)),
+                    fields,
                     value: non_empty_attr(&attrs, "value")
                         .or_else(|| non_empty_attr(&attrs, "default"))
                         .or_else(|| non_empty_attr(&attrs, "placeholder")),
@@ -2002,6 +2706,15 @@ fn parse_micronplus_nodes(
                 *index += 1;
             }
             "button" => {
+                let Some(fields) = split_fields(attrs.get("fields").map(String::as_str)) else {
+                    budget.admit_node(depth)?;
+                    nodes.push(MicronPlusNode::Text {
+                        text: line.to_string(),
+                    });
+                    *index += 1;
+                    continue;
+                };
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Button {
                     label: attrs
                         .get("label")
@@ -2010,11 +2723,12 @@ fn parse_micronplus_nodes(
                         .unwrap_or_else(|| "Button".into()),
                     event: non_empty_attr(&attrs, "event"),
                     action: non_empty_attr(&attrs, "action"),
-                    fields: split_fields(attrs.get("fields").map(String::as_str)),
+                    fields,
                 });
                 *index += 1;
             }
             "status" => {
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Status {
                     id: non_empty_attr(&attrs, "id"),
                     text: attrs.get("text").cloned().unwrap_or_default(),
@@ -2023,6 +2737,15 @@ fn parse_micronplus_nodes(
                 *index += 1;
             }
             "live" => {
+                let Some(fields) = split_fields(attrs.get("fields").map(String::as_str)) else {
+                    budget.admit_node(depth)?;
+                    nodes.push(MicronPlusNode::Text {
+                        text: line.to_string(),
+                    });
+                    *index += 1;
+                    continue;
+                };
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Live {
                     id: attrs.get("id").cloned().unwrap_or_else(|| "live".into()),
                     src: attrs.get("src").cloned().unwrap_or_default(),
@@ -2030,12 +2753,13 @@ fn parse_micronplus_nodes(
                         .get("refresh")
                         .and_then(|value| parse_refresh_secs(value)),
                     loop_count: attrs.get("loop").and_then(|value| parse_loop_count(value)),
-                    fields: split_fields(attrs.get("fields").map(String::as_str)),
+                    fields,
                     children: Vec::new(),
                 });
                 *index += 1;
             }
             _ => {
+                budget.admit_node(depth)?;
                 nodes.push(MicronPlusNode::Text {
                     text: line.to_string(),
                 });
@@ -2043,10 +2767,15 @@ fn parse_micronplus_nodes(
             }
         }
     }
-    nodes
+    Ok(nodes)
 }
 
-fn parse_micronplus_column_nodes(lines: &[&str], index: &mut usize) -> Vec<MicronPlusColumnNode> {
+fn parse_micronplus_column_nodes(
+    lines: &[&str],
+    index: &mut usize,
+    depth: usize,
+    budget: &mut MicronPlusTreeBudget,
+) -> Result<Vec<MicronPlusColumnNode>, String> {
     let mut columns = Vec::new();
     while *index < lines.len() {
         if let Some(closing) = closing_tag_name(lines[*index]) {
@@ -2065,26 +2794,27 @@ fn parse_micronplus_column_nodes(lines: &[&str], index: &mut usize) -> Vec<Micro
             continue;
         }
         *index += 1;
+        budget.admit_column()?;
         columns.push(MicronPlusColumnNode {
             title: non_empty_attr(&attrs, "title").or_else(|| non_empty_attr(&attrs, "label")),
             width: parse_usize_attr(&attrs, "width"),
             weight: parse_usize_attr(&attrs, "weight").unwrap_or(1).max(1),
-            children: parse_micronplus_nodes(lines, index, Some("column")),
+            children: parse_micronplus_nodes(lines, index, Some("column"), depth + 1, budget)?,
         });
     }
-    columns
+    Ok(columns)
 }
 
 fn apply_micronplus_nodes_partial(
     nodes: &mut [MicronPlusNode],
     slot: &str,
-    content: Vec<MicronPlusNode>,
+    content: &[MicronPlusNode],
 ) -> bool {
     let mut changed = false;
     for node in nodes {
         match node {
             MicronPlusNode::Live { id, children, .. } if id == slot => {
-                *children = content.clone();
+                *children = content.to_vec();
                 changed = true;
             }
             MicronPlusNode::Window { children, .. }
@@ -2092,12 +2822,11 @@ fn apply_micronplus_nodes_partial(
             | MicronPlusNode::Scrollbox { children, .. }
             | MicronPlusNode::Log { children, .. }
             | MicronPlusNode::Live { children, .. } => {
-                changed |= apply_micronplus_nodes_partial(children, slot, content.clone());
+                changed |= apply_micronplus_nodes_partial(children, slot, content);
             }
             MicronPlusNode::Columns { columns } => {
                 for column in columns {
-                    changed |=
-                        apply_micronplus_nodes_partial(&mut column.children, slot, content.clone());
+                    changed |= apply_micronplus_nodes_partial(&mut column.children, slot, content);
                 }
             }
             MicronPlusNode::Text { .. }
@@ -2188,7 +2917,7 @@ fn parse_tag(line: &str) -> Option<(String, BTreeMap<String, String>)> {
     }
     let mut parts = inner.splitn(2, char::is_whitespace);
     let tag = parts.next()?.to_ascii_lowercase();
-    let attrs = parse_attrs(parts.next().unwrap_or_default());
+    let attrs = parse_attrs_checked(parts.next().unwrap_or_default()).ok()?;
     Some((tag, attrs))
 }
 
@@ -2344,14 +3073,17 @@ fn parse_widget_event_line(line: &str) -> Option<MicronPlusWidgetEvent> {
     None
 }
 
-fn parse_attrs(input: &str) -> BTreeMap<String, String> {
-    parse_attrs_checked(input).unwrap_or_default()
-}
-
 fn parse_attrs_checked(input: &str) -> Result<BTreeMap<String, String>, String> {
+    if input.len() > MICRONPLUS_SOURCE_LINE_MAX_BYTES {
+        return Err(format!(
+            "attribute source exceeds {MICRONPLUS_SOURCE_LINE_MAX_BYTES} bytes"
+        ));
+    }
     let mut attrs = BTreeMap::new();
     let chars = input.chars().collect::<Vec<_>>();
     let mut index = 0;
+    let mut parsed_items = 0usize;
+    let mut owned_bytes = 0usize;
     while index < chars.len() {
         while index < chars.len() && chars[index].is_whitespace() {
             index += 1;
@@ -2367,45 +3099,69 @@ fn parse_attrs_checked(input: &str) -> Result<BTreeMap<String, String>, String> 
         while index < chars.len() && chars[index].is_whitespace() {
             index += 1;
         }
-        if chars.get(index) != Some(&'=') {
-            attrs.insert(key, "true".into());
-            continue;
-        }
-        index += 1;
-        while index < chars.len() && chars[index].is_whitespace() {
-            index += 1;
-        }
-        let value = if chars.get(index) == Some(&'"') {
-            index += 1;
-            let value_start = index;
-            while index < chars.len() && chars[index] != '"' {
-                index += 1;
-            }
-            if index >= chars.len() {
-                return Err(format!("unterminated quoted attribute value for {key}"));
-            }
-            let value = chars[value_start..index].iter().collect::<String>();
-            index += 1;
-            value
-        } else if chars.get(index) == Some(&'\'') {
-            index += 1;
-            let value_start = index;
-            while index < chars.len() && chars[index] != '\'' {
-                index += 1;
-            }
-            if index >= chars.len() {
-                return Err(format!("unterminated quoted attribute value for {key}"));
-            }
-            let value = chars[value_start..index].iter().collect::<String>();
-            index += 1;
-            value
+        let value = if chars.get(index) != Some(&'=') {
+            "true".to_string()
         } else {
-            let value_start = index;
-            while index < chars.len() && !chars[index].is_whitespace() {
+            index += 1;
+            while index < chars.len() && chars[index].is_whitespace() {
                 index += 1;
             }
-            chars[value_start..index].iter().collect::<String>()
+            if chars.get(index) == Some(&'"') {
+                index += 1;
+                let value_start = index;
+                while index < chars.len() && chars[index] != '"' {
+                    index += 1;
+                }
+                if index >= chars.len() {
+                    return Err(format!("unterminated quoted attribute value for {key}"));
+                }
+                let value = chars[value_start..index].iter().collect::<String>();
+                index += 1;
+                value
+            } else if chars.get(index) == Some(&'\'') {
+                index += 1;
+                let value_start = index;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
+                }
+                if index >= chars.len() {
+                    return Err(format!("unterminated quoted attribute value for {key}"));
+                }
+                let value = chars[value_start..index].iter().collect::<String>();
+                index += 1;
+                value
+            } else {
+                let value_start = index;
+                while index < chars.len() && !chars[index].is_whitespace() {
+                    index += 1;
+                }
+                chars[value_start..index].iter().collect::<String>()
+            }
         };
+        parsed_items = parsed_items.saturating_add(1);
+        if parsed_items > MICRONPLUS_ATTRIBUTE_MAX_ITEMS {
+            return Err(format!(
+                "attribute list exceeds {MICRONPLUS_ATTRIBUTE_MAX_ITEMS} items"
+            ));
+        }
+        if key.len() > MICRONPLUS_ATTRIBUTE_KEY_MAX_BYTES {
+            return Err(format!(
+                "attribute key exceeds {MICRONPLUS_ATTRIBUTE_KEY_MAX_BYTES} bytes"
+            ));
+        }
+        if value.len() > MICRONPLUS_ATTRIBUTE_VALUE_MAX_BYTES {
+            return Err(format!(
+                "attribute value exceeds {MICRONPLUS_ATTRIBUTE_VALUE_MAX_BYTES} bytes"
+            ));
+        }
+        owned_bytes = owned_bytes
+            .checked_add(key.len().saturating_add(value.len()))
+            .ok_or_else(|| "attribute byte accounting overflow".to_string())?;
+        if owned_bytes > MICRONPLUS_ATTRIBUTE_MAX_OWNED_BYTES {
+            return Err(format!(
+                "attribute list exceeds {MICRONPLUS_ATTRIBUTE_MAX_OWNED_BYTES} owned bytes"
+            ));
+        }
         attrs.insert(key, value);
     }
     Ok(attrs)
@@ -2421,6 +3177,199 @@ fn repair_micronplus_tag_line(line: &str) -> Option<String> {
         });
     }
     None
+}
+
+fn admitted_micronplus_source(markup: &str) -> Result<String, String> {
+    validate_micronplus_source(markup)?;
+    Ok(dedent_micronplus_source(markup))
+}
+
+fn validate_micronplus_source(markup: &str) -> Result<(), String> {
+    if markup.len() > MICRONPLUS_SOURCE_MAX_BYTES {
+        return Err(format!(
+            "MicronPlus source exceeds {MICRONPLUS_SOURCE_MAX_BYTES} bytes"
+        ));
+    }
+    let mut lines = 0usize;
+    for line in markup.lines() {
+        lines = lines.saturating_add(1);
+        if lines > MICRONPLUS_SOURCE_MAX_LINES {
+            return Err(format!(
+                "MicronPlus source exceeds {MICRONPLUS_SOURCE_MAX_LINES} lines"
+            ));
+        }
+        if line.len() > MICRONPLUS_SOURCE_LINE_MAX_BYTES {
+            return Err(format!(
+                "MicronPlus source line exceeds {MICRONPLUS_SOURCE_LINE_MAX_BYTES} bytes"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MicronPlusTreeStats {
+    nodes: usize,
+    columns: usize,
+    owned_bytes: usize,
+    max_depth: usize,
+}
+
+fn validate_micronplus_tree_owned_bytes(tree: &MicronPlusWidgetTree) -> Result<(), String> {
+    micronplus_tree_stats(tree).map(|_| ())
+}
+
+fn micronplus_tree_stats(tree: &MicronPlusWidgetTree) -> Result<MicronPlusTreeStats, String> {
+    let mut stats = MicronPlusTreeStats::default();
+    let mut pending = tree
+        .nodes
+        .iter()
+        .map(|node| (node, 1usize))
+        .collect::<Vec<_>>();
+    while let Some((node, depth)) = pending.pop() {
+        stats.nodes = stats.nodes.saturating_add(1);
+        stats.max_depth = stats.max_depth.max(depth);
+        if stats.nodes > MICRONPLUS_TREE_MAX_NODES {
+            return Err(format!(
+                "MicronPlus tree exceeds {MICRONPLUS_TREE_MAX_NODES} nodes"
+            ));
+        }
+        if depth > MICRONPLUS_TREE_MAX_DEPTH {
+            return Err(format!(
+                "MicronPlus tree exceeds depth {MICRONPLUS_TREE_MAX_DEPTH}"
+            ));
+        }
+        let mut strings = Vec::new();
+        match node {
+            MicronPlusNode::Text { text } => strings.push(text.as_str()),
+            MicronPlusNode::Window { title, children }
+            | MicronPlusNode::Box { title, children } => {
+                strings.extend(title.iter().map(String::as_str));
+                pending.extend(children.iter().map(|child| (child, depth + 1)));
+            }
+            MicronPlusNode::Columns { columns } => {
+                stats.columns = stats.columns.saturating_add(columns.len());
+                if stats.columns > MICRONPLUS_TREE_MAX_COLUMNS {
+                    return Err(format!(
+                        "MicronPlus tree exceeds {MICRONPLUS_TREE_MAX_COLUMNS} columns"
+                    ));
+                }
+                for column in columns {
+                    strings.extend(column.title.iter().map(String::as_str));
+                    pending.extend(column.children.iter().map(|child| (child, depth + 2)));
+                }
+            }
+            MicronPlusNode::Scrollbox {
+                id,
+                title,
+                children,
+                ..
+            } => {
+                strings.extend(id.iter().map(String::as_str));
+                strings.extend(title.iter().map(String::as_str));
+                pending.extend(children.iter().map(|child| (child, depth + 1)));
+            }
+            MicronPlusNode::Log { id, children, .. } => {
+                strings.extend(id.iter().map(String::as_str));
+                pending.extend(children.iter().map(|child| (child, depth + 1)));
+            }
+            MicronPlusNode::Input {
+                name,
+                label,
+                submit,
+                event,
+                action,
+                fields,
+                value,
+                ..
+            } => {
+                strings.push(name);
+                strings.extend(label.iter().map(String::as_str));
+                strings.extend(submit.iter().map(String::as_str));
+                strings.extend(event.iter().map(String::as_str));
+                strings.extend(action.iter().map(String::as_str));
+                strings.extend(fields.iter().map(String::as_str));
+                strings.extend(value.iter().map(String::as_str));
+            }
+            MicronPlusNode::Button {
+                label,
+                event,
+                action,
+                fields,
+            } => {
+                strings.push(label);
+                strings.extend(event.iter().map(String::as_str));
+                strings.extend(action.iter().map(String::as_str));
+                strings.extend(fields.iter().map(String::as_str));
+            }
+            MicronPlusNode::Status { id, text, style } => {
+                strings.extend(id.iter().map(String::as_str));
+                strings.push(text);
+                strings.extend(style.iter().map(String::as_str));
+            }
+            MicronPlusNode::Live {
+                id,
+                src,
+                fields,
+                children,
+                ..
+            } => {
+                strings.push(id);
+                strings.push(src);
+                strings.extend(fields.iter().map(String::as_str));
+                pending.extend(children.iter().map(|child| (child, depth + 1)));
+            }
+        }
+        for string in strings {
+            stats.owned_bytes = stats
+                .owned_bytes
+                .checked_add(string.len())
+                .ok_or_else(|| "MicronPlus tree byte accounting overflow".to_string())?;
+            if stats.owned_bytes > MICRONPLUS_TREE_MAX_OWNED_BYTES {
+                return Err(format!(
+                    "MicronPlus tree exceeds {MICRONPLUS_TREE_MAX_OWNED_BYTES} owned bytes"
+                ));
+            }
+        }
+    }
+    Ok(stats)
+}
+
+fn micronplus_live_matches(tree: &MicronPlusWidgetTree, slot: &str) -> (usize, usize) {
+    let mut matches = 0usize;
+    let mut deepest = 0usize;
+    let mut pending = tree
+        .nodes
+        .iter()
+        .map(|node| (node, 1usize))
+        .collect::<Vec<_>>();
+    while let Some((node, depth)) = pending.pop() {
+        match node {
+            MicronPlusNode::Window { children, .. }
+            | MicronPlusNode::Box { children, .. }
+            | MicronPlusNode::Scrollbox { children, .. }
+            | MicronPlusNode::Log { children, .. } => {
+                pending.extend(children.iter().map(|child| (child, depth + 1)));
+            }
+            MicronPlusNode::Columns { columns } => {
+                for column in columns {
+                    pending.extend(column.children.iter().map(|child| (child, depth + 2)));
+                }
+            }
+            MicronPlusNode::Live { id, children, .. } => {
+                if id == slot {
+                    matches = matches.saturating_add(1);
+                    deepest = deepest.max(depth);
+                }
+                pending.extend(children.iter().map(|child| (child, depth + 1)));
+            }
+            MicronPlusNode::Text { .. }
+            | MicronPlusNode::Input { .. }
+            | MicronPlusNode::Button { .. }
+            | MicronPlusNode::Status { .. } => {}
+        }
+    }
+    (matches, deepest)
 }
 
 fn dedent_micronplus_source(markup: &str) -> String {
@@ -2478,13 +3427,13 @@ fn cleanup_lowered_lines(lines: Vec<String>) -> String {
     cleaned.join("\n")
 }
 
-fn split_fields(raw: Option<&str>) -> Vec<String> {
-    raw.unwrap_or_default()
-        .split(['|', ','])
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-        .map(str::to_string)
-        .collect()
+fn split_fields(raw: Option<&str>) -> Option<Vec<String>> {
+    collect_bounded_link_fields(
+        raw.unwrap_or_default()
+            .split(['|', ','])
+            .map(str::trim)
+            .filter(|field| !field.is_empty()),
+    )
 }
 
 fn parse_refresh_secs(value: &str) -> Option<u64> {
@@ -2584,7 +3533,7 @@ pub fn micronplus_control_binding_for_field(
                             .get("submit")
                             .filter(|submit| !submit.is_empty())
                             .cloned(),
-                        fields: split_fields(attrs.get("fields").map(String::as_str)),
+                        fields: split_fields(attrs.get("fields").map(String::as_str))?,
                     });
                 }
             }
@@ -2639,6 +3588,279 @@ mod tests {
     use crate::micron::fixtures::{render_markup_report, REGRESSION_WIDTHS};
     use std::path::PathBuf;
 
+    fn nested_boxes(count: usize) -> String {
+        let mut markup = "[box]\n".repeat(count);
+        markup.push_str("leaf\n");
+        markup.push_str(&"[/box]\n".repeat(count));
+        markup
+    }
+
+    fn columns(count: usize) -> String {
+        let mut markup = String::from("[columns]\n");
+        for _ in 0..count {
+            markup.push_str("[column]\ncontent\n[/column]\n");
+        }
+        markup.push_str("[/columns]\n");
+        markup
+    }
+
+    #[test]
+    fn micronplus_tree_enforces_node_and_depth_budgets() {
+        assert!(try_parse_micronplus_tree(&nested_boxes(MICRONPLUS_TREE_MAX_DEPTH - 1)).is_ok());
+        assert!(
+            try_parse_micronplus_tree(&nested_boxes(MICRONPLUS_TREE_MAX_DEPTH))
+                .is_err_and(|error| error.contains("exceeds depth"))
+        );
+
+        let exact_nodes = "text\n".repeat(MICRONPLUS_TREE_MAX_NODES);
+        assert_eq!(
+            try_parse_micronplus_tree(&exact_nodes)
+                .expect("exact node ceiling")
+                .nodes
+                .len(),
+            MICRONPLUS_TREE_MAX_NODES
+        );
+        let excessive_nodes = "text\n".repeat(MICRONPLUS_TREE_MAX_NODES + 1);
+        assert!(try_parse_micronplus_tree(&excessive_nodes)
+            .is_err_and(|error| error.contains("exceeds 8192 nodes")));
+    }
+
+    #[test]
+    fn micronplus_layout_enforces_column_budget() {
+        let exact = try_extract_micronplus_layout(&columns(MICRONPLUS_LAYOUT_MAX_COLUMNS))
+            .expect("exact column ceiling");
+        assert_eq!(exact.windows[0].column_groups[0].columns.len(), 512);
+
+        assert!(
+            try_extract_micronplus_layout(&columns(MICRONPLUS_LAYOUT_MAX_COLUMNS + 1))
+                .is_err_and(|error| error.contains("exceeds 512 columns"))
+        );
+    }
+
+    #[test]
+    fn micronplus_source_and_attribute_preflight_reject_before_structural_parsing() {
+        let oversized_line = "x".repeat(MICRONPLUS_SOURCE_LINE_MAX_BYTES + 1);
+        assert!(try_parse_micronplus_tree(&oversized_line)
+            .is_err_and(|error| error.contains("source line")));
+        let lowered = lower_micronplus_markup(&oversized_line);
+        assert_eq!(lowered.markup, oversized_line);
+        assert_eq!(lowered.diagnostics.len(), 1);
+
+        let exact_attrs = (0..MICRONPLUS_ATTRIBUTE_MAX_ITEMS)
+            .map(|index| format!("key{index}=value"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            parse_attrs_checked(&exact_attrs)
+                .expect("exact attribute ceiling")
+                .len(),
+            MICRONPLUS_ATTRIBUTE_MAX_ITEMS
+        );
+        let excessive_attrs = format!("{exact_attrs} one_more=value");
+        assert!(parse_attrs_checked(&excessive_attrs)
+            .is_err_and(|error| error.contains("exceeds 64 items")));
+    }
+
+    #[test]
+    fn micronplus_retained_string_validators_accept_exact_and_reject_next_byte() {
+        let mut tree = MicronPlusWidgetTree {
+            nodes: vec![MicronPlusNode::Text {
+                text: "x".repeat(MICRONPLUS_TREE_MAX_OWNED_BYTES),
+            }],
+        };
+        assert_eq!(validate_micronplus_tree_owned_bytes(&tree), Ok(()));
+        let MicronPlusNode::Text { text } = &mut tree.nodes[0] else {
+            panic!("text fixture");
+        };
+        text.push('x');
+        assert!(validate_micronplus_tree_owned_bytes(&tree).is_err());
+
+        let mut layout = MicronPlusLayout {
+            windows: vec![MicronPlusWindowLayout {
+                title: None,
+                column_groups: vec![MicronPlusColumnGroup {
+                    columns: vec![MicronPlusColumnLayout {
+                        title: None,
+                        width: None,
+                        weight: 1,
+                        raw_markup: "x".repeat(MICRONPLUS_LAYOUT_MAX_OWNED_BYTES),
+                    }],
+                }],
+            }],
+        };
+        assert_eq!(validate_micronplus_layout_owned_bytes(&layout), Ok(()));
+        layout.windows[0].column_groups[0].columns[0]
+            .raw_markup
+            .push('x');
+        assert!(validate_micronplus_layout_owned_bytes(&layout).is_err());
+    }
+
+    #[test]
+    fn micronplus_partial_multiplication_is_rejected_atomically() {
+        let large_fragment = format!("{}\n", "x".repeat(MICRONPLUS_SOURCE_LINE_MAX_BYTES - 1))
+            .repeat(MICRONPLUS_SOURCE_MAX_BYTES / MICRONPLUS_SOURCE_LINE_MAX_BYTES);
+        assert_eq!(large_fragment.len(), MICRONPLUS_SOURCE_MAX_BYTES);
+
+        let long_source = format!(":/{}.mu", "a".repeat(128));
+        let mut tree = try_parse_micronplus_tree(&format!(
+            "[live id=shared src={long_source}]\n[live id=shared src={long_source}]"
+        ))
+        .expect("tree fixture");
+        let original_tree = tree.clone();
+        assert!(!apply_micronplus_tree_partial(
+            &mut tree,
+            "shared",
+            &large_fragment,
+        ));
+        assert_eq!(tree, original_tree);
+
+        let mut layout = try_extract_micronplus_layout(
+            "[columns]\n[column]\n[live id=shared src=:/one.mu]\n[/column]\n[column]\n[live id=shared src=:/two.mu]\n[/column]\n[/columns]",
+        )
+        .expect("layout fixture");
+        let original_layout = layout.clone();
+        assert!(!apply_micronplus_layout_partial(
+            &mut layout,
+            "shared",
+            &large_fragment,
+        ));
+        assert_eq!(layout, original_layout);
+    }
+
+    #[test]
+    fn micronplus_widget_store_is_item_byte_and_widget_bounded() {
+        let mut store = MicronPlusWidgetStore::default();
+        for index in 0..MICRONPLUS_WIDGET_STORE_MAX_WIDGETS {
+            assert!(store.apply_event(MicronPlusWidgetEvent::StatusUpdate {
+                id: format!("widget-{index}"),
+                text: "ready".into(),
+                style: None,
+            }));
+        }
+        assert!(!store.apply_event(MicronPlusWidgetEvent::StatusUpdate {
+            id: "one-too-many".into(),
+            text: "rejected".into(),
+            style: None,
+        }));
+        assert_eq!(store.metrics().widgets, MICRONPLUS_WIDGET_STORE_MAX_WIDGETS);
+        assert_eq!(store.metrics().rejected_events, 1);
+
+        assert!(store.apply_event(MicronPlusWidgetEvent::ScrollboxSet {
+            id: "widget-0".into(),
+            items: (0..MICRONPLUS_WIDGET_STATE_MAX_ITEMS)
+                .map(|index| MicronPlusWidgetItem::text(format!("old-{index}")))
+                .collect(),
+        }));
+        assert!(store.apply_event(MicronPlusWidgetEvent::ScrollboxAppend {
+            id: "widget-0".into(),
+            items: vec![MicronPlusWidgetItem::text("newest")],
+        }));
+        let state = store.get("widget-0").expect("widget state");
+        assert_eq!(state.items.len(), MICRONPLUS_WIDGET_STATE_MAX_ITEMS);
+        assert_eq!(
+            state.items.last().map(|item| item.text.as_str()),
+            Some("newest")
+        );
+        assert_ne!(
+            state.items.first().map(|item| item.text.as_str()),
+            Some("old-0")
+        );
+        assert!(store.metrics().items <= MICRONPLUS_WIDGET_STORE_MAX_ITEMS);
+        assert!(store.metrics().owned_bytes <= MICRONPLUS_WIDGET_STORE_MAX_OWNED_BYTES);
+    }
+
+    #[test]
+    fn micronplus_widget_store_rejects_invalid_or_structurally_excessive_items_atomically() {
+        let mut store = MicronPlusWidgetStore::default();
+        assert!(store.apply_event(MicronPlusWidgetEvent::StatusUpdate {
+            id: "status".into(),
+            text: "previous".into(),
+            style: None,
+        }));
+        assert!(!store.apply_event(MicronPlusWidgetEvent::StatusUpdate {
+            id: "status".into(),
+            text: "x".repeat(MICRONPLUS_WIDGET_TEXT_MAX_BYTES + 1),
+            style: None,
+        }));
+        assert_eq!(
+            store.get("status").and_then(|state| state.text.as_deref()),
+            Some("previous")
+        );
+
+        let excessive_nodes = "x\n".repeat(MICRONPLUS_TREE_MAX_NODES + 1);
+        assert!(!store.apply_event(MicronPlusWidgetEvent::ScrollboxSet {
+            id: "structured".into(),
+            items: vec![MicronPlusWidgetItem::markup(excessive_nodes)],
+        }));
+        assert!(store.get("structured").is_none());
+        assert_eq!(store.metrics().rejected_events, 2);
+    }
+
+    #[test]
+    fn micronplus_widget_event_extraction_is_item_and_byte_bounded() {
+        let markup = (0..=MICRONPLUS_EXTRACTED_EVENT_MAX_ITEMS)
+            .map(|index| format!("[event name=log.append.feed text=item-{index}]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (cleaned, events) = extract_micronplus_widget_events(&markup);
+        assert_eq!(events.len(), MICRONPLUS_EXTRACTED_EVENT_MAX_ITEMS);
+        assert!(cleaned.contains("item-256"));
+
+        let markup = (0..80)
+            .map(|index| {
+                let text = format!(
+                    "{index:02}{}",
+                    "x".repeat(MICRONPLUS_WIDGET_TEXT_MAX_BYTES - 2)
+                );
+                format!("[event name=log.append.feed text={text}]")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (cleaned, events) = extract_micronplus_widget_events(&markup);
+        assert!(events.len() < 80);
+        assert!(!cleaned.is_empty());
+    }
+
+    #[test]
+    fn micronplus_control_event_history_retains_recent_bounded_edge() {
+        let mut history = Vec::new();
+        for index in 0..=MICRONPLUS_CONTROL_EVENT_HISTORY_MAX_ITEMS {
+            assert!(retain_micronplus_control_event(
+                &mut history,
+                MicronPlusControlEvent {
+                    event: format!("button.{index}"),
+                    source: "button".into(),
+                    name: Some("send".into()),
+                    action: None,
+                    fields: Vec::new(),
+                    value: Some("x".repeat(MICRON_CONTROL_VALUE_MAX_BYTES)),
+                },
+            ));
+        }
+        assert!(history.len() < MICRONPLUS_CONTROL_EVENT_HISTORY_MAX_ITEMS);
+        assert_eq!(
+            history.last().map(|event| event.event.as_str()),
+            Some("button.256")
+        );
+        assert!(
+            micronplus_control_event_history_owned_bytes(&history)
+                <= MICRONPLUS_CONTROL_EVENT_HISTORY_MAX_OWNED_BYTES
+        );
+        let previous = history.clone();
+        assert!(!retain_micronplus_control_event(
+            &mut history,
+            MicronPlusControlEvent {
+                event: "button.invalid".into(),
+                source: "button".into(),
+                name: None,
+                action: Some("x".repeat(MICRON_LINK_TARGET_MAX_BYTES + 1)),
+                fields: Vec::new(),
+                value: None,
+            },
+        ));
+        assert_eq!(history, previous);
+    }
+
     #[test]
     fn lowers_live_input_and_button_to_micron_primitives() {
         let lowered = lower_micronplus_markup(
@@ -2660,6 +3882,29 @@ mod tests {
         assert_eq!(lowered.inputs[0].submit.as_deref(), Some("enter"));
         assert_eq!(lowered.buttons.len(), 1);
         assert_eq!(lowered.buttons[0].event.as_deref(), Some("button.clicked"));
+    }
+
+    #[test]
+    fn oversized_micronplus_fields_remain_non_actionable() {
+        use crate::micron::parser::MICRON_LINK_FIELD_MAX_BYTES;
+
+        let line = format!(
+            "[button label=Reject action=:/target fields={}]",
+            "f".repeat(MICRON_LINK_FIELD_MAX_BYTES + 1)
+        );
+        let lowered = lower_micronplus_markup(&line);
+        assert!(lowered.buttons.is_empty());
+        assert_eq!(lowered.markup, line);
+        assert!(lowered
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("fields exceed Micron link limits")));
+
+        let tree = parse_micronplus_tree(&line);
+        assert!(matches!(
+            tree.nodes.as_slice(),
+            [MicronPlusNode::Text { text }] if text == &line
+        ));
     }
 
     #[test]
@@ -2876,7 +4121,7 @@ ddd
             .filter(|cell| {
                 cell.control
                     .as_ref()
-                    .is_some_and(|control| control.name == "message")
+                    .is_some_and(|control| control.name.as_ref() == "message")
             })
             .count();
 
@@ -2897,7 +4142,7 @@ ddd
             .filter(|cell| {
                 cell.control
                     .as_ref()
-                    .is_some_and(|control| control.name == "message")
+                    .is_some_and(|control| control.name.as_ref() == "message")
             })
             .count();
 

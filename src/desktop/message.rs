@@ -24,6 +24,32 @@ pub(in crate::desktop) enum OmenChatDraftCommandResult {
     HandledKeep,
 }
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Debug)]
+pub(in crate::desktop) struct OmenChatLiveOpenCompletion {
+    pub(in crate::desktop) descriptor: OmenChatDescriptor,
+    pub(in crate::desktop) result: Result<crate::runtime::OmenChatLinkOpened, String>,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Debug)]
+pub(in crate::desktop) struct OmenChatLiveReconnectCompletion {
+    pub(in crate::desktop) session_id: ChatSessionId,
+    pub(in crate::desktop) generation: u64,
+    pub(in crate::desktop) descriptor: OmenChatDescriptor,
+    pub(in crate::desktop) result: Result<crate::runtime::OmenChatLinkOpened, String>,
+}
+
+#[cfg(feature = "chat-client")]
+#[derive(Clone, Debug)]
+pub(in crate::desktop) struct OmenChatMediaCacheCompletion {
+    pub(in crate::desktop) session_id: ChatSessionId,
+    pub(in crate::desktop) cache_key: String,
+    pub(in crate::desktop) generation: u64,
+    pub(in crate::desktop) result:
+        Result<super::omenchat_desktop_state::CachedOmenChatMedia, String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::desktop) enum DesktopPane {
     Browser(TabId),
@@ -57,117 +83,119 @@ pub(in crate::desktop) enum OmenChatMediaLoadState {
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::desktop) enum Message {
-    SwitchSection(WorkspaceSection),
-    SelectBrowserTab(usize),
-    NewBrowserTab,
-    CloseBrowserTab,
-    CloseBrowserPaneTab(TabId),
-    NewConversationPane,
-    CloseConversationPaneTab(u64),
+pub(in crate::desktop) enum ThemeMessage {
+    SetTheme(String),
+    SetFontSize(u16),
+    ToggleReducedMotion,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum ClearwebMessage {
+    ToggleSocksProxy,
+    ToggleRemoteMedia,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum ExternalBrowserMessage {
+    SelectPreferred(usize),
+    ClearPreferred,
+    OpenWith(usize),
+    CopyUrl,
+    PromptUrl(String),
+    DismissPrompt,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum RuntimeMessage {
+    ToggleAutoSyncAfterPropagationAccept,
+    SelectNativeBackend,
+    StartNativeRuntime,
+    NativeQuickstart,
+    InterfaceStatsSampled(Result<crate::runtime::InterfaceStats, String>),
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum IdentityMessage {
+    Create,
+    ActivateManaged(String),
+    ActiveLabelChanged(String),
+    DeleteActive,
+    ConfirmDeleteActive,
+    CancelDeleteActive,
+    ClearActive,
+    AnnounceNow,
+    CopyActiveHash,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum PluginMessage {
+    Select(usize),
+    Toggle(usize),
+    BeginRemove(usize),
+    ToggleSelected,
+    BeginInstall,
+    BeginSelectedRemove,
+    Refresh,
+    ShowLogs,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum DirectoryMessage {
+    SwitchKind(crate::directory::DirectoryKind),
+    SwitchScope(DirectoryScope),
+    FilterChanged(String),
+    SelectEntry(usize),
+    OpenEntry(usize),
+    OpenPeerChat(usize),
     #[cfg(feature = "chat-client")]
-    NewOmenChatPane,
-    #[cfg(feature = "chat-client")]
-    OmenChatServerEntryChanged(String),
-    #[cfg(feature = "chat-client")]
-    OpenOmenChatServerEntry,
-    #[cfg(feature = "chat-client")]
-    ToggleOmenChatRooms,
-    #[cfg(feature = "chat-client")]
-    JoinOmenChatRoom {
-        session_id: ChatSessionId,
-        room: String,
-    },
-    #[cfg(feature = "chat-client")]
-    OmenChatDraftChanged {
-        session_id: ChatSessionId,
-        value: String,
-    },
-    #[cfg(feature = "chat-client")]
-    OmenChatScrolled {
-        session_id: ChatSessionId,
-        room_id: RoomId,
-        offset: RelativeOffset,
-    },
-    #[cfg(feature = "chat-client")]
-    JumpOmenChatToPresent {
-        session_id: ChatSessionId,
-        room_id: RoomId,
-    },
-    #[cfg(feature = "chat-client")]
-    SendOmenChatDraft(ChatSessionId),
-    #[cfg(feature = "chat-client")]
-    ResendOmenChatLocalEcho {
-        session_id: ChatSessionId,
-        room_id: RoomId,
-        event_id: u64,
-        body: String,
-        action: bool,
-    },
-    #[cfg(feature = "chat-client")]
-    LoadOlderOmenChatHistory(ChatSessionId),
-    #[cfg(feature = "chat-client")]
-    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-    RequestOmenChatPath(ChatSessionId),
-    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-    ReconnectOmenChatSession(ChatSessionId),
-    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-    ReconnectOmenChatSessionIfDisconnected(ChatSessionId),
-    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-    OmenChatPathRequestResult {
-        session_id: ChatSessionId,
-        destination: String,
-        result: Result<bool, String>,
-    },
-    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-    OmenChatLiveOpenResult {
-        descriptor: OmenChatDescriptor,
-        result: Result<crate::runtime::OmenChatLinkOpened, String>,
-    },
-    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-    OmenChatLiveReconnectResult {
-        session_id: ChatSessionId,
-        generation: u64,
-        descriptor: OmenChatDescriptor,
-        result: Result<crate::runtime::OmenChatLinkOpened, String>,
-    },
-    AddressChanged(String),
-    OpenAddress,
-    BrowserPaneAddressChanged {
-        tab_id: TabId,
-        value: String,
-    },
-    OpenBrowserPaneAddress(TabId),
-    ReloadBrowserPane(TabId),
-    BrowserPaneBack(TabId),
-    BrowserPaneForward(TabId),
-    BrowserPaneTop(TabId),
-    StopBrowserPaneTask(TabId),
-    InlineProbeBrowserPane(TabId),
-    LiveProbeBrowserPane(TabId),
-    WarmBrowserPanePath(TabId),
-    RetryBrowserPaneAfterPath(TabId),
-    BrowserPanePathDiagnostics(TabId),
-    CaptureBrowserPaneRender(TabId),
-    DismissBrowserPaneWarning(TabId),
-    DismissBrowserPaneRequest(TabId),
-    ToggleBrowserPaneIdentify(TabId),
-    OpenSetupAddress,
-    ReloadBrowser,
-    BrowserBack,
-    BrowserForward,
-    StopBrowserTask,
-    InlineProbe,
-    LiveProbe,
-    WarmPath,
-    RetryAfterPath,
-    PathDiagnostics,
-    CaptureBrowserRender,
-    ShowDiagnostics,
+    OpenOmenChat(usize),
+    InspectPeer(usize),
+    SaveEntry(usize),
+    ToggleTrust(usize),
+    ToggleIdentify(usize),
+    CycleDelivery(usize),
+    RequestPath(usize),
+    UsePropagation(usize),
+    ClearPropagation,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum InterfaceMessage {
+    CreateTcpClient,
+    CreateI2p,
+    CreateRNode,
+    CreateGatewayPreset(String),
+    SelectProfile(usize),
+    ToggleEnabled(usize),
+    DeleteProfile(usize),
+    ConfirmDelete,
+    CancelDelete,
+    NameChanged { profile_id: String, value: String },
+    TcpClientHostChanged { profile_id: String, value: String },
+    TcpClientPortChanged { profile_id: String, value: String },
+    TcpClientIfacNetworkChanged { profile_id: String, value: String },
+    TcpClientIfacPassphraseChanged { profile_id: String, value: String },
+    TcpServerHostChanged { profile_id: String, value: String },
+    TcpServerPortChanged { profile_id: String, value: String },
+    TcpServerIfacNetworkChanged { profile_id: String, value: String },
+    TcpServerIfacPassphraseChanged { profile_id: String, value: String },
+    ToggleI2pConnectable(usize),
+    I2pPeersChanged { profile_id: String, value: String },
+    RNodeDevicePortChanged { profile_id: String, value: String },
+    RNodeFrequencyChanged { profile_id: String, value: String },
+    RNodeBandwidthChanged { profile_id: String, value: String },
+    RNodeTxPowerChanged { profile_id: String, value: String },
+    RNodeSpreadingFactorChanged { profile_id: String, value: String },
+    RNodeCodingRateChanged { profile_id: String, value: String },
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum DiagnosticsMessage {
+    Show,
     PreviewManagedConfig,
     ExportManagedConfig,
-    PreviewDiagnosticsBundle,
-    ExportDiagnosticsBundle,
+    PreviewBundle,
+    ExportBundle,
     PreviewLiveInteropReport,
     ExportLiveInteropReport,
     NativePreflight,
@@ -179,264 +207,298 @@ pub(in crate::desktop) enum Message {
     NativeLxmfPropagationDiagnostics,
     SyncPropagationNow,
     BeginKnownDestinationsPreload,
-    CreateIdentity,
-    ActivateManagedIdentity(String),
-    ActiveIdentityLabelChanged(String),
-    DeleteActiveIdentity,
-    ConfirmDeleteActiveIdentity,
-    CancelDeleteActiveIdentity,
-    ClearActiveIdentity,
-    AnnounceIdentityNow,
-    CreateTcpClientInterface,
-    CreateI2pInterface,
-    CreateRNodeInterface,
-    CreateGatewayPreset(String),
-    SwitchConversation(usize),
-    ConversationScrolled {
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum WorkspacePaneMessage {
+    NewConversation,
+    CloseConversationTab(u64),
+    Clicked(pane_grid::Pane),
+    Dragged(pane_grid::DragEvent),
+    Resized(pane_grid::ResizeEvent),
+    Maximize(pane_grid::Pane),
+    Restore,
+    Close(pane_grid::Pane),
+    RestoreDesktop(DesktopPane),
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum ShellMessage {
+    SwitchSection(WorkspaceSection),
+    ToggleNavigation,
+    WorkspaceScrollTick,
+    InternalEventsReady,
+    PersistenceDeadlineReached,
+    MonitoringTick,
+    LxmfReconcileDeadlineReached,
+    BrowserPartialDeadlineReached,
+    OmenChatMaintenanceDeadlineReached,
+    WindowCloseRequested(window::Id),
+    WindowShutdownBegin(window::Id),
+    WindowShutdownComplete {
+        window_id: window::Id,
+        outcome: ShutdownOutcome,
+    },
+    KeyboardModifiersChanged(keyboard::Modifiers),
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum BrowserMessage {
+    SelectTab(usize),
+    NewTab,
+    CloseTab,
+    ClosePaneTab(TabId),
+    AddressChanged(String),
+    OpenAddress,
+    PaneAddressChanged { tab_id: TabId, value: String },
+    OpenPaneAddress(TabId),
+    ReloadPane(TabId),
+    PaneBack(TabId),
+    PaneForward(TabId),
+    PaneTop(TabId),
+    StopPaneTask(TabId),
+    InlineProbePane(TabId),
+    LiveProbePane(TabId),
+    WarmPanePath(TabId),
+    RetryPaneAfterPath(TabId),
+    PanePathDiagnostics(TabId),
+    CapturePaneRender(TabId),
+    DismissPaneWarning(TabId),
+    DismissPaneRequest(TabId),
+    TogglePaneIdentify(TabId),
+    OpenSetupAddress,
+    Reload,
+    Back,
+    Forward,
+    StopTask,
+    InlineProbe,
+    LiveProbe,
+    WarmPath,
+    RetryAfterPath,
+    PathDiagnostics,
+    CaptureRender,
+    FieldKey(BrowserFieldKey),
+    SubmitFieldDraft,
+    CancelFieldDraft,
+    FocusItem { reverse: bool },
+    ActivateFocusedItem,
+    Zoom { direction: isize },
+    ScrollPage { direction: isize },
+    Page(PageMessage),
+    PageForTab { tab_id: TabId, page: PageMessage },
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum ConversationMessage {
+    Switch(usize),
+    Scrolled {
         conversation_id: u64,
         offset: RelativeOffset,
     },
-    JumpConversationToPresent(u64),
-    ConversationTitleChanged(String),
-    ConversationBodyChanged(String),
-    ConversationPanePeerChanged {
+    JumpToPresent(u64),
+    TitleChanged(String),
+    BodyChanged(String),
+    PanePeerChanged {
         conversation_id: u64,
         value: String,
     },
-    ConversationPaneTitleChanged {
+    PaneTitleChanged {
         conversation_id: u64,
         value: String,
     },
-    ConversationPaneBodyChanged {
+    PaneBodyChanged {
         conversation_id: u64,
         value: String,
     },
-    ConversationPaneBodyEdited {
+    PaneBodyEdited {
         conversation_id: u64,
         action: text_editor::Action,
     },
-    PickConversationAttachment(u64),
-    ConversationAttachmentPicked {
-        conversation_id: u64,
-        result: Result<Option<PathBuf>, String>,
-    },
-    RemoveConversationAttachment {
+    PickAttachment(u64),
+    RemoveAttachment {
         conversation_id: u64,
         index: usize,
     },
-    OpenConversationAttachment(PathBuf),
-    ToggleConversationPaneDeliveryMode(u64),
-    ToggleConversationPaneTicket(u64),
-    SendConversationPaneDraft(u64),
-    PrepareLatestLxmfRetryForConversation(u64),
-    SendLatestLxmfRetryForConversation(u64),
-    SelectConversationPaneRow {
+    OpenAttachment(PathBuf),
+    TogglePaneDeliveryMode(u64),
+    TogglePaneTicket(u64),
+    SendPaneDraft(u64),
+    PrepareLatestRetryForConversation(u64),
+    SendLatestRetryForConversation(u64),
+    SelectPaneRow {
         conversation_id: u64,
         key: String,
     },
-    PrepareLxmfRetryForConversationRow {
+    PrepareRetryForConversationRow {
         conversation_id: u64,
         key: String,
     },
-    SendLxmfRetryForConversationRow {
+    SendRetryForConversationRow {
         conversation_id: u64,
         key: String,
     },
-    DismissConversationPaneRow {
+    DismissPaneRow {
         conversation_id: u64,
         key: String,
     },
-    CloseConversationPaneDetails {
+    ClosePaneDetails {
         conversation_id: u64,
     },
     SyncPropagationForConversationRow {
         conversation_id: u64,
         key: String,
     },
-    InspectConversationPanePeer(u64),
-    RequestConversationPanePeerPath(u64),
-    ConversationPaneDiagnostics(u64),
-    ToggleConversationPaneTrust(u64),
-    ToggleConversationDeliveryMode,
-    ToggleConversationTicket,
-    SendConversationDraft,
-    PrepareLatestLxmfRetry,
-    SendLatestLxmfRetry,
-    SelectConversationRow(String),
-    PrepareLxmfRetryForRow(String),
-    SendLxmfRetryForRow(String),
+    InspectPanePeer(u64),
+    RequestPanePeerPath(u64),
+    PaneDiagnostics(u64),
+    TogglePaneTrust(u64),
+    ToggleDeliveryMode,
+    ToggleTicket,
+    SendDraft,
+    PrepareLatestRetry,
+    SendLatestRetry,
+    SelectRow(String),
+    PrepareRetryForRow(String),
+    SendRetryForRow(String),
     SyncPropagationForRow(String),
     SyncMessages,
-    InspectLxmfPeer,
-    RequestLxmfPeerPath,
-    SwitchDirectoryKind(crate::directory::DirectoryKind),
-    SwitchDirectoryScope(DirectoryScope),
-    DirectoryFilterChanged(String),
-    SelectDirectoryEntry(usize),
-    OpenDirectoryEntry(usize),
-    OpenPeerChat(usize),
-    #[cfg(feature = "chat-client")]
-    OpenDirectoryOmenChat(usize),
-    InspectDirectoryPeer(usize),
-    SaveDirectoryEntry(usize),
-    ToggleDirectoryTrust(usize),
-    ToggleDirectoryIdentify(usize),
-    CycleDirectoryDelivery(usize),
-    RequestDirectoryPath(usize),
-    UseDirectoryPropagation(usize),
-    ClearDirectoryPropagation,
-    SelectInterfaceProfile(usize),
-    ToggleInterfaceEnabled(usize),
-    DeleteInterfaceProfile(usize),
-    ConfirmInterfaceDelete,
-    CancelInterfaceDelete,
-    SelectPlugin(usize),
-    TogglePlugin(usize),
-    BeginPluginRemove(usize),
-    ToggleSelectedPlugin,
-    BeginPluginInstall,
-    BeginSelectedPluginRemove,
-    RefreshPlugins,
-    ShowPluginLogs,
-    InterfaceNameChanged {
-        profile_id: String,
+    InspectPeer,
+    RequestPeerPath,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum ConversationCompletionMessage {
+    AttachmentPicked {
+        conversation_id: u64,
+        result: Result<Option<PathBuf>, String>,
+    },
+}
+
+#[cfg(feature = "chat-client")]
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum OmenChatMessage {
+    NewPane,
+    ServerEntryChanged(String),
+    OpenServerEntry,
+    ToggleRooms,
+    JoinRoom {
+        session_id: ChatSessionId,
+        room: String,
+    },
+    DraftChanged {
+        session_id: ChatSessionId,
         value: String,
     },
-    TcpClientHostChanged {
-        profile_id: String,
-        value: String,
+    Scrolled {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        offset: RelativeOffset,
     },
-    TcpClientPortChanged {
-        profile_id: String,
-        value: String,
+    JumpToPresent {
+        session_id: ChatSessionId,
+        room_id: RoomId,
     },
-    TcpClientIfacNetworkChanged {
-        profile_id: String,
-        value: String,
+    SendDraft(ChatSessionId),
+    ResendLocalEcho {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+        body: String,
+        action: bool,
     },
-    TcpClientIfacPassphraseChanged {
-        profile_id: String,
-        value: String,
-    },
-    TcpServerHostChanged {
-        profile_id: String,
-        value: String,
-    },
-    TcpServerPortChanged {
-        profile_id: String,
-        value: String,
-    },
-    TcpServerIfacNetworkChanged {
-        profile_id: String,
-        value: String,
-    },
-    TcpServerIfacPassphraseChanged {
-        profile_id: String,
-        value: String,
-    },
-    ToggleI2pConnectable(usize),
-    I2pPeersChanged {
-        profile_id: String,
-        value: String,
-    },
-    RNodeDevicePortChanged {
-        profile_id: String,
-        value: String,
-    },
-    RNodeFrequencyChanged {
-        profile_id: String,
-        value: String,
-    },
-    RNodeBandwidthChanged {
-        profile_id: String,
-        value: String,
-    },
-    RNodeTxPowerChanged {
-        profile_id: String,
-        value: String,
-    },
-    RNodeSpreadingFactorChanged {
-        profile_id: String,
-        value: String,
-    },
-    RNodeCodingRateChanged {
-        profile_id: String,
-        value: String,
-    },
-    SetTheme(String),
-    SetFontSize(u16),
-    SelectPreferredExternalBrowser(usize),
-    ClearPreferredExternalBrowser,
-    ToggleClearwebSocksProxy,
-    ToggleClearwebRemoteMedia,
-    ToggleAutoSyncAfterPropagationAccept,
-    SelectNativeBackend,
-    StartNativeRuntime,
-    NativeQuickstart,
-    InterfaceStatsSampled(Result<crate::runtime::InterfaceStats, String>),
-    ToggleNavigation,
-    BrowserFieldKey(BrowserFieldKey),
-    SubmitBrowserFieldDraft,
-    CancelBrowserFieldDraft,
-    FocusBrowserItem {
-        reverse: bool,
-    },
-    ActivateFocusedBrowserItem,
-    BrowserZoom {
-        direction: isize,
-    },
-    ScrollBrowserPage {
-        direction: isize,
-    },
-    Tick,
-    Page(PageMessage),
-    PageForTab {
-        tab_id: TabId,
-        page: PageMessage,
-    },
-    WorkspacePaneClicked(pane_grid::Pane),
-    WorkspacePaneDragged(pane_grid::DragEvent),
-    WorkspacePaneResized(pane_grid::ResizeEvent),
-    WorkspacePaneMaximize(pane_grid::Pane),
-    WorkspacePaneRestore,
-    WorkspacePaneClose(pane_grid::Pane),
-    RestoreDesktopPane(DesktopPane),
-    #[cfg(feature = "chat-client")]
-    CloseOmenChatSession(ChatSessionId),
-    WindowCloseRequested(window::Id),
-    WindowShutdownComplete(window::Id),
-    KeyboardModifiersChanged(keyboard::Modifiers),
-    OpenExternalLinkWith(usize),
-    CopyExternalLinkUrl,
-    CopyActiveIdentityHash,
-    PromptExternalUrl(String),
-    #[cfg(feature = "chat-client")]
-    OpenCachedOmenChatMedia(String),
-    #[cfg(feature = "chat-client")]
-    LoadOmenChatMedia(String),
-    #[cfg(feature = "chat-client")]
-    FetchOmenChatUploadResource {
+    LoadOlderHistory(ChatSessionId),
+    CloseSession(ChatSessionId),
+    OpenCachedMedia(String),
+    LoadMedia(String),
+    FetchUploadResource {
         session_id: ChatSessionId,
         resource_id: String,
     },
-    #[cfg(feature = "chat-client")]
-    PickOmenChatUpload(ChatSessionId),
-    #[cfg(feature = "chat-client")]
-    OmenChatUploadPicked {
+    PickUpload(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    RequestPath(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ReconnectSession(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ReconnectSessionIfDisconnected(ChatSessionId),
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum OmenChatTransportCompletionMessage {
+    PathRequest {
+        session_id: ChatSessionId,
+        destination: String,
+        result: Result<bool, String>,
+    },
+    LiveOpen(Box<OmenChatLiveOpenCompletion>),
+    LiveReconnect(Box<OmenChatLiveReconnectCompletion>),
+}
+
+#[cfg(feature = "chat-client")]
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum OmenChatMediaCompletionMessage {
+    UploadPicked {
         session_id: ChatSessionId,
         result: Result<Option<PathBuf>, String>,
     },
-    #[cfg(feature = "chat-client")]
-    OmenChatGifFramesLoaded {
+    GifFramesLoaded {
         path: String,
-        result: Result<Vec<u8>, String>,
+        result: Result<super::omenchat_desktop_state::DecodedOmenChatGif, String>,
     },
-    #[cfg(feature = "chat-client")]
-    OmenChatMediaLoaded {
+    CacheCompleted(Box<OmenChatMediaCacheCompletion>),
+    StaleMediaRemoved,
+    MediaLoaded {
         url: String,
-        result: Result<DownloadedFile, String>,
+        result: Result<(DownloadedFile, Vec<String>), String>,
     },
-    DismissExternalLinkPrompt,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum Message {
+    Shell(ShellMessage),
+    Browser(BrowserMessage),
+    Conversation(ConversationMessage),
+    ConversationCompletion(ConversationCompletionMessage),
+    #[cfg(feature = "chat-client")]
+    OmenChat(OmenChatMessage),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    OmenChatTransportCompletion(OmenChatTransportCompletionMessage),
+    #[cfg(feature = "chat-client")]
+    OmenChatMediaCompletion(Box<OmenChatMediaCompletionMessage>),
+    WorkspacePane(WorkspacePaneMessage),
+    Diagnostics(DiagnosticsMessage),
+    Identity(IdentityMessage),
+    Interface(InterfaceMessage),
+    Directory(DirectoryMessage),
+    Plugin(PluginMessage),
+    Theme(ThemeMessage),
+    Clearweb(ClearwebMessage),
+    ExternalBrowser(ExternalBrowserMessage),
+    Runtime(RuntimeMessage),
+    #[cfg(test)]
+    TestUnhandledRoutingMessage,
+}
+
+#[cfg(all(test, feature = "desktop-ui"))]
+mod size_tests {
+    use super::Message;
+
+    #[test]
+    fn asynchronous_completion_envelopes_keep_router_message_small() {
+        assert!(
+            std::mem::size_of::<Message>() < 128,
+            "desktop Message grew to {} bytes",
+            std::mem::size_of::<Message>()
+        );
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum ShutdownOutcome {
+    Stopped,
+    Failed(String),
+    TimedOut,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

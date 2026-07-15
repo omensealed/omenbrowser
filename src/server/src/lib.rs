@@ -1,22 +1,29 @@
 #[cfg(feature = "live-rns-net")]
 compile_error!("live-rns-net was removed from omenchatd; use --features live-reticulum");
 
+pub mod admin_db;
 pub mod config;
+pub mod database_recovery;
 pub mod error;
 pub mod live;
 pub mod protocol;
 #[cfg(feature = "live-reticulum")]
 pub mod reticulum_live;
+pub mod server_log;
 pub mod session;
 pub mod store;
 pub mod transport;
+#[cfg(feature = "tui")]
 pub mod tui;
 mod tui_format;
+#[cfg(feature = "tui")]
 mod tui_layout;
+#[cfg(feature = "tui")]
 mod tui_text;
 pub mod upload;
 
 use error::ServerResult;
+use std::io::Read;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +33,8 @@ pub enum CliCommand {
     Tui(ServerOptions),
     Status(ServerOptions),
     Doctor(ServerOptions),
+    UploadsRepairLedger(ServerOptions),
+    DatabaseRestoreMigrationBackup(ServerOptions, DatabaseRestoreOptions),
     ConfigShow(ServerOptions),
     ConfigSet(ServerOptions, ConfigSetOptions),
     RoomsList(ServerOptions),
@@ -34,6 +43,7 @@ pub enum CliCommand {
     RoomsArchive(ServerOptions, RoomSelectOptions),
     InterfacesTcpServer(ServerOptions, TcpServerOverride),
     InterfacesTcpClient(ServerOptions, TcpClientOverride),
+    Invalid(String),
     Help,
     Version,
 }
@@ -63,6 +73,11 @@ pub struct ConfigSetOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseRestoreOptions {
+    pub backup: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomAddOptions {
     pub name: String,
     pub topic: Option<String>,
@@ -85,7 +100,7 @@ pub struct TcpServerOverride {
     pub listen_port: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TcpClientOverride {
     pub target_host: String,
     pub target_port: u16,
@@ -93,8 +108,26 @@ pub struct TcpClientOverride {
     pub passphrase: Option<String>,
 }
 
+impl std::fmt::Debug for TcpClientOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpClientOverride")
+            .field("target_host", &self.target_host)
+            .field("target_port", &self.target_port)
+            .field("network_name", &self.network_name)
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
 impl CliCommand {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Self {
+        let args = match resolve_passphrase_args(args.into_iter().collect()) {
+            Ok(args) => args,
+            Err(error) => return Self::Invalid(error),
+        };
         let mut args = args.into_iter();
         let Some(command) = args.next() else {
             return Self::Help;
@@ -105,6 +138,8 @@ impl CliCommand {
             "tui" => Self::Tui(parse_options(args)),
             "status" => Self::Status(parse_options(args)),
             "doctor" => Self::Doctor(parse_options(args)),
+            "uploads" => parse_uploads_command(args),
+            "database" => parse_database_command(args),
             "config" => parse_config_command(args),
             "rooms" => parse_rooms_command(args),
             "interfaces" => parse_interfaces_command(args),
@@ -168,7 +203,17 @@ impl Omenchatd {
             }
             CliCommand::Tui(options) => {
                 let config = config_from_options(&options)?;
-                tui::run_admin_console(config)
+                #[cfg(feature = "tui")]
+                {
+                    tui::run_admin_console(config)
+                }
+                #[cfg(not(feature = "tui"))]
+                {
+                    let _ = config;
+                    Err(crate::error::ServerError::Message(
+                        "omenchatd tui is unavailable in this headless build; rebuild with --features server-full or tui".into(),
+                    ))
+                }
             }
             CliCommand::Status(options) => {
                 let config = config_from_options(&options)?;
@@ -179,6 +224,32 @@ impl Omenchatd {
             CliCommand::Doctor(options) => {
                 let config = config_from_options(&options)?;
                 print!("{}", render_doctor_report(&config));
+                Ok(())
+            }
+            CliCommand::UploadsRepairLedger(options) => {
+                let config = config_from_options(&options)?;
+                print!("{}", repair_upload_ledger(&config)?);
+                Ok(())
+            }
+            CliCommand::DatabaseRestoreMigrationBackup(options, restore) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::restore_migration_backup(
+                    &config.database_path,
+                    &restore.backup,
+                )?;
+                println!(
+                    "restored omenchatd database from schema v{} migration backup",
+                    report.source_version
+                );
+                println!("database: {}", config.database_path.display());
+                println!(
+                    "preserved previous database: {}",
+                    report.preserved_database.display()
+                );
+                println!(
+                    "Run `omenchatd doctor --home {}` before restarting the server.",
+                    config.root_dir().display()
+                );
                 Ok(())
             }
             CliCommand::ConfigShow(options) => {
@@ -218,29 +289,43 @@ impl Omenchatd {
             }
             CliCommand::RoomsList(options) => {
                 let config = config_from_options(&options)?;
-                for (room_id, name, topic) in config::list_rooms(&config)? {
+                config::init_files(&config)?;
+                let database = admin_db::AdminDatabase::open(&config.database_path)?;
+                for room in database.list_rooms()? {
                     println!(
                         "#{name}\troom_id={room_id}\ttopic={topic}",
-                        topic = topic.unwrap_or_default()
+                        name = room.name,
+                        room_id = room.room_id,
+                        topic = room.topic.unwrap_or_default()
                     );
                 }
                 Ok(())
             }
             CliCommand::RoomsAdd(options, room) => {
                 let config = config_from_options(&options)?;
-                config::add_room(&config, &room.name, room.topic.as_deref())?;
+                config::init_files(&config)?;
+                let database = admin_db::AdminDatabase::open(&config.database_path)?;
+                database.create_room(room.name.clone(), room.topic)?;
                 println!("room ready: #{}", room.name.trim().trim_start_matches('#'));
                 Ok(())
             }
             CliCommand::RoomsSetTopic(options, room) => {
                 let config = config_from_options(&options)?;
-                config::update_room_topic(&config, room.room_id, room.topic.as_deref())?;
+                config::init_files(&config)?;
+                let database = admin_db::AdminDatabase::open(&config.database_path)?;
+                let room_id = u32::try_from(room.room_id)
+                    .map_err(|_| error::ServerError::Message("room not found".into()))?;
+                database.update_room_topic(room_id, room.topic)?;
                 println!("room topic updated: id={}", room.room_id);
                 Ok(())
             }
             CliCommand::RoomsArchive(options, room) => {
                 let config = config_from_options(&options)?;
-                config::archive_room(&config, room.room_id)?;
+                config::init_files(&config)?;
+                let database = admin_db::AdminDatabase::open(&config.database_path)?;
+                let room_id = u32::try_from(room.room_id)
+                    .map_err(|_| error::ServerError::Message("room not found".into()))?;
+                database.archive_room(room_id)?;
                 println!("room archived: id={}", room.room_id);
                 Ok(())
             }
@@ -258,6 +343,7 @@ impl Omenchatd {
                 println!("updated {}", config.reticulum_config_file().display());
                 Ok(())
             }
+            CliCommand::Invalid(error) => Err(crate::error::ServerError::Message(error)),
             CliCommand::Help => {
                 print_help();
                 Ok(())
@@ -283,6 +369,65 @@ fn parse_config_command(args: impl IntoIterator<Item = String>) -> CliCommand {
         }
         _ => CliCommand::Help,
     }
+}
+
+fn parse_uploads_command(args: impl IntoIterator<Item = String>) -> CliCommand {
+    let mut args = args.into_iter();
+    let Some(command) = args.next() else {
+        return CliCommand::Help;
+    };
+    if command != "repair-ledger" {
+        return CliCommand::Help;
+    }
+    let mut confirmed = false;
+    let options = args
+        .filter(|arg| {
+            if arg == "--confirm" {
+                confirmed = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>();
+    if !confirmed {
+        return CliCommand::Invalid(
+            "upload ledger repair requires --confirm and must be run while omenchatd is stopped"
+                .into(),
+        );
+    }
+    CliCommand::UploadsRepairLedger(parse_options(options))
+}
+
+fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand {
+    let mut args = args.into_iter();
+    if args.next().as_deref() != Some("restore-migration-backup") {
+        return CliCommand::Help;
+    }
+    let mut confirmed = false;
+    let mut backup = None;
+    let mut options = ServerOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--confirm" => confirmed = true,
+            "--from" => backup = args.next().map(PathBuf::from),
+            "--home" => options.home = args.next().map(PathBuf::from),
+            other => {
+                return CliCommand::Invalid(format!("unknown database restore option: {other}"));
+            }
+        }
+    }
+    if !confirmed {
+        return CliCommand::Invalid(
+            "database restore requires --confirm and must be run while omenchatd is stopped".into(),
+        );
+    }
+    let Some(backup) = backup else {
+        return CliCommand::Invalid(
+            "database restore requires --from <generated-migration-backup>".into(),
+        );
+    };
+    CliCommand::DatabaseRestoreMigrationBackup(options, DatabaseRestoreOptions { backup })
 }
 
 fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
@@ -575,6 +720,96 @@ fn parse_tcp_client_override(value: &str) -> Option<TcpClientOverride> {
     })
 }
 
+fn resolve_passphrase_args(args: Vec<String>) -> Result<Vec<String>, String> {
+    let mut resolved = Vec::with_capacity(args.len());
+    let mut args = args.into_iter();
+    let mut source_seen = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--passphrase" | "--ifac-passphrase" => {
+                ensure_single_passphrase_source(&mut source_seen)?;
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a value"))?;
+                eprintln!(
+                    "warning: --passphrase exposes secrets in process listings; use --passphrase-file, --passphrase-stdin, or --passphrase-prompt"
+                );
+                resolved.extend(["--passphrase".into(), validate_passphrase(value)?]);
+            }
+            "--passphrase-file" | "--ifac-passphrase-file" => {
+                ensure_single_passphrase_source(&mut source_seen)?;
+                let path = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a path"))?;
+                let value = read_passphrase_file(std::path::Path::new(&path))?;
+                resolved.extend(["--passphrase".into(), value]);
+            }
+            "--passphrase-stdin" | "--ifac-passphrase-stdin" => {
+                ensure_single_passphrase_source(&mut source_seen)?;
+                let value = read_passphrase_from_reader(std::io::stdin().lock())?;
+                resolved.extend(["--passphrase".into(), value]);
+            }
+            "--passphrase-prompt" | "--ifac-passphrase-prompt" => {
+                ensure_single_passphrase_source(&mut source_seen)?;
+                let value = rpassword::prompt_password("IFAC passphrase: ")
+                    .map_err(|error| format!("failed to read hidden IFAC passphrase: {error}"))?;
+                resolved.extend(["--passphrase".into(), validate_passphrase(value)?]);
+            }
+            _ => resolved.push(arg),
+        }
+    }
+    Ok(resolved)
+}
+
+fn ensure_single_passphrase_source(seen: &mut bool) -> Result<(), String> {
+    if std::mem::replace(seen, true) {
+        return Err("choose exactly one passphrase source".into());
+    }
+    Ok(())
+}
+
+fn read_passphrase_file(path: &std::path::Path) -> Result<String, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect passphrase file: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("passphrase file must be a regular non-symlink file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("passphrase file permissions must not allow group or other access".into());
+        }
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("failed to open passphrase file: {error}"))?;
+    read_passphrase_from_reader(file)
+}
+
+fn read_passphrase_from_reader(reader: impl Read) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read passphrase: {error}"))?;
+    if bytes.len() > 4096 {
+        return Err("passphrase input exceeds 4096 bytes".into());
+    }
+    let value =
+        String::from_utf8(bytes).map_err(|_| "passphrase input is not valid UTF-8".to_string())?;
+    validate_passphrase(value.trim_end_matches(['\r', '\n']).to_owned())
+}
+
+fn validate_passphrase(value: String) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("passphrase must not be empty".into());
+    }
+    if value.contains('\0') {
+        return Err("passphrase must not contain NUL bytes".into());
+    }
+    Ok(value)
+}
+
 fn config_from_options(options: &ServerOptions) -> ServerResult<config::ServerConfig> {
     let root = options
         .home
@@ -594,10 +829,12 @@ fn default_home() -> PathBuf {
 fn print_help() {
     println!("omenchatd commands:");
     println!("  --version");
-    println!("  init [--home <path>] [--tcp-server <listen_ip:port>] [--tcp-client <host:port>] [--network-name <name>] [--passphrase <pass>]");
-    println!("  run [--home <path>] [--tcp-server <listen_ip:port>] [--tcp-client <host:port>] [--network-name <name>] [--passphrase <pass>]");
+    println!("  init [--home <path>] [--tcp-server <listen_ip:port>] [--tcp-client <host:port>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]");
+    println!("  run [--home <path>] [--tcp-server <listen_ip:port>] [--tcp-client <host:port>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]");
     println!("  status [--home <path>]");
     println!("  doctor [--home <path>]");
+    println!("  uploads repair-ledger --confirm [--home <path>]  # server must be stopped");
+    println!("  database restore-migration-backup --from <path> --confirm [--home <path>]  # server must be stopped");
     println!("  config show [--home <path>]");
     println!(
         "  config set [--home <path>] [--name <name>] [--operator-label <label>] [--motd <text>] [--announce-interval <minutes>]"
@@ -609,8 +846,13 @@ fn print_help() {
     println!("  rooms topic <room_id> [--topic <topic>] [--home <path>]");
     println!("  rooms archive <room_id> [--home <path>]");
     println!("  interfaces tcp-server <listen_ip:port> [--home <path>]");
-    println!("  interfaces tcp-client <host:port> [--home <path>] [--network-name <name>] [--passphrase <pass>]");
-    println!("  tui [--home <path>]");
+    println!("  interfaces tcp-client <host:port> [--home <path>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]");
+    println!("  --passphrase <pass> is deprecated because argv may be visible to other processes");
+    if cfg!(feature = "tui") {
+        println!("  tui [--home <path>]");
+    } else {
+        println!("  tui [unavailable in this headless build]");
+    }
 }
 
 fn print_version() {
@@ -622,11 +864,16 @@ fn print_version() {
 }
 
 fn compiled_feature_summary() -> String {
-    [("live-reticulum", cfg!(feature = "live-reticulum"))]
-        .into_iter()
-        .map(|(name, enabled)| format!("{name}:{}", if enabled { "on" } else { "off" }))
-        .collect::<Vec<_>>()
-        .join(",")
+    [
+        ("server-headless", cfg!(feature = "server-headless")),
+        ("server-full", cfg!(feature = "server-full")),
+        ("live-reticulum", cfg!(feature = "live-reticulum")),
+        ("tui", cfg!(feature = "tui")),
+    ]
+    .into_iter()
+    .map(|(name, enabled)| format!("{name}:{}", if enabled { "on" } else { "off" }))
+    .collect::<Vec<_>>()
+    .join(",")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -717,7 +964,79 @@ fn doctor_checks(config: &config::ServerConfig) -> Vec<DoctorCheck> {
     checks.push(room_check(config));
     checks.push(interface_check(&reticulum_config));
     checks.push(limit_check(config));
+    checks.push(upload_ledger_check(config));
     checks
+}
+
+fn upload_ledger_check(config: &config::ServerConfig) -> DoctorCheck {
+    if !config.database_path.is_file() {
+        return DoctorCheck {
+            level: DoctorLevel::Warn,
+            name: "upload ledger",
+            detail: "database is unavailable; upload reconciliation was not run".into(),
+        };
+    }
+    let database = match crate::admin_db::AdminDatabase::open_read_only(&config.database_path) {
+        Ok(database) => database,
+        Err(error) => {
+            return DoctorCheck {
+                level: DoctorLevel::Fail,
+                name: "upload ledger",
+                detail: format!("read-only database inspection failed: {error}"),
+            };
+        }
+    };
+    let report = match database.inspect_upload_ledgers(config.upload_cache_path()) {
+        Ok(report) => report,
+        Err(error) => {
+            return DoctorCheck {
+                level: DoctorLevel::Fail,
+                name: "upload ledger",
+                detail: format!("identity reconciliation failed: {error}"),
+            };
+        }
+    };
+    let detail = format!(
+        "tracked={} files/{} disk={} files/{} missing={} mismatched={} orphan={} unsafe={}",
+        report.tracked_files,
+        crate::tui_format::human_bytes(report.tracked_bytes),
+        report.disk_files,
+        crate::tui_format::human_bytes(report.disk_bytes),
+        report.missing,
+        report.mismatched,
+        report.orphans,
+        report.unsafe_paths,
+    );
+    DoctorCheck {
+        level: if report.unsafe_paths > 0 {
+            DoctorLevel::Fail
+        } else if report.missing > 0 || report.mismatched > 0 || report.orphans > 0 {
+            DoctorLevel::Warn
+        } else {
+            DoctorLevel::Pass
+        },
+        name: "upload ledger",
+        detail,
+    }
+}
+
+fn repair_upload_ledger(config: &config::ServerConfig) -> ServerResult<String> {
+    if !config.database_path.is_file() {
+        return Err(crate::error::ServerError::Message(
+            "upload ledger repair refused: database file is missing; run `omenchatd init` only when creating a new server home"
+                .into(),
+        ));
+    }
+    let database =
+        crate::admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+    let repair = database.repair_upload_ledgers(config.upload_cache_path())?;
+    Ok(format!(
+        "omenchatd upload ledger repair: removed_missing={} removed_unsafe={} preserved_orphans={}\nNo files were deleted. Run `omenchatd doctor --home {}` to verify the repaired ledger.\n",
+        repair.removed_missing,
+        repair.removed_unsafe,
+        repair.preserved_orphans,
+        config.root_dir().display()
+    ))
 }
 
 fn path_check(name: &'static str, path: &std::path::Path, ok: bool, advice: &str) -> DoctorCheck {
@@ -1300,13 +1619,219 @@ mod tests {
     }
 
     #[test]
+    fn cli_requires_confirmation_for_upload_ledger_repair() {
+        assert!(matches!(
+            CliCommand::parse(["uploads".to_string(), "repair-ledger".to_string()]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "uploads".to_string(),
+                "repair-ledger".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-repair".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::UploadsRepairLedger(ServerOptions {
+                home: Some(PathBuf::from("/tmp/omenchatd-repair")),
+                tcp_server: None,
+                tcp_client: None,
+            })
+        );
+    }
+
+    #[test]
+    fn cli_requires_explicit_source_and_confirmation_for_database_restore() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "restore-migration-backup".to_string(),
+                "--from".to_string(),
+                "/tmp/backup.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "restore-migration-backup".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--from")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "restore-migration-backup".to_string(),
+                "--from".to_string(),
+                "/tmp/omenchat.sqlite.pre-v2-from-v1.bak".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-restore".to_string(),
+            ]),
+            CliCommand::DatabaseRestoreMigrationBackup(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-restore")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseRestoreOptions {
+                    backup: PathBuf::from("/tmp/omenchat.sqlite.pre-v2-from-v1.bak"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_database_restore_uses_only_the_selected_isolated_home() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-database-restore-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let current = crate::store::OmenchatStore::open(&config.database_path)
+            .expect("open current database");
+        current
+            .ensure_room("current-cli", None)
+            .expect("current marker");
+        drop(current);
+
+        let backup = crate::store::migration_backup_path(&config.database_path, 1);
+        let source = rusqlite::Connection::open(&backup).expect("restore source");
+        source
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .expect("source schema");
+        source
+            .execute(
+                "INSERT INTO rooms(name, created_at) VALUES ('restored-cli', 1)",
+                [],
+            )
+            .expect("source marker");
+        source
+            .pragma_update(None, "user_version", 1)
+            .expect("source version");
+        drop(source);
+
+        Omenchatd
+            .run(CliCommand::DatabaseRestoreMigrationBackup(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseRestoreOptions {
+                    backup: backup.clone(),
+                },
+            ))
+            .expect("CLI restore");
+
+        let restored =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("restored database");
+        assert!(restored
+            .room_by_name("restored-cli")
+            .expect("restored marker")
+            .is_some());
+        assert!(restored
+            .room_by_name("current-cli")
+            .expect("current marker absent")
+            .is_none());
+        drop(restored);
+        assert!(backup.is_file(), "selected source remains intact");
+        std::fs::remove_dir_all(root).expect("remove isolated CLI restore home");
+    }
+
+    #[test]
+    fn cli_room_mutations_use_the_initialized_administrative_database_path() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-admin-db-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let options = ServerOptions {
+            home: Some(root.clone()),
+            ..ServerOptions::default()
+        };
+        Omenchatd
+            .run(CliCommand::RoomsAdd(
+                options.clone(),
+                RoomAddOptions {
+                    name: "ops".into(),
+                    topic: Some("Operations".into()),
+                },
+            ))
+            .expect("add room through administrative database");
+        let config = config::ServerConfig::for_root(root.clone());
+        let room = config::list_rooms(&config)
+            .expect("list rooms")
+            .into_iter()
+            .find(|(_, name, _)| name == "ops")
+            .expect("ops room");
+        Omenchatd
+            .run(CliCommand::RoomsSetTopic(
+                options.clone(),
+                RoomTopicOptions {
+                    room_id: room.0,
+                    topic: Some("Incidents".into()),
+                },
+            ))
+            .expect("update room through administrative database");
+        assert_eq!(
+            config::list_rooms(&config)
+                .expect("updated rooms")
+                .into_iter()
+                .find(|(_, name, _)| name == "ops")
+                .and_then(|(_, _, topic)| topic),
+            Some("Incidents".into())
+        );
+        Omenchatd
+            .run(CliCommand::RoomsArchive(
+                options,
+                RoomSelectOptions { room_id: room.0 },
+            ))
+            .expect("archive room through administrative database");
+        assert!(!config::list_rooms(&config)
+            .expect("rooms after archive")
+            .iter()
+            .any(|(_, name, _)| name == "ops"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cli_parses_version_command() {
         assert_eq!(
             CliCommand::parse(["--version".to_string()]),
             CliCommand::Version
         );
-        assert!(compiled_feature_summary().contains("live-reticulum:"));
+        let features = compiled_feature_summary();
+        assert!(features.contains("server-headless:"));
+        assert!(features.contains("server-full:"));
+        assert!(features.contains("live-reticulum:"));
+        assert!(features.contains("tui:"));
         assert!(!compiled_feature_summary().contains("live-rns-net:"));
+    }
+
+    #[cfg(not(feature = "tui"))]
+    #[test]
+    fn headless_build_rejects_tui_without_touching_a_server_home() {
+        let root =
+            std::env::temp_dir().join(format!("omenchatd-headless-tui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let error = Omenchatd
+            .run(CliCommand::Tui(ServerOptions {
+                home: Some(root.clone()),
+                ..ServerOptions::default()
+            }))
+            .expect_err("headless TUI must fail");
+        assert!(error.to_string().contains("headless build"));
+        assert!(!root.exists());
     }
 
     #[test]
@@ -1360,6 +1885,138 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_upload_ledger_discrepancies_without_repairing() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-doctor-upload-ledger-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("init");
+        let identity = b"doctor-upload-user";
+        let identity_dir = crate::upload::upload_identity_dir(&config, identity);
+        std::fs::create_dir_all(&identity_dir).expect("identity dir");
+        let missing = identity_dir.join("missing.bin");
+        let orphan = identity_dir.join("orphan.bin");
+        std::fs::write(&orphan, b"orphan").expect("orphan");
+        let connection = rusqlite::Connection::open(&config.database_path).expect("database");
+        connection
+            .execute(
+                "INSERT INTO users(user_id, rns_identity_hash, display_name, first_seen_at, last_seen_at)
+                 VALUES (41, ?1, 'Doctor Upload', 0, 0)",
+                [identity.as_slice()],
+            )
+            .expect("user");
+        connection
+            .execute(
+                "INSERT INTO upload_files(resource_id, room_id, actor_user_id, filename, byte_len, path, created_at)
+                 VALUES ('missing-resource', 1, 41, 'missing.bin', 7, ?1, 0)",
+                [missing.display().to_string()],
+            )
+            .expect("missing row");
+        drop(connection);
+
+        let warning = render_doctor_report(&config);
+        assert!(warning.contains("[WARN] upload ledger:"));
+        assert!(warning.contains("missing=1 mismatched=0 orphan=1 unsafe=0"));
+        assert!(orphan.exists());
+
+        let outside = root.join("outside.bin");
+        std::fs::write(&outside, b"outside").expect("outside");
+        let connection = rusqlite::Connection::open(&config.database_path).expect("database");
+        connection
+            .execute(
+                "INSERT INTO upload_files(resource_id, room_id, actor_user_id, filename, byte_len, path, created_at)
+                 VALUES ('unsafe-resource', 1, 41, 'outside.bin', 7, ?1, 1)",
+                [outside.display().to_string()],
+            )
+            .expect("unsafe row");
+        drop(connection);
+
+        let failure = render_doctor_report(&config);
+        assert!(failure.contains("omenchatd doctor: fail"));
+        assert!(failure.contains("[FAIL] upload ledger:"));
+        assert!(failure.contains("missing=1 mismatched=0 orphan=1 unsafe=1"));
+        assert!(orphan.exists());
+        assert!(outside.exists());
+        let connection = rusqlite::Connection::open(&config.database_path).expect("database");
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM upload_files", [], |row| row.get(0))
+            .expect("upload row count");
+        assert_eq!(rows, 2);
+
+        drop(connection);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_upload_ledger_repair_preserves_all_files() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-upload-repair-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("init");
+        drop(
+            crate::store::OmenchatStore::open(&config.database_path)
+                .expect("initialize current schema"),
+        );
+        let identity = b"repair-upload-user";
+        let identity_dir = crate::upload::upload_identity_dir(&config, identity);
+        std::fs::create_dir_all(&identity_dir).expect("identity dir");
+        let missing = identity_dir.join("missing.bin");
+        let orphan = identity_dir.join("orphan.bin");
+        let outside = root.join("outside.bin");
+        std::fs::write(&orphan, b"orphan").expect("orphan");
+        std::fs::write(&outside, b"outside").expect("outside");
+        let connection = rusqlite::Connection::open(&config.database_path).expect("database");
+        connection
+            .execute(
+                "INSERT INTO users(user_id, rns_identity_hash, display_name, first_seen_at, last_seen_at)
+                 VALUES (42, ?1, 'Repair Upload', 0, 0)",
+                [identity.as_slice()],
+            )
+            .expect("user");
+        for (resource_id, path) in [
+            ("missing-resource", &missing),
+            ("unsafe-resource", &outside),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO upload_files(resource_id, room_id, actor_user_id, filename, byte_len, path, created_at)
+                     VALUES (?1, 1, 42, 'file.bin', 7, ?2, 0)",
+                    (resource_id, path.display().to_string()),
+                )
+                .expect("upload row");
+        }
+        drop(connection);
+
+        let report = repair_upload_ledger(&config).expect("explicit repair");
+        assert!(report.contains("removed_missing=1"));
+        assert!(report.contains("removed_unsafe=1"));
+        assert!(report.contains("preserved_orphans=1"));
+        assert!(orphan.exists());
+        assert!(outside.exists());
+        let connection = rusqlite::Connection::open(&config.database_path).expect("database");
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM upload_files", [], |row| row.get(0))
+            .expect("row count");
+        assert_eq!(rows, 0);
+        drop(connection);
+
+        let repeated = repair_upload_ledger(&config).expect("idempotent repair");
+        assert!(repeated.contains("removed_missing=0"));
+        assert!(repeated.contains("removed_unsafe=0"));
+        assert!(repeated.contains("preserved_orphans=1"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn config_set_persists_announce_interval_and_limits() {
         let root = std::env::temp_dir().join(format!(
             "omenchatd-config-set-limits-{}",
@@ -1401,5 +2058,58 @@ mod tests {
         assert_eq!(config.limits.rate_messages_per_minute, 33);
         assert_eq!(config.limits.rate_commands_per_minute, 17);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn safe_passphrase_file_is_resolved_for_tcp_client_command() {
+        let path =
+            std::env::temp_dir().join(format!("omenchatd-passphrase-{}", std::process::id()));
+        std::fs::write(&path, b"server-secret\n").expect("passphrase file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("permissions");
+        }
+
+        let command = CliCommand::parse([
+            "interfaces".into(),
+            "tcp-client".into(),
+            "gateway.example:42420".into(),
+            "--passphrase-file".into(),
+            path.display().to_string(),
+        ]);
+        let CliCommand::InterfacesTcpClient(_, tcp) = command else {
+            panic!("expected TCP client command");
+        };
+        assert_eq!(tcp.passphrase.as_deref(), Some("server-secret"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn passphrase_sources_are_exclusive_and_invalid_input_blocks_execution() {
+        let command = CliCommand::parse([
+            "run".into(),
+            "--passphrase".into(),
+            "one".into(),
+            "--passphrase-stdin".into(),
+        ]);
+        assert!(matches!(command, CliCommand::Invalid(_)));
+        assert!(Omenchatd.run(command).is_err());
+        assert!(read_passphrase_from_reader(std::io::Cursor::new(vec![b'x'; 4097])).is_err());
+        assert!(read_passphrase_from_reader(std::io::Cursor::new(b"\n")).is_err());
+    }
+
+    #[test]
+    fn tcp_override_debug_redacts_passphrase() {
+        let value = TcpClientOverride {
+            target_host: "gateway.example".into(),
+            target_port: 42420,
+            network_name: Some("private".into()),
+            passphrase: Some("server-debug-secret".into()),
+        };
+        let debug = format!("{value:?}");
+        assert!(!debug.contains("server-debug-secret"));
+        assert!(debug.contains("<redacted>"));
     }
 }

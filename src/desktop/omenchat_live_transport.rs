@@ -95,7 +95,10 @@ impl DesktopApp {
         link: crate::micron::LinkAction,
     ) -> Option<Task<Message>> {
         let mut descriptor = OmenChatDescriptor::from_omenchat_link(&link.target)?;
-        apply_omenchat_link_fields(&mut descriptor, &link.fields);
+        if !apply_omenchat_link_fields(&mut descriptor, &link.fields) {
+            self.app.status.task = "OMENchat link metadata exceeds client limits".into();
+            return None;
+        }
         descriptor.local_display_name = Some(self.local_omenchat_display_name());
         if let Some(session_id) = self
             .omenchat

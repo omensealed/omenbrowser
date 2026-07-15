@@ -11,18 +11,20 @@ use crate::media::{
 };
 
 use super::super::{
-    safe_timeline_text, ChatSessionId, ChatTimelineUpload, Message, OmenChatMediaLoadState, RoomId,
-    ICON_DOWNLOAD, ICON_OMENCHAT_RECONNECT, ICON_OPEN, OMENCHAT_INLINE_MEDIA_MAX_HEIGHT,
-    OMENCHAT_INLINE_MEDIA_MAX_WIDTH,
+    safe_timeline_text, ChatSessionId, ChatTimelineUpload, ExternalBrowserMessage, Message,
+    OmenChatMediaLoadState, OmenChatMessage, RoomId, ICON_DOWNLOAD, ICON_OMENCHAT_RECONNECT,
+    ICON_OPEN, OMENCHAT_INLINE_MEDIA_MAX_HEIGHT, OMENCHAT_INLINE_MEDIA_MAX_WIDTH,
 };
 use super::human_bytes;
 use super::inline_icon_button_owned;
 pub(in crate::desktop) use super::omenchat_media_format::cached_media_is_animated_gif;
 use super::omenchat_media_format::inline_media_size;
+pub(in crate::desktop) use super::omenchat_media_format::{
+    gif_image_descriptor_count, image_dimensions_from_bytes,
+};
 #[cfg(test)]
 pub(in crate::desktop) use super::omenchat_media_format::{
-    gif_image_descriptor_count, image_dimensions_from_bytes, read_media_header_bytes,
-    scale_media_dimensions,
+    read_media_header_bytes, scale_media_dimensions,
 };
 
 pub(in crate::desktop) fn omenchat_upload_cache_key(
@@ -281,7 +283,7 @@ pub(in crate::desktop) fn omenchat_upload_action_row<'a>(
             upload_line = upload_line.push(inline_icon_button_owned(
                 ICON_OPEN,
                 "Open attachment",
-                Message::OpenCachedOmenChatMedia(path.clone()),
+                Message::OmenChat(OmenChatMessage::OpenCachedMedia(path.clone())),
             ));
         }
         Some(state @ OmenChatMediaLoadState::Loading { .. }) => {
@@ -294,20 +296,20 @@ pub(in crate::desktop) fn omenchat_upload_action_row<'a>(
             upload_line = upload_line.push(inline_icon_button_owned(
                 ICON_DOWNLOAD,
                 "Retry attachment download",
-                Message::FetchOmenChatUploadResource {
+                Message::OmenChat(OmenChatMessage::FetchUploadResource {
                     session_id: upload.session_id,
                     resource_id: upload.resource_id.clone(),
-                },
+                }),
             ));
         }
         None => {
             upload_line = upload_line.push(inline_icon_button_owned(
                 ICON_DOWNLOAD,
                 "Download attachment",
-                Message::FetchOmenChatUploadResource {
+                Message::OmenChat(OmenChatMessage::FetchUploadResource {
                     session_id: upload.session_id,
                     resource_id: upload.resource_id.clone(),
-                },
+                }),
             ));
         }
     }
@@ -327,13 +329,13 @@ pub(in crate::desktop) fn omenchat_resend_action_row<'a>(
         inline_icon_button_owned(
             ICON_OMENCHAT_RECONNECT,
             "Resend message",
-            Message::ResendOmenChatLocalEcho {
+            Message::OmenChat(OmenChatMessage::ResendLocalEcho {
                 session_id,
                 room_id,
                 event_id,
                 body,
                 action,
-            },
+            }),
         )
     ]
     .spacing(6)
@@ -355,7 +357,7 @@ pub(in crate::desktop) fn omenchat_media_hint_row<'a>(
         hint_row = hint_row.push(inline_icon_button_owned(
             ICON_OPEN,
             "Open",
-            Message::PromptExternalUrl(url),
+            Message::ExternalBrowser(ExternalBrowserMessage::PromptUrl(url)),
         ));
         has_hint_row = true;
     }
@@ -363,7 +365,7 @@ pub(in crate::desktop) fn omenchat_media_hint_row<'a>(
         hint_row = hint_row.push(inline_icon_button_owned(
             ICON_OPEN,
             "Open",
-            Message::OpenCachedOmenChatMedia(path),
+            Message::OmenChat(OmenChatMessage::OpenCachedMedia(path)),
         ));
         has_hint_row = true;
     }
@@ -371,7 +373,7 @@ pub(in crate::desktop) fn omenchat_media_hint_row<'a>(
         hint_row = hint_row.push(inline_icon_button_owned(
             ICON_OPEN,
             "Load",
-            Message::LoadOmenChatMedia(url),
+            Message::OmenChat(OmenChatMessage::LoadMedia(url)),
         ));
         has_hint_row = true;
     }
@@ -381,7 +383,7 @@ pub(in crate::desktop) fn omenchat_media_hint_row<'a>(
 pub(in crate::desktop) fn omenchat_media_hint_preview<'a>(
     path: &str,
     animated: bool,
-    frames: Option<&'a iced_gif::Frames>,
+    frames: Option<&'a super::super::omenchat_desktop_state::OmenChatGifFrames>,
 ) -> Option<Element<'a, Message>> {
     let media = omenchat_inline_media_element(path, animated, frames);
     Some(container(media).width(Length::Fill).into())
@@ -389,7 +391,7 @@ pub(in crate::desktop) fn omenchat_media_hint_preview<'a>(
 
 pub(in crate::desktop) fn omenchat_upload_preview<'a>(
     state: &OmenChatMediaLoadState,
-    frames: Option<&'a iced_gif::Frames>,
+    frames: Option<&'a super::super::omenchat_desktop_state::OmenChatGifFrames>,
 ) -> Option<Element<'a, Message>> {
     let path = omenchat_media_state_image_path(state)?;
     let media =
@@ -400,19 +402,24 @@ pub(in crate::desktop) fn omenchat_upload_preview<'a>(
 pub(in crate::desktop) fn omenchat_inline_media_element<'a>(
     path: &str,
     animated: bool,
-    frames: Option<&'a iced_gif::Frames>,
+    frames: Option<&'a super::super::omenchat_desktop_state::OmenChatGifFrames>,
 ) -> Element<'a, Message> {
     let (width, height) = omenchat_inline_media_size(Path::new(path))
         .unwrap_or((OMENCHAT_INLINE_MEDIA_MAX_WIDTH, 240.0));
-    if animated {
-        if let Some(frames) = frames {
-            return iced_gif::Gif::new(frames)
-                .width(Length::Fixed(width))
-                .height(Length::Fixed(height))
-                .content_fit(ContentFit::Contain)
-                .into();
+    #[cfg(feature = "chat-client-gif")]
+    {
+        if animated {
+            if let Some(frames) = frames {
+                return iced_gif::Gif::new(frames)
+                    .width(Length::Fixed(width))
+                    .height(Length::Fixed(height))
+                    .content_fit(ContentFit::Contain)
+                    .into();
+            }
         }
     }
+    #[cfg(not(feature = "chat-client-gif"))]
+    let _ = (animated, frames);
     image(path.to_owned())
         .width(Length::Fixed(width))
         .height(Length::Fixed(height))

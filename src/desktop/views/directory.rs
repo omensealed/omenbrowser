@@ -8,8 +8,8 @@ use crate::directory::{DirectoryEntry, DirectoryKind, TrustLevel};
 use super::super::{
     action_grid, app_scrollable, card_container_style, format_epoch_secs, omen_button,
     omen_button_owned, relative_time, section_card, status_container_style, subtle_button,
-    subtle_button_owned, ui_size, wrapped_panel_text, wrapped_text_owned, DesktopApp, Message,
-    DIRECTORY_RENDER_LIMIT,
+    subtle_button_owned, ui_size, wrapped_panel_text, wrapped_text_owned, DesktopApp,
+    DirectoryMessage, Message, DIRECTORY_RENDER_LIMIT,
 };
 use super::directory_model::{
     directory_empty_text, directory_empty_text_for_scope, directory_entry_matches_view,
@@ -26,9 +26,15 @@ pub(in crate::desktop) fn directory_tab_button(
 ) -> Button<'static, Message> {
     let title = format!("{label} ({count})");
     if &kind == active {
-        omen_button_owned(title, Message::SwitchDirectoryKind(kind))
+        omen_button_owned(
+            title,
+            Message::Directory(DirectoryMessage::SwitchKind(kind)),
+        )
     } else {
-        subtle_button_owned(title, Message::SwitchDirectoryKind(kind))
+        subtle_button_owned(
+            title,
+            Message::Directory(DirectoryMessage::SwitchKind(kind)),
+        )
     }
 }
 
@@ -38,9 +44,15 @@ pub(in crate::desktop) fn directory_scope_button(
     active: &DirectoryScope,
 ) -> Button<'static, Message> {
     if &scope == active {
-        omen_button_owned(label.to_string(), Message::SwitchDirectoryScope(scope))
+        omen_button_owned(
+            label.to_string(),
+            Message::Directory(DirectoryMessage::SwitchScope(scope)),
+        )
     } else {
-        subtle_button_owned(label.to_string(), Message::SwitchDirectoryScope(scope))
+        subtle_button_owned(
+            label.to_string(),
+            Message::Directory(DirectoryMessage::SwitchScope(scope)),
+        )
     }
 }
 
@@ -51,21 +63,27 @@ pub(in crate::desktop) fn directory_selected_primary_actions(
     match kind {
         DirectoryKind::Node => row![omen_button(
             "Browse Node",
-            Message::OpenDirectoryEntry(index)
+            Message::Directory(DirectoryMessage::OpenEntry(index))
         )]
         .spacing(8)
         .wrap()
         .into(),
         DirectoryKind::Peer => row![
-            omen_button("Message Peer", Message::OpenPeerChat(index)),
-            subtle_button("Inspect Peer", Message::InspectDirectoryPeer(index)),
+            omen_button(
+                "Message Peer",
+                Message::Directory(DirectoryMessage::OpenPeerChat(index))
+            ),
+            subtle_button(
+                "Inspect Peer",
+                Message::Directory(DirectoryMessage::InspectPeer(index))
+            ),
         ]
         .spacing(8)
         .wrap()
         .into(),
         DirectoryKind::Propagation => row![omen_button(
             "Use Propagation",
-            Message::UseDirectoryPropagation(index)
+            Message::Directory(DirectoryMessage::UsePropagation(index))
         )]
         .spacing(8)
         .wrap()
@@ -73,7 +91,7 @@ pub(in crate::desktop) fn directory_selected_primary_actions(
         #[cfg(feature = "chat-client")]
         DirectoryKind::OmenChat => row![omen_button(
             "Open Chat",
-            Message::OpenDirectoryOmenChat(index)
+            Message::Directory(DirectoryMessage::OpenOmenChat(index))
         )]
         .spacing(8)
         .wrap()
@@ -81,14 +99,14 @@ pub(in crate::desktop) fn directory_selected_primary_actions(
         #[cfg(not(feature = "chat-client"))]
         DirectoryKind::OmenChat => row![subtle_button(
             "Select",
-            Message::SelectDirectoryEntry(index)
+            Message::Directory(DirectoryMessage::SelectEntry(index))
         )]
         .spacing(8)
         .wrap()
         .into(),
         DirectoryKind::Unknown => row![subtle_button(
             "Select",
-            Message::SelectDirectoryEntry(index)
+            Message::Directory(DirectoryMessage::SelectEntry(index))
         )]
         .spacing(8)
         .wrap()
@@ -191,9 +209,12 @@ pub(in crate::desktop) fn directory_view(desktop: &DesktopApp) -> Element<'_, Me
                     "Search directory by name, destination, kind, delivery...",
                     &desktop.app.directory_state.filter
                 )
-                .on_input(Message::DirectoryFilterChanged)
+                .on_input(|value| Message::Directory(DirectoryMessage::FilterChanged(value)))
                 .width(Length::Fill),
-                subtle_button("Clear", Message::DirectoryFilterChanged(String::new())),
+                subtle_button(
+                    "Clear",
+                    Message::Directory(DirectoryMessage::FilterChanged(String::new()))
+                ),
             ]
             .spacing(8)
             .wrap(),
@@ -229,7 +250,7 @@ pub(in crate::desktop) fn directory_view(desktop: &DesktopApp) -> Element<'_, Me
                     action_grid(
                         vec![subtle_button(
                             "Clear Propagation",
-                            Message::ClearDirectoryPropagation
+                            Message::Directory(DirectoryMessage::ClearPropagation)
                         ),],
                         3
                     ),
@@ -308,16 +329,32 @@ fn directory_entry_card(
         "entry"
     };
     let primary_action = match entry.kind {
-        DirectoryKind::Node => subtle_button("Browse", Message::OpenDirectoryEntry(index)),
-        DirectoryKind::Peer => subtle_button("Message", Message::OpenPeerChat(index)),
-        DirectoryKind::Propagation => subtle_button("Use", Message::UseDirectoryPropagation(index)),
+        DirectoryKind::Node => subtle_button(
+            "Browse",
+            Message::Directory(DirectoryMessage::OpenEntry(index)),
+        ),
+        DirectoryKind::Peer => subtle_button(
+            "Message",
+            Message::Directory(DirectoryMessage::OpenPeerChat(index)),
+        ),
+        DirectoryKind::Propagation => subtle_button(
+            "Use",
+            Message::Directory(DirectoryMessage::UsePropagation(index)),
+        ),
         #[cfg(feature = "chat-client")]
-        DirectoryKind::OmenChat => {
-            subtle_button("Open Chat", Message::OpenDirectoryOmenChat(index))
-        }
+        DirectoryKind::OmenChat => subtle_button(
+            "Open Chat",
+            Message::Directory(DirectoryMessage::OpenOmenChat(index)),
+        ),
         #[cfg(not(feature = "chat-client"))]
-        DirectoryKind::OmenChat => subtle_button("Select", Message::SelectDirectoryEntry(index)),
-        DirectoryKind::Unknown => subtle_button("Select", Message::SelectDirectoryEntry(index)),
+        DirectoryKind::OmenChat => subtle_button(
+            "Select",
+            Message::Directory(DirectoryMessage::SelectEntry(index)),
+        ),
+        DirectoryKind::Unknown => subtle_button(
+            "Select",
+            Message::Directory(DirectoryMessage::SelectEntry(index)),
+        ),
     };
     let destination_preview = short_destination_hash(&entry.destination_hash);
     let display_name = entry.display_name.clone();
@@ -341,7 +378,10 @@ fn directory_entry_card(
             text(relative_time(entry.last_seen))
                 .size(ui_size(13))
                 .width(Length::Shrink),
-            subtle_button("Select", Message::SelectDirectoryEntry(index)),
+            subtle_button(
+                "Select",
+                Message::Directory(DirectoryMessage::SelectEntry(index))
+            ),
             primary_action,
         ]
         .spacing(8)
@@ -396,9 +436,12 @@ fn directory_selected_details_card(desktop: &DesktopApp) -> Element<'_, Message>
     let mut management_actions = vec![
         subtle_button(
             if entry.saved { "Remove Saved" } else { "Save" },
-            Message::SaveDirectoryEntry(index),
+            Message::Directory(DirectoryMessage::SaveEntry(index)),
         ),
-        subtle_button(trust_action, Message::ToggleDirectoryTrust(index)),
+        subtle_button(
+            trust_action,
+            Message::Directory(DirectoryMessage::ToggleTrust(index)),
+        ),
     ];
     if directory_kind_supports_identify_toggle(&entry.kind) {
         management_actions.push(subtle_button(
@@ -407,18 +450,18 @@ fn directory_selected_details_card(desktop: &DesktopApp) -> Element<'_, Message>
             } else {
                 "Identify"
             },
-            Message::ToggleDirectoryIdentify(index),
+            Message::Directory(DirectoryMessage::ToggleIdentify(index)),
         ));
     }
     if directory_kind_supports_delivery_preference(&entry.kind) {
         management_actions.push(subtle_button(
             "Delivery",
-            Message::CycleDirectoryDelivery(index),
+            Message::Directory(DirectoryMessage::CycleDelivery(index)),
         ));
     }
     management_actions.push(subtle_button(
         "Request Path",
-        Message::RequestDirectoryPath(index),
+        Message::Directory(DirectoryMessage::RequestPath(index)),
     ));
     let selected_management = action_grid(management_actions, 3);
 

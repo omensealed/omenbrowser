@@ -2,6 +2,7 @@
 use ratatui::style::{Color, Modifier, Style};
 #[cfg(feature = "tui")]
 use ratatui::text::{Line, Span};
+use std::sync::{Arc, OnceLock};
 use unicode_width::UnicodeWidthChar;
 
 use crate::micron::parser::{
@@ -10,12 +11,17 @@ use crate::micron::parser::{
 };
 
 const SECTION_INDENT: usize = 2;
+pub const MICRON_RENDER_MAX_WIDTH_CELLS: usize = 4 * 1024;
+pub const MICRON_RENDER_MAX_ROWS: usize = u16::MAX as usize;
+pub const MICRON_RENDER_MAX_CELLS: usize = 1024 * 1024;
+const MICRON_RENDER_LIMIT_NOTICE: &str =
+    "[OMENbrowser: rendered output was truncated at a safe display limit]";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControlRef {
-    pub name: String,
-    pub kind: String,
-    pub value: String,
+    pub name: Arc<str>,
+    pub kind: Arc<str>,
+    pub value: Arc<str>,
     pub offset: usize,
     pub length: usize,
     pub masked: bool,
@@ -24,8 +30,8 @@ pub struct ControlRef {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
-    pub style: TextStyle,
-    pub link: Option<LinkAction>,
+    pub style: Arc<TextStyle>,
+    pub link: Option<Arc<LinkAction>>,
     pub control: Option<ControlRef>,
     pub cursor: bool,
 }
@@ -59,12 +65,22 @@ impl RenderedRow {
     }
 }
 
+pub(crate) fn default_render_style() -> Arc<TextStyle> {
+    static DEFAULT_STYLE: OnceLock<Arc<TextStyle>> = OnceLock::new();
+    DEFAULT_STYLE
+        .get_or_init(|| Arc::new(TextStyle::default()))
+        .clone()
+}
+
 pub fn render_document(document: &Document, width: usize) -> Vec<RenderedRow> {
-    document
-        .rows
-        .iter()
-        .flat_map(|row| wrap_rendered_row(render_row(row, width), width))
-        .collect()
+    let width = bounded_render_width(width);
+    collect_bounded_rendered_rows(
+        document
+            .rows
+            .iter()
+            .flat_map(|row| wrap_rendered_row(render_row(row, width), width)),
+        width,
+    )
 }
 
 pub fn hit_regions_for_document(document: &Document, width: usize) -> Vec<HitRegion> {
@@ -74,23 +90,25 @@ pub fn hit_regions_for_document(document: &Document, width: usize) -> Vec<HitReg
 
 pub fn hit_regions_for_rendered_rows(rows: &[RenderedRow]) -> Vec<HitRegion> {
     let mut regions = Vec::new();
-    for (row_index, row) in rows.iter().enumerate() {
+    for (row_index, row) in rows.iter().take(MICRON_RENDER_MAX_ROWS).enumerate() {
         let mut current: Option<HitRegion> = None;
-        for (col, cell) in row.cells.iter().enumerate() {
-            let action = cell
-                .link
-                .clone()
-                .map(HitAction::Link)
-                .or_else(|| cell.control.clone().map(HitAction::Control));
-            let Some(action) = action else {
+        for (col, cell) in row
+            .cells
+            .iter()
+            .take(MICRON_RENDER_MAX_WIDTH_CELLS)
+            .enumerate()
+        {
+            if cell.link.is_none() && cell.control.is_none() {
                 if let Some(region) = current.take() {
                     regions.push(region);
                 }
                 continue;
-            };
+            }
             let col = col as u16;
             match &mut current {
-                Some(region) if region.action == action && region.col_end == col => {
+                Some(region)
+                    if cell_matches_hit_action(cell, &region.action) && region.col_end == col =>
+                {
                     region.col_end = col + 1;
                 }
                 Some(region) => {
@@ -99,7 +117,7 @@ pub fn hit_regions_for_rendered_rows(rows: &[RenderedRow]) -> Vec<HitRegion> {
                         row: row_index as u16,
                         col_start: col,
                         col_end: col + 1,
-                        action,
+                        action: owned_hit_action(cell).expect("actionable cell checked"),
                     });
                 }
                 None => {
@@ -107,7 +125,7 @@ pub fn hit_regions_for_rendered_rows(rows: &[RenderedRow]) -> Vec<HitRegion> {
                         row: row_index as u16,
                         col_start: col,
                         col_end: col + 1,
-                        action,
+                        action: owned_hit_action(cell).expect("actionable cell checked"),
                     });
                 }
             }
@@ -117,6 +135,21 @@ pub fn hit_regions_for_rendered_rows(rows: &[RenderedRow]) -> Vec<HitRegion> {
         }
     }
     regions
+}
+
+fn cell_matches_hit_action(cell: &Cell, action: &HitAction) -> bool {
+    match action {
+        HitAction::Link(link) => cell.link.as_deref() == Some(link),
+        HitAction::Control(control) => cell.control.as_ref() == Some(control),
+    }
+}
+
+fn owned_hit_action(cell: &Cell) -> Option<HitAction> {
+    cell.link
+        .as_deref()
+        .cloned()
+        .map(HitAction::Link)
+        .or_else(|| cell.control.clone().map(HitAction::Control))
 }
 
 pub fn hit_test_document(
@@ -140,8 +173,15 @@ fn render_row_with_field_focus(
     width: usize,
     field_focus: Option<FieldFocus<'_>>,
 ) -> RenderedRow {
+    let width = bounded_render_width(width);
     let mut cells = Vec::new();
-    let indent = " ".repeat(row.depth.saturating_sub(1) * SECTION_INDENT);
+    let indent_len = row
+        .depth
+        .saturating_sub(1)
+        .saturating_mul(SECTION_INDENT)
+        .min(MICRON_RENDER_MAX_CELLS);
+    let indent = " ".repeat(indent_len);
+    let base_style = Arc::new(row.base_style.clone());
 
     if row.kind == RowKind::Divider {
         let available = width.saturating_sub(indent.len()).max(1);
@@ -152,7 +192,7 @@ fn render_row_with_field_focus(
                 .take(width)
                 .map(|ch| Cell {
                     ch,
-                    style: row.base_style.clone(),
+                    style: base_style.clone(),
                     link: None,
                     control: None,
                     cursor: false,
@@ -165,10 +205,10 @@ fn render_row_with_field_focus(
         };
     }
 
-    for ch in indent.chars() {
+    for ch in indent.chars().take(MICRON_RENDER_MAX_CELLS) {
         cells.push(Cell {
             ch,
-            style: row.base_style.clone(),
+            style: base_style.clone(),
             link: None,
             control: None,
             cursor: false,
@@ -178,17 +218,26 @@ fn render_row_with_field_focus(
     for fragment in &row.fragments {
         match fragment {
             Fragment::Span(span) => {
-                for ch in span.text.chars() {
+                let link = span.link.clone().map(Arc::new);
+                let style = Arc::new(span.style.clone());
+                for ch in span
+                    .text
+                    .chars()
+                    .take(MICRON_RENDER_MAX_CELLS.saturating_sub(cells.len()))
+                {
                     cells.push(Cell {
                         ch,
-                        style: span.style.clone(),
-                        link: span.link.clone(),
+                        style: style.clone(),
+                        link: link.clone(),
                         control: None,
                         cursor: false,
                     });
                 }
             }
             Fragment::Control(control) => append_control(&mut cells, control, field_focus),
+        }
+        if cells.len() >= MICRON_RENDER_MAX_CELLS {
+            break;
         }
     }
 
@@ -276,15 +325,23 @@ fn append_control(cells: &mut Vec<Cell>, control: &FieldControl, field_focus: Op
     };
 
     let length = display.chars().count();
-    for (offset, ch) in display.chars().enumerate() {
+    let name: Arc<str> = Arc::from(control.name.as_str());
+    let kind: Arc<str> = Arc::from(control.kind.as_str());
+    let value: Arc<str> = Arc::from(control.value.as_str());
+    let style = Arc::new(style);
+    for (offset, ch) in display
+        .chars()
+        .take(MICRON_RENDER_MAX_CELLS.saturating_sub(cells.len()))
+        .enumerate()
+    {
         cells.push(Cell {
             ch,
             style: style.clone(),
             link: None,
             control: Some(ControlRef {
-                name: control.name.clone(),
-                kind: control.kind.clone(),
-                value: control.value.clone(),
+                name: name.clone(),
+                kind: kind.clone(),
+                value: value.clone(),
                 offset: source_start + offset,
                 length,
                 masked: control.masked,
@@ -300,6 +357,7 @@ pub fn render_document_with_field_cursor(
     focused_control: Option<&str>,
     field_cursor: Option<(&str, usize)>,
 ) -> Vec<RenderedRow> {
+    let width = bounded_render_width(width);
     let Some((field_name, cursor_byte)) = field_cursor else {
         return render_document(document, width);
     };
@@ -310,13 +368,80 @@ pub fn render_document_with_field_cursor(
         name: field_name,
         cursor_byte,
     };
-    document
-        .rows
-        .iter()
-        .flat_map(|row| {
+    collect_bounded_rendered_rows(
+        document.rows.iter().flat_map(|row| {
             wrap_rendered_row(render_row_with_field_focus(row, width, Some(focus)), width)
-        })
-        .collect()
+        }),
+        width,
+    )
+}
+
+fn bounded_render_width(width: usize) -> usize {
+    width.min(MICRON_RENDER_MAX_WIDTH_CELLS)
+}
+
+pub fn bound_rendered_rows(rows: Vec<RenderedRow>, width: usize) -> Vec<RenderedRow> {
+    collect_bounded_rendered_rows(rows, width)
+}
+
+fn collect_bounded_rendered_rows(
+    rows: impl IntoIterator<Item = RenderedRow>,
+    width: usize,
+) -> Vec<RenderedRow> {
+    let width = bounded_render_width(width);
+    let notice = render_limit_notice(width);
+    let reserved_cells = notice.cells.len();
+    let content_cell_limit = MICRON_RENDER_MAX_CELLS.saturating_sub(reserved_cells);
+    let rows = rows.into_iter();
+    let mut bounded = Vec::with_capacity(rows.size_hint().0.min(MICRON_RENDER_MAX_ROWS));
+    let mut retained_cells = 0usize;
+    let mut truncated = false;
+
+    for row in rows {
+        let Some(next_cells) = retained_cells.checked_add(row.cells.len()) else {
+            truncated = true;
+            break;
+        };
+        if bounded.len() >= MICRON_RENDER_MAX_ROWS.saturating_sub(1)
+            || next_cells > content_cell_limit
+        {
+            truncated = true;
+            break;
+        }
+        retained_cells = next_cells;
+        bounded.push(row);
+    }
+
+    if truncated {
+        bounded.push(notice);
+    }
+    bounded
+}
+
+fn render_limit_notice(width: usize) -> RenderedRow {
+    let cell_limit = if width == 0 {
+        MICRON_RENDER_LIMIT_NOTICE.chars().count()
+    } else {
+        width
+    };
+    let style = default_render_style();
+    RenderedRow {
+        cells: MICRON_RENDER_LIMIT_NOTICE
+            .chars()
+            .take(cell_limit)
+            .map(|ch| Cell {
+                ch,
+                style: style.clone(),
+                link: None,
+                control: None,
+                cursor: false,
+            })
+            .collect(),
+        align: Alignment::Left,
+        depth: 0,
+        base_style: TextStyle::default(),
+        wrap: false,
+    }
 }
 
 fn cursor_char_index(value: &str, cursor_byte: usize) -> usize {
@@ -364,7 +489,7 @@ fn wrap_rendered_row(row: RenderedRow, width: usize) -> Vec<RenderedRow> {
 
     let mut wrapped = Vec::new();
     let mut start = 0;
-    while start < row.cells.len() {
+    while start < row.cells.len() && wrapped.len() < MICRON_RENDER_MAX_ROWS {
         let mut end = start;
         let mut current_width = 0;
         let mut last_break = None;
@@ -429,10 +554,11 @@ fn align_row(mut row: RenderedRow, width: usize) -> RenderedRow {
         Alignment::Right => padding,
     };
     if left_padding > 0 {
+        let style = Arc::new(row.base_style.clone());
         let mut cells = vec![
             Cell {
                 ch: ' ',
-                style: row.base_style.clone(),
+                style,
                 link: None,
                 control: None,
                 cursor: false,
@@ -444,10 +570,11 @@ fn align_row(mut row: RenderedRow, width: usize) -> RenderedRow {
     }
     let right_padding = width.saturating_sub(cells_width(&row.cells));
     if right_padding > 0 {
+        let style = Arc::new(row.base_style.clone());
         row.cells.extend(vec![
             Cell {
                 ch: ' ',
-                style: row.base_style.clone(),
+                style,
                 link: None,
                 control: None,
                 cursor: false,
@@ -513,7 +640,7 @@ pub fn rendered_rows_to_lines(
                     .map(|cell| {
                         let focused =
                             cell.control.as_ref().is_some_and(|control| {
-                                Some(control.name.as_str()) == focused_control
+                                Some(control.name.as_ref()) == focused_control
                             }) || cell
                                 .link
                                 .as_ref()
@@ -681,9 +808,121 @@ mod tests {
             rows[0].cells[3]
                 .control
                 .as_ref()
-                .map(|control| control.name.as_str()),
+                .map(|control| control.name.as_ref()),
             Some("name")
         );
+    }
+
+    #[test]
+    fn rendered_cells_share_payload_bearing_action_metadata() {
+        let label = "L".repeat(128);
+        let forwarded = "f".repeat(crate::micron::parser::MICRON_LINK_FIELD_MAX_BYTES);
+        let field_value = "v".repeat(crate::micron::parser::MICRON_CONTROL_VALUE_MAX_BYTES);
+        let doc = parse_micron(&format!(
+            "`[{label}`mock.node:/path`{forwarded}] `<256|name`{field_value}>"
+        ));
+        let rows = render_document(&doc, 512);
+        let cells = &rows[0].cells;
+        let link_cells = cells
+            .iter()
+            .filter_map(|cell| cell.link.as_ref())
+            .collect::<Vec<_>>();
+        let control_cells = cells
+            .iter()
+            .filter_map(|cell| cell.control.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(link_cells.len(), label.len());
+        assert!(link_cells
+            .iter()
+            .all(|link| Arc::ptr_eq(link_cells[0], link)));
+        assert_eq!(control_cells.len(), 256);
+        assert!(control_cells.iter().all(|control| Arc::ptr_eq(
+            &control_cells[0].name,
+            &control.name
+        ) && Arc::ptr_eq(
+            &control_cells[0].kind,
+            &control.kind
+        ) && Arc::ptr_eq(
+            &control_cells[0].value,
+            &control.value
+        )));
+
+        let regions = hit_regions_for_rendered_rows(&rows);
+        assert!(regions.iter().any(|region| matches!(
+            &region.action,
+            HitAction::Link(link)
+                if link.target == "mock.node:/path" && link.fields == vec![forwarded.clone()]
+        )));
+        assert!(regions.iter().any(|region| matches!(
+            &region.action,
+            HitAction::Control(control)
+                if control.name.as_ref() == "name" && control.value.as_ref() == field_value
+        )));
+    }
+
+    #[test]
+    fn rendered_cells_share_styles_with_copy_on_write_mutation() {
+        let text = "a".repeat(1024);
+        let doc = parse_micron(&format!("`F123{text} `<256|name`guest>"));
+        let mut rows = render_document(&doc, 1400);
+        let text_cells = &rows[0].cells[..text.len()];
+        assert!(text_cells
+            .iter()
+            .all(|cell| Arc::ptr_eq(&text_cells[0].style, &cell.style)));
+        let control_cells = rows[0]
+            .cells
+            .iter()
+            .filter(|cell| cell.control.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(control_cells.len(), 256);
+        assert!(control_cells
+            .iter()
+            .all(|cell| Arc::ptr_eq(&control_cells[0].style, &cell.style)));
+
+        let neighbor_style = rows[0].cells[1].style.clone();
+        Arc::make_mut(&mut rows[0].cells[0].style).bold = true;
+        assert!(rows[0].cells[0].style.bold);
+        assert!(!rows[0].cells[1].style.bold);
+        assert!(!Arc::ptr_eq(&rows[0].cells[0].style, &neighbor_style));
+        assert!(Arc::ptr_eq(&rows[0].cells[1].style, &neighbor_style));
+
+        let default_one = default_render_style();
+        let default_two = default_render_style();
+        assert!(Arc::ptr_eq(&default_one, &default_two));
+    }
+
+    #[test]
+    fn renderer_bounds_width_rows_and_cells_with_visible_notice() {
+        let divider = render_document(&parse_micron("-="), usize::MAX);
+        assert_eq!(divider.len(), 1);
+        assert_eq!(divider[0].cells.len(), MICRON_RENDER_MAX_WIDTH_CELLS);
+
+        let markup = std::iter::repeat_n("row", 14_000)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rows = render_document(&parse_micron(&markup), 80);
+        assert!(rows.len() <= MICRON_RENDER_MAX_ROWS);
+        assert!(rows.iter().map(|row| row.cells.len()).sum::<usize>() <= MICRON_RENDER_MAX_CELLS);
+        assert!(rows
+            .last()
+            .is_some_and(|row| row.text().contains("rendered output was truncated")));
+
+        let empty = RenderedRow {
+            cells: Vec::new(),
+            align: Alignment::Left,
+            depth: 0,
+            base_style: TextStyle::default(),
+            wrap: false,
+        };
+        let row_saturated = bound_rendered_rows(
+            std::iter::repeat_n(empty, MICRON_RENDER_MAX_ROWS).collect(),
+            80,
+        );
+        assert_eq!(row_saturated.len(), MICRON_RENDER_MAX_ROWS);
+        assert!(row_saturated
+            .last()
+            .is_some_and(|row| row.text().contains("rendered output was truncated")));
     }
 
     #[test]
@@ -794,7 +1033,7 @@ mod tests {
             .filter(|cell| {
                 cell.control
                     .as_ref()
-                    .is_some_and(|control| control.name == "name")
+                    .is_some_and(|control| control.name.as_ref() == "name")
             })
             .map(|cell| cell.ch)
             .collect::<String>();
@@ -824,7 +1063,7 @@ mod tests {
                     && cell
                         .control
                         .as_ref()
-                        .is_some_and(|control| control.name == "message")
+                        .is_some_and(|control| control.name.as_ref() == "message")
             })
         }));
     }

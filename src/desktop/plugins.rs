@@ -1,6 +1,6 @@
 use iced::Task;
 
-use super::{DesktopApp, Message};
+use super::{DesktopApp, Message, PluginMessage};
 
 impl DesktopApp {
     pub(super) fn dispatch_plugin_message(
@@ -8,35 +8,35 @@ impl DesktopApp {
         message: Message,
     ) -> Result<Task<Message>, Message> {
         match message {
-            Message::SelectPlugin(index) => {
+            Message::Plugin(PluginMessage::Select(index)) => {
                 self.update_select_plugin(index);
                 Ok(Task::none())
             }
-            Message::TogglePlugin(index) => {
+            Message::Plugin(PluginMessage::Toggle(index)) => {
                 self.update_toggle_plugin(index);
                 Ok(Task::none())
             }
-            Message::BeginPluginRemove(index) => {
+            Message::Plugin(PluginMessage::BeginRemove(index)) => {
                 self.update_begin_plugin_remove(index);
                 Ok(Task::none())
             }
-            Message::ToggleSelectedPlugin => {
+            Message::Plugin(PluginMessage::ToggleSelected) => {
                 self.update_toggle_selected_plugin();
                 Ok(Task::none())
             }
-            Message::BeginPluginInstall => {
+            Message::Plugin(PluginMessage::BeginInstall) => {
                 self.update_begin_plugin_install();
                 Ok(Task::none())
             }
-            Message::BeginSelectedPluginRemove => {
+            Message::Plugin(PluginMessage::BeginSelectedRemove) => {
                 self.update_begin_selected_plugin_remove();
                 Ok(Task::none())
             }
-            Message::RefreshPlugins => {
+            Message::Plugin(PluginMessage::Refresh) => {
                 self.update_refresh_plugins();
                 Ok(Task::none())
             }
-            Message::ShowPluginLogs => {
+            Message::Plugin(PluginMessage::ShowLogs) => {
                 self.update_show_plugin_logs();
                 Ok(Task::none())
             }

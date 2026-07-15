@@ -3,7 +3,7 @@ use iced::widget::Button;
 use crate::interfaces::{GatewayPreset, InterfaceKind};
 
 use super::{omen_button_owned, subtle_button_owned, warning_button_owned};
-use crate::desktop::{DesktopApp, Message};
+use crate::desktop::{DesktopApp, InterfaceMessage, Message};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GatewayPresetButtonState {
@@ -23,7 +23,7 @@ pub(in crate::desktop) fn gateway_preset_buttons(
         .into_iter()
         .map(|preset| {
             let state = gateway_preset_button_state(desktop, &preset);
-            let message = Message::CreateGatewayPreset(preset.id);
+            let message = Message::Interface(InterfaceMessage::CreateGatewayPreset(preset.id));
             match state {
                 GatewayPresetButtonState::Missing => {
                     subtle_button_owned(format!("Add {}", preset.name), message)

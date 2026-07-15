@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver};
+use tokio::sync::watch;
 
 use crate::browser::cache::PageCache;
 use crate::browser::{BrowserAddress, BrowserPage, BrowserSession, DownloadedFile, PageSource};
@@ -28,8 +28,8 @@ use crate::messaging::{
 };
 use crate::micron::parser::DEFAULT_FG_DARK;
 use crate::micron::render::{
-    hit_regions_for_document, hit_regions_for_rendered_rows, hit_test_document, render_document,
-    HitAction, HitRegion, RenderedRow,
+    bound_rendered_rows, hit_regions_for_document, hit_regions_for_rendered_rows,
+    hit_test_document, render_document, HitAction, HitRegion, RenderedRow,
 };
 use crate::micron::{parse_micron, Document};
 use crate::plugins::micronplus::{
@@ -38,9 +38,9 @@ use crate::plugins::micronplus::{
     micronplus_event_from_target, parse_micronplus_tree,
     render_column_group_rows_with_widgets_fields_and_cursor,
     render_micronplus_rows_with_widgets_and_field_cursor,
-    render_micronplus_tree_rows_with_widgets_and_field_cursor, widget_event_from_control_event,
-    MicronPlusControlEvent, MicronPlusLayout, MicronPlusWidgetEvent, MicronPlusWidgetStore,
-    MicronPlusWidgetTree,
+    render_micronplus_tree_rows_with_widgets_and_field_cursor, retain_micronplus_control_event,
+    widget_event_from_control_event, MicronPlusControlEvent, MicronPlusLayout,
+    MicronPlusWidgetEvent, MicronPlusWidgetStore, MicronPlusWidgetTree,
 };
 use crate::plugins::BUILTIN_MICRONPLUS_PLUGIN_ID;
 use crate::plugins::{InstalledPlugin, PluginManifest, PluginRegistry};
@@ -59,11 +59,40 @@ use crate::storage::settings::{
     DeletedConversationSettings, ReticulumInstanceMode, RuntimeBackendSetting,
     SensitiveFormPersistence, WorkspaceSectionPreference,
 };
+use crate::structured_log_reader::{
+    load_recent_log_entries, PersistedLogLimits, PersistedLogStats,
+};
+use crate::structured_log_writer::{
+    enforce_structured_log_retention, StructuredLogDiskPolicy, StructuredLogDiskStats,
+    StructuredLogFlushHandle, StructuredLogWorker, StructuredLogWorkerMetrics,
+    STRUCTURED_LOG_MAX_FILE_BYTES, STRUCTURED_LOG_MAX_RETAIN_FILES, STRUCTURED_LOG_MIN_FILE_BYTES,
+};
 use crate::workspace::{FocusArea, WorkspaceSection};
 
 pub type TabId = u64;
 const UI_PREFERENCE_AUTOSAVE_DELAY_MS: u64 = 500;
 const STRUCTURED_LOG_DEFAULT_MAX_BYTES: u64 = 256 * 1024;
+const STRUCTURED_LOG_MESSAGE_BYTES: usize = 16 * 1024;
+const STRUCTURED_LOG_MEMORY_ENTRY_LIMIT: usize = 4096;
+const STRUCTURED_LOG_MEMORY_BYTES: usize = 4 * 1024 * 1024;
+const STRUCTURED_LOG_STARTUP_ENTRY_LIMIT: usize = 4096;
+const STRUCTURED_LOG_STARTUP_DIRECTORY_ENTRY_LIMIT: usize = 4096;
+const STRUCTURED_LOG_STARTUP_FILE_LIMIT: usize = 16;
+const INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES: usize = 32 * 1024 * 1024;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+const OMENCHAT_STAGED_FRAME_MAX_ITEMS: usize = 256;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+const OMENCHAT_STAGED_FRAME_MAX_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+const OMENCHAT_STAGED_RESOURCE_MAX_ITEMS: usize = 16;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+const OMENCHAT_STAGED_RESOURCE_MAX_BYTES: usize = 32 * 1024 * 1024;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+const OMENCHAT_STAGED_CLOSE_MAX_ITEMS: usize = 256;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+const OMENCHAT_STAGED_CLOSE_MAX_BYTES: usize = 256 * 1024;
+const STRUCTURED_LOG_STARTUP_FILE_BYTES: usize = 512 * 1024;
+const STRUCTURED_LOG_STARTUP_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const LXMF_DIRECT_PROOF_TIMEOUT_SECONDS: f64 = 45.0;
 const LXMF_DIRECT_PROOF_RECONCILE_INTERVAL_MS: u64 = 5_000;
 const LXMF_PROPAGATION_ROUTER_TIMEOUT_SECONDS: f64 = 45.0;
@@ -837,8 +866,194 @@ pub enum InternalAppEvent {
     Shutdown,
 }
 
+#[derive(Clone)]
+struct InternalEventSender {
+    sender: tokio::sync::mpsc::Sender<InternalEventEnvelope>,
+    wake: watch::Sender<u64>,
+    payload_budget: Arc<InternalEventPayloadBudget>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InternalEventTrySendError {
+    Full,
+    Closed,
+    ByteBudget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InternalEventSendError {
+    Closed,
+    ByteBudget,
+}
+
+#[derive(Debug)]
+struct InternalEventEnvelope {
+    event: InternalAppEvent,
+    _payload_permit: Option<InternalEventPayloadPermit>,
+}
+
+#[derive(Debug, Default)]
+struct InternalEventPayloadBudget {
+    queued_items: AtomicUsize,
+    queued_bytes: AtomicUsize,
+    rejected_events: AtomicU64,
+}
+
+#[derive(Debug)]
+struct InternalEventPayloadPermit {
+    budget: Arc<InternalEventPayloadBudget>,
+    bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InternalEventPayloadMetrics {
+    pub queued_items: usize,
+    pub queued_bytes: usize,
+    pub rejected_events: u64,
+}
+
+impl InternalEventPayloadBudget {
+    fn reserve(self: &Arc<Self>, bytes: usize) -> Option<InternalEventPayloadPermit> {
+        if bytes == 0 {
+            return None;
+        }
+        let reserved =
+            self.queued_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current
+                        .checked_add(bytes)
+                        .filter(|next| *next <= INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES)
+                });
+        if reserved.is_err() {
+            self.rejected_events.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        self.queued_items.fetch_add(1, Ordering::Relaxed);
+        Some(InternalEventPayloadPermit {
+            budget: self.clone(),
+            bytes,
+        })
+    }
+
+    fn reject_reserved(&self, bytes: usize) {
+        if bytes > 0 {
+            self.rejected_events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn metrics(&self) -> InternalEventPayloadMetrics {
+        InternalEventPayloadMetrics {
+            queued_items: self.queued_items.load(Ordering::Acquire),
+            queued_bytes: self.queued_bytes.load(Ordering::Acquire),
+            rejected_events: self.rejected_events.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Drop for InternalEventPayloadPermit {
+    fn drop(&mut self) {
+        self.budget.queued_items.fetch_sub(1, Ordering::Relaxed);
+        self.budget
+            .queued_bytes
+            .fetch_sub(self.bytes, Ordering::Release);
+    }
+}
+
+fn internal_omenchat_event_payload_bytes(event: &InternalAppEvent) -> usize {
+    match event {
+        InternalAppEvent::Runtime(RuntimeBusEvent::OmenChatLinkData(data)) => {
+            data.frame_bytes.len()
+        }
+        InternalAppEvent::Runtime(RuntimeBusEvent::OmenChatResourceData(data)) => data
+            .data
+            .len()
+            .saturating_add(data.metadata.as_ref().map_or(0, Vec::len)),
+        InternalAppEvent::Runtime(RuntimeBusEvent::OmenChatLinkClosed(data)) => {
+            data.reason.as_ref().map_or(0, String::len)
+        }
+        _ => 0,
+    }
+}
+
+impl InternalEventSender {
+    async fn send(&self, event: InternalAppEvent) -> Result<(), InternalEventSendError> {
+        let bytes = internal_omenchat_event_payload_bytes(&event);
+        let permit = self.payload_budget.reserve(bytes);
+        if bytes > 0 && permit.is_none() {
+            return Err(InternalEventSendError::ByteBudget);
+        }
+        let envelope = InternalEventEnvelope {
+            event,
+            _payload_permit: permit,
+        };
+        if self.sender.send(envelope).await.is_err() {
+            self.payload_budget.reject_reserved(bytes);
+            return Err(InternalEventSendError::Closed);
+        }
+        self.wake.send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
+        Ok(())
+    }
+
+    fn try_send(&self, event: InternalAppEvent) -> Result<(), InternalEventTrySendError> {
+        let bytes = internal_omenchat_event_payload_bytes(&event);
+        let permit = self.payload_budget.reserve(bytes);
+        if bytes > 0 && permit.is_none() {
+            return Err(InternalEventTrySendError::ByteBudget);
+        }
+        self.try_send_envelope(InternalEventEnvelope {
+            event,
+            _payload_permit: permit,
+        })
+    }
+
+    fn try_send_envelope(
+        &self,
+        envelope: InternalEventEnvelope,
+    ) -> Result<(), InternalEventTrySendError> {
+        let has_payload_permit = envelope._payload_permit.is_some();
+        self.sender.try_send(envelope).map_err(|error| {
+            self.payload_budget
+                .reject_reserved(usize::from(has_payload_permit));
+            match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => InternalEventTrySendError::Full,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    InternalEventTrySendError::Closed
+                }
+            }
+        })?;
+        self.wake.send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct InternalEventWake {
+    id: u64,
+    receiver: watch::Receiver<u64>,
+}
+
+impl InternalEventWake {
+    pub(crate) fn receiver(&self) -> watch::Receiver<u64> {
+        self.receiver.clone()
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl std::hash::Hash for InternalEventWake {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
 fn spawn_runtime_event_forwarder(
-    event_tx: Sender<InternalAppEvent>,
+    event_tx: InternalEventSender,
     mut receiver: broadcast::Receiver<crate::runtime::RuntimeBusEvent>,
 ) -> bool {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -847,15 +1062,10 @@ fn spawn_runtime_event_forwarder(
     handle.spawn(async move {
         loop {
             match receiver.recv().await {
-                Ok(event) => {
-                    if event_tx
-                        .send(InternalAppEvent::Runtime(event))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
+                Ok(event) => match event_tx.send(InternalAppEvent::Runtime(event)).await {
+                    Ok(()) | Err(InternalEventSendError::ByteBudget) => {}
+                    Err(InternalEventSendError::Closed) => break,
+                },
                 Err(broadcast::error::RecvError::Closed) => break,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
             }
@@ -4783,6 +4993,19 @@ pub struct MonitoringPanelState {
     pub last_network_snapshot: Option<NetworkSnapshot>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OmenChatEventStagingMetrics {
+    pub frame_items: usize,
+    pub frame_bytes: usize,
+    pub resource_items: usize,
+    pub resource_bytes: usize,
+    pub close_items: usize,
+    pub close_bytes: usize,
+    pub rejected_frames: u64,
+    pub rejected_resources: u64,
+    pub rejected_closes: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NetworkDoctorPanelState {
     pub recent_paths: Vec<NetworkDoctorPathRecentRow>,
@@ -4828,6 +5051,18 @@ pub struct NetworkDoctorActiveResourceRow {
     pub detail: String,
     pub received: Option<u64>,
     pub total: Option<u64>,
+}
+
+struct NetworkDoctorResourceUpdate {
+    transfer: String,
+    state: String,
+    source: String,
+    purpose: Option<String>,
+    direction: Option<String>,
+    peer: Option<String>,
+    detail: String,
+    received: Option<u64>,
+    total: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4922,21 +5157,19 @@ impl NetworkDoctorPanelState {
         rows.truncate(Self::MAX_RECENT_ROWS);
     }
 
-    fn upsert_resource(
-        &mut self,
-        transfer: impl Into<String>,
-        state: impl Into<String>,
-        source: impl Into<String>,
-        purpose: Option<String>,
-        direction: Option<String>,
-        peer: Option<String>,
-        detail: impl Into<String>,
-        received: Option<u64>,
-        total: Option<u64>,
-    ) {
-        let transfer = transfer.into();
+    fn upsert_resource(&mut self, update: NetworkDoctorResourceUpdate) {
+        let NetworkDoctorResourceUpdate {
+            transfer,
+            state,
+            source,
+            purpose,
+            direction,
+            peer,
+            detail,
+            received,
+            total,
+        } = update;
         let previous = self.active_resources.get(&transfer);
-        let source = source.into();
         let source = if source == "unknown" {
             previous
                 .map(|row| row.source.clone())
@@ -4948,7 +5181,7 @@ impl NetworkDoctorPanelState {
         let direction = direction.or_else(|| previous.and_then(|row| row.direction.clone()));
         let peer = peer.or_else(|| previous.and_then(|row| row.peer.clone()));
         let detail = Self::resource_detail_with_context(
-            detail.into(),
+            detail,
             &source,
             purpose.as_deref(),
             direction.as_deref(),
@@ -4959,7 +5192,7 @@ impl NetworkDoctorPanelState {
             NetworkDoctorActiveResourceRow {
                 epoch_ms: current_epoch_ms(),
                 transfer,
-                state: state.into(),
+                state,
                 source,
                 purpose,
                 direction,
@@ -5101,17 +5334,17 @@ impl NetworkDoctorPanelState {
             data.data.len(),
             data.metadata.as_ref().map_or(0, Vec::len)
         );
-        self.upsert_resource(
-            transfer_id.clone(),
-            "complete",
-            "omenchat",
-            Some("omenchat-resource".into()),
-            Some("inbound".into()),
-            None,
-            detail.clone(),
-            Some(data.data.len() as u64),
-            Some(data.data.len() as u64),
-        );
+        self.upsert_resource(NetworkDoctorResourceUpdate {
+            transfer: transfer_id.clone(),
+            state: "complete".into(),
+            source: "omenchat".into(),
+            purpose: Some("omenchat-resource".into()),
+            direction: Some("inbound".into()),
+            peer: None,
+            detail: detail.clone(),
+            received: Some(data.data.len() as u64),
+            total: Some(data.data.len() as u64),
+        });
         Self::push_resource(&mut self.recent_resources, transfer_id, "complete", detail);
     }
 
@@ -5233,17 +5466,17 @@ impl NetworkDoctorPanelState {
                         .map(|bytes| format!("{bytes} byte(s)"))
                         .unwrap_or_else(|| "unknown".into())
                 );
-                self.upsert_resource(
-                    transfer_id.clone(),
-                    "offered",
-                    source.as_deref().unwrap_or("unknown"),
-                    Some(purpose.clone()),
-                    direction.clone().or_else(|| Some("inbound".into())),
-                    peer.clone().or_else(|| Some(link_id.clone())),
-                    detail.clone(),
-                    None,
-                    *bytes,
-                );
+                self.upsert_resource(NetworkDoctorResourceUpdate {
+                    transfer: transfer_id.clone(),
+                    state: "offered".into(),
+                    source: source.clone().unwrap_or_else(|| "unknown".into()),
+                    purpose: Some(purpose.clone()),
+                    direction: direction.clone().or_else(|| Some("inbound".into())),
+                    peer: peer.clone().or_else(|| Some(link_id.clone())),
+                    detail: detail.clone(),
+                    received: None,
+                    total: *bytes,
+                });
                 Self::push_resource(&mut self.recent_resources, transfer_id, "offered", detail);
             }
             crate::runtime::RuntimeFacadeEvent::ResourceProgress {
@@ -5265,17 +5498,17 @@ impl NetworkDoctorPanelState {
                     (None, Some(total)) => format!("{received}/{total} byte(s)"),
                     (None, None) => format!("{received} byte(s) received"),
                 };
-                self.upsert_resource(
-                    transfer_id.clone(),
-                    "progress",
-                    source.as_deref().unwrap_or("unknown"),
-                    purpose.clone(),
-                    direction.clone(),
-                    peer.clone(),
-                    detail.clone(),
-                    Some(*received),
-                    *total,
-                );
+                self.upsert_resource(NetworkDoctorResourceUpdate {
+                    transfer: transfer_id.clone(),
+                    state: "progress".into(),
+                    source: source.clone().unwrap_or_else(|| "unknown".into()),
+                    purpose: purpose.clone(),
+                    direction: direction.clone(),
+                    peer: peer.clone(),
+                    detail: detail.clone(),
+                    received: Some(*received),
+                    total: *total,
+                });
                 Self::push_resource(&mut self.recent_resources, transfer_id, "progress", detail);
             }
             crate::runtime::RuntimeFacadeEvent::ResourceComplete {
@@ -5286,17 +5519,17 @@ impl NetworkDoctorPanelState {
                 direction,
                 peer,
             } => {
-                self.upsert_resource(
-                    transfer_id.clone(),
-                    "complete",
-                    source.as_deref().unwrap_or("unknown"),
-                    purpose.clone(),
-                    direction.clone(),
-                    peer.clone(),
-                    format!("{bytes} byte(s)"),
-                    Some(*bytes),
-                    Some(*bytes),
-                );
+                self.upsert_resource(NetworkDoctorResourceUpdate {
+                    transfer: transfer_id.clone(),
+                    state: "complete".into(),
+                    source: source.clone().unwrap_or_else(|| "unknown".into()),
+                    purpose: purpose.clone(),
+                    direction: direction.clone(),
+                    peer: peer.clone(),
+                    detail: format!("{bytes} byte(s)"),
+                    received: Some(*bytes),
+                    total: Some(*bytes),
+                });
                 Self::push_resource(
                     &mut self.recent_resources,
                     transfer_id,
@@ -5312,17 +5545,17 @@ impl NetworkDoctorPanelState {
                 direction,
                 peer,
             } => {
-                self.upsert_resource(
-                    transfer_id.clone(),
-                    "failed",
-                    source.as_deref().unwrap_or("unknown"),
-                    purpose.clone(),
-                    direction.clone(),
-                    peer.clone(),
-                    reason.clone(),
-                    None,
-                    None,
-                );
+                self.upsert_resource(NetworkDoctorResourceUpdate {
+                    transfer: transfer_id.clone(),
+                    state: "failed".into(),
+                    source: source.clone().unwrap_or_else(|| "unknown".into()),
+                    purpose: purpose.clone(),
+                    direction: direction.clone(),
+                    peer: peer.clone(),
+                    detail: reason.clone(),
+                    received: None,
+                    total: None,
+                });
                 Self::push_resource(&mut self.recent_resources, transfer_id, "failed", reason);
             }
             crate::runtime::RuntimeFacadeEvent::LxmfEvent { event, detail } => Self::push_lxmf(
@@ -5422,7 +5655,7 @@ pub struct LogEntry {
     pub message: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct LogBuffer {
     pub lines: Vec<String>,
     pub entries: Vec<LogEntry>,
@@ -5431,6 +5664,10 @@ pub struct LogBuffer {
     log_file: Option<PathBuf>,
     max_file_bytes: u64,
     retain_files: usize,
+    memory_bytes: usize,
+    startup_load_stats: PersistedLogStats,
+    disk_stats: StructuredLogDiskStats,
+    worker: Option<StructuredLogWorker>,
 }
 
 impl LogBuffer {
@@ -5441,13 +5678,24 @@ impl LogBuffer {
         load_recent_entries: usize,
     ) -> Self {
         let _ = std::fs::create_dir_all(&logs_dir);
+        let policy = StructuredLogDiskPolicy::normalized(max_file_bytes, retain_files);
+        let log_file = logs_dir.join("omenbrowser_rs.jsonl");
+        let worker = StructuredLogWorker::start();
+        let worker_start_warning = worker.as_ref().err().map(|error| {
+            format!("structured log persistence disabled: writer start failed: {error}")
+        });
         let mut buffer = Self {
-            log_file: Some(logs_dir.join("omenbrowser_rs.jsonl")),
-            max_file_bytes,
-            retain_files,
+            log_file: Some(log_file.clone()),
+            max_file_bytes: policy.max_file_bytes,
+            retain_files: policy.retain_files,
+            disk_stats: enforce_structured_log_retention(&log_file, policy),
+            worker: worker.ok(),
             ..Self::default()
         };
         buffer.load_recent_entries(load_recent_entries);
+        if let Some(warning) = worker_start_warning {
+            buffer.push_with_source(LogSeverity::Warn, LogSource::App, warning);
+        }
         buffer
     }
 
@@ -5461,7 +5709,7 @@ impl LogBuffer {
         source: LogSource,
         message: impl Into<String>,
     ) {
-        let message = message.into();
+        let message = bounded_log_message(message.into());
         self.lines.push(message.clone());
         let entry = LogEntry {
             epoch_ms: current_epoch_ms(),
@@ -5470,12 +5718,17 @@ impl LogBuffer {
             message,
         };
         self.persist_entry(&entry);
+        self.memory_bytes = self
+            .memory_bytes
+            .saturating_add(log_entry_memory_bytes(&entry));
         self.entries.push(entry);
+        self.enforce_memory_budget();
     }
 
     fn clear_display(&mut self) {
         self.lines.clear();
         self.entries.clear();
+        self.memory_bytes = 0;
         self.severity_filter = None;
         self.source_filter = None;
     }
@@ -5515,105 +5768,157 @@ impl LogBuffer {
         self.source_filter
     }
 
-    fn persist_entry(&self, entry: &LogEntry) {
+    fn persist_entry(&mut self, entry: &LogEntry) {
         let Some(path) = &self.log_file else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let policy = StructuredLogDiskPolicy::normalized(self.max_file_bytes, self.retain_files);
+        if let Some(worker) = &self.worker {
+            let _ = worker.enqueue(path, entry.clone(), policy);
+        } else {
+            let stats = StructuredLogDiskStats {
+                write_failures: 1,
+                ..StructuredLogDiskStats::default()
+            };
+            self.record_disk_stats(stats);
         }
-        if path
-            .metadata()
-            .is_ok_and(|metadata| metadata.len() >= self.max_file_bytes)
-        {
-            let rotated = path.with_file_name(format!("omenbrowser_rs-{}.jsonl", entry.epoch_ms));
-            let _ = std::fs::rename(path, rotated);
-            self.prune_rotated_logs(path);
-        }
-        let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
-            return;
-        };
-        if let Ok(serialized) = serde_json::to_string(entry) {
-            let _ = writeln!(file, "{serialized}");
-        }
+    }
+
+    fn flush(&self, timeout: Duration) -> bool {
+        self.worker
+            .as_ref()
+            .is_none_or(|worker| worker.flush_handle().flush(timeout))
+    }
+
+    fn flush_handle(&self) -> Option<StructuredLogFlushHandle> {
+        self.worker.as_ref().map(StructuredLogWorker::flush_handle)
+    }
+
+    fn worker_metrics(&self) -> StructuredLogWorkerMetrics {
+        let mut metrics = self.worker.as_ref().map_or_else(
+            StructuredLogWorkerMetrics::default,
+            StructuredLogWorker::metrics,
+        );
+        metrics.write_failures = metrics
+            .write_failures
+            .saturating_add(self.disk_stats.write_failures as u64);
+        metrics.rotations = metrics
+            .rotations
+            .saturating_add(self.disk_stats.rotations as u64);
+        metrics.removed_files = metrics
+            .removed_files
+            .saturating_add(self.disk_stats.removed_files as u64);
+        metrics.removal_failures = metrics
+            .removal_failures
+            .saturating_add(self.disk_stats.removal_failures as u64);
+        metrics.unsafe_paths_refused = metrics
+            .unsafe_paths_refused
+            .saturating_add(self.disk_stats.unsafe_paths_refused as u64);
+        metrics.truncated_directory_scans = metrics
+            .truncated_directory_scans
+            .saturating_add(u64::from(self.disk_stats.directory_scan_truncated));
+        metrics
+    }
+
+    fn record_disk_stats(&mut self, stats: StructuredLogDiskStats) {
+        // Persistence failures remain non-fatal and must not recursively log themselves.
+        self.disk_stats.directory_entries_scanned = self
+            .disk_stats
+            .directory_entries_scanned
+            .saturating_add(stats.directory_entries_scanned);
+        self.disk_stats.directory_scan_truncated |= stats.directory_scan_truncated;
+        self.disk_stats.matching_rotated_files = stats.matching_rotated_files;
+        self.disk_stats.removed_files = self
+            .disk_stats
+            .removed_files
+            .saturating_add(stats.removed_files);
+        self.disk_stats.removal_failures = self
+            .disk_stats
+            .removal_failures
+            .saturating_add(stats.removal_failures);
+        self.disk_stats.rotations = self.disk_stats.rotations.saturating_add(stats.rotations);
+        self.disk_stats.write_failures = self
+            .disk_stats
+            .write_failures
+            .saturating_add(stats.write_failures);
+        self.disk_stats.unsafe_paths_refused = self
+            .disk_stats
+            .unsafe_paths_refused
+            .saturating_add(stats.unsafe_paths_refused);
     }
 
     fn load_recent_entries(&mut self, limit: usize) {
         if limit == 0 {
             self.lines.clear();
             self.entries.clear();
+            self.memory_bytes = 0;
+            self.startup_load_stats = PersistedLogStats::default();
             return;
         }
         let Some(path) = &self.log_file else {
             return;
         };
-        let mut files = Vec::new();
-        if let Some(parent) = path.parent() {
-            if let Ok(read_dir) = std::fs::read_dir(parent) {
-                files.extend(
-                    read_dir
-                        .filter_map(Result::ok)
-                        .map(|entry| entry.path())
-                        .filter(|candidate| {
-                            candidate
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .is_some_and(|name| {
-                                    name == "omenbrowser_rs.jsonl"
-                                        || (name.starts_with("omenbrowser_rs-")
-                                            && name.ends_with(".jsonl"))
-                                })
-                        }),
-                );
-            }
-        }
-        if files.is_empty() && path.exists() {
-            files.push(path.clone());
-        }
-        let mut entries = files
+        let Some(logs_dir) = path.parent() else {
+            return;
+        };
+        let effective_limit = limit.min(STRUCTURED_LOG_STARTUP_ENTRY_LIMIT);
+        let loaded = load_recent_log_entries(
+            logs_dir,
+            PersistedLogLimits {
+                entry_limit: effective_limit,
+                directory_entry_limit: STRUCTURED_LOG_STARTUP_DIRECTORY_ENTRY_LIMIT,
+                file_limit: self
+                    .retain_files
+                    .saturating_add(1)
+                    .clamp(1, STRUCTURED_LOG_STARTUP_FILE_LIMIT),
+                file_bytes: STRUCTURED_LOG_STARTUP_FILE_BYTES,
+                total_bytes: STRUCTURED_LOG_STARTUP_TOTAL_BYTES,
+            },
+        );
+        self.startup_load_stats = loaded.stats;
+        self.entries = loaded
+            .entries
             .into_iter()
-            .filter_map(|path| std::fs::read_to_string(path).ok())
-            .flat_map(|raw| {
-                raw.lines()
-                    .filter_map(|line| serde_json::from_str::<LogEntry>(line).ok())
-                    .collect::<Vec<_>>()
+            .map(|mut entry| {
+                entry.message = bounded_log_message(entry.message);
+                entry
             })
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|entry| entry.epoch_ms);
-        if entries.len() > limit {
-            entries = entries.split_off(entries.len() - limit);
+            .collect();
+        self.lines = self
+            .entries
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect();
+        self.memory_bytes = self.entries.iter().map(log_entry_memory_bytes).sum();
+        self.enforce_memory_budget();
+        if limit > effective_limit {
+            self.push_with_source(
+                LogSeverity::Warn,
+                LogSource::App,
+                format!(
+                    "structured log startup entries capped at {effective_limit} (requested {limit})"
+                ),
+            );
         }
-        self.lines = entries.iter().map(|entry| entry.message.clone()).collect();
-        self.entries = entries;
     }
 
-    fn prune_rotated_logs(&self, active_path: &Path) {
-        let Some(parent) = active_path.parent() else {
-            return;
-        };
-        let Ok(entries) = std::fs::read_dir(parent) else {
-            return;
-        };
-        let mut rotated = entries
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.file_name().to_str().is_some_and(|name| {
-                    name.starts_with("omenbrowser_rs-") && name.ends_with(".jsonl")
-                })
-            })
-            .filter_map(|entry| {
-                let modified = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .ok()?;
-                Some((modified, entry.path()))
-            })
-            .collect::<Vec<_>>();
-        rotated.sort_by_key(|(modified, _)| *modified);
-        let remove_count = rotated.len().saturating_sub(self.retain_files);
-        for (_, path) in rotated.into_iter().take(remove_count) {
-            let _ = std::fs::remove_file(path);
+    fn enforce_memory_budget(&mut self) {
+        let mut remove_count = 0;
+        let mut retained_bytes = self.memory_bytes;
+        while self.entries.len().saturating_sub(remove_count) > STRUCTURED_LOG_MEMORY_ENTRY_LIMIT
+            || retained_bytes > STRUCTURED_LOG_MEMORY_BYTES
+        {
+            let Some(entry) = self.entries.get(remove_count) else {
+                break;
+            };
+            retained_bytes = retained_bytes.saturating_sub(log_entry_memory_bytes(entry));
+            remove_count += 1;
         }
+        if remove_count > 0 {
+            self.entries.drain(..remove_count);
+            self.lines.drain(..remove_count.min(self.lines.len()));
+        }
+        self.memory_bytes = retained_bytes;
     }
 }
 
@@ -5627,8 +5932,31 @@ impl Default for LogBuffer {
             log_file: None,
             max_file_bytes: STRUCTURED_LOG_DEFAULT_MAX_BYTES,
             retain_files: 4,
+            memory_bytes: 0,
+            startup_load_stats: PersistedLogStats::default(),
+            disk_stats: StructuredLogDiskStats::default(),
+            worker: None,
         }
     }
+}
+
+fn bounded_log_message(message: String) -> String {
+    const MARKER: &str = "...<truncated>";
+    if message.len() <= STRUCTURED_LOG_MESSAGE_BYTES {
+        return message.as_str().to_owned();
+    }
+    let mut end = STRUCTURED_LOG_MESSAGE_BYTES.saturating_sub(MARKER.len());
+    while !message.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let mut bounded = String::with_capacity(end.saturating_add(MARKER.len()));
+    bounded.push_str(&message[..end]);
+    bounded.push_str(MARKER);
+    bounded
+}
+
+fn log_entry_memory_bytes(entry: &LogEntry) -> usize {
+    entry.message.len().saturating_mul(2).saturating_add(128)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -5766,16 +6094,29 @@ pub struct App {
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pending_omenchat_link_data: Vec<crate::runtime::OmenChatLinkData>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pending_omenchat_link_data_bytes: usize,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pending_omenchat_link_closed: Vec<crate::runtime::OmenChatLinkClosed>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pending_omenchat_link_closed_bytes: usize,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pending_omenchat_resource_data: Vec<crate::runtime::OmenChatResourceData>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pending_omenchat_resource_data_bytes: usize,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    rejected_omenchat_staged_frames: u64,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    rejected_omenchat_staged_resources: u64,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    rejected_omenchat_staged_closes: u64,
     micronplus_node_warnings: BTreeMap<String, Vec<MicronPlusNodeWarning>>,
     diagnostics_export_pending: Option<u64>,
     runtime_startup_pending: bool,
     pending_post_startup_action: Option<PendingPostStartupAction>,
     should_quit: bool,
-    event_tx: Sender<InternalAppEvent>,
-    event_rx: Receiver<InternalAppEvent>,
+    event_tx: InternalEventSender,
+    event_rx: Receiver<InternalEventEnvelope>,
+    event_wake: InternalEventWake,
     browser_viewport_width: usize,
     browser_viewport_height: usize,
     pending_ui_preferences_save: Option<PendingUiPreferenceSave>,
@@ -5806,6 +6147,25 @@ impl App {
             let _ = config.paths.adopt_legacy_app_storage_once(&legacy_paths);
         }
         config.paths.ensure()?;
+        let requested_log_policy = (
+            config.settings.logs.max_file_bytes,
+            config.settings.logs.retain_files,
+        );
+        let log_policy =
+            StructuredLogDiskPolicy::normalized(requested_log_policy.0, requested_log_policy.1);
+        config.settings.logs.max_file_bytes = log_policy.max_file_bytes;
+        config.settings.logs.retain_files = log_policy.retain_files;
+        let log_policy_warning = (requested_log_policy
+            != (log_policy.max_file_bytes, log_policy.retain_files))
+            .then(|| {
+                format!(
+                    "structured log disk policy normalized: max_file_bytes {} -> {}, retain_files {} -> {}",
+                    requested_log_policy.0,
+                    log_policy.max_file_bytes,
+                    requested_log_policy.1,
+                    log_policy.retain_files
+                )
+            });
         let start_url = config.settings.default_start_page.clone();
         let restart_was_required = config.settings.restart_required;
         let runtime_decision = build_runtime(&config.settings, &config.paths)?;
@@ -5892,7 +6252,19 @@ impl App {
                 }],
                 warnings: vec![format!("plugin discovery failed: {error}")],
             });
-        let (event_tx, event_rx) = channel(256);
+        static NEXT_EVENT_WAKE_ID: AtomicU64 = AtomicU64::new(1);
+        let (raw_event_tx, event_rx) = channel(256);
+        let (wake_tx, wake_rx) = watch::channel(0);
+        let payload_budget = Arc::new(InternalEventPayloadBudget::default());
+        let event_tx = InternalEventSender {
+            sender: raw_event_tx,
+            wake: wake_tx,
+            payload_budget,
+        };
+        let event_wake = InternalEventWake {
+            id: NEXT_EVENT_WAKE_ID.fetch_add(1, Ordering::Relaxed),
+            receiver: wake_rx,
+        };
         let show_help = config.settings.ui.show_help;
         let browser_overlay_mode =
             BrowserOverlayMode::from(config.settings.ui.browser_overlay_mode);
@@ -5922,9 +6294,11 @@ impl App {
             config.settings.logs.retain_files,
             config.settings.logs.load_recent_entries,
         );
-        for line in std::iter::once("OMENbrowser_rs mock shell initialized".into())
-            .chain(plugin_report.warnings.iter().cloned())
-        {
+        logs.push(LogSeverity::Info, "OMENbrowser_rs mock shell initialized");
+        if let Some(warning) = log_policy_warning {
+            logs.push_with_source(LogSeverity::Warn, LogSource::App, warning);
+        }
+        for line in plugin_report.warnings.iter().cloned() {
             logs.push(LogSeverity::Info, line);
         }
         let diagnostics_target_address = config.settings.diagnostics_target_address.clone();
@@ -6007,9 +6381,21 @@ impl App {
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             pending_omenchat_link_data: Vec::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            pending_omenchat_link_data_bytes: 0,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             pending_omenchat_link_closed: Vec::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            pending_omenchat_link_closed_bytes: 0,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             pending_omenchat_resource_data: Vec::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            pending_omenchat_resource_data_bytes: 0,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            rejected_omenchat_staged_frames: 0,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            rejected_omenchat_staged_resources: 0,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            rejected_omenchat_staged_closes: 0,
             micronplus_node_warnings: BTreeMap::new(),
             diagnostics_export_pending: None,
             runtime_startup_pending: false,
@@ -6017,6 +6403,7 @@ impl App {
             should_quit: false,
             event_tx,
             event_rx,
+            event_wake,
             browser_viewport_width: 80,
             browser_viewport_height: 20,
             pending_ui_preferences_save: None,
@@ -6072,6 +6459,13 @@ impl App {
             LogSource::App,
             "OMENbrowser_rs desktop session started",
         );
+    }
+
+    pub fn record_desktop_routing_error(&mut self, diagnostic: impl Into<String>) {
+        let diagnostic = diagnostic.into();
+        self.logs
+            .push_with_source(LogSeverity::Error, LogSource::App, diagnostic);
+        self.status.task = "internal UI routing error; see Logs".into();
     }
 
     fn recover_lxmf_correlation_nonblocking(&mut self) {
@@ -6157,10 +6551,18 @@ impl App {
             context.directory_service,
             &mut session,
         );
-        if let Some(page) = restored_page {
-            session.restore_page(page, history, saved.history_index);
+        let restore_result = if let Some(page) = restored_page {
+            session.restore_page(page, history, saved.history_index)
         } else {
-            session.restore_navigation(current_url, title.clone(), history, saved.history_index);
+            session.restore_navigation(current_url, title.clone(), history, saved.history_index)
+        };
+        if restore_result.is_err() {
+            let _fallback_result = session.restore_navigation(
+                context.fallback_url,
+                context.fallback_url,
+                Vec::new(),
+                -1,
+            );
         }
         let current_page = session.current_page().cloned();
         let title = current_page
@@ -6368,7 +6770,7 @@ impl App {
             .or_else(|| self.micronplus_column_preview_rows_for_tab(tab, width, field_cursor))
             .or_else(|| self.micronplus_fragment_rows_for_tab(tab, width, field_cursor))?;
         apply_document_default_link_foreground(tab.session.current_document.as_ref(), &mut rows);
-        Some(rows)
+        Some(bound_rendered_rows(rows, width))
     }
 
     fn browser_hit_regions_for_tab_width(&self, tab: &BrowserTab, width: usize) -> Vec<HitRegion> {
@@ -6519,9 +6921,18 @@ impl App {
         else {
             return false;
         };
-        self.workspace.browser_tabs[active]
+        if !self.workspace.browser_tabs[active]
             .micronplus_widgets
-            .apply_event(event);
+            .apply_event(event)
+        {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Plugin,
+                "MicronPlus widget event rejected by retained-state limits",
+            );
+            self.status.task = "MicronPlus widget event rejected by retained-state limits".into();
+            return false;
+        }
         self.workspace.browser_tabs[active].render_cache.generation =
             self.workspace.browser_tabs[active].session.generation;
         true
@@ -6547,15 +6958,34 @@ impl App {
             });
         let submitted_name = event.name.clone();
         let submitted_fields = event.fields.clone();
-        self.workspace.browser_tabs[active]
-            .micronplus_control_events
-            .push(event);
+        if !retain_micronplus_control_event(
+            &mut self.workspace.browser_tabs[active].micronplus_control_events,
+            event,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Plugin,
+                "MicronPlus control event rejected by history limits",
+            );
+            self.status.task = "MicronPlus control event rejected by history limits".into();
+            return false;
+        }
         if let Some(widget_event) = widget_event {
-            self.workspace.browser_tabs[active]
+            if self.workspace.browser_tabs[active]
                 .micronplus_widgets
-                .apply_event(widget_event);
-            self.workspace.browser_tabs[active].render_cache.generation =
-                self.workspace.browser_tabs[active].session.generation;
+                .apply_event(widget_event)
+            {
+                self.workspace.browser_tabs[active].render_cache.generation =
+                    self.workspace.browser_tabs[active].session.generation;
+            } else {
+                self.logs.push_with_source(
+                    LogSeverity::Warn,
+                    LogSource::Plugin,
+                    "MicronPlus widget projection rejected by retained-state limits",
+                );
+                self.status.task =
+                    "MicronPlus widget projection rejected by retained-state limits".into();
+            }
         }
         if let Some(link) = action_link {
             if self.try_refresh_partial_for_link(active, &link) {
@@ -6579,6 +7009,18 @@ impl App {
         self.flush_pending_ui_preferences();
         self.flush_pending_directory_persistence();
         self.should_quit = true;
+    }
+
+    pub fn flush_structured_logs(&self, timeout: Duration) -> bool {
+        self.logs.flush(timeout)
+    }
+
+    pub fn structured_log_flush_handle(&self) -> Option<StructuredLogFlushHandle> {
+        self.logs.flush_handle()
+    }
+
+    pub fn structured_log_worker_metrics(&self) -> StructuredLogWorkerMetrics {
+        self.logs.worker_metrics()
     }
 
     pub fn toggle_help(&mut self) {
@@ -6638,9 +7080,11 @@ impl App {
         match self.directory_service.flush_due_save() {
             Ok(saved) => saved,
             Err(error) => {
-                self.logs.lines.push(format!(
-                    "failed to persist live directory announces: {error}"
-                ));
+                self.logs.push_with_source(
+                    LogSeverity::Error,
+                    LogSource::App,
+                    format!("failed to persist live directory announces: {error}"),
+                );
                 self.status.task = format!("directory save failed: {error}");
                 false
             }
@@ -6651,9 +7095,11 @@ impl App {
         match self.directory_service.flush_pending_save() {
             Ok(saved) => saved,
             Err(error) => {
-                self.logs.lines.push(format!(
-                    "failed to persist pending directory announces: {error}"
-                ));
+                self.logs.push_with_source(
+                    LogSeverity::Error,
+                    LogSource::App,
+                    format!("failed to persist pending directory announces: {error}"),
+                );
                 self.status.task = format!("directory save failed: {error}");
                 false
             }
@@ -6662,9 +7108,11 @@ impl App {
 
     fn save_ui_preferences(&mut self, label: &str) {
         if let Err(error) = self.settings.save(&self.paths.settings_file) {
-            self.logs
-                .lines
-                .push(format!("failed to persist UI preferences: {error}"));
+            self.logs.push_with_source(
+                LogSeverity::Error,
+                LogSource::App,
+                format!("failed to persist UI preferences: {error}"),
+            );
             self.status.task = format!("{label} changed; settings save failed: {error}");
         }
     }
@@ -6673,9 +7121,11 @@ impl App {
         match self.settings.save(&self.paths.settings_file) {
             Ok(()) => true,
             Err(error) => {
-                self.logs
-                    .lines
-                    .push(format!("failed to persist settings change: {error}"));
+                self.logs.push_with_source(
+                    LogSeverity::Error,
+                    LogSource::App,
+                    format!("failed to persist settings change: {error}"),
+                );
                 self.status.task = format!("{label} changed; settings save failed: {error}");
                 false
             }
@@ -10892,10 +11342,34 @@ impl App {
     }
 
     pub fn edit_address_char(&mut self, ch: char) {
-        if !self.input_accepts_text() || !self.input.insert_char(ch) {
-            return;
+        let mut encoded = [0; 4];
+        self.edit_address_text(ch.encode_utf8(&mut encoded));
+    }
+
+    pub fn edit_address_text(&mut self, text: &str) -> bool {
+        if !self.input_accepts_text() {
+            return false;
+        }
+        if let Some(candidate) = self.active_browser_field_candidate(text) {
+            let Some((tab_id, name, value)) = candidate else {
+                self.status.task = "page field limit reached; input was not changed".into();
+                return false;
+            };
+            let admitted = self.browser_tab_index(tab_id).is_some_and(|index| {
+                self.workspace.browser_tabs[index]
+                    .session
+                    .can_set_field_value(&name, &value)
+            });
+            if !admitted {
+                self.status.task = "page field limit reached; input was not changed".into();
+                return false;
+            }
+        }
+        if !self.input.insert_text(text) {
+            return false;
         }
         self.sync_active_input_to_target();
+        true
     }
 
     pub fn address_backspace(&mut self) {
@@ -10934,6 +11408,25 @@ impl App {
                 self.input.active.as_ref().map(|active| &active.target),
                 Some(InputTarget::BrowserField { .. })
             )
+    }
+
+    fn active_browser_field_candidate(
+        &self,
+        inserted: &str,
+    ) -> Option<Option<(TabId, String, String)>> {
+        let active = self.input.active.as_ref()?;
+        let InputTarget::BrowserField { tab_id, name } = &active.target else {
+            return None;
+        };
+        let Some(new_len) = active.buffer.as_str().len().checked_add(inserted.len()) else {
+            return Some(None);
+        };
+        if new_len > crate::micron::parser::MICRON_CONTROL_VALUE_MAX_BYTES {
+            return Some(None);
+        }
+        let mut value = active.buffer.as_str().to_string();
+        value.insert_str(active.buffer.cursor(), inserted);
+        Some(Some((*tab_id, name.clone(), value)))
     }
 
     pub fn focus_message_title(&mut self) {
@@ -10987,6 +11480,22 @@ impl App {
             self.status.task = format!("font size set to {size}px; restart to apply");
             true
         } else {
+            false
+        }
+    }
+
+    pub fn toggle_settings_reduced_motion(&mut self) -> bool {
+        let previous = self.settings.ui.reduce_motion;
+        self.settings.ui.reduce_motion = !previous;
+        if self.save_settings_change("reduced motion") {
+            self.status.task = if self.settings.ui.reduce_motion {
+                "reduced motion enabled; animated previews are paused".into()
+            } else {
+                "reduced motion disabled; visible animated previews may play".into()
+            };
+            true
+        } else {
+            self.settings.ui.reduce_motion = previous;
             false
         }
     }
@@ -11639,8 +12148,15 @@ impl App {
             self.status.task = "structured log max bytes must be a whole number".into();
             return false;
         };
-        if max_file_bytes < 4096 {
-            self.status.task = "structured log max bytes must be at least 4096".into();
+        if max_file_bytes < STRUCTURED_LOG_MIN_FILE_BYTES {
+            self.status.task = format!(
+                "structured log max bytes must be at least {STRUCTURED_LOG_MIN_FILE_BYTES}"
+            );
+            return false;
+        }
+        if max_file_bytes > STRUCTURED_LOG_MAX_FILE_BYTES {
+            self.status.task =
+                format!("structured log max bytes must be at most {STRUCTURED_LOG_MAX_FILE_BYTES}");
             return false;
         }
         self.settings.logs.max_file_bytes = max_file_bytes;
@@ -11662,6 +12178,12 @@ impl App {
             self.status.task = "structured log retained files must be greater than zero".into();
             return false;
         }
+        if retain_files > STRUCTURED_LOG_MAX_RETAIN_FILES {
+            self.status.task = format!(
+                "structured log retained files must be at most {STRUCTURED_LOG_MAX_RETAIN_FILES}"
+            );
+            return false;
+        }
         self.settings.logs.retain_files = retain_files;
         self.logs.retain_files = retain_files;
         if self.save_settings_change("structured log retained files") {
@@ -11677,6 +12199,12 @@ impl App {
             self.status.task = "structured log startup entries must be a whole number".into();
             return false;
         };
+        if load_recent_entries > STRUCTURED_LOG_STARTUP_ENTRY_LIMIT {
+            self.status.task = format!(
+                "structured log startup entries must be at most {STRUCTURED_LOG_STARTUP_ENTRY_LIMIT}"
+            );
+            return false;
+        }
         self.settings.logs.load_recent_entries = load_recent_entries;
         if self.save_settings_change("structured log startup entries") {
             self.status.task = format!(
@@ -13879,7 +14407,9 @@ impl App {
                 regions
                     .iter()
                     .find_map(|(index, region)| match &region.action {
-                        HitAction::Control(control) if control.name == focused.name => Some(*index),
+                        HitAction::Control(control) if control.name.as_ref() == focused.name => {
+                            Some(*index)
+                        }
                         _ => None,
                     })
             });
@@ -13920,12 +14450,12 @@ impl App {
                     .interactive_controls();
                 let Some(control_index) = controls
                     .iter()
-                    .position(|control| control.name == control_ref.name)
+                    .position(|control| control.name == control_ref.name.as_ref())
                 else {
                     return false;
                 };
                 self.workspace.browser_tabs[active].focused_control = Some(FocusedControl {
-                    name: control_ref.name.clone(),
+                    name: control_ref.name.to_string(),
                     index: control_index,
                 });
                 self.workspace.browser_tabs[active].focused_link = None;
@@ -14036,12 +14566,12 @@ impl App {
                     .interactive_controls();
                 let Some(index) = controls
                     .iter()
-                    .position(|control| control.name == control_ref.name)
+                    .position(|control| control.name == control_ref.name.as_ref())
                 else {
                     return false;
                 };
                 self.workspace.browser_tabs[active].focused_control = Some(FocusedControl {
-                    name: control_ref.name.clone(),
+                    name: control_ref.name.to_string(),
                     index,
                 });
                 let control = controls[index].clone();
@@ -14938,17 +15468,16 @@ impl App {
         scheduled
     }
 
-    pub fn browser_partials_need_low_latency_tick(&self, now_epoch_ms: u64) -> bool {
-        self.workspace.browser_tabs.iter().any(|tab| {
-            tab.partials.generation == tab.session.generation
-                && (!tab.partials.pending_slots.is_empty()
-                    || tab.partials.specs.iter().any(|spec| {
-                        spec.remaining != Some(0)
-                            && spec
-                                .next_refresh_epoch_ms
-                                .is_some_and(|next| next <= now_epoch_ms.saturating_add(1_000))
-                    }))
-        })
+    pub(crate) fn desktop_browser_partial_deadline(&self) -> Option<(u64, u64)> {
+        self.workspace
+            .browser_tabs
+            .iter()
+            .filter(|tab| tab.partials.generation == tab.session.generation)
+            .flat_map(|tab| tab.partials.specs.iter())
+            .filter(|spec| spec.remaining != Some(0))
+            .filter_map(|spec| spec.next_refresh_epoch_ms)
+            .min()
+            .map(|deadline| (self.event_wake.id(), deadline))
     }
 
     pub fn scroll_active_browser_lines(&mut self, delta: isize) -> usize {
@@ -15274,6 +15803,31 @@ impl App {
         self.drain_internal_events_matching(|_| true)
     }
 
+    pub(crate) fn internal_event_wake(&self) -> InternalEventWake {
+        self.event_wake.clone()
+    }
+
+    pub(crate) fn desktop_persistence_deadline(&self) -> Option<(u64, u64)> {
+        let ui_deadline = self
+            .pending_ui_preferences_save
+            .as_ref()
+            .map(|pending| pending.due_epoch_ms);
+        let directory_deadline = self.directory_service.pending_save_due_epoch_ms();
+        ui_deadline
+            .into_iter()
+            .chain(directory_deadline)
+            .min()
+            .map(|deadline| (self.event_wake.id(), deadline))
+    }
+
+    pub(crate) fn desktop_lxmf_reconcile_deadline(&self) -> (u64, u64) {
+        (
+            self.event_wake.id(),
+            self.next_lxmf_direct_reconcile_epoch_ms
+                .min(self.next_lxmf_propagation_reconcile_epoch_ms),
+        )
+    }
+
     pub fn drain_internal_events_with_active_conversation_readable(
         &mut self,
         active_conversation_readable: bool,
@@ -15291,17 +15845,21 @@ impl App {
     ) -> usize {
         let mut applied = 0;
         let mut deferred = Vec::new();
-        while let Ok(event) = self.event_rx.try_recv() {
-            if should_handle(&event) {
+        while let Ok(envelope) = self.event_rx.try_recv() {
+            if should_handle(&envelope.event) {
+                let InternalEventEnvelope {
+                    event,
+                    _payload_permit,
+                } = envelope;
                 if self.handle_internal_event(event) {
                     applied += 1;
                 }
             } else {
-                deferred.push(event);
+                deferred.push(envelope);
             }
         }
-        for event in deferred {
-            if self.event_tx.try_send(event).is_err() {
+        for envelope in deferred {
+            if self.event_tx.try_send_envelope(envelope).is_err() {
                 self.logs
                     .lines
                     .push("event queue full while deferring event".into());
@@ -15437,9 +15995,13 @@ impl App {
 
     pub async fn wait_for_message_task_result(&mut self) -> bool {
         loop {
-            let Some(event) = self.event_rx.recv().await else {
+            let Some(envelope) = self.event_rx.recv().await else {
                 return false;
             };
+            let InternalEventEnvelope {
+                event,
+                _payload_permit,
+            } = envelope;
             if let InternalAppEvent::MessageTask(result) = event {
                 let applied = self.apply_message_task_result(result);
                 self.drain_message_task_results();
@@ -15451,9 +16013,13 @@ impl App {
 
     pub async fn wait_for_browser_task_result(&mut self) -> bool {
         loop {
-            let Some(event) = self.event_rx.recv().await else {
+            let Some(envelope) = self.event_rx.recv().await else {
                 return false;
             };
+            let InternalEventEnvelope {
+                event,
+                _payload_permit,
+            } = envelope;
             if let InternalAppEvent::BrowserTask(result) = event {
                 let applied = self.apply_browser_task_result(result);
                 self.drain_browser_task_results();
@@ -15465,9 +16031,13 @@ impl App {
 
     pub async fn wait_for_diagnostics_task_result(&mut self) -> bool {
         loop {
-            let Some(event) = self.event_rx.recv().await else {
+            let Some(envelope) = self.event_rx.recv().await else {
                 return false;
             };
+            let InternalEventEnvelope {
+                event,
+                _payload_permit,
+            } = envelope;
             if let InternalAppEvent::DiagnosticsTask(result) = event {
                 let applied = self.apply_diagnostics_task_result(result);
                 self.drain_diagnostics_task_results();
@@ -15483,19 +16053,46 @@ impl App {
             .is_ok()
     }
 
+    pub fn internal_event_payload_metrics(&self) -> InternalEventPayloadMetrics {
+        self.event_tx.payload_budget.metrics()
+    }
+
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub fn drain_omenchat_link_data(&mut self) -> Vec<crate::runtime::OmenChatLinkData> {
+        self.pending_omenchat_link_data_bytes = 0;
         std::mem::take(&mut self.pending_omenchat_link_data)
     }
 
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub fn drain_omenchat_link_closed(&mut self) -> Vec<crate::runtime::OmenChatLinkClosed> {
+        self.pending_omenchat_link_closed_bytes = 0;
         std::mem::take(&mut self.pending_omenchat_link_closed)
     }
 
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub fn drain_omenchat_resource_data(&mut self) -> Vec<crate::runtime::OmenChatResourceData> {
+        self.pending_omenchat_resource_data_bytes = 0;
         std::mem::take(&mut self.pending_omenchat_resource_data)
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub fn omenchat_event_staging_metrics(&self) -> OmenChatEventStagingMetrics {
+        OmenChatEventStagingMetrics {
+            frame_items: self.pending_omenchat_link_data.len(),
+            frame_bytes: self.pending_omenchat_link_data_bytes,
+            resource_items: self.pending_omenchat_resource_data.len(),
+            resource_bytes: self.pending_omenchat_resource_data_bytes,
+            close_items: self.pending_omenchat_link_closed.len(),
+            close_bytes: self.pending_omenchat_link_closed_bytes,
+            rejected_frames: self.rejected_omenchat_staged_frames,
+            rejected_resources: self.rejected_omenchat_staged_resources,
+            rejected_closes: self.rejected_omenchat_staged_closes,
+        }
+    }
+
+    #[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
+    pub fn omenchat_event_staging_metrics(&self) -> OmenChatEventStagingMetrics {
+        OmenChatEventStagingMetrics::default()
     }
 
     pub fn enqueue_log_event(&self, line: impl Into<String>) -> bool {
@@ -16279,27 +16876,77 @@ impl App {
                 true
             }
             crate::runtime::RuntimeBusEvent::OmenChatLinkData(data) => {
+                let link_id = data.link_id;
+                let frame_bytes = data.frame_bytes.len();
                 self.monitoring_state.estimated_inbound_bytes = self
                     .monitoring_state
                     .estimated_inbound_bytes
-                    .saturating_add(data.frame_bytes.len() as u64);
+                    .saturating_add(frame_bytes as u64);
                 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-                self.pending_omenchat_link_data.push(data.clone());
+                if self.pending_omenchat_link_data.len() >= OMENCHAT_STAGED_FRAME_MAX_ITEMS
+                    || self
+                        .pending_omenchat_link_data_bytes
+                        .saturating_add(frame_bytes)
+                        > OMENCHAT_STAGED_FRAME_MAX_BYTES
+                {
+                    self.rejected_omenchat_staged_frames =
+                        self.rejected_omenchat_staged_frames.saturating_add(1);
+                    self.logs.push_with_source(
+                        LogSeverity::Warn,
+                        LogSource::Runtime,
+                        format!(
+                            "OMENchat link frame staging budget exceeded link_id={} bytes={frame_bytes}",
+                            hex_lower(&link_id)
+                        ),
+                    );
+                    return true;
+                } else {
+                    self.pending_omenchat_link_data_bytes = self
+                        .pending_omenchat_link_data_bytes
+                        .saturating_add(frame_bytes);
+                    self.pending_omenchat_link_data.push(data);
+                }
                 self.logs.push_with_source(
                     LogSeverity::Debug,
                     LogSource::Runtime,
                     format!(
                         "OMENchat link frame received link_id={} bytes={}",
-                        hex_lower(&data.link_id),
-                        data.frame_bytes.len()
+                        hex_lower(&link_id),
+                        frame_bytes
                     ),
                 );
                 true
             }
             crate::runtime::RuntimeBusEvent::OmenChatLinkClosed(data) => {
+                let link_id = data.link_id;
                 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-                self.pending_omenchat_link_closed.push(data.clone());
-                let benign_close = data.reason.as_deref().is_some_and(|reason| {
+                let reason_bytes = data.reason.as_ref().map_or(0, String::len);
+                let reason = data.reason.clone();
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+                if self.pending_omenchat_link_closed.len() >= OMENCHAT_STAGED_CLOSE_MAX_ITEMS
+                    || self
+                        .pending_omenchat_link_closed_bytes
+                        .saturating_add(reason_bytes)
+                        > OMENCHAT_STAGED_CLOSE_MAX_BYTES
+                {
+                    self.rejected_omenchat_staged_closes =
+                        self.rejected_omenchat_staged_closes.saturating_add(1);
+                    self.logs.push_with_source(
+                        LogSeverity::Warn,
+                        LogSource::Runtime,
+                        format!(
+                            "OMENchat link-close staging item budget exceeded link_id={}",
+                            hex_lower(&link_id)
+                        ),
+                    );
+                    return true;
+                } else {
+                    self.pending_omenchat_link_closed_bytes = self
+                        .pending_omenchat_link_closed_bytes
+                        .saturating_add(reason_bytes);
+                    self.pending_omenchat_link_closed.push(data);
+                }
+                let benign_close = reason.as_deref().is_some_and(|reason| {
                     let reason = reason.trim();
                     reason.eq_ignore_ascii_case("timeout")
                         || reason.eq_ignore_ascii_case("destinationclosed")
@@ -16314,27 +16961,54 @@ impl App {
                     LogSource::Runtime,
                     format!(
                         "OMENchat link closed link_id={} reason={}",
-                        hex_lower(&data.link_id),
-                        data.reason.as_deref().unwrap_or("unknown")
+                        hex_lower(&link_id),
+                        reason.as_deref().unwrap_or("unknown")
                     ),
                 );
                 true
             }
             crate::runtime::RuntimeBusEvent::OmenChatResourceData(data) => {
+                let link_id = data.link_id;
+                let data_bytes = data.data.len();
+                let metadata_bytes = data.metadata.as_ref().map_or(0, Vec::len);
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+                let retained_bytes = data_bytes.saturating_add(metadata_bytes);
                 self.monitoring_state.estimated_inbound_bytes = self
                     .monitoring_state
                     .estimated_inbound_bytes
-                    .saturating_add(data.data.len() as u64);
+                    .saturating_add(data_bytes as u64);
                 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-                self.pending_omenchat_resource_data.push(data.clone());
+                if self.pending_omenchat_resource_data.len() >= OMENCHAT_STAGED_RESOURCE_MAX_ITEMS
+                    || self
+                        .pending_omenchat_resource_data_bytes
+                        .saturating_add(retained_bytes)
+                        > OMENCHAT_STAGED_RESOURCE_MAX_BYTES
+                {
+                    self.rejected_omenchat_staged_resources =
+                        self.rejected_omenchat_staged_resources.saturating_add(1);
+                    self.logs.push_with_source(
+                        LogSeverity::Warn,
+                        LogSource::Runtime,
+                        format!(
+                            "OMENchat resource staging budget exceeded link_id={} bytes={data_bytes} metadata={metadata_bytes}",
+                            hex_lower(&link_id)
+                        ),
+                    );
+                    return true;
+                } else {
+                    self.pending_omenchat_resource_data_bytes = self
+                        .pending_omenchat_resource_data_bytes
+                        .saturating_add(retained_bytes);
+                    self.pending_omenchat_resource_data.push(data);
+                }
                 self.logs.push_with_source(
                     LogSeverity::Debug,
                     LogSource::Runtime,
                     format!(
                         "OMENchat resource received link_id={} bytes={} metadata={}",
-                        hex_lower(&data.link_id),
-                        data.data.len(),
-                        data.metadata.as_ref().map_or(0, Vec::len)
+                        hex_lower(&link_id),
+                        data_bytes,
+                        metadata_bytes
                     ),
                 );
                 true
@@ -17616,8 +18290,9 @@ impl App {
                         self.sync_browser_tab_partial_page(index, page);
                         self.log_micronplus_diagnostics_for_tab(index, "partial");
                         if should_extract_widget_events {
-                            if let Some(tree_value) = self.workspace.browser_tabs[index]
-                                .current_page
+                            let mut candidate_page =
+                                self.workspace.browser_tabs[index].current_page.clone();
+                            if let Some(tree_value) = candidate_page
                                 .as_mut()
                                 .and_then(|page| page.metadata.get_mut("micronplus_tree"))
                             {
@@ -17634,8 +18309,7 @@ impl App {
                                     }
                                 }
                             }
-                            if let Some(layout_value) = self.workspace.browser_tabs[index]
-                                .current_page
+                            if let Some(layout_value) = candidate_page
                                 .as_mut()
                                 .and_then(|page| page.metadata.get_mut("micronplus_layout"))
                             {
@@ -17651,6 +18325,12 @@ impl App {
                                             .expect("MicronPlus layout serializes");
                                     }
                                 }
+                            }
+                            if candidate_page
+                                .as_ref()
+                                .is_some_and(|page| page.validate_retained().is_ok())
+                            {
+                                self.workspace.browser_tabs[index].current_page = candidate_page;
                             }
                         }
                         self.workspace.browser_tabs[index].session.current_page =
@@ -18498,13 +19178,24 @@ impl App {
     }
 
     pub fn set_active_browser_field_draft(&mut self, value: String) -> bool {
-        let Some(active) = self.input.active.as_mut() else {
+        let Some(active) = self.input.active.as_ref() else {
             return false;
         };
-        if !matches!(active.target, InputTarget::BrowserField { .. }) {
+        let InputTarget::BrowserField { tab_id, name } = &active.target else {
+            return false;
+        };
+        let admitted = value.len() <= crate::micron::parser::MICRON_CONTROL_VALUE_MAX_BYTES
+            && self.browser_tab_index(*tab_id).is_some_and(|index| {
+                self.workspace.browser_tabs[index]
+                    .session
+                    .can_set_field_value(name, &value)
+            });
+        if !admitted {
+            self.status.task = "page field limit reached; input was not changed".into();
             return false;
         }
 
+        let active = self.input.active.as_mut().expect("active input checked");
         active.buffer.set_text(value);
         self.sync_active_input_to_target();
         self.status.task = "editing page field".into();
@@ -19853,8 +20544,8 @@ fn cell_run_summary(
             "fields": link.fields,
         })),
         "control": cell.control.as_ref().map(|control| serde_json::json!({
-            "name": control.name,
-            "kind": control.kind,
+            "name": control.name.as_ref(),
+            "kind": control.kind.as_ref(),
             "length": control.length,
             "masked": control.masked,
         })),
@@ -19875,8 +20566,8 @@ fn style_capture_summary(style: &crate::micron::TextStyle) -> serde_json::Value 
 
 fn control_capture_key(control: &crate::micron::render::ControlRef) -> (&str, &str, usize, bool) {
     (
-        control.name.as_str(),
-        control.kind.as_str(),
+        control.name.as_ref(),
+        control.kind.as_ref(),
         control.length,
         control.masked,
     )
@@ -20421,7 +21112,7 @@ fn apply_document_default_link_foreground(document: Option<&Document>, rows: &mu
                 None | Some(DEFAULT_FG_DARK) | Some("default")
             )
         {
-            cell.style.fg = Some(default_fg.clone());
+            Arc::make_mut(&mut cell.style).fg = Some(default_fg.clone());
         }
     }
 }
@@ -20961,6 +21652,11 @@ fn browser_page_loaded_status(page: &BrowserPage, backend: &RuntimeBackendName) 
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs::File,
+        io::{Seek, SeekFrom, Write},
+    };
+
     use super::*;
     use crate::config::AppPaths;
     use crate::directory::DirectoryKind;
@@ -21932,7 +22628,7 @@ mod tests {
         let regions = app.browser_hit_regions_for_tab_width(app.active_browser_tab(), 80);
         assert!(regions.iter().any(|region| matches!(
             &region.action,
-            HitAction::Control(control) if control.name == "message"
+            HitAction::Control(control) if control.name.as_ref() == "message"
         )));
         assert!(regions.iter().any(|region| matches!(
             &region.action,
@@ -21944,7 +22640,7 @@ mod tests {
             app.active_browser_tab()
                 .focused_control
                 .as_ref()
-                .map(|control| control.name.as_str()),
+                .map(|control| control.name.as_ref()),
             Some("message")
         );
         assert!(app.focus_browser_item_with_viewport(80, 20, false));
@@ -22086,6 +22782,43 @@ old
         assert!(text.contains("dynamic feed"));
         assert!(!text.contains("static"));
         assert!(text.contains("runtime event"));
+    }
+
+    #[test]
+    fn micronplus_widget_rejection_is_visible_and_preserves_state() {
+        let mut app = App::new(test_config("browser-widget-admission"));
+        app.switch_section(WorkspaceSection::Browser);
+        assert!(
+            app.apply_active_micronplus_widget_event(MicronPlusWidgetEvent::StatusUpdate {
+                id: "state".into(),
+                text: "ready".into(),
+                style: None,
+            },)
+        );
+
+        assert!(
+            !app.apply_active_micronplus_widget_event(MicronPlusWidgetEvent::StatusUpdate {
+                id: "state".into(),
+                text: "x".repeat(crate::browser::micronplus::MICRONPLUS_WIDGET_TEXT_MAX_BYTES + 1,),
+                style: None,
+            },)
+        );
+
+        assert_eq!(
+            app.active_browser_tab()
+                .micronplus_widgets
+                .get("state")
+                .and_then(|state| state.text.as_deref()),
+            Some("ready")
+        );
+        assert!(app.status.task.contains("retained-state limits"));
+        assert_eq!(
+            app.active_browser_tab()
+                .micronplus_widgets
+                .metrics()
+                .rejected_events,
+            1
+        );
     }
 
     #[test]
@@ -23128,7 +23861,7 @@ side
             .filter(|cell| {
                 cell.control
                     .as_ref()
-                    .is_some_and(|control| control.name == "message")
+                    .is_some_and(|control| control.name.as_ref() == "message")
             })
             .count();
 
@@ -23139,7 +23872,7 @@ side
                     && cell
                         .control
                         .as_ref()
-                        .is_some_and(|control| control.name == "message")
+                        .is_some_and(|control| control.name.as_ref() == "message")
                     && cell.style.bg.is_some()
             })
         }));
@@ -24915,12 +25648,15 @@ side
         let mut app = App::new(test_config("session-descriptor-persist"));
 
         app.new_browser_tab();
-        app.active_browser_tab_mut().session.restore_navigation(
-            "mock.node:/restored.mu",
-            "Restored",
-            vec!["mock.node:/".into(), "mock.node:/restored.mu".into()],
-            1,
-        );
+        app.active_browser_tab_mut()
+            .session
+            .restore_navigation(
+                "mock.node:/restored.mu",
+                "Restored",
+                vec!["mock.node:/".into(), "mock.node:/restored.mu".into()],
+                1,
+            )
+            .expect("restore navigation");
         app.sync_browser_tab_from_session(app.workspace.active_browser, None);
         app.active_browser_tab_mut().scroll.offset = 6;
         app.active_browser_tab_mut().focused_control = Some(FocusedControl {
@@ -25282,6 +26018,20 @@ side
         let saved = AppSettings::load_or_default(&app.paths.settings_file).expect("load settings");
         assert_eq!(saved.ui.theme_name, "blue");
         assert!(app.status.task.contains("theme set to blue"));
+    }
+
+    #[test]
+    fn settings_reduced_motion_toggle_persists_and_reports_animation_policy() {
+        let mut app = App::new(test_config("settings-reduced-motion"));
+
+        assert!(app.toggle_settings_reduced_motion());
+        let saved = AppSettings::load_or_default(&app.paths.settings_file).expect("load settings");
+        assert!(saved.ui.reduce_motion);
+        assert!(app.status.task.contains("animated previews are paused"));
+
+        assert!(app.toggle_settings_reduced_motion());
+        let saved = AppSettings::load_or_default(&app.paths.settings_file).expect("load settings");
+        assert!(!saved.ui.reduce_motion);
     }
 
     #[test]
@@ -26599,7 +27349,7 @@ side
         app.logs.push_with_source(
             LogSeverity::Warn,
             LogSource::Diagnostics,
-            &format!(
+            format!(
                 "browser-load page probe step 1 identity failed: missing | destination={FIXTURE_NODE_HASH}"
             ),
         );
@@ -28604,7 +29354,8 @@ side
             tokio::time::timeout(std::time::Duration::from_secs(3), app.event_rx.recv())
                 .await
                 .expect("scheduled event")
-                .expect("event");
+                .expect("event")
+                .event;
         while !matches!(
             &event,
             InternalAppEvent::StartupBrowserPathReady { destination, .. }
@@ -28613,7 +29364,8 @@ side
             event = tokio::time::timeout(std::time::Duration::from_secs(3), app.event_rx.recv())
                 .await
                 .expect("scheduled retry event")
-                .expect("event");
+                .expect("event")
+                .event;
         }
         assert!(matches!(
             &event,
@@ -28795,6 +29547,7 @@ side
             else {
                 continue;
             };
+            let event = event.event;
             if matches!(
                 &event,
                 InternalAppEvent::Runtime(crate::runtime::RuntimeBusEvent::PathUpdated(path))
@@ -29138,7 +29891,7 @@ side
                 tokio::time::timeout(std::time::Duration::from_millis(500), app.event_rx.recv())
                     .await
             {
-                match event.expect("internal event") {
+                match event.expect("internal event").event {
                     InternalAppEvent::Runtime(crate::runtime::RuntimeBusEvent::PathUpdated(
                         path,
                     )) if path.destination_hash == destination && path.known => {
@@ -29344,12 +30097,14 @@ side
     fn structured_logs_persist_rotate_and_filter_by_severity_and_source() {
         let mut app = App::new(test_config("structured-logs"));
         let log_file = app.paths.logs_dir.join("omenbrowser_rs.jsonl");
+        assert!(app.flush_structured_logs(Duration::from_secs(2)));
         assert!(log_file.is_file());
 
         app.logs
             .push_with_source(LogSeverity::Warn, LogSource::Runtime, "runtime warn");
         app.logs
             .push_with_source(LogSeverity::Error, LogSource::Plugin, "plugin error");
+        assert!(app.flush_structured_logs(Duration::from_secs(2)));
         let persisted = std::fs::read_to_string(&log_file).expect("structured log file");
         assert!(persisted.contains("\"severity\":\"Warn\""));
         assert!(persisted.contains("\"source\":\"Runtime\""));
@@ -29385,6 +30140,7 @@ side
         .expect("inflate log file");
         app.logs
             .push_with_source(LogSeverity::Info, LogSource::App, "after rotate");
+        assert!(app.flush_structured_logs(Duration::from_secs(2)));
         let rotated = std::fs::read_dir(&app.paths.logs_dir)
             .expect("logs dir")
             .filter_map(Result::ok)
@@ -29499,6 +30255,120 @@ side
     }
 
     #[test]
+    fn structured_log_memory_is_item_byte_and_message_bounded() {
+        let mut logs = LogBuffer::default();
+        for index in 0..500 {
+            logs.push_with_source(
+                LogSeverity::Info,
+                LogSource::Runtime,
+                format!("{index}:{}", "é".repeat(STRUCTURED_LOG_MESSAGE_BYTES)),
+            );
+        }
+
+        assert!(logs.entries.len() <= STRUCTURED_LOG_MEMORY_ENTRY_LIMIT);
+        assert_eq!(logs.lines.len(), logs.entries.len());
+        assert!(logs.memory_bytes <= STRUCTURED_LOG_MEMORY_BYTES);
+        assert!(logs
+            .entries
+            .iter()
+            .all(|entry| entry.message.len() <= STRUCTURED_LOG_MESSAGE_BYTES));
+        assert!(logs
+            .entries
+            .iter()
+            .all(|entry| entry.message.capacity() <= STRUCTURED_LOG_MESSAGE_BYTES));
+        assert!(logs
+            .lines
+            .iter()
+            .all(|line| line.capacity() <= STRUCTURED_LOG_MESSAGE_BYTES));
+        assert!(logs
+            .entries
+            .last()
+            .is_some_and(|entry| entry.message.starts_with("499:")));
+        assert!(logs
+            .entries
+            .last()
+            .is_some_and(|entry| entry.message.ends_with("...<truncated>")));
+
+        let mut short_with_excess_capacity = String::with_capacity(1024 * 1024);
+        short_with_excess_capacity.push_str("short");
+        logs.push(LogSeverity::Info, short_with_excess_capacity);
+        assert_eq!(logs.entries.last().expect("short entry").message, "short");
+        assert!(
+            logs.entries.last().expect("short entry").message.capacity()
+                <= STRUCTURED_LOG_MESSAGE_BYTES
+        );
+
+        let mut item_limited = LogBuffer::default();
+        for index in 0..STRUCTURED_LOG_MEMORY_ENTRY_LIMIT + 7 {
+            item_limited.push(LogSeverity::Info, format!("item-{index}"));
+        }
+        assert_eq!(
+            item_limited.entries.len(),
+            STRUCTURED_LOG_MEMORY_ENTRY_LIMIT
+        );
+        assert_eq!(item_limited.lines.len(), item_limited.entries.len());
+        assert!(item_limited.memory_bytes <= STRUCTURED_LOG_MEMORY_BYTES);
+        assert_eq!(item_limited.entries[0].message, "item-7");
+    }
+
+    #[test]
+    fn structured_log_startup_loader_enforces_production_scan_and_byte_budgets() {
+        let config = test_config("structured-log-production-bounds");
+        config.paths.ensure().expect("paths");
+        for index in 0..18 {
+            let name = if index == 0 {
+                "omenbrowser_rs.jsonl".to_string()
+            } else {
+                format!("omenbrowser_rs-{index}.jsonl")
+            };
+            let mut file = File::create(config.paths.logs_dir.join(name)).expect("sparse log");
+            file.set_len((STRUCTURED_LOG_STARTUP_FILE_BYTES + 128) as u64)
+                .expect("size sparse log");
+            file.seek(SeekFrom::End(-256)).expect("seek log tail");
+            writeln!(file, "discarded-partial").expect("partial line");
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&LogEntry {
+                    epoch_ms: 100 + index as u64,
+                    severity: LogSeverity::Warn,
+                    source: LogSource::Runtime,
+                    message: format!("tail-{index}"),
+                })
+                .expect("tail entry")
+            )
+            .expect("write tail entry");
+        }
+
+        let logs = LogBuffer::with_persistence(
+            config.paths.logs_dir.clone(),
+            STRUCTURED_LOG_DEFAULT_MAX_BYTES,
+            32,
+            usize::MAX,
+        );
+        assert_eq!(
+            logs.startup_load_stats.selected_files,
+            STRUCTURED_LOG_STARTUP_FILE_LIMIT
+        );
+        assert_eq!(
+            logs.startup_load_stats.bytes_read,
+            STRUCTURED_LOG_STARTUP_TOTAL_BYTES
+        );
+        assert_eq!(
+            logs.startup_load_stats.files_read,
+            STRUCTURED_LOG_STARTUP_TOTAL_BYTES / STRUCTURED_LOG_STARTUP_FILE_BYTES
+        );
+        assert!(logs.entries.len() <= STRUCTURED_LOG_MEMORY_ENTRY_LIMIT);
+        assert!(logs.memory_bytes <= STRUCTURED_LOG_MEMORY_BYTES);
+        assert!(logs.entries.iter().any(|entry| entry.message == "tail-0"));
+        assert!(logs
+            .entries
+            .iter()
+            .any(|entry| entry.message.contains("startup entries capped")));
+        let _ = std::fs::remove_dir_all(config.paths.root);
+    }
+
+    #[test]
     fn desktop_session_log_reset_hides_preloaded_old_entries() {
         let mut config = test_config("structured-log-desktop-reset");
         config.settings.logs.load_recent_entries = 1;
@@ -29577,6 +30447,17 @@ side
         assert!(app.status.task.contains("at least 4096"));
         assert_eq!(app.settings.logs.max_file_bytes, 8192);
 
+        app.edit_settings_log_max_bytes();
+        app.input
+            .active
+            .as_mut()
+            .expect("active oversized log bytes input")
+            .buffer
+            .set_text((STRUCTURED_LOG_MAX_FILE_BYTES + 1).to_string());
+        app.submit_active_input();
+        assert!(app.status.task.contains("at most"));
+        assert_eq!(app.settings.logs.max_file_bytes, 8192);
+
         app.edit_settings_log_retain_files();
         app.input
             .active
@@ -29587,6 +30468,44 @@ side
         app.submit_active_input();
         assert!(app.status.task.contains("greater than zero"));
         assert_eq!(app.settings.logs.retain_files, 3);
+
+        app.edit_settings_log_retain_files();
+        app.input
+            .active
+            .as_mut()
+            .expect("active oversized log retain input")
+            .buffer
+            .set_text((STRUCTURED_LOG_MAX_RETAIN_FILES + 1).to_string());
+        app.submit_active_input();
+        assert!(app.status.task.contains("at most"));
+        assert_eq!(app.settings.logs.retain_files, 3);
+    }
+
+    #[test]
+    fn legacy_structured_log_disk_policy_is_normalized_and_reported() {
+        let mut config = test_config("legacy-structured-log-policy");
+        config.settings.logs.max_file_bytes = u64::MAX;
+        config.settings.logs.retain_files = usize::MAX;
+
+        let app = App::new(config);
+
+        assert_eq!(
+            app.settings.logs.max_file_bytes,
+            STRUCTURED_LOG_MAX_FILE_BYTES
+        );
+        assert_eq!(
+            app.settings.logs.retain_files,
+            STRUCTURED_LOG_MAX_RETAIN_FILES
+        );
+        assert_eq!(app.logs.max_file_bytes, STRUCTURED_LOG_MAX_FILE_BYTES);
+        assert_eq!(app.logs.retain_files, STRUCTURED_LOG_MAX_RETAIN_FILES);
+        let warning = app
+            .logs
+            .entries
+            .iter()
+            .find(|entry| entry.message.contains("disk policy normalized"))
+            .expect("normalization warning");
+        assert_eq!(warning.severity, LogSeverity::Warn);
     }
 
     #[test]
@@ -29615,6 +30534,17 @@ side
             .set_text("not-a-number");
         app.submit_active_input();
         assert!(app.status.task.contains("whole number"));
+        assert_eq!(app.settings.logs.load_recent_entries, 25);
+
+        app.edit_settings_log_load_recent_entries();
+        app.input
+            .active
+            .as_mut()
+            .expect("active oversized log load input")
+            .buffer
+            .set_text((STRUCTURED_LOG_STARTUP_ENTRY_LIMIT + 1).to_string());
+        app.submit_active_input();
+        assert!(app.status.task.contains("at most"));
         assert_eq!(app.settings.logs.load_recent_entries, 25);
     }
 
@@ -31118,6 +32048,234 @@ side
         assert!(app.should_quit());
     }
 
+    #[tokio::test]
+    async fn internal_event_bus_wake_is_coalesced_and_drains_existing_bounded_queue() {
+        let mut app = App::new(test_config("event-wake"));
+        let mut wake = app.internal_event_wake().receiver();
+
+        assert!(app.enqueue_log_event("first event"));
+        assert!(app.enqueue_log_event("second event"));
+        tokio::time::timeout(std::time::Duration::from_millis(100), wake.changed())
+            .await
+            .expect("event wake timeout")
+            .expect("event wake channel");
+
+        assert_eq!(app.drain_internal_events(), 2);
+        assert!(app.logs.lines.iter().any(|line| line == "first event"));
+        assert!(app.logs.lines.iter().any(|line| line == "second event"));
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    #[test]
+    fn omenchat_internal_event_payload_budget_saturates_and_releases_on_handling() {
+        let mut app = App::new(test_config("omenchat-event-channel-byte-budget"));
+        let resource_bytes = INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES / 4;
+
+        for index in 0..4 {
+            assert!(
+                app.enqueue_runtime_event(RuntimeBusEvent::OmenChatResourceData(
+                    crate::runtime::OmenChatResourceData {
+                        link_id: [index; 16],
+                        data: vec![index; resource_bytes],
+                        metadata: None,
+                    }
+                ))
+            );
+        }
+        assert!(
+            !app.enqueue_runtime_event(RuntimeBusEvent::OmenChatResourceData(
+                crate::runtime::OmenChatResourceData {
+                    link_id: [0xff; 16],
+                    data: vec![0],
+                    metadata: None,
+                }
+            ))
+        );
+
+        assert_eq!(
+            app.internal_event_payload_metrics(),
+            InternalEventPayloadMetrics {
+                queued_items: 4,
+                queued_bytes: INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES,
+                rejected_events: 1,
+            }
+        );
+        assert_eq!(app.drain_internal_events(), 4);
+        assert_eq!(app.internal_event_payload_metrics().queued_items, 0);
+        assert_eq!(app.internal_event_payload_metrics().queued_bytes, 0);
+        assert_eq!(app.omenchat_event_staging_metrics().resource_items, 4);
+        assert_eq!(
+            app.omenchat_event_staging_metrics().resource_bytes,
+            INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES
+        );
+        assert_eq!(app.drain_omenchat_resource_data().len(), 4);
+        assert_eq!(app.omenchat_event_staging_metrics().resource_bytes, 0);
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    #[test]
+    fn omenchat_internal_event_payload_reservation_releases_when_item_queue_is_full() {
+        let mut app = App::new(test_config("omenchat-event-channel-item-budget"));
+        for index in 0..256 {
+            assert!(app.enqueue_log_event(format!("queued event {index}")));
+        }
+
+        assert!(
+            !app.enqueue_runtime_event(RuntimeBusEvent::OmenChatResourceData(
+                crate::runtime::OmenChatResourceData {
+                    link_id: [0xff; 16],
+                    data: vec![0],
+                    metadata: None,
+                }
+            ))
+        );
+        assert_eq!(
+            app.internal_event_payload_metrics(),
+            InternalEventPayloadMetrics {
+                queued_items: 0,
+                queued_bytes: 0,
+                rejected_events: 1,
+            }
+        );
+        assert_eq!(app.drain_internal_events(), 256);
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    #[test]
+    fn omenchat_event_staging_is_item_byte_and_release_bounded() {
+        let mut app = App::new(test_config("omenchat-event-staging-bounds"));
+        let frame_bytes = OMENCHAT_STAGED_FRAME_MAX_BYTES / OMENCHAT_STAGED_FRAME_MAX_ITEMS;
+        for index in 0..OMENCHAT_STAGED_FRAME_MAX_ITEMS {
+            assert!(
+                app.handle_runtime_bus_event(RuntimeBusEvent::OmenChatLinkData(
+                    crate::runtime::OmenChatLinkData {
+                        link_id: [index as u8; 16],
+                        frame_bytes: vec![index as u8; frame_bytes],
+                    }
+                ))
+            );
+        }
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::OmenChatLinkData(
+                crate::runtime::OmenChatLinkData {
+                    link_id: [0xff; 16],
+                    frame_bytes: vec![0],
+                }
+            ))
+        );
+        let saturated_frames = app.omenchat_event_staging_metrics();
+        assert_eq!(
+            saturated_frames.frame_items,
+            OMENCHAT_STAGED_FRAME_MAX_ITEMS
+        );
+        assert_eq!(
+            saturated_frames.frame_bytes,
+            OMENCHAT_STAGED_FRAME_MAX_BYTES
+        );
+        assert_eq!(saturated_frames.rejected_frames, 1);
+        assert_eq!(
+            app.drain_omenchat_link_data().len(),
+            OMENCHAT_STAGED_FRAME_MAX_ITEMS
+        );
+        assert_eq!(app.omenchat_event_staging_metrics().frame_bytes, 0);
+
+        for index in 0..4 {
+            assert!(
+                app.handle_runtime_bus_event(RuntimeBusEvent::OmenChatResourceData(
+                    crate::runtime::OmenChatResourceData {
+                        link_id: [index; 16],
+                        data: vec![index; 8 * 1024 * 1024],
+                        metadata: None,
+                    }
+                ))
+            );
+        }
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::OmenChatResourceData(
+                crate::runtime::OmenChatResourceData {
+                    link_id: [0xff; 16],
+                    data: vec![0],
+                    metadata: None,
+                }
+            ))
+        );
+        let saturated_resources = app.omenchat_event_staging_metrics();
+        assert_eq!(saturated_resources.resource_items, 4);
+        assert_eq!(
+            saturated_resources.resource_bytes,
+            OMENCHAT_STAGED_RESOURCE_MAX_BYTES
+        );
+        assert_eq!(saturated_resources.rejected_resources, 1);
+        assert_eq!(app.drain_omenchat_resource_data().len(), 4);
+        assert_eq!(app.omenchat_event_staging_metrics().resource_bytes, 0);
+
+        for index in 0..=OMENCHAT_STAGED_CLOSE_MAX_ITEMS {
+            assert!(
+                app.handle_runtime_bus_event(RuntimeBusEvent::OmenChatLinkClosed(
+                    crate::runtime::OmenChatLinkClosed {
+                        link_id: [index as u8; 16],
+                        reason: Some("x".repeat(1024)),
+                    }
+                ))
+            );
+        }
+        let closes = app.omenchat_event_staging_metrics();
+        assert_eq!(closes.close_items, OMENCHAT_STAGED_CLOSE_MAX_ITEMS);
+        assert_eq!(closes.close_bytes, OMENCHAT_STAGED_CLOSE_MAX_BYTES);
+        assert_eq!(closes.rejected_closes, 1);
+        assert_eq!(
+            app.drain_omenchat_link_closed().len(),
+            OMENCHAT_STAGED_CLOSE_MAX_ITEMS
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_persistence_deadline_tracks_and_clears_ui_debounce() {
+        let mut app = App::new(test_config("persistence-deadline"));
+        assert!(app.desktop_persistence_deadline().is_none());
+
+        app.toggle_help();
+        let (app_id, first_deadline) = app
+            .desktop_persistence_deadline()
+            .expect("pending persistence deadline");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        app.toggle_help();
+        let (rescheduled_app_id, second_deadline) = app
+            .desktop_persistence_deadline()
+            .expect("rescheduled persistence deadline");
+        assert_eq!(rescheduled_app_id, app_id);
+        assert!(second_deadline >= first_deadline);
+
+        tokio::time::sleep(std::time::Duration::from_millis(
+            second_deadline
+                .saturating_sub(current_epoch_ms())
+                .saturating_add(5),
+        ))
+        .await;
+        assert!(app.flush_due_ui_preferences(current_epoch_ms()));
+        assert!(app.desktop_persistence_deadline().is_none());
+    }
+
+    #[test]
+    fn desktop_lxmf_reconcile_deadline_advances_after_reconciliation() {
+        let mut app = App::new(test_config("lxmf-reconcile-deadline"));
+        let (app_id, initial) = app.desktop_lxmf_reconcile_deadline();
+        assert_eq!(initial, 0);
+
+        assert_eq!(app.reconcile_due_lxmf_direct_timeouts(1_000), 0);
+        assert_eq!(app.reconcile_due_lxmf_propagation_timeouts(1_000), 0);
+        assert_eq!(
+            app.desktop_lxmf_reconcile_deadline(),
+            (app_id, 1_000 + LXMF_DIRECT_PROOF_RECONCILE_INTERVAL_MS)
+        );
+
+        assert_eq!(app.reconcile_due_lxmf_direct_timeouts(2_000), 0);
+        assert_eq!(
+            app.desktop_lxmf_reconcile_deadline(),
+            (app_id, 1_000 + LXMF_DIRECT_PROOF_RECONCILE_INTERVAL_MS)
+        );
+    }
+
     #[test]
     fn address_bar_editing_is_scoped_to_command_focus() {
         let mut app = App::new(test_config("address-edit"));
@@ -32187,6 +33345,10 @@ side
         app.sync_browser_tab_from_session(app.workspace.active_browser, None);
         app.active_browser_tab_mut().partials.specs[0].next_refresh_epoch_ms = Some(10);
         app.status.task = "steady".into();
+        assert_eq!(
+            app.desktop_browser_partial_deadline().map(|value| value.1),
+            Some(10)
+        );
 
         assert_eq!(app.refresh_due_browser_partials(10), 1);
         assert_eq!(app.status.task, "steady");
@@ -32202,6 +33364,7 @@ side
             app.active_browser_tab().partials.specs[0].next_refresh_epoch_ms,
             None
         );
+        assert!(app.desktop_browser_partial_deadline().is_none());
         assert!(app.wait_for_browser_task_result().await);
         assert_eq!(app.status.task, "steady");
 

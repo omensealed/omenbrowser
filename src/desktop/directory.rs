@@ -5,7 +5,7 @@ use crate::directory::DirectoryKind;
 #[cfg(feature = "chat-client")]
 use crate::micron::LinkAction;
 
-use super::{DesktopApp, Message};
+use super::{DesktopApp, DirectoryMessage, Message};
 
 impl DesktopApp {
     pub(super) fn dispatch_directory_message(
@@ -13,55 +13,61 @@ impl DesktopApp {
         message: Message,
     ) -> Result<Task<Message>, Message> {
         match message {
-            Message::SwitchDirectoryKind(kind) => {
+            Message::Directory(DirectoryMessage::SwitchKind(kind)) => {
                 self.update_switch_directory_kind(kind);
                 Ok(Task::none())
             }
-            Message::SwitchDirectoryScope(scope) => {
+            Message::Directory(DirectoryMessage::SwitchScope(scope)) => {
                 self.update_switch_directory_scope(scope);
                 Ok(Task::none())
             }
-            Message::DirectoryFilterChanged(value) => {
+            Message::Directory(DirectoryMessage::FilterChanged(value)) => {
                 self.update_directory_filter_changed(value);
                 Ok(Task::none())
             }
-            Message::SelectDirectoryEntry(index) => {
+            Message::Directory(DirectoryMessage::SelectEntry(index)) => {
                 self.update_select_directory_entry(index);
                 Ok(Task::none())
             }
-            Message::OpenDirectoryEntry(index) => Ok(self.update_open_directory_entry(index)),
-            Message::OpenPeerChat(index) => Ok(self.update_open_peer_chat(index)),
+            Message::Directory(DirectoryMessage::OpenEntry(index)) => {
+                Ok(self.update_open_directory_entry(index))
+            }
+            Message::Directory(DirectoryMessage::OpenPeerChat(index)) => {
+                Ok(self.update_open_peer_chat(index))
+            }
             #[cfg(feature = "chat-client")]
-            Message::OpenDirectoryOmenChat(index) => Ok(self.update_open_directory_omenchat(index)),
-            Message::InspectDirectoryPeer(index) => {
+            Message::Directory(DirectoryMessage::OpenOmenChat(index)) => {
+                Ok(self.update_open_directory_omenchat(index))
+            }
+            Message::Directory(DirectoryMessage::InspectPeer(index)) => {
                 self.update_inspect_directory_peer(index);
                 Ok(Task::none())
             }
-            Message::SaveDirectoryEntry(index) => {
+            Message::Directory(DirectoryMessage::SaveEntry(index)) => {
                 self.update_save_directory_entry(index);
                 Ok(Task::none())
             }
-            Message::ToggleDirectoryTrust(index) => {
+            Message::Directory(DirectoryMessage::ToggleTrust(index)) => {
                 self.update_toggle_directory_trust(index);
                 Ok(Task::none())
             }
-            Message::ToggleDirectoryIdentify(index) => {
+            Message::Directory(DirectoryMessage::ToggleIdentify(index)) => {
                 self.update_toggle_directory_identify(index);
                 Ok(Task::none())
             }
-            Message::CycleDirectoryDelivery(index) => {
+            Message::Directory(DirectoryMessage::CycleDelivery(index)) => {
                 self.update_cycle_directory_delivery(index);
                 Ok(Task::none())
             }
-            Message::RequestDirectoryPath(index) => {
+            Message::Directory(DirectoryMessage::RequestPath(index)) => {
                 self.update_request_directory_path(index);
                 Ok(Task::none())
             }
-            Message::UseDirectoryPropagation(index) => {
+            Message::Directory(DirectoryMessage::UsePropagation(index)) => {
                 self.update_use_directory_propagation(index);
                 Ok(Task::none())
             }
-            Message::ClearDirectoryPropagation => {
+            Message::Directory(DirectoryMessage::ClearPropagation) => {
                 self.update_clear_directory_propagation();
                 Ok(Task::none())
             }

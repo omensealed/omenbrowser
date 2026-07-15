@@ -25,9 +25,9 @@ impl DesktopApp {
             .size(ui_size(14))
             .padding(8)
             .width(Length::Fill)
-            .on_input(Message::OmenChatServerEntryChanged)
-            .on_submit(Message::OpenOmenChatServerEntry),
-            omen_button("Open", Message::OpenOmenChatServerEntry),
+            .on_input(|value| Message::OmenChat(OmenChatMessage::ServerEntryChanged(value)))
+            .on_submit(Message::OmenChat(OmenChatMessage::OpenServerEntry)),
+            omen_button("Open", Message::OmenChat(OmenChatMessage::OpenServerEntry),),
         ]
         .spacing(8);
 
@@ -44,12 +44,12 @@ impl DesktopApp {
                         row.push(tooltip_icon_button(
                             ICON_OMENCHAT_PATH,
                             "Request path",
-                            Message::RequestOmenChatPath(*session_id),
+                            Message::OmenChat(OmenChatMessage::RequestPath(*session_id)),
                         ))
                         .push(tooltip_omen_icon_button(
                             ICON_OMENCHAT_RECONNECT,
                             "Reconnect",
-                            Message::ReconnectOmenChatSession(*session_id),
+                            Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
                         ))
                     } else {
                         row
@@ -57,7 +57,7 @@ impl DesktopApp {
                     row.push(tooltip_icon_button(
                         ICON_WINDOW_MAX,
                         "Restore tiled panes",
-                        Message::WorkspacePaneRestore,
+                        Message::WorkspacePane(WorkspacePaneMessage::Restore),
                     ))
                     .wrap()
                 } else {
@@ -67,12 +67,12 @@ impl DesktopApp {
                         row.push(tooltip_icon_button(
                             ICON_OMENCHAT_PATH,
                             "Request path",
-                            Message::RequestOmenChatPath(*session_id),
+                            Message::OmenChat(OmenChatMessage::RequestPath(*session_id)),
                         ))
                         .push(tooltip_omen_icon_button(
                             ICON_OMENCHAT_RECONNECT,
                             "Reconnect",
-                            Message::ReconnectOmenChatSession(*session_id),
+                            Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
                         ))
                     } else {
                         row
@@ -81,31 +81,33 @@ impl DesktopApp {
                         .push(tooltip_icon_button(
                             ICON_WINDOW_MAX,
                             "Maximize pane",
-                            Message::WorkspacePaneMaximize(pane),
+                            Message::WorkspacePane(WorkspacePaneMessage::Maximize(pane)),
                         ))
                         .push(tooltip_icon_button(
                             ICON_WINDOW_HIDE,
                             "Close pane to restore tabs",
-                            Message::WorkspacePaneClose(pane),
+                            Message::WorkspacePane(WorkspacePaneMessage::Close(pane)),
                         ));
                     row = match kind {
                         DesktopPane::Browser(tab_id) => row.push(tooltip_warning_icon_button(
                             ICON_WINDOW_CLOSE,
                             "Delete browser tab",
-                            Message::CloseBrowserPaneTab(*tab_id),
+                            Message::Browser(BrowserMessage::ClosePaneTab(*tab_id)),
                         )),
                         DesktopPane::Conversation(conversation_id) => {
                             row.push(tooltip_warning_icon_button(
                                 ICON_WINDOW_CLOSE,
                                 "Delete conversation history",
-                                Message::CloseConversationPaneTab(*conversation_id),
+                                Message::WorkspacePane(WorkspacePaneMessage::CloseConversationTab(
+                                    *conversation_id,
+                                )),
                             ))
                         }
                         #[cfg(feature = "chat-client")]
                         DesktopPane::OmenChat(session_id) => row.push(tooltip_warning_icon_button(
                             ICON_WINDOW_CLOSE,
                             "Disconnect and close chat",
-                            Message::CloseOmenChatSession(*session_id),
+                            Message::OmenChat(OmenChatMessage::CloseSession(*session_id)),
                         )),
                     };
                     row.wrap()
@@ -117,12 +119,12 @@ impl DesktopApp {
                         row.push(tooltip_icon_button(
                             ICON_OMENCHAT_PATH,
                             "Request path",
-                            Message::RequestOmenChatPath(*session_id),
+                            Message::OmenChat(OmenChatMessage::RequestPath(*session_id)),
                         ))
                         .push(tooltip_omen_icon_button(
                             ICON_OMENCHAT_RECONNECT,
                             "Reconnect",
-                            Message::ReconnectOmenChatSession(*session_id),
+                            Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
                         ))
                     } else {
                         row
@@ -130,7 +132,7 @@ impl DesktopApp {
                     row.push(tooltip_icon_button(
                         ICON_WINDOW_MAX,
                         "Restore tiled panes",
-                        Message::WorkspacePaneRestore,
+                        Message::WorkspacePane(WorkspacePaneMessage::Restore),
                     ))
                     .wrap()
                 } else {
@@ -140,12 +142,12 @@ impl DesktopApp {
                         row.push(tooltip_icon_button(
                             ICON_OMENCHAT_PATH,
                             "Request path",
-                            Message::RequestOmenChatPath(*session_id),
+                            Message::OmenChat(OmenChatMessage::RequestPath(*session_id)),
                         ))
                         .push(tooltip_omen_icon_button(
                             ICON_OMENCHAT_RECONNECT,
                             "Reconnect",
-                            Message::ReconnectOmenChatSession(*session_id),
+                            Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
                         ))
                     } else {
                         row
@@ -154,31 +156,33 @@ impl DesktopApp {
                         .push(tooltip_icon_button(
                             ICON_WINDOW_MAX,
                             "Maximize pane",
-                            Message::WorkspacePaneMaximize(pane),
+                            Message::WorkspacePane(WorkspacePaneMessage::Maximize(pane)),
                         ))
                         .push(tooltip_icon_button(
                             ICON_WINDOW_HIDE,
                             "Close pane to restore tabs",
-                            Message::WorkspacePaneClose(pane),
+                            Message::WorkspacePane(WorkspacePaneMessage::Close(pane)),
                         ));
                     row = match kind {
                         DesktopPane::Browser(tab_id) => row.push(tooltip_warning_icon_button(
                             ICON_WINDOW_CLOSE,
                             "Delete browser tab",
-                            Message::CloseBrowserPaneTab(*tab_id),
+                            Message::Browser(BrowserMessage::ClosePaneTab(*tab_id)),
                         )),
                         DesktopPane::Conversation(conversation_id) => {
                             row.push(tooltip_warning_icon_button(
                                 ICON_WINDOW_CLOSE,
                                 "Delete conversation history",
-                                Message::CloseConversationPaneTab(*conversation_id),
+                                Message::WorkspacePane(WorkspacePaneMessage::CloseConversationTab(
+                                    *conversation_id,
+                                )),
                             ))
                         }
                         #[cfg(feature = "chat-client")]
                         DesktopPane::OmenChat(session_id) => row.push(tooltip_warning_icon_button(
                             ICON_WINDOW_CLOSE,
                             "Disconnect and close chat",
-                            Message::CloseOmenChatSession(*session_id),
+                            Message::OmenChat(OmenChatMessage::CloseSession(*session_id)),
                         )),
                     };
                     row.wrap()
@@ -210,7 +214,7 @@ impl DesktopApp {
                     .style(pane_title_container_style);
 
                 pane_grid::Content::new(
-                    container(self.workspace_pane_body(kind))
+                    container(self.workspace_pane_body(kind, self.workspace_pane_is_visible(kind)))
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .clip(true),
@@ -220,9 +224,11 @@ impl DesktopApp {
             },
         )
         .spacing(8)
-        .on_click(Message::WorkspacePaneClicked)
-        .on_drag(Message::WorkspacePaneDragged)
-        .on_resize(8, Message::WorkspacePaneResized);
+        .on_click(|pane| Message::WorkspacePane(WorkspacePaneMessage::Clicked(pane)))
+        .on_drag(|event| Message::WorkspacePane(WorkspacePaneMessage::Dragged(event)))
+        .on_resize(8, |event| {
+            Message::WorkspacePane(WorkspacePaneMessage::Resized(event))
+        });
 
         #[cfg(feature = "chat-client")]
         let content = column![
@@ -252,17 +258,23 @@ impl DesktopApp {
 
     pub(in crate::desktop) fn workspace_primary_buttons(&self) -> Vec<Button<'_, Message>> {
         let controls = vec![
-            omen_button("New Browser", Message::NewBrowserTab),
-            omen_button("New Conversation", Message::NewConversationPane),
+            omen_button("New Browser", Message::Browser(BrowserMessage::NewTab)),
+            omen_button(
+                "New Conversation",
+                Message::WorkspacePane(WorkspacePaneMessage::NewConversation),
+            ),
             subtle_button(
                 "Directory",
-                Message::SwitchSection(WorkspaceSection::Directory),
+                Message::Shell(ShellMessage::SwitchSection(WorkspaceSection::Directory)),
             ),
         ];
         #[cfg(feature = "chat-client")]
         {
             let mut controls = controls;
-            controls.insert(2, omen_button("New Chat", Message::NewOmenChatPane));
+            controls.insert(
+                2,
+                omen_button("New Chat", Message::OmenChat(OmenChatMessage::NewPane)),
+            );
             controls
         }
         #[cfg(not(feature = "chat-client"))]
@@ -279,7 +291,9 @@ impl DesktopApp {
                 restore_pane_button(
                     ICON_RESTORE_BROWSER,
                     label,
-                    Message::RestoreDesktopPane(DesktopPane::Browser(tab_id)),
+                    Message::WorkspacePane(WorkspacePaneMessage::RestoreDesktop(
+                        DesktopPane::Browser(tab_id),
+                    )),
                     false,
                 )
             })
@@ -292,7 +306,9 @@ impl DesktopApp {
                             restore_pane_button(
                                 ICON_RESTORE_CHAT,
                                 label,
-                                Message::RestoreDesktopPane(DesktopPane::OmenChat(session_id)),
+                                Message::WorkspacePane(WorkspacePaneMessage::RestoreDesktop(
+                                    DesktopPane::OmenChat(session_id),
+                                )),
                                 unread,
                             )
                         })
@@ -318,7 +334,9 @@ impl DesktopApp {
                 restore_pane_button(
                     ICON_RESTORE_MESSAGES,
                     label,
-                    Message::RestoreDesktopPane(DesktopPane::Conversation(conversation_id)),
+                    Message::WorkspacePane(WorkspacePaneMessage::RestoreDesktop(
+                        DesktopPane::Conversation(conversation_id),
+                    )),
                     unread,
                 )
             })
@@ -398,7 +416,10 @@ impl DesktopApp {
     pub(in crate::desktop) fn workspace_pane_body(
         &self,
         kind: &DesktopPane,
+        pane_visible: bool,
     ) -> Element<'_, Message> {
+        #[cfg(not(feature = "chat-client"))]
+        let _ = pane_visible;
         match kind {
             DesktopPane::Browser(tab_id) => views::browser::browser_view_for_tab(self, *tab_id),
             DesktopPane::Conversation(conversation_id) => {
@@ -406,7 +427,11 @@ impl DesktopApp {
             }
             #[cfg(feature = "chat-client")]
             DesktopPane::OmenChat(session_id) => {
-                views::omenchat::omenchat_view_for_session(self, *session_id)
+                let animate_media = views::omenchat::omenchat_media_animation_allowed(
+                    pane_visible,
+                    self.app.settings.ui.reduce_motion,
+                );
+                views::omenchat::omenchat_view_for_session(self, *session_id, animate_media)
             }
         }
     }

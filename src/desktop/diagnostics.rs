@@ -2,7 +2,7 @@ use crate::workspace::WorkspaceSection;
 
 use iced::Task;
 
-use super::{DesktopApp, Message};
+use super::{DesktopApp, DiagnosticsMessage, Message};
 
 impl DesktopApp {
     pub(super) fn dispatch_diagnostics_message(
@@ -10,67 +10,67 @@ impl DesktopApp {
         message: Message,
     ) -> Result<Task<Message>, Message> {
         match message {
-            Message::ShowDiagnostics => {
+            Message::Diagnostics(DiagnosticsMessage::Show) => {
                 self.update_show_diagnostics();
                 Ok(Task::none())
             }
-            Message::PreviewManagedConfig => {
+            Message::Diagnostics(DiagnosticsMessage::PreviewManagedConfig) => {
                 self.update_preview_managed_config();
                 Ok(Task::none())
             }
-            Message::ExportManagedConfig => {
+            Message::Diagnostics(DiagnosticsMessage::ExportManagedConfig) => {
                 self.update_export_managed_config();
                 Ok(Task::none())
             }
-            Message::PreviewDiagnosticsBundle => {
+            Message::Diagnostics(DiagnosticsMessage::PreviewBundle) => {
                 self.update_preview_diagnostics_bundle();
                 Ok(Task::none())
             }
-            Message::ExportDiagnosticsBundle => {
+            Message::Diagnostics(DiagnosticsMessage::ExportBundle) => {
                 self.update_export_diagnostics_bundle();
                 Ok(Task::none())
             }
-            Message::PreviewLiveInteropReport => {
+            Message::Diagnostics(DiagnosticsMessage::PreviewLiveInteropReport) => {
                 self.update_preview_live_interop_report();
                 Ok(Task::none())
             }
-            Message::ExportLiveInteropReport => {
+            Message::Diagnostics(DiagnosticsMessage::ExportLiveInteropReport) => {
                 self.update_export_live_interop_report();
                 Ok(Task::none())
             }
-            Message::NativePreflight => {
+            Message::Diagnostics(DiagnosticsMessage::NativePreflight) => {
                 self.update_native_preflight();
                 Ok(Task::none())
             }
-            Message::NativeSmokeDryRun => {
+            Message::Diagnostics(DiagnosticsMessage::NativeSmokeDryRun) => {
                 self.update_native_smoke_dry_run();
                 Ok(Task::none())
             }
-            Message::NativeSmokeLiveProbe => {
+            Message::Diagnostics(DiagnosticsMessage::NativeSmokeLiveProbe) => {
                 self.update_native_smoke_live_probe();
                 Ok(Task::none())
             }
-            Message::NativeLiveFetchValidate => {
+            Message::Diagnostics(DiagnosticsMessage::NativeLiveFetchValidate) => {
                 self.update_native_live_fetch_validate();
                 Ok(Task::none())
             }
-            Message::NativeLxmfSmokeSend => {
+            Message::Diagnostics(DiagnosticsMessage::NativeLxmfSmokeSend) => {
                 self.update_native_lxmf_smoke_send();
                 Ok(Task::none())
             }
-            Message::NativeLxmfInterop => {
+            Message::Diagnostics(DiagnosticsMessage::NativeLxmfInterop) => {
                 self.update_native_lxmf_interop();
                 Ok(Task::none())
             }
-            Message::NativeLxmfPropagationDiagnostics => {
+            Message::Diagnostics(DiagnosticsMessage::NativeLxmfPropagationDiagnostics) => {
                 self.update_native_lxmf_propagation_diagnostics();
                 Ok(Task::none())
             }
-            Message::SyncPropagationNow => {
+            Message::Diagnostics(DiagnosticsMessage::SyncPropagationNow) => {
                 self.update_sync_propagation_now();
                 Ok(Task::none())
             }
-            Message::BeginKnownDestinationsPreload => {
+            Message::Diagnostics(DiagnosticsMessage::BeginKnownDestinationsPreload) => {
                 self.update_begin_known_destinations_preload();
                 Ok(Task::none())
             }

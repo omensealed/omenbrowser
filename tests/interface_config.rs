@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use omenbrowser_rs::interfaces::{
     render_config, InterfaceConfigService, InterfaceKind, ReticulumInterfaceProfile,
+    GATEWAY_PRESETS_MAX_BYTES, INTERFACE_PROFILES_MAX_BYTES, INTERFACE_PROFILES_MAX_ITEMS,
+    RETICULUM_CONFIG_MAX_BYTES,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -193,6 +195,41 @@ fn gateway_presets_migrate_legacy_gateways_file() {
     assert_eq!(presets.len(), 1);
     assert_eq!(presets[0].id, "custom");
     assert!(root.join("interface_gateways.json").exists());
+    assert!(root.join("gateways.json").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(root.join("interface_gateways.json"))
+                .expect("migrated preset metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn oversized_gateway_preset_file_is_rejected_without_mutation() {
+    let root = temp_dir("oversized-gateways");
+    let path = root.join("gateways.json");
+    std::fs::File::create(&path)
+        .and_then(|file| file.set_len(GATEWAY_PRESETS_MAX_BYTES + 1))
+        .expect("write oversized gateways");
+
+    let error = InterfaceConfigService::new(
+        root.join("interfaces.json"),
+        root.join("reticulum"),
+        path.clone(),
+    )
+    .expect_err("reject oversized gateways");
+
+    assert!(error.to_string().contains("1048576 byte limit"));
+    assert_eq!(
+        std::fs::metadata(path).expect("gateway metadata").len(),
+        GATEWAY_PRESETS_MAX_BYTES + 1
+    );
 }
 
 #[test]
@@ -300,6 +337,217 @@ fn managed_apply_preserves_custom_instance_name() {
         Some("custom_browser_instance")
     );
     assert!(rendered.contains("network_identity = /tmp/omen/identity"));
+}
+
+#[test]
+fn exact_profile_file_limit_is_accepted() {
+    let root = temp_dir("exact-profile-limit");
+    let profile = ReticulumInterfaceProfile::auto("exact", "Exact");
+    let mut raw = serde_json::to_vec(&serde_json::json!({"profiles": [profile]}))
+        .expect("serialize profiles");
+    raw.resize(INTERFACE_PROFILES_MAX_BYTES as usize, b' ');
+    std::fs::write(root.join("interfaces.json"), raw).expect("write exact profiles");
+
+    let service = InterfaceConfigService::new(
+        root.join("interfaces.json"),
+        root.join("reticulum"),
+        root.join("gateways.json"),
+    )
+    .expect("load exact profiles");
+
+    assert!(service.get("exact").is_some());
+}
+
+#[test]
+fn oversized_profile_file_is_rejected_without_mutation() {
+    let root = temp_dir("oversized-profiles");
+    let path = root.join("interfaces.json");
+    std::fs::File::create(&path)
+        .and_then(|file| file.set_len(INTERFACE_PROFILES_MAX_BYTES + 1))
+        .expect("write oversized profiles");
+
+    let error = InterfaceConfigService::new(
+        path.clone(),
+        root.join("reticulum"),
+        root.join("gateways.json"),
+    )
+    .expect_err("reject oversized profiles");
+
+    assert!(error.to_string().contains("2097152 byte limit"));
+    assert_eq!(
+        std::fs::metadata(path).expect("profile metadata").len(),
+        INTERFACE_PROFILES_MAX_BYTES + 1
+    );
+}
+
+#[test]
+fn excessive_profile_count_is_rejected_without_rewrite() {
+    let root = temp_dir("profile-count");
+    let path = root.join("interfaces.json");
+    let profiles = (0..=INTERFACE_PROFILES_MAX_ITEMS)
+        .map(|index| ReticulumInterfaceProfile::auto(format!("profile-{index}"), "Auto"))
+        .collect::<Vec<_>>();
+    let raw = serde_json::to_vec(&serde_json::json!({"profiles": profiles}))
+        .expect("serialize excessive profiles");
+    std::fs::write(&path, &raw).expect("write excessive profiles");
+
+    let error = InterfaceConfigService::new(
+        path.clone(),
+        root.join("reticulum"),
+        root.join("gateways.json"),
+    )
+    .expect_err("reject excessive profiles");
+
+    assert!(error.to_string().contains("64 item limit"));
+    assert_eq!(std::fs::read(path).expect("read source"), raw);
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_symlink_is_rejected_without_touching_referent() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_dir("profile-symlink");
+    let path = root.join("interfaces.json");
+    let referent = root.join("referent.json");
+    let raw = b"{\"profiles\":[]}";
+    std::fs::write(&referent, raw).expect("write referent");
+    symlink(&referent, &path).expect("create symlink");
+
+    let error = InterfaceConfigService::new(
+        path.clone(),
+        root.join("reticulum"),
+        root.join("gateways.json"),
+    )
+    .expect_err("reject profile symlink");
+
+    assert!(error.to_string().contains("regular file"));
+    assert!(std::fs::symlink_metadata(path)
+        .expect("symlink metadata")
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read(referent).expect("read referent"), raw);
+}
+
+#[test]
+fn failed_profile_save_restores_previous_in_memory_profiles() {
+    let root = temp_dir("profile-rollback");
+    let profiles_path = root.join("interfaces.json");
+    let mut service = InterfaceConfigService::new(
+        profiles_path.clone(),
+        root.join("reticulum"),
+        root.join("gateways.json"),
+    )
+    .expect("service");
+    let previous = service.list_profiles().to_vec();
+    std::fs::remove_file(&profiles_path).expect("remove profiles file");
+    std::fs::create_dir(&profiles_path).expect("replace target with directory");
+
+    let error = service
+        .create(InterfaceKind::TcpClient)
+        .expect_err("reject unsafe profile target");
+
+    assert!(error.to_string().contains("regular file"));
+    assert_eq!(service.list_profiles(), previous);
+}
+
+#[test]
+fn unsafe_control_character_update_is_rejected_without_mutation() {
+    let root = temp_dir("control-injection");
+    let mut service = InterfaceConfigService::new(
+        root.join("interfaces.json"),
+        root.join("reticulum"),
+        root.join("gateways.json"),
+    )
+    .expect("service");
+    let mut profile = service.list_profiles()[0].clone();
+    let profile_id = profile.profile_id.clone();
+    let previous = profile.clone();
+    profile.name = "Injected\n[[Hostile]]".into();
+
+    let error = service
+        .update(profile)
+        .expect_err("reject control injection");
+
+    assert!(error.to_string().contains("unsafe control character"));
+    assert_eq!(service.get(&profile_id), Some(&previous));
+}
+
+#[cfg(unix)]
+#[test]
+fn gateway_preset_symlink_is_rejected_without_touching_referent() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_dir("gateway-symlink");
+    let path = root.join("gateways.json");
+    let referent = root.join("gateway-referent.json");
+    let raw = b"{\"gateways\":[]}";
+    std::fs::write(&referent, raw).expect("write referent");
+    symlink(&referent, &path).expect("create symlink");
+
+    let error = InterfaceConfigService::new(
+        root.join("interfaces.json"),
+        root.join("reticulum"),
+        path.clone(),
+    )
+    .expect_err("reject gateway symlink");
+
+    assert!(error.to_string().contains("regular file"));
+    assert!(std::fs::symlink_metadata(path)
+        .expect("symlink metadata")
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read(referent).expect("read referent"), raw);
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_rejects_config_symlink_without_touching_referent() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_dir("config-symlink");
+    let service = InterfaceConfigService::new(
+        root.join("interfaces.json"),
+        root.join("reticulum"),
+        root.join("gateways.json"),
+    )
+    .expect("service");
+    let config = service.config_path().clone();
+    let referent = root.join("config-referent");
+    std::fs::remove_file(&config).expect("remove config");
+    std::fs::write(&referent, b"referent secret").expect("write referent");
+    symlink(&referent, &config).expect("create config symlink");
+
+    let error = service.apply().expect_err("reject config symlink");
+
+    assert!(error.to_string().contains("regular file"));
+    assert_eq!(
+        std::fs::read(referent).expect("read referent"),
+        b"referent secret"
+    );
+}
+
+#[test]
+fn apply_rejects_oversized_existing_config_without_rewrite() {
+    let root = temp_dir("oversized-config");
+    let service = InterfaceConfigService::new(
+        root.join("interfaces.json"),
+        root.join("reticulum"),
+        root.join("gateways.json"),
+    )
+    .expect("service");
+    let config = service.config_path().clone();
+    std::fs::File::create(&config)
+        .and_then(|file| file.set_len(RETICULUM_CONFIG_MAX_BYTES + 1))
+        .expect("write oversized config");
+
+    let error = service.apply().expect_err("reject oversized config");
+
+    assert!(error.to_string().contains("1048576 byte limit"));
+    assert_eq!(
+        std::fs::metadata(config).expect("config metadata").len(),
+        RETICULUM_CONFIG_MAX_BYTES + 1
+    );
 }
 
 fn reticulum_config_value(config: &str, expected_key: &str) -> Option<String> {

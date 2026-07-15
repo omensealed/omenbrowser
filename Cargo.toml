@@ -9,18 +9,18 @@ repository = "https://github.com/omensealed/omenbrowser"
 readme = "README.md"
 
 [features]
-default = ["mock-runtime", "desktop-ui", "chat-client"]
+default = []
 mock-runtime = []
 desktop-ui = ["dep:iced", "dep:rfd"]
 desktop-svg = ["desktop-ui", "iced/svg"]
 desktop-qr = ["desktop-ui", "iced/qr_code"]
 desktop-markdown = ["desktop-ui", "iced/markdown"]
 desktop-ui-test = ["desktop-ui", "iced/debug", "iced/tester", "iced/time-travel"]
-desktop-widgets = ["desktop-ui", "dep:iced_aw", "dep:iced_fonts"]
+desktop-widgets = ["desktop-ui", "dep:iced_aw"]
 desktop-dnd = ["desktop-widgets", "dep:iced_drop"]
 desktop-animations = ["desktop-ui", "dep:iced_anim"]
 desktop-tables = ["desktop-ui", "dep:iced_table"]
-tui = ["dep:crossterm", "dep:ratatui"]
+tui = ["dep:crossterm", "dep:ratatui", "tokio/signal"]
 native-reticulum = ["dep:reticulum-rs", "dep:rns_transport", "dep:rand_core", "dep:rmpv", "dep:hkdf", "dep:tokio-util"]
 # Removed legacy rns-net compatibility feature names are retained only so stale
 # local commands fail with an explicit compile-time message instead of looking
@@ -35,7 +35,9 @@ live-reticulum = ["native-reticulum"]
 live-lxmf = ["native-lxmf"]
 live-network = ["native-network"]
 legacy-live-rns-net = ["experimental-rns-net-stack"]
-chat-client = ["desktop-ui", "dep:bzip2", "dep:iced_gif", "dep:reqwest", "dep:rmpv", "dep:rusqlite"]
+chat-client = ["desktop-ui", "dep:bzip2", "dep:reqwest", "dep:rmpv", "dep:rusqlite"]
+chat-client-gif = ["chat-client", "dep:iced_gif"]
+portable-sqlite = ["rusqlite?/bundled"]
 chat-client-reticulum = ["chat-client-rns-clean"]
 chat-client-rns-clean = ["chat-client", "native-network"]
 chat-client-rns = ["chat-client-reticulum"]
@@ -43,40 +45,52 @@ chat-client-rns-legacy = ["chat-client", "experimental-rns-net-stack"]
 chat-client-lxmf = ["chat-client", "native-lxmf-sdk"]
 chat-client-popout = ["chat-client"]
 
+# Canonical build identities. Release and packaging commands must use
+# `--no-default-features --features desktop-product`; development profiles keep
+# mock support explicit so it cannot leak into distributed binaries.
+desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite"]
+desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite"]
+desktop-dev = ["desktop-product", "mock-runtime"]
+desktop-test = ["desktop-dev", "desktop-ui-test"]
+
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
 bzip2 = { version = "0.5.2", optional = true }
-crossterm = { version = "0.27", optional = true }
+crossterm = { version = "0.29", optional = true }
 directories = "5.0"
-iced = { version = "0.14", optional = true, default-features = false, features = ["canvas", "image", "tokio", "wgpu", "x11", "wayland"] }
-iced_anim = { version = "0.3.1", optional = true, features = ["widgets"] }
+iced = { version = "0.14", optional = true, default-features = false, features = ["canvas", "image", "tokio", "wgpu"] }
+iced_anim = { version = "0.3.1", optional = true, default-features = false, features = ["widgets"] }
 iced_aw = { version = "0.14.1", optional = true, default-features = false, features = ["badge", "card", "menu", "tabs", "tab_bar", "sidebar", "selection_list", "number_input", "labeled_frame"] }
-iced_drop = { version = "0.2.37", optional = true, features = ["helpers"] }
-iced_fonts = { version = "0.3.0", optional = true, default-features = false, features = ["lucide", "nerd", "codicon"] }
-iced_gif = { version = "0.14", optional = true }
-iced_table = { version = "0.14.0", optional = true }
+iced_drop = { version = "0.2.37", optional = true, default-features = false, features = ["helpers"] }
+iced_gif = { version = "0.14", optional = true, default-features = false, features = ["tokio"] }
+iced_table = { version = "0.14.0", optional = true, default-features = false }
 hkdf = { version = "0.12", optional = true }
 lxmf = { version = "0.6.0", optional = true, default-features = false, features = ["wire"] }
-ratatui = { version = "0.26", optional = true }
+ratatui = { version = "0.30.2", optional = true, default-features = false, features = ["crossterm_0_29", "layout-cache"] }
 rand_core = { version = "0.6.4", optional = true, features = ["getrandom"] }
 reticulum-rs = { version = "0.6.0", optional = true, default-features = false, features = ["core", "transport"] }
 rns_transport = { package = "reticulum-rs-transport", version = "0.6.0", optional = true }
 rns_rpc = { package = "reticulum-rs-rpc", version = "0.6.0", optional = true }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "socks"] }
-rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
+rfd = { version = "0.15", optional = true, default-features = false }
 rmpv = { version = "1.3", optional = true }
+rpassword = "=7.5.4"
 rusqlite = { version = "0.37", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "1.0"
-tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.37", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", optional = true }
 tracing = "0.1"
 tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 unicode-width = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+iced = { version = "0.14", optional = true, default-features = false, features = ["x11", "wayland"] }
+rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
 
 
 [[bin]]
@@ -85,4 +99,4 @@ path = "src/bin/omen_reticulum_gateway.rs"
 required-features = ["native-reticulum"]
 
 [profile.dev.package."*"]
-opt-level = 3
+opt-level = 1

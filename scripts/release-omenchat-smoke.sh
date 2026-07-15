@@ -10,6 +10,7 @@ tcp_endpoint="${OMENCHAT_TCP_ENDPOINT:-127.0.0.1:42420}"
 server_tcp_client="${OMENCHAT_SERVER_TCP_CLIENT:-}"
 network_name="${OMENCHAT_NETWORK_NAME:-}"
 passphrase="${OMENCHAT_PASSPHRASE:-}"
+passphrase_file="${OMENCHAT_PASSPHRASE_FILE:-}"
 path_wait="${OMENCHAT_PATH_WAIT:-75}"
 out_root="${TMPDIR:-/tmp}/omenbrowser-rs-omenchat-smoke"
 message="OMENchat release smoke from packaged script"
@@ -34,7 +35,9 @@ Options:
                        Run omenchatd as a TCP client to an existing gateway.
                        Browser clients also connect to this endpoint.
   --network-name NAME  Optional IFAC network name for server and browser clients
-  --passphrase TEXT    Optional IFAC passphrase for server and browser clients
+  --passphrase-file FILE
+                       Owner-only IFAC passphrase file for server and clients
+  --passphrase TEXT    Deprecated: exposes the secret in argv
   --path-wait SECS     OMENchat path wait seconds (default: 75)
   --out DIR            Output parent directory
   --message TEXT       Smoke message body
@@ -52,6 +55,7 @@ Environment fallbacks:
   OMENCHAT_SERVER_TCP_CLIENT
   OMENCHAT_NETWORK_NAME
   OMENCHAT_PASSPHRASE
+  OMENCHAT_PASSPHRASE_FILE
   OMENCHAT_PATH_WAIT
 USAGE
 }
@@ -81,6 +85,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --passphrase)
       passphrase="${2:-}"
+      echo "warning: --passphrase exposes the secret in argv; use --passphrase-file" >&2
+      shift 2
+      ;;
+    --passphrase-file)
+      passphrase_file="${2:-}"
       shift 2
       ;;
     --path-wait)
@@ -171,6 +180,20 @@ browser_root="$run_dir/browser-root"
 browser_root_2="$run_dir/browser-root-2"
 mkdir -p "$server_home" "$browser_root"
 
+if [[ -n "$passphrase" && -n "$passphrase_file" ]]; then
+  echo "choose only one passphrase source" >&2
+  exit 2
+fi
+if [[ -n "$passphrase" ]]; then
+  passphrase_file="$run_dir/ifac-passphrase"
+  (umask 077; printf '%s\n' "$passphrase" > "$passphrase_file")
+  unset passphrase
+fi
+if [[ -n "$passphrase_file" && ! -f "$passphrase_file" ]]; then
+  echo "--passphrase-file does not exist: $passphrase_file" >&2
+  exit 2
+fi
+
 server_interface_args=()
 client_interface_args=(--tcp-client "$tcp_endpoint")
 if [[ -n "$server_tcp_client" ]]; then
@@ -182,9 +205,9 @@ if [[ -n "$network_name" ]]; then
   server_interface_args+=(--network-name "$network_name")
   client_interface_args+=(--network-name "$network_name")
 fi
-if [[ -n "$passphrase" ]]; then
-  server_interface_args+=(--passphrase "$passphrase")
-  client_interface_args+=(--passphrase "$passphrase")
+if [[ -n "$passphrase_file" ]]; then
+  server_interface_args+=(--passphrase-file "$passphrase_file")
+  client_interface_args+=(--passphrase-file "$passphrase_file")
 fi
 
 server_pid=""

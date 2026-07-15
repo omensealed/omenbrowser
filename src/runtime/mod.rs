@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod bootstrap;
 pub mod event;
 pub mod facade;
 #[cfg(feature = "native-reticulum")]
@@ -6,6 +7,7 @@ pub mod native;
 #[cfg(feature = "native-lxmf")]
 pub mod native_lxmf;
 pub mod network;
+pub mod thread_policy;
 
 #[allow(unused_imports)]
 pub use adapter::{build_runtime, RuntimeFactoryDecision};

@@ -11,8 +11,9 @@ use super::super::{
     desktop_message_retry_labels, failed_message_container_style, format_epoch_secs,
     incoming_message_container_style, lxmf_message_compact_stamp_status,
     lxmf_message_compact_status, lxmf_message_status_lines, outgoing_message_container_style,
-    selected_message_container_style, status_container_style, ui_size, Message,
-    CONVERSATION_MICRON_PREVIEW_WIDTH, CONVERSATION_PREVIEW_CHARS, CONVERSATION_PREVIEW_LINES,
+    selected_message_container_style, status_container_style, ui_size, ConversationMessage,
+    Message, CONVERSATION_MICRON_PREVIEW_WIDTH, CONVERSATION_PREVIEW_CHARS,
+    CONVERSATION_PREVIEW_LINES,
 };
 use super::{
     action_grid, conversation_message_attachment_rows, omen_button_owned, section_card,
@@ -88,10 +89,10 @@ pub(in crate::desktop) fn message_bubble<'a>(
         } else {
             "Details".into()
         },
-        Message::SelectConversationPaneRow {
+        Message::Conversation(ConversationMessage::SelectPaneRow {
             conversation_id,
             key: message_key.clone(),
-        },
+        }),
     )];
     if selected {
         if desktop_message_is_retry_candidate(message) {
@@ -99,36 +100,36 @@ pub(in crate::desktop) fn message_bubble<'a>(
             let labels = desktop_message_retry_labels(message);
             actions.push(subtle_button_owned(
                 labels.prepare.into(),
-                Message::PrepareLxmfRetryForConversationRow {
+                Message::Conversation(ConversationMessage::PrepareRetryForConversationRow {
                     conversation_id,
                     key: message_key,
-                },
+                }),
             ));
             actions.push(omen_button_owned(
                 labels.send.into(),
-                Message::SendLxmfRetryForConversationRow {
+                Message::Conversation(ConversationMessage::SendRetryForConversationRow {
                     conversation_id,
                     key: retry_key,
-                },
+                }),
             ));
         }
         if let Some(sync_label) = desktop_message_propagation_sync_label(message) {
             actions.push(omen_button_owned(
                 sync_label.into(),
-                Message::SyncPropagationForConversationRow {
+                Message::Conversation(ConversationMessage::SyncPropagationForConversationRow {
                     conversation_id,
                     key: message_summary_key(message),
-                },
+                }),
             ));
         }
     }
     if message.failed {
         actions.push(subtle_button_owned(
             "Close".into(),
-            Message::DismissConversationPaneRow {
+            Message::Conversation(ConversationMessage::DismissPaneRow {
                 conversation_id,
                 key: message_summary_key(message),
-            },
+            }),
         ));
     }
     content = content.push(action_grid(actions, 4));
@@ -184,7 +185,7 @@ pub(in crate::desktop) fn selected_message_details_card(
         text(format!("transport: {:?}", message.transport_method)).size(ui_size(13)),
         subtle_button(
             "Close",
-            Message::CloseConversationPaneDetails { conversation_id }
+            Message::Conversation(ConversationMessage::ClosePaneDetails { conversation_id })
         ),
     ]
     .spacing(10)
@@ -195,26 +196,26 @@ pub(in crate::desktop) fn selected_message_details_card(
         let labels = desktop_message_retry_labels(message);
         header_actions.push(subtle_button_owned(
             labels.prepare.into(),
-            Message::PrepareLxmfRetryForConversationRow {
+            Message::Conversation(ConversationMessage::PrepareRetryForConversationRow {
                 conversation_id,
                 key: retry_key.clone(),
-            },
+            }),
         ));
         header_actions.push(omen_button_owned(
             labels.send.into(),
-            Message::SendLxmfRetryForConversationRow {
+            Message::Conversation(ConversationMessage::SendRetryForConversationRow {
                 conversation_id,
                 key: retry_key,
-            },
+            }),
         ));
     }
     if let Some(sync_label) = desktop_message_propagation_sync_label(message) {
         header_actions.push(omen_button_owned(
             sync_label.into(),
-            Message::SyncPropagationForConversationRow {
+            Message::Conversation(ConversationMessage::SyncPropagationForConversationRow {
                 conversation_id,
                 key: message_summary_key(message),
-            },
+            }),
         ));
     }
 

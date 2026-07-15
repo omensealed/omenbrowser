@@ -56,6 +56,14 @@ impl DesktopApp {
         );
         let clearweb = clearweb_startup_state(&app);
 
+        tracing::info!(
+            workspace_panes = workspace.workspace_panes.len(),
+            browser_tabs = app.workspace.browser_tabs.len(),
+            conversations = app.workspace.conversations.len(),
+            omenchat_sessions = omenchat_session_ids.len(),
+            "desktop workspace restored"
+        );
+
         Self {
             app,
             conversation: conversation_startup,

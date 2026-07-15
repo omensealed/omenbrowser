@@ -1,9 +1,7 @@
 #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
-use std::time::Duration;
-#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -20,6 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
+use crate::admin_db::{AdminDatabase, AdminDatabaseResponse};
 use crate::config::{self, ServerConfig};
 use crate::error::{ServerError, ServerResult};
 #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
@@ -28,6 +27,7 @@ use crate::live::ActiveLinkSummary;
 use crate::live::ClosedLinkSummary;
 #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::live::LiveServerStats;
+use crate::store::{ServerAdminUser, ServerRoom, ServerUser};
 use crate::tui_format::{
     current_unix_secs, human_age, human_age_duration, human_bytes, human_system_time_local,
     human_timestamp, unix_to_utc_string,
@@ -84,6 +84,144 @@ type AdminLiveRuntime = ReticulumLiveRuntime;
 type AdminLiveRuntime = RnsNetLiveRuntime;
 
 const SETUP_ACTION_PANEL_HEIGHT: u16 = 21;
+const ADMIN_ROOM_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const ADMIN_ROOM_CACHE_ITEMS: usize = 1_024;
+const ADMIN_ROOM_CACHE_BYTES: usize = 1024 * 1024;
+const ADMIN_USER_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const ADMIN_USER_CACHE_ITEMS: usize = 4_096;
+const ADMIN_USER_CACHE_BYTES: usize = 2 * 1024 * 1024;
+
+type AdminRoomRow = (i64, String, Option<String>);
+
+enum PendingRoomDatabase {
+    Refresh(AdminDatabaseResponse<Vec<ServerRoom>>),
+    Create {
+        name: String,
+        response: AdminDatabaseResponse<ServerRoom>,
+    },
+    Update {
+        room_id: i64,
+        name: String,
+        response: AdminDatabaseResponse<ServerRoom>,
+    },
+    Archive {
+        room_id: i64,
+        name: String,
+        response: AdminDatabaseResponse<()>,
+    },
+}
+
+enum RoomDatabaseCompletion {
+    Refresh(ServerResult<Vec<ServerRoom>>),
+    Create(String, ServerResult<ServerRoom>),
+    Update(i64, String, ServerResult<ServerRoom>),
+    Archive(i64, String, ServerResult<()>),
+}
+
+enum PendingUserDatabase {
+    Refresh(AdminDatabaseResponse<Vec<ServerAdminUser>>),
+    Status {
+        user: AdminUserRow,
+        flag: u32,
+        enabled: bool,
+        response: AdminDatabaseResponse<ServerUser>,
+    },
+    Role {
+        user: AdminUserRow,
+        role_bits: u64,
+        response: AdminDatabaseResponse<ServerUser>,
+    },
+    Delete {
+        users: Vec<AdminUserRow>,
+        skipped_active: usize,
+        prune: bool,
+        response: AdminDatabaseResponse<usize>,
+    },
+}
+
+enum UserDatabaseCompletion {
+    Refresh(ServerResult<Vec<ServerAdminUser>>),
+    Status(AdminUserRow, u32, bool, ServerResult<ServerUser>),
+    Role(AdminUserRow, u64, ServerResult<ServerUser>),
+    Delete(Vec<AdminUserRow>, usize, bool, ServerResult<usize>),
+}
+
+fn bounded_admin_room_rows(rooms: Vec<ServerRoom>) -> (Vec<AdminRoomRow>, bool) {
+    bounded_admin_room_cache(
+        rooms
+            .into_iter()
+            .map(|room| (room.room_id as i64, room.name, room.topic)),
+    )
+}
+
+fn bounded_admin_room_cache(
+    rooms: impl IntoIterator<Item = AdminRoomRow>,
+) -> (Vec<AdminRoomRow>, bool) {
+    let mut rows = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for (room_id, name, topic) in rooms {
+        let room_bytes = name
+            .len()
+            .saturating_add(topic.as_ref().map_or(0, String::len))
+            .saturating_add(std::mem::size_of::<i64>());
+        if rows.len() >= ADMIN_ROOM_CACHE_ITEMS
+            || bytes.saturating_add(room_bytes) > ADMIN_ROOM_CACHE_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        bytes = bytes.saturating_add(room_bytes);
+        rows.push((room_id, name, topic));
+    }
+    (rows, truncated)
+}
+
+fn bounded_admin_user_rows(users: Vec<ServerAdminUser>) -> (Vec<AdminUserRow>, bool) {
+    let mut rows = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for admin_user in users {
+        let user = &admin_user.user;
+        let row_bytes = user
+            .identity_hash
+            .len()
+            .saturating_mul(3)
+            .saturating_add(user.display_name.len())
+            .saturating_add(user.lxmf_destination.as_ref().map_or(0, String::len))
+            .saturating_add(std::mem::size_of::<AdminUserRow>());
+        if rows.len() >= ADMIN_USER_CACHE_ITEMS
+            || bytes.saturating_add(row_bytes) > ADMIN_USER_CACHE_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        bytes = bytes.saturating_add(row_bytes);
+        rows.push(admin_user_row(admin_user));
+    }
+    (rows, truncated)
+}
+
+fn admin_user_row(admin_user: ServerAdminUser) -> AdminUserRow {
+    let user = admin_user.user;
+    let role_bits = user.role_bits;
+    let status_bits = user.status_bits;
+    let identity_hex = bytes_to_hex(&user.identity_hash);
+    AdminUserRow {
+        user_id: user.user_id as i64,
+        identity_hash: user.identity_hash,
+        identity_hex,
+        display_name: user.display_name,
+        role_bits,
+        status_bits,
+        lxmf_destination: user.lxmf_destination,
+        first_seen_at: admin_user.first_seen_at,
+        last_seen_at: admin_user.last_seen_at,
+        trusted: role_bits & ROLE_TRUSTED != 0,
+        banned: status_bits & STATUS_BANNED != 0,
+        muted: status_bits & STATUS_MUTED != 0,
+    }
+}
 
 pub fn run_admin_console(config: ServerConfig) -> ServerResult<()> {
     if io::stdout().is_terminal() && io::stdin().is_terminal() {
@@ -95,11 +233,12 @@ pub fn run_admin_console(config: ServerConfig) -> ServerResult<()> {
 
 fn run_dashboard(mut config: ServerConfig) -> ServerResult<()> {
     config::init_files(&config)?;
-    let mut terminal = TerminalGuard::enter()?;
     let mut app = AdminTui::new(config);
+    let mut terminal = TerminalGuard::enter()?;
     app.start_live_runtime();
 
     loop {
+        app.tick_admin_database();
         app.tick_live_runtime();
         terminal.draw(|frame| app.render(frame))?;
         if event::poll(Duration::from_millis(250))? {
@@ -322,6 +461,13 @@ pub(crate) enum AdminAction {
 
 struct AdminTui {
     config: ServerConfig,
+    admin_database: Option<AdminDatabase>,
+    rooms: Vec<AdminRoomRow>,
+    pending_room_database: Option<PendingRoomDatabase>,
+    next_room_refresh: Instant,
+    users: Vec<AdminUserRow>,
+    pending_user_database: Option<PendingUserDatabase>,
+    next_user_refresh: Instant,
     tab: AdminTab,
     selected_room: usize,
     input_mode: InputMode,
@@ -402,7 +548,12 @@ fn drain_admin_live_events_logged(
     max_events: usize,
     config: &ServerConfig,
 ) -> ServerResult<usize> {
-    reticulum_live::drain_live_events_logged(&mut live.runtime, max_events, config)
+    live.tokio
+        .block_on(reticulum_live::drain_live_events_logged(
+            &mut live.runtime,
+            max_events,
+            config,
+        ))
 }
 
 #[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
@@ -432,14 +583,58 @@ fn announce_admin_live_runtime(
 
 impl AdminTui {
     fn new(config: ServerConfig) -> Self {
+        let (admin_database, rooms, users, status) =
+            match AdminDatabase::open(&config.database_path) {
+                Ok(database) => {
+                    let (rooms, room_truncated, room_error) = match database.list_rooms() {
+                        Ok(rooms) => {
+                            let (rooms, truncated) = bounded_admin_room_rows(rooms);
+                            (rooms, truncated, None)
+                        }
+                        Err(error) => (Vec::new(), false, Some(error)),
+                    };
+                    let (users, user_truncated, user_error) = match database.list_users() {
+                        Ok(users) => {
+                            let (users, truncated) = bounded_admin_user_rows(users);
+                            (users, truncated, None)
+                        }
+                        Err(error) => (Vec::new(), false, Some(error)),
+                    };
+                    let status = if let Some(error) = room_error {
+                        format!("room database load failed: {error}")
+                    } else if let Some(error) = user_error {
+                        format!("user database load failed: {error}")
+                    } else if room_truncated {
+                        "room cache reached its 1,024-item/1 MiB display limit".into()
+                    } else if user_truncated {
+                        "user cache reached its 4,096-item/2 MiB display limit".into()
+                    } else {
+                        "ready".into()
+                    };
+                    (Some(database), rooms, users, status)
+                }
+                Err(error) => (
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    format!("administrative database unavailable: {error}"),
+                ),
+            };
         Self {
             config,
+            admin_database,
+            rooms,
+            pending_room_database: None,
+            next_room_refresh: Instant::now() + ADMIN_ROOM_REFRESH_INTERVAL,
+            users,
+            pending_user_database: None,
+            next_user_refresh: Instant::now() + ADMIN_USER_REFRESH_INTERVAL,
             tab: AdminTab::Overview,
             selected_room: 0,
             input_mode: InputMode::Navigate,
             input: String::new(),
             pending_room_name: String::new(),
-            status: "ready".into(),
+            status,
             selected_user: 0,
             pending_archive_room_id: None,
             pending_delete_user_id: None,
@@ -461,8 +656,387 @@ impl AdminTui {
         }
     }
 
+    fn tick_admin_database(&mut self) {
+        let completion = self
+            .pending_room_database
+            .as_ref()
+            .and_then(|pending| match pending {
+                PendingRoomDatabase::Refresh(response) => {
+                    response.try_recv().map(RoomDatabaseCompletion::Refresh)
+                }
+                PendingRoomDatabase::Create { name, response } => response
+                    .try_recv()
+                    .map(|result| RoomDatabaseCompletion::Create(name.clone(), result)),
+                PendingRoomDatabase::Update {
+                    room_id,
+                    name,
+                    response,
+                } => response
+                    .try_recv()
+                    .map(|result| RoomDatabaseCompletion::Update(*room_id, name.clone(), result)),
+                PendingRoomDatabase::Archive {
+                    room_id,
+                    name,
+                    response,
+                } => response
+                    .try_recv()
+                    .map(|result| RoomDatabaseCompletion::Archive(*room_id, name.clone(), result)),
+            });
+        if let Some(completion) = completion {
+            self.pending_room_database = None;
+            self.apply_room_database_completion(completion);
+        }
+
+        if self.pending_room_database.is_none()
+            && self.room_cache_is_visible()
+            && Instant::now() >= self.next_room_refresh
+        {
+            self.request_room_refresh();
+        }
+
+        let user_completion =
+            self.pending_user_database
+                .as_ref()
+                .and_then(|pending| match pending {
+                    PendingUserDatabase::Refresh(response) => {
+                        response.try_recv().map(UserDatabaseCompletion::Refresh)
+                    }
+                    PendingUserDatabase::Status {
+                        user,
+                        flag,
+                        enabled,
+                        response,
+                    } => response.try_recv().map(|result| {
+                        UserDatabaseCompletion::Status(user.clone(), *flag, *enabled, result)
+                    }),
+                    PendingUserDatabase::Role {
+                        user,
+                        role_bits,
+                        response,
+                    } => response.try_recv().map(|result| {
+                        UserDatabaseCompletion::Role(user.clone(), *role_bits, result)
+                    }),
+                    PendingUserDatabase::Delete {
+                        users,
+                        skipped_active,
+                        prune,
+                        response,
+                    } => response.try_recv().map(|result| {
+                        UserDatabaseCompletion::Delete(
+                            users.clone(),
+                            *skipped_active,
+                            *prune,
+                            result,
+                        )
+                    }),
+                });
+        if let Some(completion) = user_completion {
+            self.pending_user_database = None;
+            self.apply_user_database_completion(completion);
+        }
+        if self.pending_user_database.is_none()
+            && self.tab == AdminTab::Moderation
+            && Instant::now() >= self.next_user_refresh
+        {
+            self.request_user_refresh();
+        }
+    }
+
+    fn room_cache_is_visible(&self) -> bool {
+        matches!(
+            self.tab,
+            AdminTab::Overview | AdminTab::Setup | AdminTab::Rooms | AdminTab::Monitoring
+        )
+    }
+
+    fn request_room_refresh(&mut self) {
+        self.next_room_refresh = Instant::now() + ADMIN_ROOM_REFRESH_INTERVAL;
+        let Some(database) = self.admin_database.as_ref() else {
+            return;
+        };
+        match database.request_list_rooms() {
+            Ok(response) => {
+                self.pending_room_database = Some(PendingRoomDatabase::Refresh(response));
+            }
+            Err(error) => self.status = format!("room refresh rejected: {error}"),
+        }
+    }
+
+    fn apply_room_database_completion(&mut self, completion: RoomDatabaseCompletion) {
+        match completion {
+            RoomDatabaseCompletion::Refresh(Ok(rooms)) => {
+                let (rooms, truncated) = bounded_admin_room_rows(rooms);
+                self.rooms = rooms;
+                self.selected_room = self.selected_room.min(self.rooms.len().saturating_sub(1));
+                if truncated {
+                    self.status = "room cache reached its 1,024-item/1 MiB display limit".into();
+                }
+            }
+            RoomDatabaseCompletion::Refresh(Err(error)) => {
+                self.status = format!("room refresh failed: {error}");
+            }
+            RoomDatabaseCompletion::Create(name, Ok(room)) => {
+                let truncated = self.upsert_cached_room(room);
+                append_admin_log(&self.config, format!("admin added room name={name}"));
+                self.status = if truncated {
+                    format!("room ready: #{name}; room display cache reached its safety limit")
+                } else {
+                    format!(
+                        "room ready: #{name} is visible to clients; mods/admins can edit its topic"
+                    )
+                };
+            }
+            RoomDatabaseCompletion::Create(name, Err(error)) => {
+                self.status = format!("room create failed for #{name}: {error}");
+            }
+            RoomDatabaseCompletion::Update(room_id, name, Ok(room)) => {
+                let truncated = self.upsert_cached_room(room);
+                append_admin_log(
+                    &self.config,
+                    format!("admin updated room topic id={room_id} name={name}"),
+                );
+                self.status = if truncated {
+                    format!(
+                        "updated topic for #{name}; room display cache reached its safety limit"
+                    )
+                } else {
+                    format!("updated topic for #{name}: clients will see it on sync")
+                };
+            }
+            RoomDatabaseCompletion::Update(_, name, Err(error)) => {
+                self.status = format!("room topic update failed for #{name}: {error}");
+            }
+            RoomDatabaseCompletion::Archive(room_id, name, Ok(())) => {
+                self.rooms.retain(|(id, _, _)| *id != room_id);
+                self.selected_room = self.selected_room.min(self.rooms.len().saturating_sub(1));
+                append_admin_log(
+                    &self.config,
+                    format!("admin archived room id={room_id} name={name}"),
+                );
+                self.status =
+                    format!("archived #{name}: hidden from room lists; history was retained");
+            }
+            RoomDatabaseCompletion::Archive(_, name, Err(error)) => {
+                self.status = format!("room archive failed for #{name}: {error}");
+            }
+        }
+    }
+
+    fn request_user_refresh(&mut self) {
+        self.next_user_refresh = Instant::now() + ADMIN_USER_REFRESH_INTERVAL;
+        let Some(database) = self.admin_database.as_ref() else {
+            return;
+        };
+        match database.request_list_users() {
+            Ok(response) => {
+                self.pending_user_database = Some(PendingUserDatabase::Refresh(response));
+            }
+            Err(error) => self.status = format!("user refresh rejected: {error}"),
+        }
+    }
+
+    fn apply_user_database_completion(&mut self, completion: UserDatabaseCompletion) {
+        match completion {
+            UserDatabaseCompletion::Refresh(Ok(users)) => {
+                let (users, truncated) = bounded_admin_user_rows(users);
+                self.users = users;
+                self.selected_user = self.selected_user.min(self.users.len().saturating_sub(1));
+                if truncated {
+                    self.status = "user cache reached its 4,096-item/2 MiB display limit".into();
+                }
+            }
+            UserDatabaseCompletion::Refresh(Err(error)) => {
+                self.status = format!("user refresh failed: {error}");
+            }
+            UserDatabaseCompletion::Status(user, flag, enabled, Ok(updated)) => {
+                self.update_cached_user(updated);
+                if flag == STATUS_BANNED {
+                    if enabled {
+                        let disconnected = self.disconnect_live_user(&user);
+                        append_admin_log(
+                            &self.config,
+                            format!(
+                                "admin banned user id={} name={} active_links_closed={disconnected}",
+                                user.user_id, user.display_name
+                            ),
+                        );
+                        self.status = if disconnected > 0 {
+                            format!(
+                                "{} banned; closed {disconnected} active link(s); future sessions blocked",
+                                user.display_name
+                            )
+                        } else {
+                            format!("{} banned; future sessions blocked", user.display_name)
+                        };
+                    } else {
+                        append_admin_log(
+                            &self.config,
+                            format!(
+                                "admin unbanned user id={} name={}",
+                                user.user_id, user.display_name
+                            ),
+                        );
+                        self.status =
+                            format!("{} unbanned; future sessions allowed", user.display_name);
+                    }
+                } else if flag == STATUS_MUTED {
+                    let action = if enabled { "muted" } else { "unmuted" };
+                    append_admin_log(
+                        &self.config,
+                        format!(
+                            "admin {action} user id={} name={}",
+                            user.user_id, user.display_name
+                        ),
+                    );
+                    self.status = if enabled {
+                        format!(
+                            "{} muted; reading allowed, sending blocked",
+                            user.display_name
+                        )
+                    } else {
+                        format!("{} unmuted; message sending restored", user.display_name)
+                    };
+                }
+            }
+            UserDatabaseCompletion::Status(user, _, _, Err(error)) => {
+                self.status = format!(
+                    "moderation update failed for {}: {error}",
+                    user.display_name
+                );
+            }
+            UserDatabaseCompletion::Role(user, role_bits, Ok(updated)) => {
+                self.update_cached_user(updated);
+                let trusted_changed = user.trusted != (role_bits & ROLE_TRUSTED != 0)
+                    && (user.role_bits ^ role_bits) == ROLE_TRUSTED;
+                if trusted_changed {
+                    let action = if role_bits & ROLE_TRUSTED != 0 {
+                        "trusted"
+                    } else {
+                        "untrusted"
+                    };
+                    append_admin_log(
+                        &self.config,
+                        format!(
+                            "admin {action} user id={} name={}",
+                            user.user_id, user.display_name
+                        ),
+                    );
+                    self.status = if role_bits & ROLE_TRUSTED != 0 {
+                        format!(
+                            "{} trusted; trusted-media affordances enabled",
+                            user.display_name
+                        )
+                    } else {
+                        format!(
+                            "{} untrusted; trusted-media affordances removed",
+                            user.display_name
+                        )
+                    };
+                } else {
+                    append_admin_log(
+                        &self.config,
+                        format!(
+                            "admin set user role id={} name={} role={}",
+                            user.user_id,
+                            user.display_name,
+                            role_label(role_bits)
+                        ),
+                    );
+                    self.status = format!(
+                        "{} role set to {}; permissions updated",
+                        user.display_name,
+                        role_label(role_bits)
+                    );
+                }
+            }
+            UserDatabaseCompletion::Role(user, _, Err(error)) => {
+                self.status = format!("role update failed for {}: {error}", user.display_name);
+            }
+            UserDatabaseCompletion::Delete(users, skipped_active, prune, Ok(deleted)) => {
+                for user in &users {
+                    let age = stale_user_age_secs(user);
+                    let action = if prune { "pruned" } else { "deleted" };
+                    append_admin_log(
+                        &self.config,
+                        format!(
+                            "admin {action} stale user id={} name={} stale_secs={age}",
+                            user.user_id, user.display_name
+                        ),
+                    );
+                }
+                self.users.retain(|candidate| {
+                    !users.iter().any(|user| user.user_id == candidate.user_id)
+                });
+                self.selected_user = if prune {
+                    0
+                } else {
+                    self.selected_user.min(self.users.len().saturating_sub(1))
+                };
+                self.status = if prune && skipped_active > 0 {
+                    format!(
+                        "pruned {deleted} stale user record(s); skipped {skipped_active} active"
+                    )
+                } else if prune {
+                    format!("pruned {deleted} stale user record(s)")
+                } else {
+                    format!(
+                        "deleted stale user record: {}",
+                        users
+                            .first()
+                            .map(|user| user.display_name.as_str())
+                            .unwrap_or("selected user")
+                    )
+                };
+            }
+            UserDatabaseCompletion::Delete(users, _, prune, Err(error)) => {
+                let action = if prune { "prune" } else { "delete" };
+                let target = users
+                    .first()
+                    .map(|user| user.display_name.as_str())
+                    .unwrap_or("selected users");
+                self.status = format!("user {action} failed for {target}: {error}");
+            }
+        }
+    }
+
+    fn update_cached_user(&mut self, updated: ServerUser) {
+        let Some(user) = self
+            .users
+            .iter_mut()
+            .find(|user| user.user_id == updated.user_id as i64)
+        else {
+            self.next_user_refresh = Instant::now();
+            return;
+        };
+        user.identity_hex = bytes_to_hex(&updated.identity_hash);
+        user.identity_hash = updated.identity_hash;
+        user.display_name = updated.display_name;
+        user.role_bits = updated.role_bits;
+        user.status_bits = updated.status_bits;
+        user.lxmf_destination = updated.lxmf_destination;
+        user.trusted = updated.role_bits & ROLE_TRUSTED != 0;
+        user.banned = updated.status_bits & STATUS_BANNED != 0;
+        user.muted = updated.status_bits & STATUS_MUTED != 0;
+    }
+
+    fn upsert_cached_room(&mut self, room: ServerRoom) -> bool {
+        let room_id = room.room_id as i64;
+        self.rooms.retain(|(id, _, _)| *id != room_id);
+        self.rooms.push((room_id, room.name, room.topic));
+        self.rooms
+            .sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+        let (rooms, truncated) = bounded_admin_room_cache(std::mem::take(&mut self.rooms));
+        self.rooms = rooms;
+        self.selected_room = self
+            .rooms
+            .iter()
+            .position(|(id, _, _)| *id == room_id)
+            .unwrap_or_else(|| self.selected_room.min(self.rooms.len().saturating_sub(1)));
+        truncated
+    }
+
     fn render(&mut self, frame: &mut Frame<'_>) {
-        let root = frame.size();
+        let root = frame.area();
         let tab_height = tab_panel_height(root.width);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -535,7 +1109,13 @@ impl AdminTui {
     fn stop_live_runtime(&mut self) {
         if self.live.take().is_some() {
             self.live_status = "live server stopped".into();
-            self.status = "live server stopped: active links closed; config was not changed".into();
+            self.status = if crate::server_log::flush(Duration::from_secs(1)) {
+                "live server stopped: active links closed; logs flushed; config was not changed"
+                    .into()
+            } else {
+                "live server stopped: active links closed; log flush timed out; config was not changed"
+                    .into()
+            };
         } else {
             self.status = "live server is not running; press g or Start Live Server".into();
         }
@@ -790,6 +1370,7 @@ impl AdminTui {
                     hex_lower_local(&live.runtime.destination_hash)
                 ));
                 lines.push(live.runtime.live_server.stats().summary_line());
+                lines.push(live.runtime.queue_summary_line());
                 lines.extend(live.last_interface_stats.iter().cloned());
             }
             lines.join("\n")
@@ -831,11 +1412,11 @@ impl AdminTui {
                 .saturating_duration_since(Instant::now())
                 .as_secs()
                 .min(i64::MAX as u64) as i64;
-            return format!(
+            format!(
                 "announce: next automatic in {} | interval {interval}m | last: {} | Announce Now is immediate",
                 human_age_duration(remaining),
                 self.last_announce_event
-            );
+            )
         }
         #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
         {
@@ -864,7 +1445,7 @@ impl AdminTui {
                 .collect::<Vec<_>>();
             let mut lines = vec![
                 monitoring_operator_summary_text(
-                    Some(stats),
+                    Some(&stats),
                     &live.last_interface_stats,
                     &live.recent_stats,
                     &close_reasons,
@@ -878,6 +1459,7 @@ impl AdminTui {
                 format!("active links: {}", stats.active_links),
                 format!("links opened: {}", stats.links_opened),
                 format!("links closed: {}", stats.links_closed),
+                live.runtime.queue_summary_line(),
                 format!(
                     "wire volume: {} received / {} sent",
                     human_bytes(stats.bytes_in),
@@ -888,7 +1470,7 @@ impl AdminTui {
                     human_bytes(stats.resource_bytes_out),
                     stats.resources_offered
                 ),
-                format!("upload transfers: {}", upload_transfer_summary(stats)),
+                format!("upload transfers: {}", upload_transfer_summary(&stats)),
                 format!(
                     "frames: {} in / {} out / {} categorized",
                     stats.frames_in,
@@ -914,10 +1496,10 @@ impl AdminTui {
             }
             lines.push(String::new());
             lines.push("active rooms:".into());
-            let room_names = config::list_rooms(&self.config)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(room_id, name, _)| (room_id, name))
+            let room_names = self
+                .rooms
+                .iter()
+                .map(|(room_id, name, _)| (*room_id, name.clone()))
                 .collect::<BTreeMap<_, _>>();
             let room_counts = live.runtime.live_server.active_room_counts();
             if room_counts.is_empty() {
@@ -1038,9 +1620,13 @@ impl AdminTui {
             .split(columns[1]);
         let live_status = self.live_status_text();
         frame.render_widget(
-            Paragraph::new(overview_operator_summary_text(&self.config, &live_status))
-                .block(admin_block("Server Overview"))
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(overview_operator_summary_text_with_rooms(
+                &self.config,
+                &live_status,
+                &self.rooms,
+            ))
+            .block(admin_block("Server Overview"))
+            .wrap(Wrap { trim: false }),
             columns[0],
         );
         self.render_action_list(
@@ -1057,7 +1643,7 @@ impl AdminTui {
             right[1],
         );
 
-        let setup_items = setup_checklist(&self.config);
+        let setup_items = setup_checklist_with_rooms(&self.config, &self.rooms);
         let setup_rows = setup_items
             .iter()
             .map(|item| {
@@ -1089,7 +1675,7 @@ impl AdminTui {
             ])
             .split(columns[1]);
 
-        let setup_rows = setup_checklist(&self.config)
+        let setup_rows = setup_checklist_with_rooms(&self.config, &self.rooms)
             .iter()
             .map(|item| {
                 let marker = if item.ready { "[x]" } else { "[ ]" };
@@ -1105,7 +1691,7 @@ impl AdminTui {
             columns[0],
         );
         frame.render_widget(
-            Paragraph::new(setup_next_steps_text(&self.config))
+            Paragraph::new(setup_next_steps_text_with_rooms(&self.config, &self.rooms))
                 .block(admin_block("Next Steps"))
                 .wrap(Wrap { trim: false }),
             right[0],
@@ -1130,9 +1716,9 @@ impl AdminTui {
             .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
             .split(area);
         self.room_list_area = inner_rect(columns[0]);
-        let rooms = config::list_rooms(&self.config).unwrap_or_default();
         let room_list_width = self.room_list_area.width as usize;
-        let items = rooms
+        let items = self
+            .rooms
             .iter()
             .enumerate()
             .map(|(index, (room_id, name, topic))| {
@@ -1160,7 +1746,7 @@ impl AdminTui {
                 Constraint::Length(7),
             ])
             .split(columns[1]);
-        let selected = rooms.get(self.selected_room);
+        let selected = self.rooms.get(self.selected_room);
         let details = if let Some((room_id, name, topic)) = selected {
             selected_room_text(*room_id, name, topic.as_deref())
         } else {
@@ -1194,7 +1780,7 @@ impl AdminTui {
             .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
             .split(area);
         self.user_list_area = inner_rect(columns[0]);
-        let users = list_known_users(&self.config).unwrap_or_default();
+        let users = &self.users;
         let user_list_width = self.user_list_area.width as usize;
         let items = users
             .iter()
@@ -1709,14 +2295,14 @@ impl AdminTui {
             return self.handle_admin_action(action);
         }
         if self.tab == AdminTab::Rooms && self.room_list_area.contains(position) {
-            let rooms = config::list_rooms(&self.config).unwrap_or_default();
-            if let Some(row_index) = list_row_at(self.room_list_area, row, rooms.len()) {
+            if let Some(row_index) = list_row_at(self.room_list_area, row, self.rooms.len()) {
+                let rooms = self.rooms.clone();
                 self.select_room_index(row_index, &rooms);
             }
             return Ok(());
         }
         if self.tab == AdminTab::Moderation && self.user_list_area.contains(position) {
-            let users = list_known_users(&self.config).unwrap_or_default();
+            let users = self.users.clone();
             if let Some(row_index) = list_row_at(self.user_list_area, row, users.len()) {
                 self.select_user_index(row_index, &users);
             }
@@ -1827,8 +2413,7 @@ impl AdminTui {
             self.status = "select the Rooms panel before editing a room topic".into();
             return;
         }
-        let rooms = config::list_rooms(&self.config).unwrap_or_default();
-        let Some((_, _, topic)) = rooms.get(self.selected_room) else {
+        let Some((_, _, topic)) = self.rooms.get(self.selected_room) else {
             self.status = "no room selected".into();
             return;
         };
@@ -1840,32 +2425,41 @@ impl AdminTui {
             self.status = "select the Rooms panel before archiving a room".into();
             return Ok(());
         }
-        let rooms = config::list_rooms(&self.config).unwrap_or_default();
-        let Some((room_id, name, _)) = rooms.get(self.selected_room) else {
+        let Some((room_id, name, _)) = self.rooms.get(self.selected_room) else {
             self.status = "no room selected".into();
             return Ok(());
         };
-        if *room_id == 1 {
+        let room_id = *room_id;
+        let name = name.clone();
+        if room_id == 1 {
             self.pending_archive_room_id = None;
             self.status =
                 "#lobby is protected: default room stays visible and cannot be archived".into();
             return Ok(());
         }
-        if self.pending_archive_room_id != Some(*room_id) {
-            self.pending_archive_room_id = Some(*room_id);
+        if self.pending_archive_room_id != Some(room_id) {
+            self.pending_archive_room_id = Some(room_id);
             self.status = format!(
                 "archive armed for #{name}: confirm to hide it from clients; history stays stored"
             );
             return Ok(());
         }
         self.pending_archive_room_id = None;
-        config::archive_room(&self.config, *room_id)?;
-        append_admin_log(
-            &self.config,
-            format!("admin archived room id={room_id} name={name}"),
-        );
-        self.selected_room = self.selected_room.saturating_sub(1);
-        self.status = format!("archived #{name}: hidden from room lists; history was retained");
+        if self.pending_room_database.is_some() {
+            self.status = "another room database operation is still in progress".into();
+            return Ok(());
+        }
+        let Some(database) = self.admin_database.as_ref() else {
+            self.status = "administrative database is unavailable".into();
+            return Ok(());
+        };
+        let response = database.request_archive_room(room_id as u32)?;
+        self.pending_room_database = Some(PendingRoomDatabase::Archive {
+            room_id,
+            name: name.clone(),
+            response,
+        });
+        self.status = format!("archiving #{name} in the background");
         Ok(())
     }
 
@@ -2125,20 +2719,30 @@ impl AdminTui {
                 self.input_mode = InputMode::Navigate;
             }
             InputMode::EditRoomTopic => {
-                let rooms = config::list_rooms(&self.config).unwrap_or_default();
-                let Some((room_id, name, _)) = rooms.get(self.selected_room) else {
+                let Some((room_id, name, _)) = self.rooms.get(self.selected_room) else {
                     self.status = "no room selected".into();
                     self.input_mode = InputMode::Navigate;
                     self.input.clear();
                     return Ok(());
                 };
+                let room_id = *room_id;
+                let name = name.clone();
                 let topic = (!value.is_empty()).then_some(value);
-                config::update_room_topic(&self.config, *room_id, topic.as_deref())?;
-                append_admin_log(
-                    &self.config,
-                    format!("admin updated room topic id={room_id} name={name}"),
-                );
-                self.status = format!("updated topic for #{name}: clients will see it on sync");
+                if self.pending_room_database.is_some() {
+                    self.status = "another room database operation is still in progress".into();
+                    return Ok(());
+                }
+                let Some(database) = self.admin_database.as_ref() else {
+                    self.status = "administrative database is unavailable".into();
+                    return Ok(());
+                };
+                let response = database.request_update_room_topic(room_id as u32, topic)?;
+                self.pending_room_database = Some(PendingRoomDatabase::Update {
+                    room_id,
+                    name: name.clone(),
+                    response,
+                });
+                self.status = format!("updating topic for #{name} in the background");
                 self.input_mode = InputMode::Navigate;
             }
             InputMode::AddRoomName => {
@@ -2149,18 +2753,25 @@ impl AdminTui {
             }
             InputMode::AddRoomTopic => {
                 let topic = (!value.is_empty()).then_some(value);
-                config::add_room(&self.config, &self.pending_room_name, topic.as_deref())?;
-                append_admin_log(
-                    &self.config,
-                    format!(
-                        "admin added room name={}",
-                        self.pending_room_name.trim().trim_start_matches('#')
-                    ),
-                );
-                self.status = format!(
-                    "room ready: #{} is visible to clients; mods/admins can edit its topic",
-                    self.pending_room_name.trim().trim_start_matches('#')
-                );
+                if self.pending_room_database.is_some() {
+                    self.status = "another room database operation is still in progress".into();
+                    return Ok(());
+                }
+                let Some(database) = self.admin_database.as_ref() else {
+                    self.status = "administrative database is unavailable".into();
+                    return Ok(());
+                };
+                let name = self
+                    .pending_room_name
+                    .trim()
+                    .trim_start_matches('#')
+                    .to_owned();
+                let response = database.request_create_room(name.clone(), topic)?;
+                self.pending_room_database = Some(PendingRoomDatabase::Create {
+                    name: name.clone(),
+                    response,
+                });
+                self.status = format!("creating #{name} in the background");
                 self.pending_room_name.clear();
                 self.input_mode = InputMode::Navigate;
                 self.input.clear();
@@ -2199,6 +2810,12 @@ impl AdminTui {
             self.pending_prune_stale_users = false;
         }
         self.tab = tab;
+        if self.room_cache_is_visible() {
+            self.next_room_refresh = Instant::now();
+        }
+        if self.tab == AdminTab::Moderation {
+            self.next_user_refresh = Instant::now();
+        }
         self.status = format!("selected {}", self.tab.title());
     }
 
@@ -2207,13 +2824,10 @@ impl AdminTui {
             self.select_next_user();
             return;
         }
-        let room_count = config::list_rooms(&self.config)
-            .map(|rooms| {
-                let next = (self.selected_room + 1).min(rooms.len().saturating_sub(1));
-                self.select_room_index(next, &rooms);
-                rooms.len()
-            })
-            .unwrap_or(0);
+        let room_count = self.rooms.len();
+        let next = (self.selected_room + 1).min(room_count.saturating_sub(1));
+        let rooms = self.rooms.clone();
+        self.select_room_index(next, &rooms);
         if room_count == 0 {
             self.status = "no rooms to select".into();
         }
@@ -2224,17 +2838,17 @@ impl AdminTui {
             self.select_previous_user();
             return;
         }
-        let rooms = config::list_rooms(&self.config).unwrap_or_default();
-        if rooms.is_empty() {
+        if self.rooms.is_empty() {
             self.status = "no rooms to select".into();
             return;
         }
         let previous = self.selected_room.saturating_sub(1);
+        let rooms = self.rooms.clone();
         self.select_room_index(previous, &rooms);
     }
 
     fn select_next_user(&mut self) {
-        let users = list_known_users(&self.config).unwrap_or_default();
+        let users = self.users.clone();
         if users.is_empty() {
             self.status = "no users to select".into();
             return;
@@ -2244,7 +2858,7 @@ impl AdminTui {
     }
 
     fn select_previous_user(&mut self) {
-        let users = list_known_users(&self.config).unwrap_or_default();
+        let users = self.users.clone();
         if users.is_empty() {
             self.status = "no users to select".into();
             return;
@@ -2294,42 +2908,33 @@ impl AdminTui {
         if self.tab != AdminTab::Moderation {
             return Ok(());
         }
-        let Some(user) = list_known_users(&self.config)?
-            .get(self.selected_user)
-            .cloned()
-        else {
+        if self.pending_user_database.is_some() {
+            self.status = "moderation database operation already in progress".into();
+            return Ok(());
+        }
+        let Some(user) = self.users.get(self.selected_user).cloned() else {
             self.status = "no user selected".into();
             return Ok(());
         };
         self.clear_pending_user_delete();
-        set_user_flag(&self.config, user.user_id, STATUS_BANNED, !user.banned)?;
-        self.status = if user.banned {
-            append_admin_log(
-                &self.config,
-                format!(
-                    "admin unbanned user id={} name={}",
-                    user.user_id, user.display_name
-                ),
-            );
-            format!("{} unbanned; future sessions allowed", user.display_name)
-        } else {
-            let disconnected = self.disconnect_live_user(&user);
-            append_admin_log(
-                &self.config,
-                format!(
-                    "admin banned user id={} name={} active_links_closed={disconnected}",
-                    user.user_id, user.display_name
-                ),
-            );
-            if disconnected > 0 {
-                format!(
-                    "{} banned; closed {disconnected} active link(s); future sessions blocked",
-                    user.display_name
-                )
-            } else {
-                format!("{} banned; future sessions blocked", user.display_name)
-            }
-        };
+        let enabled = !user.banned;
+        let database = self
+            .admin_database
+            .as_ref()
+            .ok_or_else(|| ServerError::Message("administrative database is unavailable".into()))?;
+        let response = database.request_set_user_status_flag(
+            u32::try_from(user.user_id)
+                .map_err(|_| ServerError::Message("invalid selected user id".into()))?,
+            STATUS_BANNED,
+            enabled,
+        )?;
+        self.pending_user_database = Some(PendingUserDatabase::Status {
+            user,
+            flag: STATUS_BANNED,
+            enabled,
+            response,
+        });
+        self.status = "updating user ban state…".into();
         Ok(())
     }
 
@@ -2354,40 +2959,36 @@ impl AdminTui {
         if self.tab != AdminTab::Moderation {
             return Ok(());
         }
-        let Some(user) = list_known_users(&self.config)?
-            .get(self.selected_user)
-            .cloned()
-        else {
+        if self.pending_user_database.is_some() {
+            self.status = "moderation database operation already in progress".into();
+            return Ok(());
+        }
+        let Some(user) = self.users.get(self.selected_user).cloned() else {
             self.status = "no user selected".into();
             return Ok(());
         };
         self.clear_pending_user_delete();
-        set_user_role_flag(&self.config, user.user_id, ROLE_TRUSTED, !user.trusted)?;
-        self.status = if user.trusted {
-            append_admin_log(
-                &self.config,
-                format!(
-                    "admin untrusted user id={} name={}",
-                    user.user_id, user.display_name
-                ),
-            );
-            format!(
-                "{} untrusted; trusted-media affordances removed",
-                user.display_name
-            )
+        let role_bits = if user.trusted {
+            user.role_bits & !ROLE_TRUSTED
         } else {
-            append_admin_log(
-                &self.config,
-                format!(
-                    "admin trusted user id={} name={}",
-                    user.user_id, user.display_name
-                ),
-            );
-            format!(
-                "{} trusted; trusted-media affordances enabled",
-                user.display_name
-            )
+            user.role_bits | ROLE_TRUSTED
         };
+        let database = self
+            .admin_database
+            .as_ref()
+            .ok_or_else(|| ServerError::Message("administrative database is unavailable".into()))?;
+        let response = database.request_set_user_role_flag(
+            u32::try_from(user.user_id)
+                .map_err(|_| ServerError::Message("invalid selected user id".into()))?,
+            ROLE_TRUSTED,
+            !user.trusted,
+        )?;
+        self.pending_user_database = Some(PendingUserDatabase::Role {
+            user,
+            role_bits,
+            response,
+        });
+        self.status = "updating user trust…".into();
         Ok(())
     }
 
@@ -2395,10 +2996,7 @@ impl AdminTui {
         if self.tab != AdminTab::Moderation {
             return Ok(());
         }
-        let Some(user) = list_known_users(&self.config)?
-            .get(self.selected_user)
-            .cloned()
-        else {
+        let Some(user) = self.users.get(self.selected_user).cloned() else {
             self.status = "no user selected".into();
             return Ok(());
         };
@@ -2426,37 +3024,33 @@ impl AdminTui {
         if self.tab != AdminTab::Moderation {
             return Ok(());
         }
-        let Some(user) = list_known_users(&self.config)?
-            .get(self.selected_user)
-            .cloned()
-        else {
+        if self.pending_user_database.is_some() {
+            self.status = "moderation database operation already in progress".into();
+            return Ok(());
+        }
+        let Some(user) = self.users.get(self.selected_user).cloned() else {
             self.status = "no user selected".into();
             return Ok(());
         };
         self.clear_pending_user_delete();
-        set_user_flag(&self.config, user.user_id, STATUS_MUTED, !user.muted)?;
-        self.status = if user.muted {
-            append_admin_log(
-                &self.config,
-                format!(
-                    "admin unmuted user id={} name={}",
-                    user.user_id, user.display_name
-                ),
-            );
-            format!("{} unmuted; message sending restored", user.display_name)
-        } else {
-            append_admin_log(
-                &self.config,
-                format!(
-                    "admin muted user id={} name={}",
-                    user.user_id, user.display_name
-                ),
-            );
-            format!(
-                "{} muted; reading allowed, sending blocked",
-                user.display_name
-            )
-        };
+        let enabled = !user.muted;
+        let database = self
+            .admin_database
+            .as_ref()
+            .ok_or_else(|| ServerError::Message("administrative database is unavailable".into()))?;
+        let response = database.request_set_user_status_flag(
+            u32::try_from(user.user_id)
+                .map_err(|_| ServerError::Message("invalid selected user id".into()))?,
+            STATUS_MUTED,
+            enabled,
+        )?;
+        self.pending_user_database = Some(PendingUserDatabase::Status {
+            user,
+            flag: STATUS_MUTED,
+            enabled,
+            response,
+        });
+        self.status = "updating user mute state…".into();
         Ok(())
     }
 
@@ -2464,30 +3058,17 @@ impl AdminTui {
         if self.tab != AdminTab::Moderation {
             return Ok(());
         }
-        let Some(user) = list_known_users(&self.config)?
-            .get(self.selected_user)
-            .cloned()
-        else {
+        if self.pending_user_database.is_some() {
+            self.status = "moderation database operation already in progress".into();
+            return Ok(());
+        }
+        let Some(user) = self.users.get(self.selected_user).cloned() else {
             self.status = "no user selected".into();
             return Ok(());
         };
         self.clear_pending_user_delete();
         let next_role = next_role_bits(user.role_bits);
-        set_user_role_bits(&self.config, user.user_id, next_role)?;
-        append_admin_log(
-            &self.config,
-            format!(
-                "admin set user role id={} name={} role={}",
-                user.user_id,
-                user.display_name,
-                role_label(next_role)
-            ),
-        );
-        self.status = format!(
-            "{} role set to {}; permissions updated",
-            user.display_name,
-            role_label(next_role)
-        );
+        self.request_user_role_update(user, next_role)?;
         Ok(())
     }
 
@@ -2495,29 +3076,35 @@ impl AdminTui {
         if self.tab != AdminTab::Moderation {
             return Ok(());
         }
-        let Some(user) = list_known_users(&self.config)?
-            .get(self.selected_user)
-            .cloned()
-        else {
+        if self.pending_user_database.is_some() {
+            self.status = "moderation database operation already in progress".into();
+            return Ok(());
+        }
+        let Some(user) = self.users.get(self.selected_user).cloned() else {
             self.status = "no user selected".into();
             return Ok(());
         };
         self.clear_pending_user_delete();
-        set_user_role_bits(&self.config, user.user_id, role_bits)?;
-        append_admin_log(
-            &self.config,
-            format!(
-                "admin set user role id={} name={} role={}",
-                user.user_id,
-                user.display_name,
-                role_label(role_bits)
-            ),
-        );
-        self.status = format!(
-            "{} role set to {}; permissions updated",
-            user.display_name,
-            role_label(role_bits)
-        );
+        self.request_user_role_update(user, role_bits)?;
+        Ok(())
+    }
+
+    fn request_user_role_update(&mut self, user: AdminUserRow, role_bits: u64) -> ServerResult<()> {
+        let database = self
+            .admin_database
+            .as_ref()
+            .ok_or_else(|| ServerError::Message("administrative database is unavailable".into()))?;
+        let response = database.request_set_user_role_bits(
+            u32::try_from(user.user_id)
+                .map_err(|_| ServerError::Message("invalid selected user id".into()))?,
+            role_bits,
+        )?;
+        self.pending_user_database = Some(PendingUserDatabase::Role {
+            user,
+            role_bits,
+            response,
+        });
+        self.status = "updating user role…".into();
         Ok(())
     }
 
@@ -2525,8 +3112,12 @@ impl AdminTui {
         if self.tab != AdminTab::Moderation {
             return Ok(());
         }
+        if self.pending_user_database.is_some() {
+            self.status = "moderation database operation already in progress".into();
+            return Ok(());
+        }
         self.pending_prune_stale_users = false;
-        let users = list_known_users(&self.config)?;
+        let users = self.users.clone();
         let Some(user) = users.get(self.selected_user).cloned() else {
             self.status = "no user selected".into();
             return Ok(());
@@ -2558,16 +3149,19 @@ impl AdminTui {
             return Ok(());
         }
         self.pending_delete_user_id = None;
-        delete_user_record(&self.config, user.user_id)?;
-        append_admin_log(
-            &self.config,
-            format!(
-                "admin deleted stale user id={} name={} stale_secs={age}",
-                user.user_id, user.display_name
-            ),
-        );
-        self.selected_user = self.selected_user.min(users.len().saturating_sub(2));
-        self.status = format!("deleted stale user record: {}", user.display_name);
+        let database = self
+            .admin_database
+            .as_ref()
+            .ok_or_else(|| ServerError::Message("administrative database is unavailable".into()))?;
+        let response = database.request_delete_users(vec![u32::try_from(user.user_id)
+            .map_err(|_| ServerError::Message("invalid selected user id".into()))?])?;
+        self.pending_user_database = Some(PendingUserDatabase::Delete {
+            users: vec![user],
+            skipped_active: 0,
+            prune: false,
+            response,
+        });
+        self.status = "deleting stale user record…".into();
         Ok(())
     }
 
@@ -2575,11 +3169,16 @@ impl AdminTui {
         if self.tab != AdminTab::Moderation {
             return Ok(());
         }
-        let users = list_known_users(&self.config)?;
+        if self.pending_user_database.is_some() {
+            self.status = "moderation database operation already in progress".into();
+            return Ok(());
+        }
+        let users = self.users.clone();
         let eligible_users = users
             .iter()
             .filter(|user| stale_user_age_secs(user) >= USER_DELETE_MIN_AGE_SECS)
             .filter(|user| self.active_user_link_count(user) == 0)
+            .cloned()
             .collect::<Vec<_>>();
         let skipped_active = users
             .iter()
@@ -2613,26 +3212,26 @@ impl AdminTui {
             return Ok(());
         }
 
-        let mut pruned = 0usize;
-        for user in eligible_users {
-            let age = stale_user_age_secs(user);
-            delete_user_record(&self.config, user.user_id)?;
-            append_admin_log(
-                &self.config,
-                format!(
-                    "admin pruned stale user id={} name={} stale_secs={age}",
-                    user.user_id, user.display_name
-                ),
-            );
-            pruned += 1;
-        }
         self.pending_prune_stale_users = false;
-        self.selected_user = 0;
-        self.status = if skipped_active > 0 {
-            format!("pruned {pruned} stale user record(s); skipped {skipped_active} active")
-        } else {
-            format!("pruned {pruned} stale user record(s)")
-        };
+        let user_ids = eligible_users
+            .iter()
+            .map(|user| {
+                u32::try_from(user.user_id)
+                    .map_err(|_| ServerError::Message("invalid stale user id".into()))
+            })
+            .collect::<ServerResult<Vec<_>>>()?;
+        let database = self
+            .admin_database
+            .as_ref()
+            .ok_or_else(|| ServerError::Message("administrative database is unavailable".into()))?;
+        let response = database.request_delete_users(user_ids)?;
+        self.pending_user_database = Some(PendingUserDatabase::Delete {
+            users: eligible_users,
+            skipped_active,
+            prune: true,
+            response,
+        });
+        self.status = "pruning stale user records…".into();
         Ok(())
     }
 
@@ -2687,7 +3286,16 @@ const ROLE_MODERATOR: u64 = 1 << 1;
 const ROLE_ADMIN: u64 = 1 << 2;
 const USER_DELETE_MIN_AGE_SECS: i64 = 86_400;
 
+#[cfg(test)]
 fn setup_checklist(config: &ServerConfig) -> Vec<SetupChecklistItem> {
+    let rooms = config::list_rooms(config).unwrap_or_default();
+    setup_checklist_with_rooms(config, &rooms)
+}
+
+fn setup_checklist_with_rooms(
+    config: &ServerConfig,
+    rooms: &[AdminRoomRow],
+) -> Vec<SetupChecklistItem> {
     let identity_detail = match std::fs::metadata(&config.identity_path) {
         Ok(metadata) if metadata.len() == 64 => {
             format!("real identity at {}", config.identity_path.display())
@@ -2719,7 +3327,6 @@ fn setup_checklist(config: &ServerConfig) -> Vec<SetupChecklistItem> {
         .unwrap_or(false);
     let reticulum_detail =
         reticulum_interface_summary(reticulum_config_contents.as_deref(), &reticulum_config);
-    let rooms = config::list_rooms(config).unwrap_or_default();
     let lobby_ready = rooms.iter().any(|(_, name, _)| name == "lobby");
 
     vec![
@@ -2773,11 +3380,19 @@ fn setup_checklist(config: &ServerConfig) -> Vec<SetupChecklistItem> {
     ]
 }
 
+#[cfg(test)]
 fn overview_operator_summary_text(config: &ServerConfig, live_status: &str) -> String {
-    let room_count = config::list_rooms(config)
-        .map(|rooms| rooms.len())
-        .unwrap_or(0);
-    let checklist = setup_checklist(config);
+    let rooms = config::list_rooms(config).unwrap_or_default();
+    overview_operator_summary_text_with_rooms(config, live_status, &rooms)
+}
+
+fn overview_operator_summary_text_with_rooms(
+    config: &ServerConfig,
+    live_status: &str,
+    rooms: &[AdminRoomRow],
+) -> String {
+    let room_count = rooms.len();
+    let checklist = setup_checklist_with_rooms(config, rooms);
     let ready = checklist.iter().filter(|item| item.ready).count();
     let total = checklist.len();
     let first_missing_label = checklist
@@ -2835,9 +3450,15 @@ fn room_actions(
     ]
 }
 
+#[cfg(test)]
 fn setup_next_steps_text(config: &ServerConfig) -> String {
-    let checklist = setup_checklist(config);
-    let launch_status = setup_launch_status_text(config);
+    let rooms = config::list_rooms(config).unwrap_or_default();
+    setup_next_steps_text_with_rooms(config, &rooms)
+}
+
+fn setup_next_steps_text_with_rooms(config: &ServerConfig, rooms: &[AdminRoomRow]) -> String {
+    let checklist = setup_checklist_with_rooms(config, rooms);
+    let launch_status = setup_launch_status_text_with_rooms(config, rooms);
     let missing_labels = checklist
         .iter()
         .filter(|item| !item.ready)
@@ -2859,8 +3480,8 @@ fn setup_next_steps_text(config: &ServerConfig) -> String {
     })
 }
 
-fn setup_launch_status_text(config: &ServerConfig) -> String {
-    let checklist = setup_checklist(config);
+fn setup_launch_status_text_with_rooms(config: &ServerConfig, rooms: &[AdminRoomRow]) -> String {
+    let checklist = setup_checklist_with_rooms(config, rooms);
     let ready = checklist.iter().filter(|item| item.ready).count();
     let total = checklist.len();
     let first_missing_label = checklist
@@ -2935,6 +3556,7 @@ fn overview_action_specs() -> [(AdminAction, &'static str); 13] {
     ]
 }
 
+#[cfg(test)]
 fn list_known_users(config: &ServerConfig) -> ServerResult<Vec<AdminUserRow>> {
     config::init_files(config)?;
     let connection = rusqlite::Connection::open(&config.database_path)?;
@@ -3256,100 +3878,6 @@ fn indent_lines(text: &str, prefix: &str) -> String {
         .join("\n")
 }
 
-fn set_user_flag(
-    config: &ServerConfig,
-    user_id: i64,
-    flag: u32,
-    enabled: bool,
-) -> ServerResult<()> {
-    config::init_files(config)?;
-    let connection = rusqlite::Connection::open(&config.database_path)?;
-    let current: i64 = connection.query_row(
-        "SELECT status_bits FROM users WHERE user_id = ?1",
-        [user_id],
-        |row| row.get(0),
-    )?;
-    let mut next = current as u32;
-    if enabled {
-        next |= flag;
-    } else {
-        next &= !flag;
-    }
-    connection.execute(
-        "UPDATE users SET status_bits = ?1 WHERE user_id = ?2",
-        (next as i64, user_id),
-    )?;
-    Ok(())
-}
-
-fn set_user_role_flag(
-    config: &ServerConfig,
-    user_id: i64,
-    flag: u64,
-    enabled: bool,
-) -> ServerResult<()> {
-    config::init_files(config)?;
-    let connection = rusqlite::Connection::open(&config.database_path)?;
-    let current: i64 = connection.query_row(
-        "SELECT role_bits FROM users WHERE user_id = ?1",
-        [user_id],
-        |row| row.get(0),
-    )?;
-    let mut next = current as u64;
-    if enabled {
-        next |= flag;
-    } else {
-        next &= !flag;
-    }
-    connection.execute(
-        "UPDATE users SET role_bits = ?1 WHERE user_id = ?2",
-        (next as i64, user_id),
-    )?;
-    Ok(())
-}
-
-fn set_user_role_bits(config: &ServerConfig, user_id: i64, role_bits: u64) -> ServerResult<()> {
-    config::init_files(config)?;
-    let connection = rusqlite::Connection::open(&config.database_path)?;
-    connection.execute(
-        "UPDATE users SET role_bits = ?1 WHERE user_id = ?2",
-        (role_bits as i64, user_id),
-    )?;
-    Ok(())
-}
-
-fn delete_user_record(config: &ServerConfig, user_id: i64) -> ServerResult<()> {
-    config::init_files(config)?;
-    let connection = rusqlite::Connection::open(&config.database_path)?;
-    connection.execute("DELETE FROM room_members WHERE user_id = ?1", [user_id])?;
-    connection.execute("DELETE FROM users WHERE user_id = ?1", [user_id])?;
-    Ok(())
-}
-
-fn prune_stale_user_records_for_config(
-    config: &ServerConfig,
-    log_action: &str,
-) -> ServerResult<usize> {
-    let users = list_known_users(config)?;
-    let mut pruned = 0usize;
-    for user in users
-        .iter()
-        .filter(|user| stale_user_age_secs(user) >= USER_DELETE_MIN_AGE_SECS)
-    {
-        let age = stale_user_age_secs(user);
-        delete_user_record(config, user.user_id)?;
-        append_admin_log(
-            config,
-            format!(
-                "{log_action} stale user id={} name={} stale_secs={age}",
-                user.user_id, user.display_name
-            ),
-        );
-        pruned += 1;
-    }
-    Ok(pruned)
-}
-
 fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -3611,7 +4139,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 fn run_line_console(mut config: ServerConfig) -> ServerResult<()> {
     config::init_files(&config)?;
-    print_dashboard(&config)?;
+    let database = AdminDatabase::open(&config.database_path)?;
+    print_dashboard(&config, &database)?;
     print_commands();
 
     let stdin = io::stdin();
@@ -3629,7 +4158,7 @@ fn run_line_console(mut config: ServerConfig) -> ServerResult<()> {
             continue;
         }
 
-        match apply_admin_command(&mut config, line) {
+        match apply_admin_command_with_database(&mut config, &database, line) {
             Ok(AdminConsoleAction::Continue) => {}
             Ok(AdminConsoleAction::Quit) => return Ok(()),
             Err(error) => println!("error: {error}"),
@@ -3643,7 +4172,17 @@ enum AdminConsoleAction {
     Quit,
 }
 
+#[cfg(test)]
 fn apply_admin_command(config: &mut ServerConfig, line: &str) -> ServerResult<AdminConsoleAction> {
+    let database = AdminDatabase::open(&config.database_path)?;
+    apply_admin_command_with_database(config, &database, line)
+}
+
+fn apply_admin_command_with_database(
+    config: &mut ServerConfig,
+    database: &AdminDatabase,
+    line: &str,
+) -> ServerResult<AdminConsoleAction> {
     let mut parts = line.split_whitespace();
     let Some(command) = parts.next() else {
         return Ok(AdminConsoleAction::Continue);
@@ -3655,19 +4194,19 @@ fn apply_admin_command(config: &mut ServerConfig, line: &str) -> ServerResult<Ad
             Ok(AdminConsoleAction::Continue)
         }
         "r" | "refresh" | "status" => {
-            print_dashboard(config)?;
+            print_dashboard(config, database)?;
             Ok(AdminConsoleAction::Continue)
         }
         "rooms" => {
-            print_rooms(config)?;
+            print_rooms(database)?;
             Ok(AdminConsoleAction::Continue)
         }
         "setup" => {
-            print_setup_checklist(config);
+            print_setup_checklist_with_database(config, database)?;
             Ok(AdminConsoleAction::Continue)
         }
         "users" => {
-            print_users(config)?;
+            print_users(database)?;
             Ok(AdminConsoleAction::Continue)
         }
         "add-room" => {
@@ -3678,7 +4217,7 @@ fn apply_admin_command(config: &mut ServerConfig, line: &str) -> ServerResult<Ad
             };
             let topic = parts.collect::<Vec<_>>().join(" ");
             let topic = (!topic.trim().is_empty()).then_some(topic);
-            config::add_room(config, name, topic.as_deref())?;
+            database.create_room(name.to_owned(), topic)?;
             append_admin_log(
                 config,
                 format!(
@@ -3697,7 +4236,7 @@ fn apply_admin_command(config: &mut ServerConfig, line: &str) -> ServerResult<Ad
             };
             let topic = parts.collect::<Vec<_>>().join(" ");
             let topic = (!topic.trim().is_empty()).then_some(topic);
-            config::update_room_topic(config, room_id, topic.as_deref())?;
+            database.update_room_topic(checked_record_id(room_id, "room")?, topic)?;
             append_admin_log(
                 config,
                 format!("admin console updated room topic id={room_id}"),
@@ -3709,7 +4248,7 @@ fn apply_admin_command(config: &mut ServerConfig, line: &str) -> ServerResult<Ad
             let Some(room_id) = parts.next().and_then(|value| value.parse::<i64>().ok()) else {
                 return Err(ServerError::Message("usage: archive-room <room_id>".into()));
             };
-            config::archive_room(config, room_id)?;
+            database.archive_room(checked_record_id(room_id, "room")?)?;
             append_admin_log(config, format!("admin console archived room id={room_id}"));
             println!("{}", room_archived_update_text(room_id));
             Ok(AdminConsoleAction::Continue)
@@ -3974,50 +4513,72 @@ fn apply_admin_command(config: &mut ServerConfig, line: &str) -> ServerResult<Ad
         }
         "ban-user" => {
             let user_id = parse_user_id(&mut parts, "usage: ban-user <user_id>")?;
-            set_user_flag(config, user_id, STATUS_BANNED, true)?;
+            database.set_user_status_flag(
+                checked_record_id(user_id, "user")?,
+                STATUS_BANNED,
+                true,
+            )?;
             append_admin_log(config, format!("admin console banned user id={user_id}"));
             println!("{}", user_banned_update_text(user_id));
             Ok(AdminConsoleAction::Continue)
         }
         "unban-user" => {
             let user_id = parse_user_id(&mut parts, "usage: unban-user <user_id>")?;
-            set_user_flag(config, user_id, STATUS_BANNED, false)?;
+            database.set_user_status_flag(
+                checked_record_id(user_id, "user")?,
+                STATUS_BANNED,
+                false,
+            )?;
             append_admin_log(config, format!("admin console unbanned user id={user_id}"));
             println!("{}", user_unbanned_update_text(user_id));
             Ok(AdminConsoleAction::Continue)
         }
         "mute-user" => {
             let user_id = parse_user_id(&mut parts, "usage: mute-user <user_id>")?;
-            set_user_flag(config, user_id, STATUS_MUTED, true)?;
+            database.set_user_status_flag(
+                checked_record_id(user_id, "user")?,
+                STATUS_MUTED,
+                true,
+            )?;
             append_admin_log(config, format!("admin console muted user id={user_id}"));
             println!("{}", user_muted_update_text(user_id));
             Ok(AdminConsoleAction::Continue)
         }
         "unmute-user" => {
             let user_id = parse_user_id(&mut parts, "usage: unmute-user <user_id>")?;
-            set_user_flag(config, user_id, STATUS_MUTED, false)?;
+            database.set_user_status_flag(
+                checked_record_id(user_id, "user")?,
+                STATUS_MUTED,
+                false,
+            )?;
             append_admin_log(config, format!("admin console unmuted user id={user_id}"));
             println!("{}", user_unmuted_update_text(user_id));
             Ok(AdminConsoleAction::Continue)
         }
         "trust-user" => {
             let user_id = parse_user_id(&mut parts, "usage: trust-user <user_id>")?;
-            set_user_role_flag(config, user_id, ROLE_TRUSTED, true)?;
+            database.set_user_role_flag(checked_record_id(user_id, "user")?, ROLE_TRUSTED, true)?;
             append_admin_log(config, format!("admin console trusted user id={user_id}"));
             println!("{}", user_trusted_update_text(user_id));
             Ok(AdminConsoleAction::Continue)
         }
         "untrust-user" => {
             let user_id = parse_user_id(&mut parts, "usage: untrust-user <user_id>")?;
-            set_user_role_flag(config, user_id, ROLE_TRUSTED, false)?;
+            database.set_user_role_flag(
+                checked_record_id(user_id, "user")?,
+                ROLE_TRUSTED,
+                false,
+            )?;
             append_admin_log(config, format!("admin console untrusted user id={user_id}"));
             println!("{}", user_untrusted_update_text(user_id));
             Ok(AdminConsoleAction::Continue)
         }
         "delete-user" => {
             let user_id = parse_user_id(&mut parts, "usage: delete-user <user_id>")?;
-            let user = list_known_users(config)?
+            let user = database
+                .list_users()?
                 .into_iter()
+                .map(admin_user_row)
                 .find(|user| user.user_id == user_id)
                 .ok_or_else(|| ServerError::Message(format!("unknown user id={user_id}")))?;
             let age = stale_user_age_secs(&user);
@@ -4027,7 +4588,7 @@ fn apply_admin_command(config: &mut ServerConfig, line: &str) -> ServerResult<Ad
                     stale_delete_status_label(&user)
                 )));
             }
-            delete_user_record(config, user_id)?;
+            database.delete_users(vec![checked_record_id(user_id, "user")?])?;
             append_admin_log(
                 config,
                 format!(
@@ -4039,7 +4600,27 @@ fn apply_admin_command(config: &mut ServerConfig, line: &str) -> ServerResult<Ad
             Ok(AdminConsoleAction::Continue)
         }
         "prune-stale-users" => {
-            let pruned = prune_stale_user_records_for_config(config, "admin console pruned")?;
+            let users = database
+                .list_users()?
+                .into_iter()
+                .map(admin_user_row)
+                .filter(|user| stale_user_age_secs(user) >= USER_DELETE_MIN_AGE_SECS)
+                .collect::<Vec<_>>();
+            let user_ids = users
+                .iter()
+                .map(|user| checked_record_id(user.user_id, "user"))
+                .collect::<ServerResult<Vec<_>>>()?;
+            let pruned = database.delete_users(user_ids)?;
+            for user in users {
+                let age = stale_user_age_secs(&user);
+                append_admin_log(
+                    config,
+                    format!(
+                        "admin console pruned stale user id={} name={} stale_secs={age}",
+                        user.user_id, user.display_name
+                    ),
+                );
+            }
             println!("pruned stale users: {pruned}");
             Ok(AdminConsoleAction::Continue)
         }
@@ -4050,7 +4631,7 @@ fn apply_admin_command(config: &mut ServerConfig, line: &str) -> ServerResult<Ad
                     "usage: set-user-role <user_id> <standard|trusted|mod|admin>".into(),
                 ));
             };
-            set_user_role_bits(config, user_id, role)?;
+            database.set_user_role_bits(checked_record_id(user_id, "user")?, role)?;
             append_admin_log(
                 config,
                 format!(
@@ -4079,6 +4660,11 @@ fn parse_user_id<'a>(
         .next()
         .and_then(|value| value.parse::<i64>().ok())
         .ok_or_else(|| ServerError::Message(usage.into()))
+}
+
+fn checked_record_id(value: i64, label: &str) -> ServerResult<u32> {
+    u32::try_from(value)
+        .map_err(|_| ServerError::Message(format!("{label} id must be between 0 and {}", u32::MAX)))
 }
 
 fn parse_usize_arg<'a>(
@@ -4124,28 +4710,47 @@ fn require_rest(line: &str, command: &str, usage: &str) -> ServerResult<String> 
     Ok(value)
 }
 
-fn print_dashboard(config: &ServerConfig) -> ServerResult<()> {
+fn print_dashboard(config: &ServerConfig, database: &AdminDatabase) -> ServerResult<()> {
+    let rooms = database.list_rooms()?;
     println!();
     println!("== OMENchatd Admin ==");
-    print!("{}", config::render_status(config));
-    print_setup_checklist(config);
-    print_rooms(config)?;
+    print!(
+        "{}",
+        config::render_status_with_room_count(config, rooms.len())
+    );
+    print_setup_checklist_with_rooms(config, &admin_room_rows(&rooms));
+    print_rooms_from(&rooms);
     println!();
     Ok(())
 }
 
-fn print_setup_checklist(config: &ServerConfig) {
-    print!("{}", setup_checklist_text(config));
+fn print_setup_checklist_with_database(
+    config: &ServerConfig,
+    database: &AdminDatabase,
+) -> ServerResult<()> {
+    let rooms = database.list_rooms()?;
+    print_setup_checklist_with_rooms(config, &admin_room_rows(&rooms));
+    Ok(())
 }
 
+fn print_setup_checklist_with_rooms(config: &ServerConfig, rooms: &[AdminRoomRow]) {
+    print!("{}", setup_checklist_text_with_rooms(config, rooms));
+}
+
+#[cfg(test)]
 fn setup_checklist_text(config: &ServerConfig) -> String {
+    let rooms = config::list_rooms(config).unwrap_or_default();
+    setup_checklist_text_with_rooms(config, &rooms)
+}
+
+fn setup_checklist_text_with_rooms(config: &ServerConfig, rooms: &[AdminRoomRow]) -> String {
     let mut checklist = String::new();
-    for item in setup_checklist(config) {
+    for item in setup_checklist_with_rooms(config, rooms) {
         let marker = if item.ready { "[x]" } else { "[ ]" };
         checklist.push_str(&format!("{marker} {:<18} {}\n", item.label, item.detail));
     }
     let addresses = setup_addresses_text(config);
-    let next_steps = setup_next_steps_text(config);
+    let next_steps = setup_next_steps_text_with_rooms(config, rooms);
     setup_console_text(&SetupConsoleText {
         checklist: &checklist,
         addresses: &addresses,
@@ -4153,44 +4758,71 @@ fn setup_checklist_text(config: &ServerConfig) -> String {
     })
 }
 
-fn print_rooms(config: &ServerConfig) -> ServerResult<()> {
-    print!("rooms:\n{}", rooms_text(config)?);
+fn print_rooms(database: &AdminDatabase) -> ServerResult<()> {
+    let rooms = database.list_rooms()?;
+    print_rooms_from(&rooms);
     Ok(())
 }
 
-fn rooms_text(config: &ServerConfig) -> ServerResult<String> {
+fn print_rooms_from(rooms: &[ServerRoom]) {
+    print!("rooms:\n{}", rooms_text_from(rooms));
+}
+
+fn rooms_text_from(rooms: &[ServerRoom]) -> String {
+    let rooms = admin_room_rows(rooms);
+    rooms_text_from_rows(&rooms)
+}
+
+fn rooms_text_from_rows(rooms: &[AdminRoomRow]) -> String {
     let mut text = String::new();
-    for (room_id, name, topic) in config::list_rooms(config)? {
-        let topic = topic.unwrap_or_default();
+    for (room_id, name, topic) in rooms {
         text.push_str(&room_console_row_text(&RoomConsoleRowText {
-            room_id,
-            name: &name,
-            topic: &topic,
+            room_id: *room_id,
+            name,
+            topic: topic.as_deref().unwrap_or_default(),
         }));
     }
-    Ok(text)
+    text
 }
 
-fn print_users(config: &ServerConfig) -> ServerResult<()> {
-    print!("{}", users_text(config)?);
+fn admin_room_rows(rooms: &[ServerRoom]) -> Vec<AdminRoomRow> {
+    rooms
+        .iter()
+        .map(|room| (room.room_id as i64, room.name.clone(), room.topic.clone()))
+        .collect()
+}
+
+fn print_users(database: &AdminDatabase) -> ServerResult<()> {
+    let users = database
+        .list_users()?
+        .into_iter()
+        .map(admin_user_row)
+        .collect::<Vec<_>>();
+    print!("{}", users_text_from(&users));
     Ok(())
 }
 
+#[cfg(test)]
 fn users_text(config: &ServerConfig) -> ServerResult<String> {
+    let users = list_known_users(config)?;
+    Ok(users_text_from(&users))
+}
+
+fn users_text_from(users: &[AdminUserRow]) -> String {
     let mut text = String::from("users:\n");
-    for user in list_known_users(config)? {
+    for user in users {
         let first_seen = human_timestamp(user.first_seen_at);
         let last_seen = user
             .last_seen_at
             .map(human_timestamp)
             .unwrap_or_else(|| "never".into());
-        let stale_delete = stale_delete_status_label(&user);
+        let stale_delete = stale_delete_status_label(user);
         let lxmf_destination = user.lxmf_destination.as_deref().unwrap_or("-");
         text.push_str(&user_console_row_text(&UserConsoleRowText {
             user_id: user.user_id,
             display_name: &user.display_name,
             role_label: role_label(user.role_bits),
-            status_label: moderation_status_label(&user),
+            status_label: moderation_status_label(user),
             first_seen: &first_seen,
             last_seen: &last_seen,
             stale_delete: &stale_delete,
@@ -4201,7 +4833,7 @@ fn users_text(config: &ServerConfig) -> ServerResult<String> {
     if text == "users:\n" {
         text.push_str("  (none)\n");
     }
-    Ok(text)
+    text
 }
 
 fn print_commands() {
@@ -4224,6 +4856,30 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ))
+    }
+
+    fn complete_room_database(app: &mut AdminTui) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.pending_room_database.is_some() {
+            app.tick_admin_database();
+            assert!(
+                Instant::now() < deadline,
+                "room database completion exceeded test deadline"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn complete_user_database(app: &mut AdminTui) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.pending_user_database.is_some() {
+            app.tick_admin_database();
+            assert!(
+                Instant::now() < deadline,
+                "user database completion exceeded test deadline"
+            );
+            std::thread::yield_now();
+        }
     }
 
     #[test]
@@ -4348,6 +5004,53 @@ mod tests {
     }
 
     #[test]
+    fn line_console_reuses_one_database_actor_for_room_and_user_commands() {
+        let root = temp_root("console-database-actor");
+        let mut config = ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("init");
+        let connection = rusqlite::Connection::open(&config.database_path).expect("seed db");
+        connection
+            .execute(
+                "INSERT INTO users(rns_identity_hash, display_name, role_bits, status_bits, first_seen_at, last_seen_at)
+                 VALUES (?1, 'Alice', 0, 0, 1, 1)",
+                [b"peer-a".as_slice()],
+            )
+            .expect("insert user");
+        drop(connection);
+        let database = AdminDatabase::open(&config.database_path).expect("database actor");
+        let user_id = database.list_users().expect("users")[0].user.user_id;
+
+        apply_admin_command_with_database(&mut config, &database, "add-room ops Operations")
+            .expect("add room");
+        apply_admin_command_with_database(&mut config, &database, &format!("mute-user {user_id}"))
+            .expect("mute user");
+        apply_admin_command_with_database(&mut config, &database, &format!("trust-user {user_id}"))
+            .expect("trust user");
+
+        let rooms = database.list_rooms().expect("rooms");
+        let users = database.list_users().expect("users after moderation");
+        assert!(rooms.iter().any(|room| room.name == "ops"));
+        assert_eq!(users[0].user.status_bits & STATUS_MUTED, STATUS_MUTED);
+        assert_eq!(users[0].user.role_bits & ROLE_TRUSTED, ROLE_TRUSTED);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while database.metrics().completed < 6 {
+            assert!(
+                Instant::now() < deadline,
+                "line-console database metrics did not settle"
+            );
+            std::thread::yield_now();
+        }
+        let metrics = database.metrics();
+        assert_eq!(metrics.completed, 6);
+        assert_eq!(metrics.rejected, 0);
+        assert_eq!(metrics.queued, 0);
+        assert_eq!(metrics.in_flight, 0);
+
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn setup_checklist_reports_interface_readiness() {
         let root = temp_root("setup");
         let config = ServerConfig::for_root(root.clone());
@@ -4396,7 +5099,7 @@ mod tests {
         assert!(text.contains("live: live server running"));
         assert!(!text.contains("live: runtime:"));
         assert!(text.contains("network:"));
-        assert!(text.contains("reticulum/config"));
+        assert!(text.contains(&config.reticulum_config_file().display().to_string()));
         assert!(text.contains("rooms:"));
         assert!(text.contains("uploads: max 512.0 KiB, quota 50.0 MiB"));
         assert!(text.contains("share: Portal tab"));
@@ -4463,7 +5166,7 @@ mod tests {
         assert!(text.contains("Portal page: NomadNet /page/index.mu URL"));
         assert!(text.contains("destination:"));
         assert!(text.contains("Portal file:"));
-        assert!(text.contains("reticulum/storage/pages/index.mu"));
+        assert!(text.contains(&config.nomadnet_index_page_path().display().to_string()));
         assert!(text.contains("Invite format: omenchat://<destination_hash>"));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4712,8 +5415,8 @@ mod tests {
         config::add_room(&config, "ops", Some("Old")).expect("room");
         let mut app = AdminTui::new(config);
         app.tab = AdminTab::Rooms;
-        app.selected_room = config::list_rooms(&app.config)
-            .expect("rooms")
+        app.selected_room = app
+            .rooms
             .iter()
             .position(|(_, name, _)| name == "ops")
             .expect("ops room");
@@ -4722,13 +5425,14 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::EditRoomTopic);
         app.input = "New".into();
         app.commit_input().expect("topic");
+        complete_room_database(&mut app);
         assert!(config::list_rooms(&app.config)
             .expect("rooms")
             .iter()
             .any(|(_, name, topic)| name == "ops" && topic.as_deref() == Some("New")));
 
-        app.selected_room = config::list_rooms(&app.config)
-            .expect("rooms")
+        app.selected_room = app
+            .rooms
             .iter()
             .position(|(_, name, _)| name == "ops")
             .expect("ops room");
@@ -4739,11 +5443,145 @@ mod tests {
             .iter()
             .any(|(_, name, _)| name == "ops"));
         app.archive_selected_room().expect("archive");
+        complete_room_database(&mut app);
         assert!(!config::list_rooms(&app.config)
             .expect("rooms")
             .iter()
             .any(|(_, name, _)| name == "ops"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dashboard_room_mutation_does_not_wait_for_a_locked_database() {
+        let root = temp_root("room-locked-database");
+        let config = ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("init");
+        config::add_room(&config, "ops", Some("Old")).expect("room");
+        let mut app = AdminTui::new(config);
+        app.tab = AdminTab::Rooms;
+        app.selected_room = app
+            .rooms
+            .iter()
+            .position(|(_, name, _)| name == "ops")
+            .expect("ops room");
+        let locker = rusqlite::Connection::open(&app.config.database_path).expect("locker");
+        locker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold write lock");
+
+        app.start_selected_room_topic_edit();
+        app.input = "New".into();
+        let started = Instant::now();
+        app.commit_input().expect("enqueue topic update");
+        assert!(started.elapsed() < Duration::from_millis(50));
+        assert!(app.pending_room_database.is_some());
+        app.tick_admin_database();
+        assert!(app.pending_room_database.is_some());
+
+        locker
+            .execute_batch("ROLLBACK")
+            .expect("release write lock");
+        complete_room_database(&mut app);
+        assert!(app.status.contains("clients will see it on sync"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dashboard_room_cache_is_bounded_by_items_and_bytes() {
+        let rooms = (0..=ADMIN_ROOM_CACHE_ITEMS)
+            .map(|index| ServerRoom {
+                room_id: index as u32,
+                name: format!("room-{index}"),
+                topic: Some("topic".into()),
+                room_revision: 0,
+            })
+            .collect();
+        let (rows, truncated) = bounded_admin_room_rows(rooms);
+        assert!(truncated);
+        assert_eq!(rows.len(), ADMIN_ROOM_CACHE_ITEMS);
+
+        let (rows, truncated) = bounded_admin_room_rows(vec![ServerRoom {
+            room_id: 1,
+            name: "large".into(),
+            topic: Some("x".repeat(ADMIN_ROOM_CACHE_BYTES + 1)),
+            room_revision: 0,
+        }]);
+        assert!(truncated);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn dashboard_user_mutation_does_not_wait_for_a_locked_database() {
+        let root = temp_root("user-locked-database");
+        let config = ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("init");
+        let connection = rusqlite::Connection::open(&config.database_path).expect("db");
+        connection
+            .execute(
+                "INSERT INTO users(rns_identity_hash, display_name, role_bits, status_bits, first_seen_at, last_seen_at)
+                 VALUES (?1, 'Alice', 0, 0, 1, 1)",
+                [b"peer-a".as_slice()],
+            )
+            .expect("insert user");
+        drop(connection);
+        let mut app = AdminTui::new(config);
+        app.tab = AdminTab::Moderation;
+        let locker = rusqlite::Connection::open(&app.config.database_path).expect("locker");
+        locker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold write lock");
+
+        let started = Instant::now();
+        app.toggle_selected_user_mute().expect("enqueue mute");
+        assert!(started.elapsed() < Duration::from_millis(50));
+        assert!(app.pending_user_database.is_some());
+        app.tick_admin_database();
+        assert!(app.pending_user_database.is_some());
+
+        locker
+            .execute_batch("ROLLBACK")
+            .expect("release write lock");
+        complete_user_database(&mut app);
+        assert!(app.users[0].muted);
+        assert!(app.status.contains("sending blocked"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dashboard_user_cache_is_bounded_by_items_and_bytes() {
+        let users = (0..=ADMIN_USER_CACHE_ITEMS)
+            .map(|index| ServerAdminUser {
+                user: ServerUser {
+                    user_id: index as u32,
+                    identity_hash: vec![index as u8; 32],
+                    display_name: format!("user-{index}"),
+                    role_bits: 0,
+                    status_bits: 0,
+                    lxmf_destination: None,
+                },
+                first_seen_at: 1,
+                last_seen_at: Some(1),
+            })
+            .collect();
+        let (bounded, truncated) = bounded_admin_user_rows(users);
+        assert!(truncated);
+        assert_eq!(bounded.len(), ADMIN_USER_CACHE_ITEMS);
+
+        let oversized = ServerAdminUser {
+            user: ServerUser {
+                user_id: 1,
+                identity_hash: vec![1; 32],
+                display_name: "x".repeat(ADMIN_USER_CACHE_BYTES + 1),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_destination: None,
+            },
+            first_seen_at: 1,
+            last_seen_at: None,
+        };
+        let (bounded, truncated) = bounded_admin_user_rows(vec![oversized]);
+        assert!(truncated);
+        assert!(bounded.is_empty());
     }
 
     #[test]
@@ -4759,21 +5597,23 @@ mod tests {
         app.commit_input().expect("room name");
         app.input = "Radio room".into();
         app.commit_input().expect("room topic");
+        complete_room_database(&mut app);
         assert!(app.status.contains("#radio is visible to clients"));
         assert!(app.status.contains("mods/admins can edit"));
 
-        app.selected_room = config::list_rooms(&app.config)
-            .expect("rooms")
+        app.selected_room = app
+            .rooms
             .iter()
             .position(|(_, name, _)| name == "ops")
             .expect("ops room");
         app.start_selected_room_topic_edit();
         app.input = "New".into();
         app.commit_input().expect("topic");
+        complete_room_database(&mut app);
         assert!(app.status.contains("clients will see it on sync"));
 
-        app.selected_room = config::list_rooms(&app.config)
-            .expect("rooms")
+        app.selected_room = app
+            .rooms
             .iter()
             .position(|(_, name, _)| name == "ops")
             .expect("ops room");
@@ -4781,11 +5621,12 @@ mod tests {
         assert!(app.status.contains("hide it from clients"));
         assert!(app.status.contains("history stays stored"));
         app.archive_selected_room().expect("archive");
+        complete_room_database(&mut app);
         assert!(app.status.contains("hidden from room lists"));
         assert!(app.status.contains("history was retained"));
 
-        app.selected_room = config::list_rooms(&app.config)
-            .expect("rooms")
+        app.selected_room = app
+            .rooms
             .iter()
             .position(|(room_id, _, _)| *room_id == 1)
             .expect("lobby room");
@@ -5418,11 +6259,16 @@ mod tests {
         let mut app = AdminTui::new(config);
         app.tab = AdminTab::Moderation;
         app.toggle_selected_user_trust().expect("trust");
+        complete_user_database(&mut app);
         app.toggle_selected_user_mute().expect("mute");
+        complete_user_database(&mut app);
         app.toggle_selected_user_ban().expect("ban");
+        complete_user_database(&mut app);
         app.cycle_selected_user_role().expect("role");
+        complete_user_database(&mut app);
         app.set_selected_user_role(ROLE_TRUSTED | ROLE_MODERATOR | ROLE_ADMIN)
             .expect("set admin role");
+        complete_user_database(&mut app);
 
         let users = list_known_users(&app.config).expect("users");
         assert_eq!(role_label(users[0].role_bits), "admin");
@@ -5450,12 +6296,16 @@ mod tests {
         app.tab = AdminTab::Moderation;
 
         app.toggle_selected_user_trust().expect("trust");
+        complete_user_database(&mut app);
         assert!(app.status.contains("trusted-media affordances enabled"));
         app.toggle_selected_user_mute().expect("mute");
+        complete_user_database(&mut app);
         assert!(app.status.contains("reading allowed, sending blocked"));
         app.set_selected_user_role(ROLE_MODERATOR).expect("role");
+        complete_user_database(&mut app);
         assert!(app.status.contains("role set to mod"));
         app.toggle_selected_user_ban().expect("ban");
+        complete_user_database(&mut app);
         assert!(app.status.contains("future sessions blocked"));
 
         let _ = std::fs::remove_dir_all(root);
@@ -5600,6 +6450,7 @@ mod tests {
             .iter()
             .any(|user| user.display_name == "Old Peer"));
         app.delete_selected_stale_user().expect("delete old");
+        complete_user_database(&mut app);
         let users = list_known_users(&app.config).expect("users");
         assert!(!users.iter().any(|user| user.display_name == "Old Peer"));
         assert!(users.iter().any(|user| user.display_name == "Fresh Peer"));
@@ -5792,6 +6643,7 @@ mod tests {
         assert_eq!(list_known_users(&app.config).expect("users").len(), 3);
 
         app.prune_stale_user_records().expect("prune");
+        complete_user_database(&mut app);
         let users = list_known_users(&app.config).expect("users");
 
         assert!(!app.pending_prune_stale_users);
@@ -5827,10 +6679,13 @@ mod tests {
             .expect("ops room");
         app.archive_selected_room().expect("arm archive");
         app.archive_selected_room().expect("archive");
+        complete_room_database(&mut app);
 
         app.tab = AdminTab::Moderation;
         app.toggle_selected_user_ban().expect("ban");
+        complete_user_database(&mut app);
         app.toggle_selected_user_trust().expect("trust");
+        complete_user_database(&mut app);
 
         let log = std::fs::read_to_string(app.config.log_path()).expect("audit log");
         assert!(log.contains("admin archived room"));

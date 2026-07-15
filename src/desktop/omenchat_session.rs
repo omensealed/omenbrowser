@@ -12,6 +12,12 @@ impl DesktopApp {
             .map(|session| session.server.server_id.clone());
         self.omenchat.chat_drafts.remove(&session_id);
         self.omenchat.omenchat_motds.remove(&session_id);
+        for cache_key in self
+            .omenchat
+            .cancel_media_cache_jobs_for_session(session_id)
+        {
+            self.omenchat.omenchat_media_cache.remove(&cache_key);
+        }
         self.omenchat
             .chat_scroll_offsets
             .retain(|(stored_session_id, _), _| *stored_session_id != session_id);
@@ -20,6 +26,9 @@ impl DesktopApp {
             .retain(|(stored_session_id, _), _| *stored_session_id != session_id);
         #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         {
+            self.omenchat
+                .omenchat_live_state
+                .cancel_session_transfers(session_id);
             self.omenchat.omenchat_live_opening.remove(&session_id);
             self.omenchat.omenchat_live_retry_after.remove(&session_id);
             self.omenchat.omenchat_live_retry_count.remove(&session_id);
@@ -66,7 +75,7 @@ impl DesktopApp {
         status: String,
     ) {
         if let Some(session) = self.omenchat.chat_client.session_mut(session_id) {
-            session.status = status;
+            session.set_status(status);
         }
     }
 

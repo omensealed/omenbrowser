@@ -14,7 +14,7 @@ printf 'smoke browser log with /tmp only\n' > "$browser_root/logs/runtime.log"
 printf 'smoke browser 2 log with /tmp only\n' > "$browser_root_2/logs/runtime.log"
 printf 'smoke server log with token=<redacted-source>\n' > "$server_home/logs/runtime.log"
 
-smoke_run "build server debug" cargo build --manifest-path src/server/Cargo.toml --features live-reticulum
+smoke_run "build server debug" cargo build --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
 smoke_run "omenchatd isolated init" \
   src/server/target/debug/omenchatd init --home "$server_home" --tcp-client 127.0.0.1:4242
 

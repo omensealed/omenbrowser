@@ -1,15 +1,47 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::client::{
-    ChatClient, ChatClientEvent, ChatClientRequest, ChatSessionId, ChatSessionView,
+    enforce_client_event_presentation_bounds, enforce_room_catalog_bounds,
+    enforce_user_catalog_bounds, ChatClient, ChatClientEvent, ChatClientRequest, ChatSessionId,
+    ChatSessionView, CHAT_CLIENT_MAX_SESSIONS,
 };
 use super::descriptor::OmenChatDescriptor;
-use super::model::{ChatEvent, ChatEventKind, ChatRoomSummary, ChatServerSummary, ChatUserSummary};
+use super::model::{
+    bounded_chat_text, chat_text_fits, ChatEvent, ChatEventKind, ChatRoomSummary,
+    ChatServerSummary, ChatUserSummary, CHAT_ACTOR_DISPLAY_MAX_BYTES, CHAT_CONTENT_TYPE_MAX_BYTES,
+    CHAT_MOTD_MAX_BYTES, CHAT_RESOURCE_ID_MAX_BYTES, CHAT_ROOM_NAME_MAX_BYTES,
+    CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_STATUS_MAX_BYTES, CHAT_UPLOAD_FILENAME_MAX_BYTES,
+    CHAT_USER_DISPLAY_MAX_BYTES,
+};
 use super::protocol::{
     ChatErrorCode, ChatOp, Frame, FrameBody, FrameValue, RoomId, DEFAULT_JOIN_BACKLOG_EVENTS,
     PROTOCOL_NAME,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
+
+pub const LIVE_INLINE_DOWNLOAD_MAX_ITEMS: usize = 16;
+pub const LIVE_INLINE_DOWNLOAD_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const LIVE_INLINE_DOWNLOAD_MAX_RESOURCE_BYTES: usize = 8 * 1024 * 1024;
+pub const LIVE_INLINE_DOWNLOAD_MAX_PENDING_CHUNKS: usize = 1_024;
+pub const LIVE_PENDING_UPLOAD_MAX_ITEMS: usize = 4;
+pub const LIVE_PENDING_UPLOAD_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const LIVE_PENDING_UPLOAD_MAX_RESOURCE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LiveInlineDownloadMetrics {
+    pub items: usize,
+    pub reserved_bytes: usize,
+    pub retained_bytes: usize,
+    pub pending_chunks: usize,
+    pub rejected: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LivePendingUploadMetrics {
+    pub items: usize,
+    pub bytes: usize,
+    pub rejected: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveChatClientState {
@@ -17,6 +49,8 @@ pub struct LiveChatClientState {
     pending_local_echoes: BTreeMap<u32, PendingLocalEcho>,
     pending_uploads: BTreeMap<u32, PendingLiveUpload>,
     pending_upload_downloads: BTreeMap<String, PendingLiveUploadDownload>,
+    rejected_upload_downloads: u64,
+    rejected_pending_uploads: u64,
 }
 
 impl Default for LiveChatClientState {
@@ -26,6 +60,8 @@ impl Default for LiveChatClientState {
             pending_local_echoes: BTreeMap::new(),
             pending_uploads: BTreeMap::new(),
             pending_upload_downloads: BTreeMap::new(),
+            rejected_upload_downloads: 0,
+            rejected_pending_uploads: 0,
         }
     }
 }
@@ -39,6 +75,7 @@ struct PendingLocalEcho {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingLiveUpload {
+    session_id: ChatSessionId,
     filename: String,
     content_type: Option<String>,
     bytes: Vec<u8>,
@@ -46,6 +83,7 @@ struct PendingLiveUpload {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingLiveUploadDownload {
+    session_id: ChatSessionId,
     filename: String,
     content_type: Option<String>,
     total_len: usize,
@@ -60,6 +98,60 @@ impl LiveChatClientState {
         self.next_seq = self.next_seq.saturating_add(1).max(1);
         seq
     }
+
+    pub fn inline_download_metrics(&self) -> LiveInlineDownloadMetrics {
+        LiveInlineDownloadMetrics {
+            items: self.pending_upload_downloads.len(),
+            reserved_bytes: self
+                .pending_upload_downloads
+                .values()
+                .map(|download| download.total_len)
+                .fold(0, usize::saturating_add),
+            retained_bytes: self
+                .pending_upload_downloads
+                .values()
+                .map(PendingLiveUploadDownload::retained_payload_bytes)
+                .fold(0, usize::saturating_add),
+            pending_chunks: self
+                .pending_upload_downloads
+                .values()
+                .map(|download| download.pending_chunks.len())
+                .fold(0, usize::saturating_add),
+            rejected: self.rejected_upload_downloads,
+        }
+    }
+
+    pub fn pending_upload_metrics(&self) -> LivePendingUploadMetrics {
+        LivePendingUploadMetrics {
+            items: self.pending_uploads.len(),
+            bytes: self
+                .pending_uploads
+                .values()
+                .map(|upload| upload.bytes.capacity())
+                .fold(0, usize::saturating_add),
+            rejected: self.rejected_pending_uploads,
+        }
+    }
+
+    pub fn cancel_session_transfers(&mut self, session_id: ChatSessionId) {
+        self.pending_local_echoes
+            .retain(|_, echo| echo.session_id != session_id);
+        self.pending_uploads
+            .retain(|_, upload| upload.session_id != session_id);
+        self.pending_upload_downloads
+            .retain(|_, download| download.session_id != session_id);
+    }
+}
+
+impl PendingLiveUploadDownload {
+    fn retained_payload_bytes(&self) -> usize {
+        self.bytes.len().saturating_add(
+            self.pending_chunks
+                .values()
+                .map(Vec::len)
+                .fold(0, usize::saturating_add),
+        )
+    }
 }
 
 pub fn handle_live_request<T: ChatLinkTransport>(
@@ -68,24 +160,34 @@ pub fn handle_live_request<T: ChatLinkTransport>(
     transport: &mut T,
     request: ChatClientRequest,
 ) -> Vec<ChatClientEvent> {
-    match request {
+    let mut events = match request {
         ChatClientRequest::OpenServer(descriptor) => {
             open_live_server(client, state, transport, descriptor)
         }
-        ChatClientRequest::JoinRoom { session_id, room } => send_frame_or_error(
-            transport,
-            Frame::new(
-                ChatOp::JoinRoom,
-                state.reserve_seq(),
-                None,
-                FrameBody::Text(room),
-            ),
-            Some(session_id),
-        )
-        .map_or_else(
-            || drain_live_events(client, transport, Some(session_id)),
-            |event| vec![event],
-        ),
+        ChatClientRequest::JoinRoom { session_id, room } => {
+            let room = room.trim().trim_start_matches('#');
+            if room.is_empty() || !chat_text_fits(room, CHAT_ROOM_NAME_MAX_BYTES) {
+                vec![ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "room name is empty or exceeds client limits".into(),
+                }]
+            } else {
+                send_frame_or_error(
+                    transport,
+                    Frame::new(
+                        ChatOp::JoinRoom,
+                        state.reserve_seq(),
+                        None,
+                        FrameBody::Text(room.to_owned()),
+                    ),
+                    Some(session_id),
+                )
+                .map_or_else(
+                    || drain_live_events(client, transport, Some(session_id)),
+                    |event| vec![event],
+                )
+            }
+        }
         ChatClientRequest::PartRoom { session_id, room } => {
             part_live_room(client, state, transport, session_id, room)
         }
@@ -167,7 +269,10 @@ pub fn handle_live_request<T: ChatLinkTransport>(
         ChatClientRequest::LoadOlder { session_id } => {
             load_live_history_before(client, state, transport, session_id)
         }
-    }
+    };
+    client.enforce_status_bounds();
+    enforce_client_event_presentation_bounds(&mut events);
+    events
 }
 
 pub fn reconnect_live_server<T: ChatLinkTransport>(
@@ -177,7 +282,7 @@ pub fn reconnect_live_server<T: ChatLinkTransport>(
     session_id: ChatSessionId,
     descriptor: OmenChatDescriptor,
 ) -> Vec<ChatClientEvent> {
-    let Some(session) = client.session_mut(session_id) else {
+    let Some(session) = client.session(session_id) else {
         return vec![ChatClientEvent::Error {
             session_id: Some(session_id),
             message: "OMENchat reconnect session no longer exists".into(),
@@ -189,6 +294,10 @@ pub fn reconnect_live_server<T: ChatLinkTransport>(
             message: "OMENchat reconnect destination changed".into(),
         }];
     }
+    state.cancel_session_transfers(session_id);
+    let session = client
+        .session_mut(session_id)
+        .expect("reconnect session was validated above");
     session.status = "live link connected; reopening OMENchat session".into();
 
     let mut events = vec![ChatClientEvent::ServerOpened {
@@ -202,6 +311,7 @@ pub fn reconnect_live_server<T: ChatLinkTransport>(
         session_id,
         descriptor.local_display_name.as_deref(),
     ));
+    enforce_client_event_presentation_bounds(&mut events);
     events
 }
 
@@ -249,6 +359,8 @@ fn drain_live_events_inner<T: ChatLinkTransport>(
             }
         }
     }
+    client.enforce_status_bounds();
+    enforce_client_event_presentation_bounds(&mut events);
     events
 }
 
@@ -291,7 +403,8 @@ fn open_live_server<T: ChatLinkTransport>(
         unread: 0,
         joined: false,
     };
-    client.push_session(ChatSessionView {
+    let session_capacity_reached = client.sessions().len() >= CHAT_CLIENT_MAX_SESSIONS;
+    if !client.push_session(ChatSessionView {
         session_id,
         server,
         active_room: active_room.clone(),
@@ -299,7 +412,17 @@ fn open_live_server<T: ChatLinkTransport>(
         events: Vec::new(),
         rooms: vec![active_room.clone()],
         status: "live link connected; opening OMENchat session".into(),
-    });
+    }) {
+        let message = if session_capacity_reached {
+            "OMENchat client session limit reached; close a session before opening another"
+        } else {
+            "OMENchat descriptor metadata exceeds client limits"
+        };
+        return vec![ChatClientEvent::Error {
+            session_id: None,
+            message: message.into(),
+        }];
+    }
 
     let mut events = vec![ChatClientEvent::ServerOpened {
         session_id,
@@ -332,7 +455,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         .map(|name| {
             FrameBody::Fields(vec![
                 FrameValue::String(PROTOCOL_NAME.into()),
-                FrameValue::String(name.trim().to_owned()),
+                FrameValue::String(bounded_chat_text(name.trim(), CHAT_USER_DISPLAY_MAX_BYTES)),
             ])
         })
         .unwrap_or(FrameBody::Empty);
@@ -383,6 +506,17 @@ fn part_live_room<T: ChatLinkTransport>(
     session_id: ChatSessionId,
     room: Option<String>,
 ) -> Vec<ChatClientEvent> {
+    if room.as_deref().is_some_and(|room| {
+        !chat_text_fits(
+            room.trim().trim_start_matches('#'),
+            CHAT_ROOM_NAME_MAX_BYTES,
+        )
+    }) {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "room name exceeds client limits".into(),
+        }];
+    }
     let Some(room_id) = client.session(session_id).and_then(|session| {
         room.as_deref()
             .and_then(|name| {
@@ -519,7 +653,7 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
     session_id: ChatSessionId,
     filename: String,
     content_type: Option<String>,
-    bytes: Vec<u8>,
+    mut bytes: Vec<u8>,
 ) -> Vec<ChatClientEvent> {
     let Some(room_id) = client
         .session(session_id)
@@ -537,11 +671,33 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
             message: "usage: /upload <path> with a non-empty file".into(),
         }];
     }
+    bytes.shrink_to_fit();
+    let owned_bytes = bytes.capacity();
+    let pending_metrics = state.pending_upload_metrics();
+    if filename.len() > CHAT_UPLOAD_FILENAME_MAX_BYTES
+        || content_type
+            .as_ref()
+            .is_some_and(|value| value.len() > CHAT_CONTENT_TYPE_MAX_BYTES)
+        || owned_bytes > LIVE_PENDING_UPLOAD_MAX_RESOURCE_BYTES
+        || pending_metrics.items >= LIVE_PENDING_UPLOAD_MAX_ITEMS
+        || pending_metrics.bytes.saturating_add(owned_bytes) > LIVE_PENDING_UPLOAD_MAX_BYTES
+    {
+        state.rejected_pending_uploads = state.rejected_pending_uploads.saturating_add(1);
+        let message = "OMENchat pending upload queue is full or the upload exceeds client limits";
+        if let Some(session) = client.session_mut(session_id) {
+            session.status = message.into();
+        }
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: message.into(),
+        }];
+    }
     let byte_len = bytes.len() as u64;
     let seq = state.reserve_seq();
     state.pending_uploads.insert(
         seq,
         PendingLiveUpload {
+            session_id,
             filename: filename.clone(),
             content_type: content_type.clone(),
             bytes,
@@ -592,10 +748,10 @@ fn request_live_upload_resource<T: ChatLinkTransport>(
         }];
     };
     let resource_id = resource_id.trim().to_owned();
-    if resource_id.is_empty() {
+    if resource_id.is_empty() || resource_id.len() > CHAT_RESOURCE_ID_MAX_BYTES {
         return vec![ChatClientEvent::Error {
             session_id: Some(session_id),
-            message: "upload resource id is empty".into(),
+            message: "upload resource id is empty or exceeds client limits".into(),
         }];
     }
     let frame = Frame::new(
@@ -727,6 +883,12 @@ fn set_live_room_topic<T: ChatLinkTransport>(
             message: "OMENchat live session is not available".into(),
         }];
     };
+    if !chat_text_fits(topic.trim(), CHAT_ROOM_TOPIC_MAX_BYTES) {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "room topic exceeds client limits".into(),
+        }];
+    }
     let command = format!("topic {}", topic.trim()).trim().to_owned();
     send_frame_or_error(
         transport,
@@ -759,10 +921,15 @@ fn create_live_room<T: ChatLinkTransport>(
         }];
     }
     let room = room.trim().trim_start_matches('#');
-    if room.is_empty() {
+    if room.is_empty()
+        || !chat_text_fits(room, CHAT_ROOM_NAME_MAX_BYTES)
+        || topic
+            .as_deref()
+            .is_some_and(|topic| !chat_text_fits(topic.trim(), CHAT_ROOM_TOPIC_MAX_BYTES))
+    {
         return vec![ChatClientEvent::Error {
             session_id: Some(session_id),
-            message: "room name is required".into(),
+            message: "room name or topic is empty or exceeds client limits".into(),
         }];
     }
     let command = topic
@@ -807,6 +974,7 @@ fn moderate_live_user<T: ChatLinkTransport>(
     let action = action.trim().to_ascii_lowercase();
     let target = target.trim();
     if target.is_empty()
+        || !chat_text_fits(target, CHAT_USER_DISPLAY_MAX_BYTES + 32)
         || !matches!(
             action.as_str(),
             "kick" | "ban" | "unban" | "mute" | "unmute" | "role"
@@ -964,8 +1132,8 @@ fn apply_frame_with_state(
                 .and_then(FrameValueExt::as_str)
                 .map(str::trim)
                 .filter(|motd| !motd.is_empty())
-                .map(ToOwned::to_owned);
-            let rooms = body_values(&frame.body)
+                .map(|motd| bounded_chat_text(motd, CHAT_MOTD_MAX_BYTES));
+            let mut rooms = body_values(&frame.body)
                 .and_then(|values| values.get(1))
                 .and_then(FrameValueExt::as_array)
                 .map(|values| {
@@ -979,6 +1147,11 @@ fn apply_frame_with_state(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let active_room_id = preferred_session_id
+                .and_then(|id| client.session(id))
+                .map(|session| session.active_room.room_id)
+                .unwrap_or(1);
+            let room_catalog_dropped = enforce_room_catalog_bounds(&mut rooms, active_room_id);
             if let Some(session_id) = preferred_session_id {
                 if let Some(motd) = motd {
                     events.push(ChatClientEvent::ServerMotd { session_id, motd });
@@ -986,6 +1159,7 @@ fn apply_frame_with_state(
                 if !rooms.is_empty() {
                     if let Some(session) = client.session_mut(session_id) {
                         session.rooms = merge_rooms(session.rooms.clone(), rooms.clone());
+                        session.enforce_catalog_bounds();
                     }
                     events.push(ChatClientEvent::RoomsUpdated { session_id, rooms });
                 }
@@ -1004,7 +1178,13 @@ fn apply_frame_with_state(
                 }
             }
             if let Some(session) = preferred_session_id.and_then(|id| client.session_mut(id)) {
-                session.status = "session accepted; joining room".into();
+                session.status = if room_catalog_dropped == 0 {
+                    "session accepted; joining room".into()
+                } else {
+                    format!(
+                        "session accepted; limited oversized room catalog by {room_catalog_dropped} entries"
+                    )
+                };
             }
         }
         ChatOp::JoinAccept => {
@@ -1043,6 +1223,7 @@ fn apply_frame_with_state(
                 session.active_room = room.clone();
                 clear_room_unread(session, room.room_id);
                 session.users.clear();
+                session.enforce_catalog_bounds();
                 session.status = "joined live room".into();
             }
             events.push(ChatClientEvent::RoomJoined {
@@ -1190,10 +1371,7 @@ fn apply_upload_inline_chunk(
         return;
     };
     let total_len = values.get(2).and_then(FrameValueExt::as_u64).unwrap_or(0) as usize;
-    let content_type = values
-        .get(3)
-        .and_then(FrameValueExt::as_str)
-        .map(ToOwned::to_owned);
+    let content_type = values.get(3).and_then(FrameValueExt::as_str);
     let offset = values
         .get(4)
         .and_then(FrameValueExt::as_u64)
@@ -1205,50 +1383,136 @@ fn apply_upload_inline_chunk(
         .get(6)
         .and_then(FrameValueExt::as_bool)
         .unwrap_or(false);
+    if resource_id.len() > CHAT_RESOURCE_ID_MAX_BYTES
+        || filename.len() > CHAT_UPLOAD_FILENAME_MAX_BYTES
+        || content_type.is_some_and(|value| value.len() > CHAT_CONTENT_TYPE_MAX_BYTES)
+        || total_len > LIVE_INLINE_DOWNLOAD_MAX_RESOURCE_BYTES
+    {
+        let remove_existing = state
+            .pending_upload_downloads
+            .get(resource_id)
+            .is_some_and(|download| download.session_id == session_id);
+        reject_inline_download(
+            client,
+            state,
+            session_id,
+            resource_id,
+            "inline upload metadata exceeds client limits",
+            remove_existing,
+            events,
+        );
+        return;
+    }
+
+    if let Some(entry) = state.pending_upload_downloads.get(resource_id) {
+        if entry.session_id != session_id {
+            reject_inline_download(
+                client,
+                state,
+                session_id,
+                resource_id,
+                "inline upload resource id belongs to another session",
+                false,
+                events,
+            );
+            return;
+        }
+        if entry.filename != filename
+            || entry.content_type.as_deref() != content_type
+            || entry.total_len != total_len
+        {
+            reject_inline_download(
+                client,
+                state,
+                session_id,
+                resource_id,
+                "inline upload metadata changed during transfer",
+                true,
+                events,
+            );
+            return;
+        }
+    } else {
+        let metrics = state.inline_download_metrics();
+        if metrics.items >= LIVE_INLINE_DOWNLOAD_MAX_ITEMS
+            || metrics.reserved_bytes.saturating_add(total_len) > LIVE_INLINE_DOWNLOAD_MAX_BYTES
+        {
+            reject_inline_download(
+                client,
+                state,
+                session_id,
+                resource_id,
+                "inline upload queue is full",
+                false,
+                events,
+            );
+            return;
+        }
+        state.pending_upload_downloads.insert(
+            resource_id.to_owned(),
+            PendingLiveUploadDownload {
+                session_id,
+                filename: filename.to_owned(),
+                content_type: content_type.map(ToOwned::to_owned),
+                total_len,
+                bytes: Vec::with_capacity(total_len.min(512 * 1024)),
+                pending_chunks: BTreeMap::new(),
+                done_seen: false,
+            },
+        );
+    }
+
+    let mut rejection = None;
     let entry = state
         .pending_upload_downloads
-        .entry(resource_id.to_owned())
-        .or_insert_with(|| PendingLiveUploadDownload {
-            filename: filename.to_owned(),
-            content_type,
-            total_len,
-            bytes: Vec::with_capacity(total_len.min(512 * 1024)),
-            pending_chunks: BTreeMap::new(),
-            done_seen: false,
-        });
+        .get_mut(resource_id)
+        .expect("inline upload inserted or previously present");
     if done {
         entry.done_seen = true;
     }
     if offset > entry.total_len || offset.saturating_add(chunk.len()) > entry.total_len {
-        events.push(ChatClientEvent::Error {
-            session_id: Some(session_id),
-            message: format!(
-                "OMENchat upload chunk is outside {filename}: offset {offset}, chunk {}, total {}",
-                chunk.len(),
-                entry.total_len
-            ),
-        });
-        return;
-    }
-    if offset < entry.bytes.len() {
+        rejection = Some("inline upload chunk is outside the declared resource");
+    } else if offset < entry.bytes.len() {
         let end = offset.saturating_add(chunk.len());
         let duplicate = end <= entry.bytes.len() && entry.bytes[offset..end] == *chunk;
         if !duplicate {
-            events.push(ChatClientEvent::Error {
-                session_id: Some(session_id),
-                message: format!("OMENchat upload chunk conflicts for {filename}: offset {offset}"),
-            });
-            return;
+            rejection = Some("inline upload chunk conflicts with received data");
         }
+    } else if let Some(existing) = entry.pending_chunks.get(&offset) {
+        if existing.as_slice() != chunk {
+            rejection = Some("inline upload chunk conflicts at a pending offset");
+        }
+    } else if entry.pending_chunks.len() >= LIVE_INLINE_DOWNLOAD_MAX_PENDING_CHUNKS {
+        rejection = Some("inline upload fragment limit exceeded");
+    } else if entry.retained_payload_bytes().saturating_add(chunk.len()) > entry.total_len {
+        rejection = Some("inline upload retained bytes exceed the declared resource");
     } else {
         entry
             .pending_chunks
             .entry(offset)
             .or_insert_with(|| chunk.to_vec());
     }
-    while let Some(chunk) = entry.pending_chunks.remove(&entry.bytes.len()) {
-        entry.bytes.extend_from_slice(&chunk);
+    if rejection.is_none() {
+        while let Some(chunk) = entry.pending_chunks.remove(&entry.bytes.len()) {
+            entry.bytes.extend_from_slice(&chunk);
+        }
     }
+    if let Some(message) = rejection {
+        reject_inline_download(
+            client,
+            state,
+            session_id,
+            resource_id,
+            message,
+            true,
+            events,
+        );
+        return;
+    }
+    let entry = state
+        .pending_upload_downloads
+        .get(resource_id)
+        .expect("accepted inline upload remains present");
     if let Some(session) = client.session_mut(session_id) {
         session.status = format!(
             "upload resource receiving: {} / {}",
@@ -1295,6 +1559,29 @@ fn apply_upload_inline_chunk(
             bytes: entry.bytes,
         });
     }
+}
+
+fn reject_inline_download(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    session_id: ChatSessionId,
+    resource_id: &str,
+    message: &str,
+    remove_existing: bool,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    if remove_existing {
+        state.pending_upload_downloads.remove(resource_id);
+    }
+    state.rejected_upload_downloads = state.rejected_upload_downloads.saturating_add(1);
+    let message = format!("OMENchat {message}");
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = message.clone();
+    }
+    events.push(ChatClientEvent::Error {
+        session_id: Some(session_id),
+        message,
+    });
 }
 
 fn apply_message_ack(
@@ -1402,6 +1689,14 @@ fn apply_upload_accept(
         });
         return;
     };
+    if upload.session_id != session_id {
+        state.pending_uploads.insert(frame.seq, upload);
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat upload accept belongs to another session".into(),
+        });
+        return;
+    }
     let byte_len = upload.bytes.len() as u64;
     if let Err(error) = transport.send_resource(&resource_id, upload.bytes) {
         events.push(ChatClientEvent::Error {
@@ -1443,13 +1738,19 @@ fn apply_upload_reject(
         return;
     };
     if let Some(state) = state {
-        state.pending_uploads.remove(&frame.seq);
+        if state
+            .pending_uploads
+            .get(&frame.seq)
+            .is_some_and(|upload| upload.session_id == session_id)
+        {
+            state.pending_uploads.remove(&frame.seq);
+        }
     }
     let reason = body_values(&frame.body)
         .and_then(|values| values.first())
         .and_then(FrameValueExt::as_str)
-        .unwrap_or("upload rejected by server")
-        .to_owned();
+        .unwrap_or("upload rejected by server");
+    let reason = bounded_chat_text(reason, CHAT_STATUS_MAX_BYTES);
     if let Some(session) = client.session_mut(session_id) {
         session.status = reason.clone();
     }
@@ -1468,16 +1769,20 @@ fn apply_upload_complete(
     let Some(values) = body_values(&frame.body) else {
         return;
     };
-    let resource_id = values
-        .first()
-        .and_then(FrameValueExt::as_str)
-        .unwrap_or("")
-        .to_owned();
+    let resource_id = values.first().and_then(FrameValueExt::as_str).unwrap_or("");
     let filename = values
         .get(1)
         .and_then(FrameValueExt::as_str)
-        .unwrap_or("upload")
-        .to_owned();
+        .unwrap_or("upload");
+    if resource_id.is_empty() || !chat_text_fits(resource_id, CHAT_RESOURCE_ID_MAX_BYTES) {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat upload completion resource id exceeds client limits".into(),
+        });
+        return;
+    }
+    let resource_id = resource_id.to_owned();
+    let filename = bounded_chat_text(filename, CHAT_UPLOAD_FILENAME_MAX_BYTES);
     let bytes = values.get(2).and_then(FrameValueExt::as_u64).unwrap_or(0);
     if let Some(session) = client.session_mut(session_id) {
         session.status = format!("upload complete: {filename} ({})", human_bytes(bytes));
@@ -1523,7 +1828,15 @@ fn apply_user_delta(
                 .users
                 .sort_by(|left, right| left.display_name.cmp(&right.display_name));
         }
-        session.status = format!("user updated: {}", user.display_name);
+        let (_, dropped_users) = session.enforce_catalog_bounds();
+        session.status = if dropped_users == 0 {
+            format!("user updated: {}", user.display_name)
+        } else {
+            format!(
+                "user updated: {}; limited oversized user catalog by {dropped_users} entries",
+                user.display_name
+            )
+        };
     }
     events.push(ChatClientEvent::UserUpdated { session_id, user });
 }
@@ -1566,6 +1879,12 @@ fn apply_room_delta(
         }
         session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
         session.status = format!("room updated: #{}", room.name);
+        let (dropped, _) = session.enforce_catalog_bounds();
+        if dropped > 0 {
+            session.status.push_str(&format!(
+                "; limited oversized room catalog by {dropped} entries"
+            ));
+        }
     }
     events.push(ChatClientEvent::RoomsUpdated {
         session_id,
@@ -1594,7 +1913,7 @@ fn apply_command_result(
         .unwrap_or_default();
     match command {
         "rooms" => {
-            let rooms = values
+            let mut rooms = values
                 .get(1)
                 .and_then(FrameValueExt::as_array)
                 .map(|values| {
@@ -1604,6 +1923,11 @@ fn apply_command_result(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let active_room_id = client
+                .session(session_id)
+                .map(|session| session.active_room.room_id)
+                .unwrap_or(1);
+            let room_catalog_dropped = enforce_room_catalog_bounds(&mut rooms, active_room_id);
             if rooms.is_empty() {
                 if let Some(session) = client.session_mut(session_id) {
                     session.status = "server returned no rooms".into();
@@ -1612,7 +1936,16 @@ fn apply_command_result(
             }
             if let Some(session) = client.session_mut(session_id) {
                 session.rooms = merge_rooms(session.rooms.clone(), rooms.clone());
-                session.status = format!("rooms refreshed: {}", rooms.len());
+                let (merged_dropped, _) = session.enforce_catalog_bounds();
+                let dropped = room_catalog_dropped.saturating_add(merged_dropped);
+                session.status = if dropped == 0 {
+                    format!("rooms refreshed: {}", rooms.len())
+                } else {
+                    format!(
+                        "rooms refreshed: {}; limited oversized catalog by {dropped} entries",
+                        rooms.len()
+                    )
+                };
             }
             events.push(ChatClientEvent::RoomsUpdated { session_id, rooms });
         }
@@ -1637,6 +1970,12 @@ fn apply_command_result(
                 } else {
                     "topic updated".into()
                 };
+                let (dropped, _) = session.enforce_catalog_bounds();
+                if dropped > 0 {
+                    session.status.push_str(&format!(
+                        "; limited oversized room catalog by {dropped} entries"
+                    ));
+                }
             }
             events.push(ChatClientEvent::RoomsUpdated {
                 session_id,
@@ -1656,6 +1995,12 @@ fn apply_command_result(
             if let Some(session) = client.session_mut(session_id) {
                 session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
                 session.status = format!("room created: #{}", room.name);
+                let (dropped, _) = session.enforce_catalog_bounds();
+                if dropped > 0 {
+                    session.status.push_str(&format!(
+                        "; limited oversized room catalog by {dropped} entries"
+                    ));
+                }
             }
             events.push(ChatClientEvent::RoomsUpdated {
                 session_id,
@@ -1697,6 +2042,7 @@ fn apply_command_result(
                 } else {
                     session.status = format!("left #{}", room.name);
                 }
+                session.enforce_catalog_bounds();
             }
             events.push(ChatClientEvent::RoomsUpdated {
                 session_id,
@@ -1804,13 +2150,18 @@ fn apply_batch(
                     return;
                 }
             }
-            let users = values
+            let mut users = values
                 .iter()
                 .filter_map(|value| parse_user(value, server_id.clone()))
                 .collect::<Vec<_>>();
+            let dropped = enforce_user_catalog_bounds(&mut users);
             if let Some(session) = client.session_mut(session_id) {
                 session.users = users;
-                session.status = "live userlist updated".into();
+                session.status = if dropped == 0 {
+                    "live userlist updated".into()
+                } else {
+                    format!("live userlist updated; limited oversized catalog by {dropped} entries")
+                };
             }
         }
         ChatOp::HistoryInline | ChatOp::HistoryResourceOffer => {
@@ -1818,13 +2169,26 @@ fn apply_batch(
                 .iter()
                 .filter_map(|value| parse_event(value, server_id.clone(), room_id.unwrap_or(1)))
                 .collect::<Vec<_>>();
-            let mut added = Vec::new();
-            for event in parsed {
-                if append_event(client, session_id, event.clone(), true) {
-                    added.push(event);
-                }
-            }
+            let existing = client
+                .session(session_id)
+                .map(|session| {
+                    session
+                        .events
+                        .iter()
+                        .map(|event| (event.room_id, event.event_id))
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            let mut seen = BTreeSet::new();
+            let added = parsed
+                .into_iter()
+                .filter(|event| {
+                    let key = (event.room_id, event.event_id);
+                    !existing.contains(&key) && seen.insert(key)
+                })
+                .collect::<Vec<_>>();
             if !added.is_empty() {
+                client.prepend_history_events(session_id, added.clone());
                 if let Some(session) = client.session_mut(session_id) {
                     session.status = format!("synced {} recent room history event(s)", added.len());
                 }
@@ -1866,29 +2230,33 @@ fn append_event(
     event: ChatEvent,
     sort_after: bool,
 ) -> bool {
-    let Some(session) = client.session_mut(session_id) else {
-        return false;
-    };
-    if session
-        .events
-        .iter()
-        .any(|existing| existing.room_id == event.room_id && existing.event_id == event.event_id)
     {
-        return false;
+        let Some(session) = client.session_mut(session_id) else {
+            return false;
+        };
+        if session.events.iter().any(|existing| {
+            existing.room_id == event.room_id && existing.event_id == event.event_id
+        }) {
+            return false;
+        }
+        if event.room_id == session.active_room.room_id {
+            clear_room_unread(session, event.room_id);
+        } else {
+            increment_room_unread(session, event.room_id);
+        }
     }
-    if event.room_id == session.active_room.room_id {
-        clear_room_unread(session, event.room_id);
+    let edge = if sort_after {
+        super::client::HistoryWindowEdge::Oldest
     } else {
-        increment_room_unread(session, event.room_id);
+        super::client::HistoryWindowEdge::Newest
+    };
+    let retained = client.append_event_bounded(session_id, event, sort_after, edge);
+    if retained {
+        if let Some(session) = client.session_mut(session_id) {
+            session.status = "live events updated".into();
+        }
     }
-    session.events.push(event);
-    if sort_after {
-        session
-            .events
-            .sort_by_key(|event| (event.room_id, event.event_id));
-    }
-    session.status = "live events updated".into();
-    true
+    retained
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -2045,16 +2413,25 @@ fn increment_room_unread(session: &mut ChatSessionView, room_id: u32) {
 
 fn parse_room(value: &FrameValue, server_id: String, joined: bool) -> Option<ChatRoomSummary> {
     let fields = value.as_array()?;
+    let name = fields.get(1)?.as_str()?.trim();
+    if name.is_empty() || !chat_text_fits(name, CHAT_ROOM_NAME_MAX_BYTES) {
+        return None;
+    }
+    let topic = match fields.get(2) {
+        Some(FrameValue::String(topic)) if !topic.trim().is_empty() => {
+            let topic = topic.trim();
+            if !chat_text_fits(topic, CHAT_ROOM_TOPIC_MAX_BYTES) {
+                return None;
+            }
+            Some(topic.to_owned())
+        }
+        _ => None,
+    };
     Some(ChatRoomSummary {
         server_id,
         room_id: fields.first()?.as_u64()? as u32,
-        name: fields.get(1)?.as_str()?.to_string(),
-        topic: match fields.get(2) {
-            Some(FrameValue::String(topic)) if !topic.trim().is_empty() => {
-                Some(topic.trim().to_owned())
-            }
-            _ => None,
-        },
+        name: name.to_owned(),
+        topic,
         unread: 0,
         joined,
     })
@@ -2062,10 +2439,14 @@ fn parse_room(value: &FrameValue, server_id: String, joined: bool) -> Option<Cha
 
 fn parse_user(value: &FrameValue, server_id: String) -> Option<ChatUserSummary> {
     let fields = value.as_array()?;
+    let display_name = fields.get(1)?.as_str()?.trim();
+    if display_name.is_empty() || !chat_text_fits(display_name, CHAT_USER_DISPLAY_MAX_BYTES) {
+        return None;
+    }
     Some(ChatUserSummary {
         server_id,
         user_id: fields.first()?.as_u64()? as u32,
-        display_name: fields.get(1)?.as_str()?.to_string(),
+        display_name: display_name.to_owned(),
         role_bits: fields.get(2).and_then(FrameValueExt::as_u64).unwrap_or(0),
         status_bits: fields.get(3).and_then(FrameValueExt::as_u64).unwrap_or(0) as u32,
         lxmf_available: fields
@@ -2084,11 +2465,18 @@ fn parse_event(value: &FrameValue, server_id: String, room_id: u32) -> Option<Ch
         2 => ChatEventKind::Action { body },
         3 => ChatEventKind::Notice { body },
         4 => ChatEventKind::System { body },
-        5 => ChatEventKind::Upload {
-            resource_id: fields.get(6)?.as_str()?.to_owned(),
-            filename: fields.get(7)?.as_str()?.to_owned(),
-            bytes: fields.get(8)?.as_u64()?,
-        },
+        5 => {
+            let resource_id = fields.get(6)?.as_str()?;
+            let filename = fields.get(7)?.as_str()?;
+            if resource_id.is_empty() || !chat_text_fits(resource_id, CHAT_RESOURCE_ID_MAX_BYTES) {
+                return None;
+            }
+            ChatEventKind::Upload {
+                resource_id: resource_id.to_owned(),
+                filename: bounded_chat_text(filename, CHAT_UPLOAD_FILENAME_MAX_BYTES),
+                bytes: fields.get(8)?.as_u64()?,
+            }
+        }
         _ => return None,
     };
     Some(ChatEvent {
@@ -2101,7 +2489,7 @@ fn parse_event(value: &FrameValue, server_id: String, room_id: u32) -> Option<Ch
         },
         actor_display_name: match fields.get(5) {
             Some(FrameValue::String(name)) if !name.trim().is_empty() => {
-                Some(name.trim().to_owned())
+                Some(bounded_chat_text(name.trim(), CHAT_ACTOR_DISPLAY_MAX_BYTES))
             }
             _ => None,
         },
@@ -2119,18 +2507,18 @@ fn body_values(body: &FrameBody) -> Option<&[FrameValue]> {
 
 fn parse_error_text(body: &FrameBody) -> String {
     match body {
-        FrameBody::Text(value) => value.clone(),
+        FrameBody::Text(value) => bounded_chat_text(value, CHAT_STATUS_MAX_BYTES),
         FrameBody::Fields(values) => {
             let code = values.iter().find_map(FrameValueExt::as_u64);
             let message = values
                 .iter()
                 .find_map(FrameValueExt::as_str)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| "OMENchat server returned an error".into());
+                .unwrap_or("OMENchat server returned an error");
             if let Some(label) = code.and_then(error_code_label) {
-                format!("{label}: {message}")
+                let available = CHAT_STATUS_MAX_BYTES.saturating_sub(label.len() + 2);
+                format!("{label}: {}", bounded_chat_text(message, available))
             } else {
-                message
+                bounded_chat_text(message, CHAT_STATUS_MAX_BYTES)
             }
         }
         FrameBody::Empty => "OMENchat server returned an error".into(),
@@ -2383,6 +2771,51 @@ mod tests {
     }
 
     #[test]
+    fn live_open_refuses_session_overload_before_sending_frames() {
+        use crate::chat::client::CHAT_CLIENT_MAX_SESSIONS;
+
+        let mut client = ChatClient::new();
+        for index in 0..CHAT_CLIENT_MAX_SESSIONS {
+            let session_id = client.reserve_session_id();
+            assert!(client.push_session(ChatSessionView {
+                session_id,
+                server: ChatServerSummary {
+                    server_id: format!("server-{index}"),
+                    destination: format!("destination-{index}"),
+                    display_name: format!("Server {index}"),
+                },
+                active_room: room_summary(&format!("server-{index}"), 1, "lobby"),
+                rooms: vec![room_summary(&format!("server-{index}"), 1, "lobby")],
+                users: Vec::new(),
+                events: Vec::new(),
+                status: "ready".into(),
+            }));
+        }
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::OpenServer(OmenChatDescriptor {
+                server_destination: "overload".into(),
+                ..OmenChatDescriptor::default()
+            }),
+        );
+
+        assert_eq!(client.sessions().len(), CHAT_CLIENT_MAX_SESSIONS);
+        assert!(transport.sent_frames.is_empty());
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::Error {
+                session_id: None,
+                message
+            }] if message.contains("session limit reached")
+        ));
+    }
+
+    #[test]
     fn live_upload_offer_sends_accepted_resource_payload() {
         let mut client = ChatClient::new();
         let mut state = LiveChatClientState::default();
@@ -2427,6 +2860,14 @@ mod tests {
         assert_eq!(offer.op, ChatOp::UploadOffer);
         assert_eq!(offer.room_id, Some(1));
         assert_eq!(offer.seq, 1);
+        assert_eq!(
+            state.pending_upload_metrics(),
+            LivePendingUploadMetrics {
+                items: 1,
+                bytes: 5,
+                rejected: 0,
+            }
+        );
 
         transport
             .push_incoming_frame(&Frame::new(
@@ -2456,6 +2897,10 @@ mod tests {
                 ..
             }] if filename == "proof.txt"
         ));
+        assert_eq!(
+            state.pending_upload_metrics(),
+            LivePendingUploadMetrics::default()
+        );
     }
 
     #[test]
@@ -2542,6 +2987,10 @@ mod tests {
                 && content_type == "image/png"
                 && bytes == b"abcdefg"
         ));
+        assert_eq!(
+            state.inline_download_metrics(),
+            LiveInlineDownloadMetrics::default()
+        );
     }
 
     #[test]
@@ -2624,6 +3073,318 @@ mod tests {
                 .map(|session| session.status.as_str()),
             Some("upload resource received: image.png (7 B)")
         );
+        assert_eq!(
+            state.inline_download_metrics(),
+            LiveInlineDownloadMetrics::default()
+        );
+    }
+
+    #[test]
+    fn live_inline_downloads_enforce_item_and_reserved_byte_budgets() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let mut events = Vec::new();
+        for index in 0..LIVE_INLINE_DOWNLOAD_MAX_ITEMS {
+            apply_frame_with_state(
+                &mut client,
+                Some(&mut state),
+                &mut transport,
+                Some(session_id),
+                inline_chunk_frame(
+                    &format!("resource-{index}"),
+                    1024 * 1024,
+                    1,
+                    vec![index as u8],
+                ),
+                &mut events,
+            );
+        }
+        let metrics = state.inline_download_metrics();
+        assert_eq!(metrics.items, LIVE_INLINE_DOWNLOAD_MAX_ITEMS);
+        assert_eq!(metrics.reserved_bytes, LIVE_INLINE_DOWNLOAD_MAX_BYTES);
+        assert_eq!(metrics.retained_bytes, LIVE_INLINE_DOWNLOAD_MAX_ITEMS);
+        assert_eq!(metrics.pending_chunks, LIVE_INLINE_DOWNLOAD_MAX_ITEMS);
+        assert_eq!(metrics.rejected, 0);
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            inline_chunk_frame("resource-overload", 1, 0, vec![1]),
+            &mut events,
+        );
+        let metrics = state.inline_download_metrics();
+        assert_eq!(metrics.items, LIVE_INLINE_DOWNLOAD_MAX_ITEMS);
+        assert_eq!(metrics.reserved_bytes, LIVE_INLINE_DOWNLOAD_MAX_BYTES);
+        assert_eq!(metrics.rejected, 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::Error { message, .. } if message.contains("queue is full")
+        )));
+    }
+
+    #[test]
+    fn live_inline_download_rejects_oversized_resource_before_retention() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let mut events = Vec::new();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            inline_chunk_frame(
+                "oversized",
+                LIVE_INLINE_DOWNLOAD_MAX_RESOURCE_BYTES + 1,
+                0,
+                vec![1],
+            ),
+            &mut events,
+        );
+
+        assert_eq!(
+            state.inline_download_metrics(),
+            LiveInlineDownloadMetrics {
+                rejected: 1,
+                ..LiveInlineDownloadMetrics::default()
+            }
+        );
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+    }
+
+    #[test]
+    fn live_inline_download_rejects_overlapping_retained_bytes() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let mut events = Vec::new();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            inline_chunk_frame("overlap", 1_024, 1, vec![1; 700]),
+            &mut events,
+        );
+        assert_eq!(state.inline_download_metrics().retained_bytes, 700);
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            inline_chunk_frame("overlap", 1_024, 2, vec![2; 700]),
+            &mut events,
+        );
+        let metrics = state.inline_download_metrics();
+        assert_eq!(metrics.items, 0);
+        assert_eq!(metrics.retained_bytes, 0);
+        assert_eq!(metrics.rejected, 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::Error { message, .. }
+                if message.contains("retained bytes exceed")
+        )));
+    }
+
+    #[test]
+    fn live_inline_download_rejects_fragment_saturation_and_releases_state() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let mut events = Vec::new();
+        for offset in 1..=LIVE_INLINE_DOWNLOAD_MAX_PENDING_CHUNKS + 1 {
+            apply_frame_with_state(
+                &mut client,
+                Some(&mut state),
+                &mut transport,
+                Some(session_id),
+                inline_chunk_frame(
+                    "fragmented",
+                    LIVE_INLINE_DOWNLOAD_MAX_RESOURCE_BYTES,
+                    offset,
+                    vec![1],
+                ),
+                &mut events,
+            );
+        }
+        let metrics = state.inline_download_metrics();
+        assert_eq!(metrics.items, 0);
+        assert_eq!(metrics.pending_chunks, 0);
+        assert_eq!(metrics.rejected, 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::Error { message, .. } if message.contains("fragment limit")
+        )));
+    }
+
+    #[test]
+    fn live_pending_uploads_enforce_item_and_byte_budgets_before_sending() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        for index in 0..LIVE_PENDING_UPLOAD_MAX_ITEMS {
+            assert!(handle_live_request(
+                &mut client,
+                &mut state,
+                &mut transport,
+                ChatClientRequest::SendUpload {
+                    session_id,
+                    room: "lobby".into(),
+                    filename: format!("item-{index}"),
+                    content_type: None,
+                    bytes: vec![index as u8],
+                },
+            )
+            .is_empty());
+        }
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendUpload {
+                session_id,
+                room: "lobby".into(),
+                filename: "item-overload".into(),
+                content_type: None,
+                bytes: vec![9],
+            },
+        );
+        assert_eq!(transport.sent_frames.len(), LIVE_PENDING_UPLOAD_MAX_ITEMS);
+        assert_eq!(
+            state.pending_upload_metrics(),
+            LivePendingUploadMetrics {
+                items: LIVE_PENDING_UPLOAD_MAX_ITEMS,
+                bytes: LIVE_PENDING_UPLOAD_MAX_ITEMS,
+                rejected: 1,
+            }
+        );
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        for index in 0..2 {
+            assert!(handle_live_request(
+                &mut client,
+                &mut state,
+                &mut transport,
+                ChatClientRequest::SendUpload {
+                    session_id,
+                    room: "lobby".into(),
+                    filename: format!("large-{index}"),
+                    content_type: None,
+                    bytes: vec![0; LIVE_PENDING_UPLOAD_MAX_RESOURCE_BYTES],
+                },
+            )
+            .is_empty());
+        }
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendUpload {
+                session_id,
+                room: "lobby".into(),
+                filename: "byte-overload".into(),
+                content_type: None,
+                bytes: vec![1],
+            },
+        );
+        assert_eq!(
+            state.pending_upload_metrics().bytes,
+            LIVE_PENDING_UPLOAD_MAX_BYTES
+        );
+        assert_eq!(state.pending_upload_metrics().rejected, 1);
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+    }
+
+    #[test]
+    fn live_session_cancellation_releases_pending_transfer_state() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        assert!(handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendUpload {
+                session_id,
+                room: "lobby".into(),
+                filename: "pending.bin".into(),
+                content_type: None,
+                bytes: vec![1; 32],
+            },
+        )
+        .is_empty());
+        let mut events = Vec::new();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            inline_chunk_frame("download", 64, 1, vec![2; 16]),
+            &mut events,
+        );
+        assert_eq!(state.pending_upload_metrics().items, 1);
+        assert_eq!(state.inline_download_metrics().items, 1);
+
+        state.cancel_session_transfers(session_id);
+
+        assert_eq!(state.pending_upload_metrics().items, 0);
+        assert_eq!(state.pending_upload_metrics().bytes, 0);
+        assert_eq!(state.inline_download_metrics().items, 0);
+        assert_eq!(state.inline_download_metrics().retained_bytes, 0);
+    }
+
+    #[test]
+    fn live_reconnect_releases_prior_link_transfer_state() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        assert!(handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendUpload {
+                session_id,
+                room: "lobby".into(),
+                filename: "pending.bin".into(),
+                content_type: None,
+                bytes: vec![1; 32],
+            },
+        )
+        .is_empty());
+        let mut events = Vec::new();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            inline_chunk_frame("download", 64, 1, vec![2; 16]),
+            &mut events,
+        );
+
+        let reconnect_events = reconnect_live_server(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            OmenChatDescriptor {
+                server_destination: "abcd".into(),
+                ..OmenChatDescriptor::default()
+            },
+        );
+
+        assert!(matches!(
+            reconnect_events.first(),
+            Some(ChatClientEvent::ServerOpened { .. })
+        ));
+        assert_eq!(state.pending_upload_metrics().items, 0);
+        assert_eq!(state.inline_download_metrics().items, 0);
     }
 
     #[test]
@@ -3112,6 +3873,73 @@ mod tests {
     }
 
     #[test]
+    fn live_room_and_user_catalog_snapshots_are_bounded_and_visible() {
+        use crate::chat::client::{CHAT_SESSION_MAX_ROOMS, CHAT_SESSION_MAX_USERS};
+
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let room_values = (1..=CHAT_SESSION_MAX_ROOMS as u64 + 1)
+            .map(|room_id| room_value(room_id, &format!("room-{room_id:04}")))
+            .collect();
+        let mut events = Vec::new();
+        apply_command_result(
+            &mut client,
+            Some(session_id),
+            &FrameBody::Fields(vec![
+                FrameValue::String("rooms".into()),
+                FrameValue::Array(room_values),
+            ]),
+            &mut events,
+        );
+
+        let room_update_len = events.iter().find_map(|event| match event {
+            ChatClientEvent::RoomsUpdated { rooms, .. } => Some(rooms.len()),
+            _ => None,
+        });
+        assert_eq!(room_update_len, Some(CHAT_SESSION_MAX_ROOMS));
+        let session = client.session(session_id).expect("bounded room catalog");
+        assert_eq!(session.rooms.len(), CHAT_SESSION_MAX_ROOMS);
+        assert!(session.status.contains("limited oversized catalog"));
+
+        let user_values = (1..=CHAT_SESSION_MAX_USERS as u64 + 1)
+            .map(|user_id| {
+                FrameValue::Array(vec![
+                    FrameValue::U64(user_id),
+                    FrameValue::String(format!("user-{user_id:04}")),
+                    FrameValue::U64(0),
+                    FrameValue::U64(0),
+                    FrameValue::Bool(false),
+                ])
+            })
+            .collect();
+        apply_batch(
+            &mut client,
+            Some(session_id),
+            ChatOp::UserListSnapshotInline,
+            Some(1),
+            user_values,
+            &mut events,
+        );
+
+        let session = client.session(session_id).expect("bounded user catalog");
+        assert_eq!(session.users.len(), CHAT_SESSION_MAX_USERS);
+        assert!(session.status.contains("limited oversized catalog"));
+    }
+
+    #[test]
     fn live_send_message_local_echo_is_confirmed_by_message_ack() {
         let mut client = ChatClient::new();
         let session_id = client.reserve_session_id();
@@ -3503,6 +4331,39 @@ mod tests {
                 .as_deref(),
             Some("Operational updates")
         );
+    }
+
+    #[test]
+    fn live_outbound_operational_metadata_is_rejected_before_send() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let requests = [
+            ChatClientRequest::JoinRoom {
+                session_id,
+                room: "r".repeat(CHAT_ROOM_NAME_MAX_BYTES + 1),
+            },
+            ChatClientRequest::SetTopic {
+                session_id,
+                topic: "t".repeat(CHAT_ROOM_TOPIC_MAX_BYTES + 1),
+            },
+            ChatClientRequest::CreateRoom {
+                session_id,
+                room: "r".repeat(CHAT_ROOM_NAME_MAX_BYTES + 1),
+                topic: None,
+            },
+            ChatClientRequest::ModerateUser {
+                session_id,
+                action: "ban".into(),
+                target: "u".repeat(CHAT_USER_DISPLAY_MAX_BYTES + 33),
+            },
+        ];
+
+        for request in requests {
+            let events = handle_live_request(&mut client, &mut state, &mut transport, request);
+            assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+        }
+        assert!(transport.sent_frames.is_empty());
     }
 
     #[test]
@@ -4354,6 +5215,27 @@ mod tests {
     }
 
     #[test]
+    fn live_event_actor_display_name_is_utf8_byte_bounded() {
+        let event = parse_event(
+            &FrameValue::Array(vec![
+                FrameValue::U64(22),
+                FrameValue::U64(1),
+                FrameValue::U64(7),
+                FrameValue::I64(123),
+                FrameValue::String("hello".into()),
+                FrameValue::String("☃".repeat(CHAT_ACTOR_DISPLAY_MAX_BYTES)),
+            ]),
+            "server-a".into(),
+            1,
+        )
+        .expect("event");
+
+        let actor = event.actor_display_name.expect("bounded actor");
+        assert!(actor.len() <= CHAT_ACTOR_DISPLAY_MAX_BYTES);
+        assert!(actor.ends_with('…'));
+    }
+
+    #[test]
     fn parse_room_preserves_topic() {
         let room = parse_room(
             &FrameValue::Array(vec![
@@ -4372,6 +5254,41 @@ mod tests {
     }
 
     #[test]
+    fn live_room_and_user_parsers_reject_oversized_operational_labels() {
+        assert!(parse_room(
+            &FrameValue::Array(vec![
+                FrameValue::U64(3),
+                FrameValue::String("r".repeat(CHAT_ROOM_NAME_MAX_BYTES + 1)),
+                FrameValue::Nil,
+            ]),
+            "server-a".into(),
+            true,
+        )
+        .is_none());
+        assert!(parse_room(
+            &FrameValue::Array(vec![
+                FrameValue::U64(3),
+                FrameValue::String("ops".into()),
+                FrameValue::String("t".repeat(CHAT_ROOM_TOPIC_MAX_BYTES + 1)),
+            ]),
+            "server-a".into(),
+            true,
+        )
+        .is_none());
+        assert!(parse_user(
+            &FrameValue::Array(vec![
+                FrameValue::U64(7),
+                FrameValue::String("u".repeat(CHAT_USER_DISPLAY_MAX_BYTES + 1)),
+                FrameValue::U64(0),
+                FrameValue::U64(0),
+                FrameValue::Bool(false),
+            ]),
+            "server-a".into(),
+        )
+        .is_none());
+    }
+
+    #[test]
     fn parse_error_text_includes_known_error_code_label() {
         let text = parse_error_text(&FrameBody::Fields(vec![
             FrameValue::U64(ChatErrorCode::PermissionDenied as u16 as u64),
@@ -4379,6 +5296,39 @@ mod tests {
         ]));
 
         assert_eq!(text, "permission denied: user is muted");
+    }
+
+    #[test]
+    fn live_error_and_motd_text_are_utf8_byte_bounded() {
+        let error = parse_error_text(&FrameBody::Fields(vec![
+            FrameValue::U64(ChatErrorCode::PermissionDenied as u16 as u64),
+            FrameValue::String("☃".repeat(CHAT_STATUS_MAX_BYTES)),
+        ]));
+        assert!(error.len() <= CHAT_STATUS_MAX_BYTES);
+        assert!(error.ends_with('…'));
+
+        let (mut client, session_id) = live_test_client();
+        let mut events = Vec::new();
+        apply_frame(
+            &mut client,
+            Some(session_id),
+            Frame::new(
+                ChatOp::SessionAccept,
+                1,
+                None,
+                FrameBody::Fields(vec![
+                    FrameValue::String(PROTOCOL_NAME.into()),
+                    FrameValue::Array(Vec::new()),
+                    FrameValue::String("☃".repeat(CHAT_MOTD_MAX_BYTES)),
+                ]),
+            ),
+            &mut events,
+        );
+        let motd = events.iter().find_map(|event| match event {
+            ChatClientEvent::ServerMotd { motd, .. } => Some(motd),
+            _ => None,
+        });
+        assert!(motd.is_some_and(|motd| motd.len() <= CHAT_MOTD_MAX_BYTES && motd.ends_with('…')));
     }
 
     fn room_value(room_id: u64, name: &str) -> FrameValue {
@@ -4408,6 +5358,47 @@ mod tests {
             unread: 0,
             joined: true,
         }
+    }
+
+    fn live_test_client() -> (ChatClient, ChatSessionId) {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "joined".into(),
+        }));
+        (client, session_id)
+    }
+
+    fn inline_chunk_frame(
+        resource_id: &str,
+        total_len: usize,
+        offset: usize,
+        chunk: Vec<u8>,
+    ) -> Frame {
+        Frame::new(
+            ChatOp::UploadInlineChunk,
+            1,
+            Some(1),
+            FrameBody::Fields(vec![
+                FrameValue::String(resource_id.into()),
+                FrameValue::String("download.bin".into()),
+                FrameValue::U64(total_len as u64),
+                FrameValue::String("application/octet-stream".into()),
+                FrameValue::U64(offset as u64),
+                FrameValue::Bytes(chunk),
+                FrameValue::Bool(false),
+            ]),
+        )
     }
 
     fn event_value(event_id: u64, actor: u64, body: &str) -> FrameValue {

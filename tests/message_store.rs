@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use omenbrowser_rs::messaging::{MessageStore, MessageSummary, TransportMethod};
+use omenbrowser_rs::messaging::{
+    MessageStore, MessageSummary, TransportMethod, MESSAGE_STORE_CORRUPT_BACKUP_MAX_FILES,
+    MESSAGE_STORE_MAX_SCAN_ENTRIES, MESSAGE_STORE_MAX_THREADS, MESSAGE_STORE_THREAD_MAX_BYTES,
+    MESSAGE_STORE_THREAD_MAX_MESSAGES,
+};
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -220,6 +224,242 @@ fn corrupted_thread_is_backed_up_and_defaulted() {
 
     assert_eq!(thread.messages.len(), 0);
     assert_eq!(backups, 1);
+}
+
+#[test]
+fn thread_file_admission_accepts_exact_limit_and_rejects_next_byte() {
+    let root = temp_dir("thread-byte-limit");
+    let store = MessageStore::new(root.clone()).expect("store");
+    let raw = serde_json::json!({
+        "peer_hash": "exact",
+        "peer_label": "Exact",
+        "messages": [],
+        "unread_count": 0
+    })
+    .to_string();
+    let mut exact = raw.into_bytes();
+    exact.resize(MESSAGE_STORE_THREAD_MAX_BYTES as usize, b' ');
+    std::fs::write(root.join("exact.json"), exact).expect("exact thread");
+    store.get_thread("exact").expect("exact thread admitted");
+
+    let oversized = root.join("oversized.json");
+    let file = std::fs::File::create(&oversized).expect("oversized thread");
+    file.set_len(MESSAGE_STORE_THREAD_MAX_BYTES + 1)
+        .expect("extend oversized thread");
+    drop(file);
+    let error = store
+        .get_thread("oversized")
+        .expect_err("next byte must be rejected");
+    assert!(error.to_string().contains("byte limit"));
+    assert_eq!(
+        std::fs::metadata(oversized)
+            .expect("oversized metadata")
+            .len(),
+        MESSAGE_STORE_THREAD_MAX_BYTES + 1
+    );
+}
+
+#[test]
+fn thread_message_count_is_rejected_and_peer_derived_paths_are_contained() {
+    let root = temp_dir("thread-semantic-limit");
+    let store = MessageStore::new(root.clone()).expect("store");
+    let thread = omenbrowser_rs::messaging::ConversationThread {
+        peer_hash: "peer-limit".into(),
+        peer_label: "Peer".into(),
+        messages: vec![message("peer-limit", 1.0, false); MESSAGE_STORE_THREAD_MAX_MESSAGES + 1],
+        unread_count: 0,
+        lxmf_reply_ticket: None,
+    };
+    std::fs::write(
+        root.join("peer-limit.json"),
+        serde_json::to_vec(&thread).expect("thread fixture"),
+    )
+    .expect("thread fixture");
+    let error = store
+        .get_thread("peer-limit")
+        .expect_err("message count must be rejected");
+    assert!(error.to_string().contains("message limit"));
+
+    let outside = root.parent().expect("fixture parent").join("escaped.json");
+    let _ = std::fs::remove_file(&outside);
+    store
+        .append(message("../escaped", 1.0, false))
+        .expect("filesystem-unsafe peer must use a contained mapped filename");
+    assert!(!outside.exists());
+    assert_eq!(
+        store
+            .get_thread("../escaped")
+            .expect("mapped peer thread")
+            .messages
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn thread_discovery_is_item_scan_and_total_byte_bounded() {
+    let root = temp_dir("thread-discovery-limit");
+    let store = MessageStore::new(root.clone()).expect("store");
+    let raw = serde_json::json!({
+        "peer_hash": "peer",
+        "peer_label": "Peer",
+        "messages": [],
+        "unread_count": 0
+    })
+    .to_string();
+    for index in 0..MESSAGE_STORE_MAX_THREADS {
+        std::fs::write(root.join(format!("peer-{index:04}.json")), &raw).expect("thread file");
+    }
+    assert_eq!(
+        store.list_threads().expect("exact thread limit").len(),
+        MESSAGE_STORE_MAX_THREADS
+    );
+    let error = store
+        .append(message("new-peer", 1.0, false))
+        .expect_err("append must not exceed thread capacity");
+    assert!(error.to_string().contains("cannot exceed"));
+    std::fs::write(root.join("peer-over.json"), &raw).expect("extra thread");
+    let error = store
+        .list_threads()
+        .expect_err("next thread must be rejected");
+    assert!(error.to_string().contains("thread limit"));
+
+    let scan_root = temp_dir("thread-scan-limit");
+    let scan_store = MessageStore::new(scan_root.clone()).expect("scan store");
+    for index in 0..=MESSAGE_STORE_MAX_SCAN_ENTRIES {
+        std::fs::create_dir(scan_root.join(format!("ignored-{index:04}"))).expect("ignored entry");
+    }
+    let error = scan_store
+        .list_threads()
+        .expect_err("scan saturation must be rejected");
+    assert!(error.to_string().contains("entry scan limit"));
+    std::fs::remove_dir_all(scan_root).expect("remove scan fixture");
+
+    let byte_root = temp_dir("thread-total-byte-limit");
+    let byte_store = MessageStore::new(byte_root.clone()).expect("byte store");
+    for index in 0..9 {
+        let file = std::fs::File::create(byte_root.join(format!("peer-{index}.json")))
+            .expect("sparse thread");
+        file.set_len(MESSAGE_STORE_THREAD_MAX_BYTES)
+            .expect("extend sparse thread");
+    }
+    let error = byte_store
+        .list_threads()
+        .expect_err("aggregate byte saturation must be rejected");
+    assert!(error.to_string().contains("retained byte limit"));
+    std::fs::remove_dir_all(byte_root).expect("remove byte fixture");
+}
+
+#[test]
+fn corruption_backups_are_bounded_without_pruning_legacy_material() {
+    let root = temp_dir("corrupt-retention");
+    let store = MessageStore::new(root.clone()).expect("store");
+    let thread = root.join("peer.json");
+    std::fs::write(&thread, b"{bad").expect("corrupt thread");
+    let legacy = root.join("peer.json.corrupt.legacy.bak");
+    std::fs::write(&legacy, b"legacy backup").expect("legacy backup");
+
+    for _ in 0..MESSAGE_STORE_CORRUPT_BACKUP_MAX_FILES + 3 {
+        store.get_thread("peer").expect("corrupt recovery");
+    }
+    let backups = std::fs::read_dir(&root)
+        .expect("backup entries")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("omen-message.corrupt."))
+        })
+        .count();
+    assert_eq!(backups, MESSAGE_STORE_CORRUPT_BACKUP_MAX_FILES);
+    assert_eq!(
+        std::fs::read(legacy).expect("legacy backup"),
+        b"legacy backup"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn thread_publication_is_private_and_thread_symlinks_are_not_followed() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = temp_dir("thread-publication-safety");
+    let store = MessageStore::new(root.clone()).expect("store");
+    store
+        .append(message("private-peer", 1.0, false))
+        .expect("append private thread");
+    let path = root.join("private-peer.json");
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("thread metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let outside = root.join("outside");
+    std::fs::write(&outside, b"outside sentinel").expect("outside file");
+    symlink(&outside, root.join("linked.json")).expect("thread symlink");
+    let error = store
+        .get_thread("linked")
+        .expect_err("thread symlink must be rejected");
+    assert!(error.to_string().contains("symbolic link"));
+    assert_eq!(
+        std::fs::read(outside).expect("outside sentinel"),
+        b"outside sentinel"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_single_component_nonportable_filename_remains_update_compatible() {
+    let root = temp_dir("legacy-nonportable-filename");
+    let legacy_path = root.join("legacy:peer.json");
+    let legacy_thread = omenbrowser_rs::messaging::ConversationThread {
+        peer_hash: "legacy:peer".into(),
+        peer_label: "Legacy Peer".into(),
+        messages: vec![message("legacy:peer", 1.0, false)],
+        unread_count: 0,
+        lxmf_reply_ticket: None,
+    };
+    std::fs::write(
+        &legacy_path,
+        serde_json::to_vec(&legacy_thread).expect("legacy thread"),
+    )
+    .expect("legacy filename");
+    let store = MessageStore::new(root.clone()).expect("store");
+
+    assert_eq!(
+        store
+            .get_thread("legacy:peer")
+            .expect("legacy load")
+            .messages
+            .len(),
+        1
+    );
+    store
+        .append(message("legacy:peer", 2.0, false))
+        .expect("legacy update");
+
+    assert_eq!(
+        store
+            .get_thread("legacy:peer")
+            .expect("updated legacy thread")
+            .messages
+            .len(),
+        2
+    );
+    assert!(legacy_path.exists());
+    assert_eq!(
+        std::fs::read_dir(root)
+            .expect("message entries")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .count(),
+        1
+    );
 }
 
 #[test]

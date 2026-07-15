@@ -1,3 +1,4 @@
+#[cfg(feature = "tui")]
 pub(crate) fn fit_line_to_width(value: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
@@ -13,6 +14,7 @@ pub(crate) fn fit_line_to_width(value: &str, max_width: usize) -> String {
     format!("{}...", value.chars().take(keep).collect::<String>())
 }
 
+#[cfg(feature = "tui")]
 pub(crate) fn current_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -20,12 +22,14 @@ pub(crate) fn current_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(feature = "tui")]
 pub(crate) fn human_timestamp(unix_secs: i64) -> String {
     let now = current_unix_secs();
     let age = now.saturating_sub(unix_secs);
     format!("{} UTC ({})", unix_to_utc_string(unix_secs), human_age(age))
 }
 
+#[cfg(feature = "tui")]
 pub(crate) fn human_system_time_local(time: std::time::SystemTime) -> String {
     let unix_secs = time
         .duration_since(std::time::UNIX_EPOCH)
@@ -34,6 +38,7 @@ pub(crate) fn human_system_time_local(time: std::time::SystemTime) -> String {
     format!("{} UTC", unix_to_utc_string(unix_secs))
 }
 
+#[cfg(feature = "tui")]
 pub(crate) fn human_age(seconds: i64) -> String {
     let seconds = seconds.max(0);
     let days = seconds / 86_400;
@@ -50,6 +55,7 @@ pub(crate) fn human_age(seconds: i64) -> String {
     }
 }
 
+#[cfg(feature = "tui")]
 pub(crate) fn human_age_duration(seconds: i64) -> String {
     let seconds = seconds.max(0);
     let days = seconds / 86_400;
@@ -66,6 +72,7 @@ pub(crate) fn human_age_duration(seconds: i64) -> String {
     }
 }
 
+#[cfg(feature = "tui")]
 pub(crate) fn unix_to_utc_string(unix_secs: i64) -> String {
     let days = unix_secs.div_euclid(86_400);
     let seconds_of_day = unix_secs.rem_euclid(86_400);
@@ -76,6 +83,7 @@ pub(crate) fn unix_to_utc_string(unix_secs: i64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
 }
 
+#[cfg(feature = "tui")]
 fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let z = days_since_epoch + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -107,12 +115,12 @@ pub(crate) fn human_bytes(bytes: u64) -> String {
     }
 }
 
-#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+#[cfg(feature = "tui")]
 pub(crate) fn human_bytes_per_second(bytes: u64, elapsed_secs: f64) -> String {
     human_bytes((bytes as f64 / elapsed_secs).round() as u64)
 }
 
-#[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+#[cfg(feature = "tui")]
 pub(crate) fn human_duration(seconds: f64) -> String {
     if seconds >= 60.0 {
         format!("{:.1}m", seconds / 60.0)
@@ -126,6 +134,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "tui")]
     fn line_fitting_preserves_short_text_and_truncates_long_text() {
         assert_eq!(fit_line_to_width("short", 12), "short");
         assert_eq!(fit_line_to_width("abcdef", 0), "");
@@ -137,11 +146,17 @@ mod tests {
     fn human_formatters_use_readable_bytes_and_dates() {
         assert_eq!(human_bytes(999), "999 B");
         assert_eq!(human_bytes(2048), "2.00 KiB");
+    }
+
+    #[test]
+    #[cfg(feature = "tui")]
+    fn human_date_formatters_use_readable_dates() {
         assert_eq!(unix_to_utc_string(0), "1970-01-01 00:00:00");
         assert_eq!(unix_to_utc_string(1_700_000_000), "2023-11-14 22:13:20");
     }
 
     #[test]
+    #[cfg(feature = "tui")]
     fn human_age_formatters_keep_operator_text_compact() {
         assert_eq!(human_age(42), "42s ago");
         assert_eq!(human_age(180), "3m ago");
@@ -153,7 +168,7 @@ mod tests {
         assert_eq!(human_age_duration(180_000), "2d 2h");
     }
 
-    #[cfg(any(test, feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+    #[cfg(feature = "tui")]
     #[test]
     fn rate_formatters_are_human_readable() {
         assert_eq!(human_bytes_per_second(2048, 2.0), "1.00 KiB");

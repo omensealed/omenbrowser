@@ -6,7 +6,7 @@ use crate::app::TabId;
 use crate::browser::BrowserSession;
 use crate::micron::render::HitAction;
 
-use super::{DesktopApp, ExternalLinkPrompt, Message};
+use super::{DesktopApp, ExternalBrowserMessage, ExternalLinkPrompt, Message};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::desktop) struct ExternalBrowserChoice {
@@ -127,24 +127,26 @@ impl DesktopApp {
         message: Message,
     ) -> Result<iced::Task<Message>, Message> {
         match message {
-            Message::SelectPreferredExternalBrowser(index) => {
+            Message::ExternalBrowser(ExternalBrowserMessage::SelectPreferred(index)) => {
                 self.update_select_preferred_external_browser(index);
                 Ok(iced::Task::none())
             }
-            Message::ClearPreferredExternalBrowser => {
+            Message::ExternalBrowser(ExternalBrowserMessage::ClearPreferred) => {
                 self.update_clear_preferred_external_browser();
                 Ok(iced::Task::none())
             }
-            Message::OpenExternalLinkWith(index) => {
+            Message::ExternalBrowser(ExternalBrowserMessage::OpenWith(index)) => {
                 self.update_open_external_link_with(index);
                 Ok(iced::Task::none())
             }
-            Message::CopyExternalLinkUrl => Ok(self.update_copy_external_link_url()),
-            Message::PromptExternalUrl(url) => {
+            Message::ExternalBrowser(ExternalBrowserMessage::CopyUrl) => {
+                Ok(self.update_copy_external_link_url())
+            }
+            Message::ExternalBrowser(ExternalBrowserMessage::PromptUrl(url)) => {
                 self.update_prompt_external_url(url);
                 Ok(iced::Task::none())
             }
-            Message::DismissExternalLinkPrompt => {
+            Message::ExternalBrowser(ExternalBrowserMessage::DismissPrompt) => {
                 self.update_dismiss_external_link_prompt();
                 Ok(iced::Task::none())
             }
@@ -316,7 +318,7 @@ fn shell_word(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::desktop::{DesktopPane, Message};
+    use crate::desktop::{DesktopPane, ExternalBrowserMessage, Message};
     use crate::micron::LinkAction;
     use iced::widget::scrollable::RelativeOffset;
 
@@ -377,7 +379,7 @@ mod tests {
         assert!(desktop.prompt_external_url_if_needed("https://example.org/news".into(), None));
         assert!(desktop.clearweb.external_link_prompt.is_some());
 
-        let _ = desktop.update(Message::CopyExternalLinkUrl);
+        let _ = desktop.update(Message::ExternalBrowser(ExternalBrowserMessage::CopyUrl));
 
         assert!(desktop.clearweb.external_link_prompt.is_none());
         assert_eq!(desktop.app.status.task, "copied external URL to clipboard");
@@ -413,7 +415,7 @@ mod tests {
             Some(&RelativeOffset { x: 0.0, y: 0.72 })
         );
 
-        let _ = desktop.update(Message::CopyExternalLinkUrl);
+        let _ = desktop.update(Message::ExternalBrowser(ExternalBrowserMessage::CopyUrl));
 
         assert!(!desktop.workspace.restore_workspace_scrolls_pending);
         assert_eq!(desktop.workspace.restore_workspace_scrolls_remaining, 0);
@@ -441,7 +443,9 @@ mod tests {
         assert!(desktop.prompt_external_url_if_needed("https://example.org/news".into(), None));
         assert!(desktop.clearweb.external_link_prompt.is_some());
 
-        let _ = desktop.update(Message::OpenExternalLinkWith(0));
+        let _ = desktop.update(Message::ExternalBrowser(ExternalBrowserMessage::OpenWith(
+            0,
+        )));
 
         assert!(desktop.clearweb.external_link_prompt.is_none());
         assert!(desktop

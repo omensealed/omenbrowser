@@ -129,29 +129,45 @@ pub(in crate::desktop) fn browser_view_for_tab(
             .into();
     };
     let toolbar = row![
-        tooltip_icon_button(ICON_BACK, "Back", Message::BrowserPaneBack(tab_id)),
-        tooltip_icon_button(ICON_FORWARD, "Forward", Message::BrowserPaneForward(tab_id)),
-        tooltip_icon_button(ICON_RELOAD, "Reload", Message::ReloadBrowserPane(tab_id)),
-        tooltip_warning_icon_button(ICON_STOP, "Stop", Message::StopBrowserPaneTask(tab_id)),
+        tooltip_icon_button(
+            ICON_BACK,
+            "Back",
+            Message::Browser(BrowserMessage::PaneBack(tab_id)),
+        ),
+        tooltip_icon_button(
+            ICON_FORWARD,
+            "Forward",
+            Message::Browser(BrowserMessage::PaneForward(tab_id)),
+        ),
+        tooltip_icon_button(
+            ICON_RELOAD,
+            "Reload",
+            Message::Browser(BrowserMessage::ReloadPane(tab_id)),
+        ),
+        tooltip_warning_icon_button(
+            ICON_STOP,
+            "Stop",
+            Message::Browser(BrowserMessage::StopPaneTask(tab_id)),
+        ),
         tooltip_omen_icon_button(
             ICON_REQUEST_PATH,
             "Request Path",
-            Message::WarmBrowserPanePath(tab_id)
+            Message::Browser(BrowserMessage::WarmPanePath(tab_id))
         ),
         tooltip_icon_button(
             IDENTIFY_ICON,
             "Identify",
-            Message::ToggleBrowserPaneIdentify(tab_id)
+            Message::Browser(BrowserMessage::TogglePaneIdentify(tab_id))
         ),
         tooltip_icon_button(
             ICON_CAPTURE,
             "Capture",
-            Message::CaptureBrowserPaneRender(tab_id)
+            Message::Browser(BrowserMessage::CapturePaneRender(tab_id))
         ),
         tooltip_icon_button(
             ICON_DIAGNOSTICS,
             "Diagnostics",
-            Message::BrowserPanePathDiagnostics(tab_id)
+            Message::Browser(BrowserMessage::PanePathDiagnostics(tab_id))
         ),
     ]
     .spacing(8)
@@ -190,14 +206,19 @@ pub(in crate::desktop) fn browser_view_for_tab(
 
 fn browser_address_row<'a>(tab_id: TabId, address_input: &'a str) -> Element<'a, Message> {
     let input: Element<'a, Message> = text_input("destination:/path", address_input)
-        .on_input(move |value| Message::BrowserPaneAddressChanged { tab_id, value })
-        .on_submit(Message::OpenBrowserPaneAddress(tab_id))
+        .on_input(move |value| {
+            Message::Browser(BrowserMessage::PaneAddressChanged { tab_id, value })
+        })
+        .on_submit(Message::Browser(BrowserMessage::OpenPaneAddress(tab_id)))
         .width(Length::Fill)
         .into();
     row![
         input,
-        omen_button("Open", Message::OpenBrowserPaneAddress(tab_id)),
-        subtle_button("Top", Message::BrowserPaneTop(tab_id)),
+        omen_button(
+            "Open",
+            Message::Browser(BrowserMessage::OpenPaneAddress(tab_id)),
+        ),
+        subtle_button("Top", Message::Browser(BrowserMessage::PaneTop(tab_id)),),
     ]
     .spacing(8)
     .width(Length::Fill)
@@ -241,7 +262,7 @@ fn browser_page_for_tab<'a>(
                         .map(|editor| (editor.name.as_str(), editor.cursor_byte)),
                 )
         },
-        move |page| Message::PageForTab { tab_id, page },
+        move |page| Message::Browser(BrowserMessage::PageForTab { tab_id, page }),
     )
 }
 
@@ -268,7 +289,10 @@ fn browser_request_state_view_for_tab(tab: &crate::app::BrowserTab) -> Element<'
             ),
             14
         ),
-        subtle_button("Close", Message::DismissBrowserPaneRequest(tab.id)),
+        subtle_button(
+            "Close",
+            Message::Browser(BrowserMessage::DismissPaneRequest(tab.id)),
+        ),
     ]
     .spacing(8)]
     .spacing(3);
@@ -277,13 +301,22 @@ fn browser_request_state_view_for_tab(tab: &crate::app::BrowserTab) -> Element<'
     }
     if show_path_actions {
         let mut actions = vec![
-            omen_button("Request Path", Message::WarmBrowserPanePath(tab.id)),
-            subtle_button("Diag", Message::BrowserPanePathDiagnostics(tab.id)),
+            omen_button(
+                "Request Path",
+                Message::Browser(BrowserMessage::WarmPanePath(tab.id)),
+            ),
+            subtle_button(
+                "Diag",
+                Message::Browser(BrowserMessage::PanePathDiagnostics(tab.id)),
+            ),
         ];
         if browser_request_preview_retry_ready(tab, preview) {
             actions.insert(
                 1,
-                omen_button("Retry", Message::RetryBrowserPaneAfterPath(tab.id)),
+                omen_button(
+                    "Retry",
+                    Message::Browser(BrowserMessage::RetryPaneAfterPath(tab.id)),
+                ),
             );
         }
         body = body.push(action_grid(actions, 3));
@@ -309,10 +342,22 @@ fn browser_live_warning_banner_for_tab(
         .unwrap_or("no previous page is visible");
     let actions = action_grid(
         vec![
-            subtle_button("Close", Message::DismissBrowserPaneWarning(tab_id)),
-            omen_button("Request Path", Message::WarmBrowserPanePath(tab_id)),
-            omen_button("Retry", Message::RetryBrowserPaneAfterPath(tab_id)),
-            subtle_button("Diag", Message::BrowserPanePathDiagnostics(tab_id)),
+            subtle_button(
+                "Close",
+                Message::Browser(BrowserMessage::DismissPaneWarning(tab_id)),
+            ),
+            omen_button(
+                "Request Path",
+                Message::Browser(BrowserMessage::WarmPanePath(tab_id)),
+            ),
+            omen_button(
+                "Retry",
+                Message::Browser(BrowserMessage::RetryPaneAfterPath(tab_id)),
+            ),
+            subtle_button(
+                "Diag",
+                Message::Browser(BrowserMessage::PanePathDiagnostics(tab_id)),
+            ),
         ],
         4,
     );

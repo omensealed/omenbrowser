@@ -4,7 +4,7 @@ set -euo pipefail
 mode="${1:-quick}"
 package_archive="${2:-}"
 package_smoke_out="${3:-/tmp/omenbrowser-rs-test-package-check}"
-browser_features="${OMENBROWSER_BROWSER_FEATURES:-chat-client-reticulum}"
+browser_features="${OMENBROWSER_BROWSER_FEATURES:-desktop-product}"
 
 if [[ -z "$package_archive" ]]; then
   if [[ -f "dist/OMENbrowser_rs-latest.tar.gz" ]]; then
@@ -28,13 +28,34 @@ echo "browser features: $browser_features"
 
 require_clean_browser_version() {
   local version_file="$1"
+  grep -Eq 'git_commit=[[:xdigit:]]{7,64}([[:space:]]|$)' "$version_file"
+  grep -Eq 'target=[^[:space:]]+' "$version_file"
+  grep -q 'profile=desktop-product' "$version_file"
   grep -q 'chat-client-reticulum:on' "$version_file"
   grep -q 'native-network:on' "$version_file"
+  grep -q 'desktop-product:on' "$version_file"
+  grep -q 'mock-runtime:off' "$version_file"
 }
 
 require_clean_server_version() {
   local version_file="$1"
   grep -q 'live-reticulum:on' "$version_file"
+}
+
+require_headless_server_version() {
+  local version_file="$1"
+  require_clean_server_version "$version_file"
+  grep -q 'server-headless:on' "$version_file"
+  grep -q 'server-full:off' "$version_file"
+  grep -q 'tui:off' "$version_file"
+}
+
+require_full_server_version() {
+  local version_file="$1"
+  require_clean_server_version "$version_file"
+  grep -q 'server-headless:on' "$version_file"
+  grep -q 'server-full:on' "$version_file"
+  grep -q 'tui:on' "$version_file"
 }
 
 if [[ "$mode" == "package" ]]; then
@@ -125,7 +146,7 @@ if [[ "$mode" == "package" ]]; then
   require_clean_browser_version "$extract_root/omenbrowser_rs-version.txt"
   grep -q 'omenchatd ' "$extract_root/omenchatd-version.txt"
   grep -q 'features=' "$extract_root/omenchatd-version.txt"
-  require_clean_server_version "$extract_root/omenchatd-version.txt"
+  require_full_server_version "$extract_root/omenchatd-version.txt"
 
   echo "== Package omenchatd isolated init/status =="
   server_home="$(mktemp -d "${TMPDIR:-/tmp}/omenchatd-release-check-package.XXXXXX")"
@@ -147,7 +168,7 @@ if [[ "$mode" == "package" ]]; then
   collector_out="$extract_root/collector-out"
   browser_root_2="$extract_root/browser-root-2"
   mkdir -p "$browser_root/logs" "$browser_root_2/logs" "$collector_server_home/logs"
-  printf 'browser release check log\n' > "$browser_root/logs/runtime.log"
+  printf 'passphrase = collector-secret-value\n' > "$browser_root/logs/runtime.log"
   printf 'browser release check log 2\n' > "$browser_root_2/logs/runtime.log"
   printf 'server release check log\n' > "$collector_server_home/logs/runtime.log"
   (
@@ -174,6 +195,12 @@ if [[ "$mode" == "package" ]]; then
     grep -q 'omenchatd ' "$collector_bundle/package-metadata.txt"
     test -f "$collector_bundle/omenchatd-service.txt"
     test -f "$collector_bundle/omenchatd-diagnostics.txt"
+    grep -q 'passphrase = <redacted-secret>' "$collector_bundle/browser-logs.txt"
+    ! grep -R -q 'collector-secret-value' "$collector_bundle"
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+      test "$(stat -c '%a' "$collector_bundle")" = "700"
+      test "$(stat -c '%a' "$collector_bundle/browser-logs.txt")" = "600"
+    fi
   )
 
   echo "== Package OMENchat smoke =="
@@ -193,52 +220,78 @@ fi
 
 echo "== Browser format =="
 cargo fmt --check
+bash -n scripts/test-desktop-shutdown.sh
+bash -n scripts/measure-desktop-idle.sh
+bash -n scripts/compare-desktop-idle.sh
+bash -n scripts/measure-pane-stress.sh
+bash -n scripts/measure-omenchatd-backpressure.sh
+bash -n scripts/measure-omenchatd-db.sh
+bash -n scripts/verify-tui-dependencies.sh
+bash -n scripts/test-tui-lifecycle.sh
+bash -n scripts/test-tui-real-pty.sh
+
+echo "== TUI dependency check =="
+bash scripts/verify-tui-dependencies.sh
+
+echo "== TUI lifecycle smoke =="
+bash scripts/test-tui-lifecycle.sh
+if [[ "$(uname -s)" == "Linux" ]]; then
+  echo "== Linux real PTY TUI smoke =="
+  bash scripts/test-tui-real-pty.sh
+fi
 
 echo "== Browser feature check =="
-cargo check --features "$browser_features"
-cargo run --features "$browser_features" --bin omenbrowser_rs -- --version > /tmp/omenbrowser-rs-test-check-version.txt
+bash scripts/verify-product-features.sh
+cargo check --locked --no-default-features --features native-lxmf
+cargo check --locked --no-default-features --features "$browser_features"
+cargo run --locked --no-default-features --features "$browser_features" --bin omenbrowser_rs -- --version > /tmp/omenbrowser-rs-test-check-version.txt
 require_clean_browser_version /tmp/omenbrowser-rs-test-check-version.txt
 
 echo "== Browser focused OMENchat tests =="
-cargo test --features "$browser_features" \
+cargo test --locked --no-default-features --features "$browser_features" \
   live_sync_recent_history_requests_latest_active_room_batch
-cargo test --features "$browser_features" \
+cargo test --locked --no-default-features --features "$browser_features" \
   omenchat_help_documents_release_isolation_and_server_storage
-cargo test --features "$browser_features" \
+cargo test --locked --no-default-features --features "$browser_features" \
   opening_different_omenchat_destinations_creates_separate_sessions
 
 echo "== omenchatd format =="
 cargo fmt --manifest-path src/server/Cargo.toml --check
 
 echo "== omenchatd feature check =="
-cargo check --manifest-path src/server/Cargo.toml --features live-reticulum
-cargo run --manifest-path src/server/Cargo.toml --features live-reticulum -- --version > /tmp/omenchatd-test-check-version.txt
-require_clean_server_version /tmp/omenchatd-test-check-version.txt
+cargo check --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
+cargo run --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless -- --version > /tmp/omenchatd-test-check-version.txt
+require_headless_server_version /tmp/omenchatd-test-check-version.txt
+if cargo tree --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless | grep -Eq '(^|[[:space:]])(ratatui|crossterm) v'; then
+  echo "headless omenchatd dependency graph includes TUI crates" >&2
+  exit 1
+fi
+cargo check --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full
 
 echo "== omenchatd focused server tests =="
-cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
+cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless \
   history_recent_returns_current_when_client_fingerprint_matches
-cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
+cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless \
   history_recent_returns_bounded_backlog_when_client_fingerprint_differs
-cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
+cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless \
   status_reports_live_destination_hash
-cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
+cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless \
   init_creates_editable_baseline_reticulum_config
-cargo test --manifest-path src/server/Cargo.toml --features live-reticulum \
+cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless \
   tcp_client_override_writes_isolated_reticulum_config
 
 if [[ "$mode" == "full" ]]; then
   echo "== Browser full feature tests =="
-  cargo test --features "$browser_features"
+  cargo test --locked --no-default-features --features "$browser_features"
 
   echo "== Browser clippy =="
-  cargo clippy --features "$browser_features" -- -D warnings
+  cargo clippy --locked --no-default-features --features "$browser_features" -- -D warnings
 
   echo "== omenchatd full feature tests =="
-  cargo test --manifest-path src/server/Cargo.toml --features live-reticulum
+  cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full
 
   echo "== omenchatd clippy =="
-  cargo clippy --manifest-path src/server/Cargo.toml --features live-reticulum -- -D warnings
+  cargo clippy --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full -- -D warnings
 fi
 
 echo "== release check complete =="

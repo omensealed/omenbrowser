@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Diagnostic bundles can contain hostnames, labels, and log excerpts even after
+# content redaction. Keep every newly created directory/file owner-only.
+umask 077
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root_dir="$(cd "$script_dir/.." && pwd)"
 
@@ -94,7 +98,10 @@ redact_stream() {
     -e 's#(/[^[:space:]"]*/)?known_destinations(["[:space:]]|$)#<redacted-known-destinations>\2#g' \
     -e 's#(/[^[:space:]"]*/)?omenchat\.sqlite(["[:space:]]|$)#<redacted-sqlite>\2#g' \
     -e 's#(/[^[:space:]"]*/)?messages/[^[:space:]"]+\.json#<redacted-message-json>#g' \
-    -e 's#message body:[^"]*#message body:<redacted>#g'
+    -e 's#message body:[^"]*#message body:<redacted>#g' \
+    -e 's#([Pp][Aa][Ss][Ss][Pp][Hh][Rr][Aa][Ss][Ee][[:space:]]*[=:][[:space:]]*)[^[:space:]",;]+#\1<redacted-secret>#g' \
+    -e 's#(OMENCHAT_PASSPHRASE=)[^[:space:]"]+#\1<redacted-secret>#g' \
+    -e 's#(--passphrase([[:space:]]+|=))[^[:space:]"]+#\1<redacted-secret>#g'
 }
 
 is_sensitive_path() {

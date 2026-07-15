@@ -56,6 +56,11 @@ impl InputBuffer {
         self.cursor += ch.len_utf8();
     }
 
+    pub fn insert_str(&mut self, text: &str) {
+        self.text.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
     pub fn backspace(&mut self) {
         let Some(previous) = self.previous_boundary() else {
             return;
@@ -191,10 +196,15 @@ impl InputState {
     }
 
     pub fn insert_char(&mut self, ch: char) -> bool {
+        let mut encoded = [0; 4];
+        self.insert_text(ch.encode_utf8(&mut encoded))
+    }
+
+    pub fn insert_text(&mut self, text: &str) -> bool {
         let Some(active) = self.active.as_mut() else {
             return false;
         };
-        active.buffer.insert_char(ch);
+        active.buffer.insert_str(text);
         true
     }
 

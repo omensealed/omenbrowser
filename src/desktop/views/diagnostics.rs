@@ -5,10 +5,12 @@ use super::super::{
     action_grid, app_scrollable, diagnostics_preview_live_fetch_card,
     diagnostics_preview_lxmf_delivery_card, diagnostics_preview_propagation_sync_card,
     diagnostics_preview_report_summary, diagnostics_preview_stage_cards, omen_button, section_card,
-    subtle_button, ui_size, wrapped_text_owned, DesktopApp, Message,
+    subtle_button, ui_size, wrapped_text_owned, BrowserMessage, DesktopApp, DiagnosticsMessage,
+    Message,
 };
 
 pub(in crate::desktop) fn diagnostics_view(desktop: &DesktopApp) -> Element<'_, Message> {
+    let log_metrics = desktop.app.structured_log_worker_metrics();
     let summary = diagnostics_preview_report_summary(&desktop.app.diagnostics_state.preview_lines);
     let summary_card = if let Some(summary) = summary {
         section_card(
@@ -204,6 +206,39 @@ pub(in crate::desktop) fn diagnostics_view(desktop: &DesktopApp) -> Element<'_, 
                 ]
                 .spacing(4),
             ),
+            section_card(
+                "Structured Log Writer",
+                column![
+                    wrapped_text_owned(
+                        format!(
+                            "queue: items={} bytes={} oldest_ms={} dropped={} completed={}",
+                            log_metrics.queued_items,
+                            log_metrics.queued_bytes,
+                            log_metrics.oldest_age_ms,
+                            log_metrics.dropped_records,
+                            log_metrics.completed_records
+                        ),
+                        14
+                    ),
+                    wrapped_text_owned(
+                        format!(
+                            "disk: write_failures={} rotations={} removed={} removal_failures={} unsafe_refused={} truncated_scans={}",
+                            log_metrics.write_failures,
+                            log_metrics.rotations,
+                            log_metrics.removed_files,
+                            log_metrics.removal_failures,
+                            log_metrics.unsafe_paths_refused,
+                            log_metrics.truncated_directory_scans
+                        ),
+                        14
+                    ),
+                    wrapped_text_owned(
+                        "Metrics are read from bounded in-memory counters; this panel does not scan log files or emit recursive log records.",
+                        13
+                    ),
+                ]
+                .spacing(4),
+            ),
             section_card("Native Action Prerequisites", blockers),
             summary_card,
             live_fetch_card,
@@ -215,30 +250,67 @@ pub(in crate::desktop) fn diagnostics_view(desktop: &DesktopApp) -> Element<'_, 
                 column![
                     action_grid(
                         vec![
-                            omen_button("Native Preflight", Message::NativePreflight),
-                            omen_button("Native Dry Smoke", Message::NativeSmokeDryRun),
-                            omen_button("Native Live Probe", Message::NativeSmokeLiveProbe),
-                            omen_button("Native Live Fetch", Message::NativeLiveFetchValidate),
-                            subtle_button("Path Diagnostics", Message::PathDiagnostics),
+                            omen_button(
+                                "Native Preflight",
+                                Message::Diagnostics(DiagnosticsMessage::NativePreflight)
+                            ),
+                            omen_button(
+                                "Native Dry Smoke",
+                                Message::Diagnostics(DiagnosticsMessage::NativeSmokeDryRun)
+                            ),
+                            omen_button(
+                                "Native Live Probe",
+                                Message::Diagnostics(DiagnosticsMessage::NativeSmokeLiveProbe)
+                            ),
+                            omen_button(
+                                "Native Live Fetch",
+                                Message::Diagnostics(DiagnosticsMessage::NativeLiveFetchValidate)
+                            ),
+                            subtle_button(
+                                "Path Diagnostics",
+                                Message::Browser(BrowserMessage::PathDiagnostics),
+                            ),
                             subtle_button(
                                 "Known Destinations",
-                                Message::BeginKnownDestinationsPreload
+                                Message::Diagnostics(
+                                    DiagnosticsMessage::BeginKnownDestinationsPreload
+                                )
                             ),
                         ],
                         3,
                     ),
                     action_grid(
                         vec![
-                            omen_button("LXMF Smoke Send", Message::NativeLxmfSmokeSend),
-                            omen_button("LXMF Interop", Message::NativeLxmfInterop),
+                            omen_button(
+                                "LXMF Smoke Send",
+                                Message::Diagnostics(DiagnosticsMessage::NativeLxmfSmokeSend)
+                            ),
+                            omen_button(
+                                "LXMF Interop",
+                                Message::Diagnostics(DiagnosticsMessage::NativeLxmfInterop)
+                            ),
                             omen_button(
                                 "Sync Propagation",
-                                Message::NativeLxmfPropagationDiagnostics
+                                Message::Diagnostics(
+                                    DiagnosticsMessage::NativeLxmfPropagationDiagnostics
+                                )
                             ),
-                            subtle_button("Preview Live Report", Message::PreviewLiveInteropReport),
-                            subtle_button("Export Live Report", Message::ExportLiveInteropReport),
-                            subtle_button("Preview Bundle", Message::PreviewDiagnosticsBundle),
-                            subtle_button("Export Bundle", Message::ExportDiagnosticsBundle),
+                            subtle_button(
+                                "Preview Live Report",
+                                Message::Diagnostics(DiagnosticsMessage::PreviewLiveInteropReport)
+                            ),
+                            subtle_button(
+                                "Export Live Report",
+                                Message::Diagnostics(DiagnosticsMessage::ExportLiveInteropReport)
+                            ),
+                            subtle_button(
+                                "Preview Bundle",
+                                Message::Diagnostics(DiagnosticsMessage::PreviewBundle)
+                            ),
+                            subtle_button(
+                                "Export Bundle",
+                                Message::Diagnostics(DiagnosticsMessage::ExportBundle)
+                            ),
                         ],
                         3
                     ),

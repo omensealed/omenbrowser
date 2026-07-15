@@ -13,7 +13,8 @@ use crate::protocol::{
 };
 use crate::store::{OmenchatStore, ServerRoom, ServerRoomEvent, ServerRoomEventKind, ServerUser};
 use crate::upload::{
-    plan_upload_with_policy, store_upload_with_policy, UploadPolicy, UploadQuotaDecision,
+    plan_upload_with_index, store_upload_with_policy_indexed_and_commit, UploadPolicy,
+    UploadQuotaDecision,
 };
 
 const STATUS_BANNED: u32 = 1;
@@ -1271,7 +1272,15 @@ impl SessionEngine {
             cache_root,
             quota_bytes: self.limits.upload_quota_bytes,
         };
-        match plan_upload_with_policy(&policy, &peer.identity_hash, offer.incoming_bytes)? {
+        let identity_dir =
+            crate::upload::upload_identity_dir_for_root(&policy.cache_root, &peer.identity_hash);
+        let indexed = self.store.plan_upload_from_index(
+            user.user_id,
+            &identity_dir,
+            offer.incoming_bytes,
+            policy.quota_bytes,
+        )?;
+        match plan_upload_with_index(&policy, &peer.identity_hash, offer.incoming_bytes, indexed) {
             UploadQuotaDecision::Disabled => Ok(vec![self.upload_reject_frame(
                 seq,
                 Some(room_id),
@@ -1371,19 +1380,54 @@ impl SessionEngine {
             cache_root,
             quota_bytes: self.limits.upload_quota_bytes,
         };
-        let stored =
-            store_upload_with_policy(&policy, &peer.identity_hash, &upload.filename, &data)?;
         let _user = self.ensure_peer(peer)?;
-        self.store
-            .record_upload_file(crate::store::RecordUploadFile {
-                resource_id,
-                room_id: upload.room_id,
-                actor_user_id: upload.user_id,
-                filename: &upload.filename,
-                content_type: upload.content_type.as_deref(),
-                byte_len: stored.bytes,
-                path: &stored.path,
-            })?;
+        let identity_dir =
+            crate::upload::upload_identity_dir_for_root(&policy.cache_root, &peer.identity_hash);
+        let stored = store_upload_with_policy_indexed_and_commit(
+            &policy,
+            &peer.identity_hash,
+            &upload.filename,
+            &data,
+            |incoming_bytes| {
+                let indexed = self.store.plan_upload_from_index(
+                    upload.user_id,
+                    &identity_dir,
+                    incoming_bytes,
+                    policy.quota_bytes,
+                )?;
+                Ok(plan_upload_with_index(
+                    &policy,
+                    &peer.identity_hash,
+                    incoming_bytes,
+                    indexed,
+                ))
+            },
+            |pending| {
+                self.store
+                    .record_upload_file(crate::store::RecordUploadFile {
+                        resource_id,
+                        room_id: upload.room_id,
+                        actor_user_id: upload.user_id,
+                        filename: &upload.filename,
+                        content_type: upload.content_type.as_deref(),
+                        byte_len: pending.bytes,
+                        path: &pending.path,
+                    })
+            },
+        )?;
+        if let Err(error) =
+            self.store
+                .remove_evicted_upload_records(upload.user_id, resource_id, &stored.evicted)
+        {
+            // The file replacement is already durable. Retaining stale rows
+            // over-counts quota and is safer than reporting failure after a
+            // successful client-visible upload. Force reconciliation before
+            // the next admission and emit an operator-visible diagnostic.
+            self.store.invalidate_upload_ledger(upload.user_id);
+            eprintln!(
+                "omenchatd upload ledger cleanup failed after durable replacement; next upload will require reconciliation: {error}"
+            );
+        }
         let event = self.store.append_event(
             upload.room_id,
             Some(upload.user_id),
