@@ -65,7 +65,11 @@ reproducible`, `superseded`, and `not yet inspected`.
   size tests, and settings-retention tests are the local gate. No dependency,
   wire, configuration, storage-format, or accepted behavior change. Roll back
   the target graph expectations/docs independently; roll back the cfg cleanup
-  and boxed internal envelope only with their native Clippy gates. Completion
+  and boxed internal envelope only with their native Clippy gates. The first
+  rerun passed each corrected graph gate, then Apple Silicon's all-target
+  Clippy exposed 13 Rust 1.97 style failures in settings test fixtures; those
+  fixtures now use equivalent direct initializers, with all 31 settings tests
+  and the complete desktop-product Clippy target passing locally. Completion
   gate: rerun hosted Windows/MSVC and both macOS jobs successfully.
 - Bare native-LXMF feature closure: root native request/LXMF code now uses the
   feature-neutral allocation-free MessagePack preflight and shared OMENchat

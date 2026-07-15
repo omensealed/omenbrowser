@@ -117,19 +117,22 @@ fn nested_extra(depth: usize) -> serde_json::Value {
 
 #[test]
 fn semantic_settings_accept_collection_and_recursion_boundaries() {
-    let mut settings = AppSettings::default();
-    settings.browser_tabs = vec![BrowserTabSettings::default(); APP_SETTINGS_MAX_BROWSER_TABS];
-    settings.conversation_tabs =
-        vec![ConversationTabSettings::default(); APP_SETTINGS_MAX_CONVERSATION_TABS];
-    settings.bookmarks = vec![
-        Bookmark {
-            title: "saved".into(),
-            url: "mock.node:/".into(),
-        };
-        APP_SETTINGS_MAX_BOOKMARKS
-    ];
-    settings.deleted_conversations =
-        vec![Default::default(); APP_SETTINGS_MAX_DELETED_CONVERSATIONS];
+    let mut settings = AppSettings {
+        browser_tabs: vec![BrowserTabSettings::default(); APP_SETTINGS_MAX_BROWSER_TABS],
+        conversation_tabs: vec![
+            ConversationTabSettings::default();
+            APP_SETTINGS_MAX_CONVERSATION_TABS
+        ],
+        bookmarks: vec![
+            Bookmark {
+                title: "saved".into(),
+                url: "mock.node:/".into(),
+            };
+            APP_SETTINGS_MAX_BOOKMARKS
+        ],
+        deleted_conversations: vec![Default::default(); APP_SETTINGS_MAX_DELETED_CONVERSATIONS],
+        ..AppSettings::default()
+    };
     settings.ui.desktop_workspace_panes =
         vec![Default::default(); APP_SETTINGS_MAX_WORKSPACE_PANES];
     settings.trusted_plugin_ids = vec!["trusted".into(); APP_SETTINGS_MAX_PLUGIN_IDS];
@@ -153,28 +156,37 @@ fn semantic_settings_accept_collection_and_recursion_boundaries() {
 fn semantic_settings_reject_each_unbounded_collection_and_recursive_value() {
     let mut cases = Vec::new();
 
-    let mut settings = AppSettings::default();
-    settings.browser_tabs = vec![BrowserTabSettings::default(); APP_SETTINGS_MAX_BROWSER_TABS + 1];
+    let settings = AppSettings {
+        browser_tabs: vec![BrowserTabSettings::default(); APP_SETTINGS_MAX_BROWSER_TABS + 1],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
-    let mut settings = AppSettings::default();
-    settings.conversation_tabs =
-        vec![ConversationTabSettings::default(); APP_SETTINGS_MAX_CONVERSATION_TABS + 1];
+    let settings = AppSettings {
+        conversation_tabs: vec![
+            ConversationTabSettings::default();
+            APP_SETTINGS_MAX_CONVERSATION_TABS + 1
+        ],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
-    let mut settings = AppSettings::default();
-    settings.bookmarks = vec![
-        Bookmark {
-            title: "saved".into(),
-            url: "mock.node:/".into(),
-        };
-        APP_SETTINGS_MAX_BOOKMARKS + 1
-    ];
+    let settings = AppSettings {
+        bookmarks: vec![
+            Bookmark {
+                title: "saved".into(),
+                url: "mock.node:/".into(),
+            };
+            APP_SETTINGS_MAX_BOOKMARKS + 1
+        ],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
-    let mut settings = AppSettings::default();
-    settings.deleted_conversations =
-        vec![Default::default(); APP_SETTINGS_MAX_DELETED_CONVERSATIONS + 1];
+    let settings = AppSettings {
+        deleted_conversations: vec![Default::default(); APP_SETTINGS_MAX_DELETED_CONVERSATIONS + 1],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
     let mut settings = AppSettings::default();
@@ -182,61 +194,75 @@ fn semantic_settings_reject_each_unbounded_collection_and_recursive_value() {
         vec![Default::default(); APP_SETTINGS_MAX_WORKSPACE_PANES + 1];
     cases.push(settings);
 
-    let mut settings = AppSettings::default();
-    settings.trusted_plugin_ids = vec!["trusted".into(); APP_SETTINGS_MAX_PLUGIN_IDS + 1];
+    let settings = AppSettings {
+        trusted_plugin_ids: vec!["trusted".into(); APP_SETTINGS_MAX_PLUGIN_IDS + 1],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
     let mut settings = AppSettings::default();
     settings.plugins.enabled_plugin_ids = vec!["enabled".into(); APP_SETTINGS_MAX_PLUGIN_IDS + 1];
     cases.push(settings);
 
-    let mut settings = AppSettings::default();
-    settings.conversation_tabs = vec![ConversationTabSettings {
-        attachments: vec![
-            PathBuf::from("attachment");
-            APP_SETTINGS_MAX_ATTACHMENTS_PER_CONVERSATION + 1
-        ],
-        ..ConversationTabSettings::default()
-    }];
+    let settings = AppSettings {
+        conversation_tabs: vec![ConversationTabSettings {
+            attachments: vec![
+                PathBuf::from("attachment");
+                APP_SETTINGS_MAX_ATTACHMENTS_PER_CONVERSATION + 1
+            ],
+            ..ConversationTabSettings::default()
+        }],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
-    let mut settings = AppSettings::default();
-    settings.browser_tabs = vec![BrowserTabSettings {
-        history: vec!["mock.node:/".into(); BROWSER_HISTORY_MAX_ITEMS + 1],
-        ..BrowserTabSettings::default()
-    }];
+    let settings = AppSettings {
+        browser_tabs: vec![BrowserTabSettings {
+            history: vec!["mock.node:/".into(); BROWSER_HISTORY_MAX_ITEMS + 1],
+            ..BrowserTabSettings::default()
+        }],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
-    let mut settings = AppSettings::default();
-    settings.browser_tabs = vec![BrowserTabSettings {
-        history: vec![
-            "x".repeat(BROWSER_HISTORY_MAX_OWNED_BYTES / BROWSER_HISTORY_MAX_ITEMS + 1);
-            BROWSER_HISTORY_MAX_ITEMS
-        ],
-        ..BrowserTabSettings::default()
-    }];
+    let settings = AppSettings {
+        browser_tabs: vec![BrowserTabSettings {
+            history: vec![
+                "x".repeat(
+                    BROWSER_HISTORY_MAX_OWNED_BYTES / BROWSER_HISTORY_MAX_ITEMS + 1
+                );
+                BROWSER_HISTORY_MAX_ITEMS
+            ],
+            ..BrowserTabSettings::default()
+        }],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
-    let mut settings = AppSettings::default();
-    settings.browser_tabs = vec![BrowserTabSettings {
-        focused_link: Some(BrowserFocusedLinkSettings {
-            target: "mock.node:/".into(),
-            fields: vec!["field".into(); MICRON_LINK_MAX_FIELDS + 1],
-            region_index: 0,
-        }),
-        ..BrowserTabSettings::default()
-    }];
+    let settings = AppSettings {
+        browser_tabs: vec![BrowserTabSettings {
+            focused_link: Some(BrowserFocusedLinkSettings {
+                target: "mock.node:/".into(),
+                fields: vec!["field".into(); MICRON_LINK_MAX_FIELDS + 1],
+                region_index: 0,
+            }),
+            ..BrowserTabSettings::default()
+        }],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
-    let mut settings = AppSettings::default();
-    settings.browser_tabs = vec![BrowserTabSettings {
-        focused_link: Some(BrowserFocusedLinkSettings {
-            target: "mock.node:/".into(),
-            fields: vec!["x".repeat(MICRON_LINK_FIELD_MAX_BYTES + 1)],
-            region_index: 0,
-        }),
-        ..BrowserTabSettings::default()
-    }];
+    let settings = AppSettings {
+        browser_tabs: vec![BrowserTabSettings {
+            focused_link: Some(BrowserFocusedLinkSettings {
+                target: "mock.node:/".into(),
+                fields: vec!["x".repeat(MICRON_LINK_FIELD_MAX_BYTES + 1)],
+                region_index: 0,
+            }),
+            ..BrowserTabSettings::default()
+        }],
+        ..AppSettings::default()
+    };
     cases.push(settings);
 
     let mut settings = AppSettings::default();
@@ -310,14 +336,16 @@ fn semantic_save_rejection_preserves_previous_file_without_staging() {
     let path = dir.join("settings.json");
     let previous = br#"{"default_start_page":"mock.node:/previous"}"#;
     std::fs::write(&path, previous).expect("previous settings");
-    let mut settings = AppSettings::default();
-    settings.conversation_tabs = vec![ConversationTabSettings {
-        attachments: vec![
-            PathBuf::from("attachment");
-            APP_SETTINGS_MAX_ATTACHMENTS_PER_CONVERSATION + 1
-        ],
-        ..ConversationTabSettings::default()
-    }];
+    let settings = AppSettings {
+        conversation_tabs: vec![ConversationTabSettings {
+            attachments: vec![
+                PathBuf::from("attachment");
+                APP_SETTINGS_MAX_ATTACHMENTS_PER_CONVERSATION + 1
+            ],
+            ..ConversationTabSettings::default()
+        }],
+        ..AppSettings::default()
+    };
 
     let error = settings
         .save(&path)
@@ -911,8 +939,10 @@ fn settings_save_uses_unique_staging_and_leaves_former_temp_collision_untouched(
     let former_temp = dir.join(format!("settings.json.tmp.{}", std::process::id()));
     let sentinel = b"former predictable staging path";
     std::fs::write(&former_temp, sentinel).expect("former staging collision");
-    let mut settings = AppSettings::default();
-    settings.default_start_page = "mock.node:/unique-stage".into();
+    let settings = AppSettings {
+        default_start_page: "mock.node:/unique-stage".into(),
+        ..AppSettings::default()
+    };
 
     settings.save(&path).expect("save through unique staging");
 
