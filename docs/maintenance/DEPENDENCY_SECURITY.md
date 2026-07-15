@@ -199,12 +199,15 @@ RUSTSEC-2024-0436 marks the `paste` 1.0.15 proc macro unmaintained and names
 `pastey` as a maintained drop-in successor. There is no patched `paste`
 release. OMENbrowser and omenchatd do not invoke the macro directly.
 
-The two active parent boundaries are:
+The active target-specific parent boundaries are:
 
 - both canonical desktop products use `paste` through
   `image 0.25.10 -> ravif 0.13.0 -> rav1e 0.8.1`; this is the explicitly
   supported AVIF media path, and `rav1e` uses the macro to generate CPU/ASM
   dispatch symbols at compile time;
+- Apple desktop targets also use `paste` through `wgpu-hal -> metal 0.32.0`
+  for the native graphics backend; Linux and Windows product targets do not
+  activate that parent;
 - root `tui` and omenchatd `server-full` no longer use it after the Ratatui
   0.30.2 migration; minimal/headless server profiles also exclude it.
 
@@ -213,9 +216,10 @@ parse browser media, Reticulum/LXMF frames, OMENchat payloads, configuration,
 or stored user data at runtime. Its parent libraries remain runtime-reachable,
 so the warning cannot be described as lock-only.
 
-The product graph gate requires `rav1e` to be the sole direct `paste` parent in
-both desktop products. The TUI dependency gate separately proves `paste` is
-absent from root `tui` and omenchatd `server-full`. AVIF remains enabled:
+The product graph gate requires `rav1e` to be the sole direct `paste` parent on
+Linux and Windows, and exactly `metal` plus `rav1e` on Apple targets, in both
+desktop products. The TUI dependency gate separately proves `paste` is absent
+from root `tui` and omenchatd `server-full`. AVIF remains enabled:
 OMENbrowser recognizes `.avif` and `image/avif`, and removing `image`'s AVIF
 feature would be an observable compatibility regression.
 

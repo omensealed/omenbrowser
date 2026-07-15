@@ -1737,9 +1737,11 @@ upstream migration and bounded-frame completion gate are recorded in
 `docs/maintenance/DEPENDENCY_SECURITY.md`.
 
 RUSTSEC-2024-0436 marks the compile-time `paste` macro unmaintained. Both
-desktop products currently reach it only through `rav1e` for explicitly
-supported AVIF media. Ratatui 0.30.2 removes it from the optional root TUI and
-omenchatd `server-full`. The two graph gates fix those boundaries:
+desktop products reach it through `rav1e` for explicitly supported AVIF media;
+Apple targets additionally reach it through the native `metal` graphics
+backend. Linux and Windows must resolve exactly `rav1e`, while Apple must
+resolve exactly `metal` and `rav1e`. Ratatui 0.30.2 removes it from the optional
+root TUI and omenchatd `server-full`. The two graph gates fix those boundaries:
 
 ```bash
 bash scripts/verify-product-features.sh
@@ -1751,6 +1753,12 @@ cargo tree --locked --no-default-features --features desktop-product \
 Any new depth-1 desktop parent or any TUI occurrence is a release regression.
 Removing AVIF merely to clear an informational build-time warning is not
 compatible with current media behavior. Native TUI smoke remains required.
+
+The Windows product Clippy gate also enforces the desktop router's strict
+sub-128-byte `Message` bound. Payload-bearing OMENchat media completions keep
+their typed payload behind one `Box`; removing that boundary can make every
+`Result<Task<Message>, Message>` handler cross Clippy's large-error threshold
+on Windows even when the Linux layout remains below it.
 
 ## Native product dependency identity
 

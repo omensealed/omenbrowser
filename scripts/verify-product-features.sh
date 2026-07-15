@@ -109,27 +109,39 @@ assert_product_crate_excluded "animated product" "$features" bincode
 assert_product_crate_excluded "static-media product" \
   "desktop-product-static-media" bincode
 
-assert_inverse_direct_parent() {
+assert_inverse_direct_parents() {
   local profile="$1"
   local profile_features="$2"
   local crate="$3"
-  local expected_parent="$4"
+  local target="$4"
+  local expected_parents="$5"
   local parents
   parents="$(
-    cargo tree --locked --no-default-features --features "$profile_features" \
+    cargo tree --locked --target "$target" --no-default-features \
+      --features "$profile_features" \
       -i "$crate" --prefix depth \
       | sed -n 's/^1\([^ ]*\) v.*$/\1/p' \
-      | sort -u
+      | sort -u \
+      | paste -sd, -
   )"
-  if [[ "$parents" != "$expected_parent" ]]; then
-    echo "product feature verification failed: $profile $crate direct parents are '${parents:-none}', expected '$expected_parent'" >&2
+  if [[ "$parents" != "$expected_parents" ]]; then
+    echo "product feature verification failed: $profile $target $crate direct parents are '${parents:-none}', expected '$expected_parents'" >&2
     exit 1
   fi
 }
 
-assert_inverse_direct_parent "animated product" "$features" paste@1.0.15 rav1e
-assert_inverse_direct_parent "static-media product" \
-  "desktop-product-static-media" paste@1.0.15 rav1e
+for profile_spec in \
+  "animated product|$features" \
+  "static-media product|desktop-product-static-media"; do
+  profile="${profile_spec%%|*}"
+  profile_features="${profile_spec#*|}"
+  assert_inverse_direct_parents "$profile" "$profile_features" \
+    paste@1.0.15 x86_64-unknown-linux-gnu rav1e
+  assert_inverse_direct_parents "$profile" "$profile_features" \
+    paste@1.0.15 x86_64-pc-windows-msvc rav1e
+  assert_inverse_direct_parents "$profile" "$profile_features" \
+    paste@1.0.15 aarch64-apple-darwin metal,rav1e
+done
 
 if ! grep -q '^iced_gif v0\.14\.0$' <<<"$product_dependencies"; then
   echo "product feature verification failed: animated product lacks the reviewed iced_gif 0.14.0" >&2

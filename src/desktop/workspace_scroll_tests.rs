@@ -350,12 +350,12 @@ fn omenchat_upload_picker_cancel_does_not_touch_scroll_restore() {
         .restore_workspace_scroll_locks_release_pending = false;
     desktop.omenchat.chat_scroll_bottom_locks.clear();
 
-    let _ = desktop.update(Message::OmenChatMediaCompletion(
+    let _ = desktop.update(Message::OmenChatMediaCompletion(Box::new(
         crate::desktop::OmenChatMediaCompletionMessage::UploadPicked {
             session_id,
             result: Ok(None),
         },
-    ));
+    )));
 
     assert!(!desktop.workspace.restore_workspace_scrolls_pending);
     assert!(!desktop

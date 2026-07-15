@@ -1045,6 +1045,7 @@ fn prune_corrupt_settings_backups(path: &Path) -> AppResult<()> {
 
     let mut retained_files = 0usize;
     let mut retained_bytes = 0u64;
+    #[cfg(unix)]
     let mut removed = false;
     for candidate in candidates {
         let candidate_total = retained_bytes.saturating_add(candidate.bytes);
@@ -1055,7 +1056,10 @@ fn prune_corrupt_settings_backups(path: &Path) -> AppResult<()> {
             retained_bytes = candidate_total;
         } else {
             std::fs::remove_file(candidate.path)?;
-            removed = true;
+            #[cfg(unix)]
+            {
+                removed = true;
+            }
         }
     }
     #[cfg(unix)]

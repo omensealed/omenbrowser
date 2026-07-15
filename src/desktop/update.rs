@@ -172,7 +172,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                Message::OmenChatMediaCompletion(completion).route(),
+                Message::OmenChatMediaCompletion(Box::new(completion)).route(),
                 MessageRoute::OmenChat
             );
         }

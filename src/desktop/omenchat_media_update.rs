@@ -25,35 +25,27 @@ impl DesktopApp {
             Message::OmenChat(OmenChatMessage::PickUpload(session_id)) => {
                 Ok(self.update_pick_omenchat_upload(session_id))
             }
-            Message::OmenChatMediaCompletion(OmenChatMediaCompletionMessage::UploadPicked {
-                session_id,
-                result,
-            }) => {
-                self.update_omenchat_upload_picked(session_id, result);
-                Ok(Task::none())
-            }
-            Message::OmenChatMediaCompletion(OmenChatMediaCompletionMessage::GifFramesLoaded {
-                path,
-                result,
-            }) => {
-                self.update_omenchat_gif_frames_loaded(path, result);
-                Ok(Task::none())
-            }
-            Message::OmenChatMediaCompletion(OmenChatMediaCompletionMessage::CacheCompleted(
-                completion,
-            )) => Ok(self.update_omenchat_media_cache_completed(
-                completion.session_id,
-                completion.cache_key,
-                completion.generation,
-                completion.result,
-            )),
-            Message::OmenChatMediaCompletion(OmenChatMediaCompletionMessage::StaleMediaRemoved) => {
-                Ok(Task::none())
-            }
-            Message::OmenChatMediaCompletion(OmenChatMediaCompletionMessage::MediaLoaded {
-                url,
-                result,
-            }) => Ok(self.update_omenchat_media_loaded(url, result)),
+            Message::OmenChatMediaCompletion(completion) => match *completion {
+                OmenChatMediaCompletionMessage::UploadPicked { session_id, result } => {
+                    self.update_omenchat_upload_picked(session_id, result);
+                    Ok(Task::none())
+                }
+                OmenChatMediaCompletionMessage::GifFramesLoaded { path, result } => {
+                    self.update_omenchat_gif_frames_loaded(path, result);
+                    Ok(Task::none())
+                }
+                OmenChatMediaCompletionMessage::CacheCompleted(completion) => Ok(self
+                    .update_omenchat_media_cache_completed(
+                        completion.session_id,
+                        completion.cache_key,
+                        completion.generation,
+                        completion.result,
+                    )),
+                OmenChatMediaCompletionMessage::StaleMediaRemoved => Ok(Task::none()),
+                OmenChatMediaCompletionMessage::MediaLoaded { url, result } => {
+                    Ok(self.update_omenchat_media_loaded(url, result))
+                }
+            },
             _ => Err(message),
         }
     }

@@ -108,9 +108,9 @@ impl DesktopApp {
                 (session_id, result)
             },
             |(session_id, result)| {
-                Message::OmenChatMediaCompletion(
+                Message::OmenChatMediaCompletion(Box::new(
                     super::OmenChatMediaCompletionMessage::UploadPicked { session_id, result },
-                )
+                ))
             },
         )
     }
@@ -251,9 +251,9 @@ impl DesktopApp {
                         (url, result)
                     },
                     |(url, result)| {
-                        Message::OmenChatMediaCompletion(
+                        Message::OmenChatMediaCompletion(Box::new(
                             super::OmenChatMediaCompletionMessage::MediaLoaded { url, result },
-                        )
+                        ))
                     },
                 )
             }
@@ -282,9 +282,9 @@ impl DesktopApp {
                         (url, result)
                     },
                     |(url, result)| {
-                        Message::OmenChatMediaCompletion(
+                        Message::OmenChatMediaCompletion(Box::new(
                             super::OmenChatMediaCompletionMessage::MediaLoaded { url, result },
-                        )
+                        ))
                     },
                 )
             }
@@ -334,9 +334,9 @@ impl DesktopApp {
                 (path, result)
             },
             |(path, result)| {
-                Message::OmenChatMediaCompletion(
+                Message::OmenChatMediaCompletion(Box::new(
                     super::OmenChatMediaCompletionMessage::GifFramesLoaded { path, result },
-                )
+                ))
             },
         )
     }
@@ -453,7 +453,7 @@ impl DesktopApp {
                             (session_id, cache_key, generation, result)
                         },
                         |(session_id, cache_key, generation, result)| {
-                            Message::OmenChatMediaCompletion(
+                            Message::OmenChatMediaCompletion(Box::new(
                                 super::OmenChatMediaCompletionMessage::CacheCompleted(Box::new(
                                     super::OmenChatMediaCacheCompletion {
                                         session_id,
@@ -462,7 +462,7 @@ impl DesktopApp {
                                         result,
                                     },
                                 )),
-                            )
+                            ))
                         },
                     )
                 }),
@@ -492,9 +492,9 @@ impl DesktopApp {
                         let _ = tokio::fs::remove_file(cached.path).await;
                     },
                     |()| {
-                        Message::OmenChatMediaCompletion(
+                        Message::OmenChatMediaCompletion(Box::new(
                             super::OmenChatMediaCompletionMessage::StaleMediaRemoved,
-                        )
+                        ))
                     },
                 ),
                 Err(_) => Task::none(),

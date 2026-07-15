@@ -465,7 +465,7 @@ pub(in crate::desktop) enum Message {
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     OmenChatTransportCompletion(OmenChatTransportCompletionMessage),
     #[cfg(feature = "chat-client")]
-    OmenChatMediaCompletion(OmenChatMediaCompletionMessage),
+    OmenChatMediaCompletion(Box<OmenChatMediaCompletionMessage>),
     WorkspacePane(WorkspacePaneMessage),
     Diagnostics(DiagnosticsMessage),
     Identity(IdentityMessage),
@@ -487,7 +487,7 @@ mod size_tests {
     #[test]
     fn asynchronous_completion_envelopes_keep_router_message_small() {
         assert!(
-            std::mem::size_of::<Message>() <= 128,
+            std::mem::size_of::<Message>() < 128,
             "desktop Message grew to {} bytes",
             std::mem::size_of::<Message>()
         );
