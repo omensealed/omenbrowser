@@ -82,7 +82,12 @@ reproducible`, `superseded`, and `not yet inspected`.
   read/write access before flushing, without changing create/replace policy.
   The complete server-full library suite passes locally (289 passed, 3
   explicitly ignored), as does Windows-GNU strict server-full Clippy; native
-  Windows execution remains the completion proof.
+  Windows execution confirmed the repaired SQLite paths in the headless and
+  full suites. The subsequent full-profile TUI run exposed two test-only Unix
+  separator assumptions; both path-visibility assertions now derive the exact
+  native display strings from `ServerConfig`. Focused tests and Windows-GNU
+  strict server-full Clippy pass. Completion still requires one green final
+  native matrix.
 - Bare native-LXMF feature closure: root native request/LXMF code now uses the
   feature-neutral allocation-free MessagePack preflight and shared OMENchat
   wire ceilings rather than importing the `chat-client` module. The declared

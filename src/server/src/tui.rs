@@ -5099,7 +5099,7 @@ mod tests {
         assert!(text.contains("live: live server running"));
         assert!(!text.contains("live: runtime:"));
         assert!(text.contains("network:"));
-        assert!(text.contains("reticulum/config"));
+        assert!(text.contains(&config.reticulum_config_file().display().to_string()));
         assert!(text.contains("rooms:"));
         assert!(text.contains("uploads: max 512.0 KiB, quota 50.0 MiB"));
         assert!(text.contains("share: Portal tab"));
@@ -5166,7 +5166,7 @@ mod tests {
         assert!(text.contains("Portal page: NomadNet /page/index.mu URL"));
         assert!(text.contains("destination:"));
         assert!(text.contains("Portal file:"));
-        assert!(text.contains("reticulum/storage/pages/index.mu"));
+        assert!(text.contains(&config.nomadnet_index_page_path().display().to_string()));
         assert!(text.contains("Invite format: omenchat://<destination_hash>"));
         let _ = std::fs::remove_dir_all(root);
     }
