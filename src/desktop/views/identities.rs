@@ -6,7 +6,7 @@ use crate::workspace::WorkspaceSection;
 use super::super::{
     action_grid, app_scrollable, compact_label, omen_button, section_card, status_container_style,
     subtle_button, subtle_button_owned, ui_size, warning_button, warning_container_style,
-    wrapped_text_owned, DesktopApp, Message,
+    wrapped_text_owned, DesktopApp, IdentityMessage, Message, ShellMessage,
 };
 
 pub(in crate::desktop) fn identities_view(desktop: &DesktopApp) -> Element<'_, Message> {
@@ -84,7 +84,9 @@ pub(in crate::desktop) fn identities_view(desktop: &DesktopApp) -> Element<'_, M
             if !is_active {
                 header = header.push(subtle_button_owned(
                     "Use".to_string(),
-                    Message::ActivateManagedIdentity(profile.path.display().to_string()),
+                    Message::Identity(IdentityMessage::ActivateManaged(
+                        profile.path.display().to_string(),
+                    )),
                 ));
             }
             let storage_paths = desktop.app.paths.with_identity_storage_root(
@@ -140,11 +142,16 @@ pub(in crate::desktop) fn identities_view(desktop: &DesktopApp) -> Element<'_, M
                 "Active Identity",
                 column![
                     text_input("identity name", &active_label)
-                        .on_input(Message::ActiveIdentityLabelChanged)
+                        .on_input(|label| {
+                            Message::Identity(IdentityMessage::ActiveLabelChanged(label))
+                        })
                         .width(Length::Fill),
                     row![
                         wrapped_text_owned(format!("hash: {active_hash}"), 14),
-                        subtle_button("Copy", Message::CopyActiveIdentityHash),
+                        subtle_button(
+                            "Copy",
+                            Message::Identity(IdentityMessage::CopyActiveHash),
+                        ),
                     ]
                     .spacing(8)
                     .align_y(iced::Alignment::Center)
@@ -156,10 +163,22 @@ pub(in crate::desktop) fn identities_view(desktop: &DesktopApp) -> Element<'_, M
                     ), 12),
                     action_grid(
                         vec![
-                            omen_button("Create Identity", Message::CreateIdentity),
-                            subtle_button("Announce Now", Message::AnnounceIdentityNow),
-                            subtle_button("Clear Active", Message::ClearActiveIdentity),
-                            warning_button("Delete Active", Message::DeleteActiveIdentity),
+                            omen_button(
+                                "Create Identity",
+                                Message::Identity(IdentityMessage::Create),
+                            ),
+                            subtle_button(
+                                "Announce Now",
+                                Message::Identity(IdentityMessage::AnnounceNow),
+                            ),
+                            subtle_button(
+                                "Clear Active",
+                                Message::Identity(IdentityMessage::ClearActive),
+                            ),
+                            warning_button(
+                                "Delete Active",
+                                Message::Identity(IdentityMessage::DeleteActive),
+                            ),
                         ],
                         4,
                     ),
@@ -183,7 +202,10 @@ pub(in crate::desktop) fn identities_view(desktop: &DesktopApp) -> Element<'_, M
                         "External identity and custom Reticulum config paths remain editable in Settings.",
                         14,
                     ),
-                    subtle_button("Open Settings", Message::SwitchSection(WorkspaceSection::Settings)),
+                    subtle_button(
+                        "Open Settings",
+                        Message::Shell(ShellMessage::SwitchSection(WorkspaceSection::Settings))
+                    ),
                 ]
                 .spacing(8),
             ),
@@ -207,8 +229,14 @@ fn identity_delete_confirmation_view(desktop: &DesktopApp) -> Element<'_, Messag
                 13,
             ),
             row![
-                warning_button("Confirm Delete", Message::ConfirmDeleteActiveIdentity),
-                subtle_button("Cancel", Message::CancelDeleteActiveIdentity),
+                warning_button(
+                    "Confirm Delete",
+                    Message::Identity(IdentityMessage::ConfirmDeleteActive),
+                ),
+                subtle_button(
+                    "Cancel",
+                    Message::Identity(IdentityMessage::CancelDeleteActive),
+                ),
             ]
             .spacing(8)
             .wrap(),

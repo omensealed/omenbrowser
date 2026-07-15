@@ -249,6 +249,7 @@ pub(in crate::desktop) fn omenchat_monitoring_card(desktop: &DesktopApp) -> Elem
             ));
         } else {
             let media_total = desktop.omenchat.omenchat_media_cache.len();
+            let media_metadata_bytes = desktop.omenchat.omenchat_media_cache.metadata_bytes();
             let media_loading = desktop
                 .omenchat
                 .omenchat_media_cache
@@ -267,7 +268,21 @@ pub(in crate::desktop) fn omenchat_monitoring_card(desktop: &DesktopApp) -> Elem
                 .values()
                 .filter(|state| matches!(state, OmenChatMediaLoadState::Failed { .. }))
                 .count();
+            let gif_cache_items = desktop.omenchat.omenchat_gif_frames.len();
+            let gif_cache_bytes = desktop.omenchat.omenchat_gif_frames.decoded_bytes();
+            let media_job_items = desktop.omenchat.pending_media_cache_jobs.len();
+            let media_job_bytes = desktop.omenchat.pending_media_cache_bytes;
             let totals = desktop.omenchat_live_monitor_totals();
+            let pending_uploads = desktop
+                .omenchat
+                .omenchat_live_state
+                .pending_upload_metrics();
+            let inline_downloads = desktop
+                .omenchat
+                .omenchat_live_state
+                .inline_download_metrics();
+            let event_queue = desktop.app.internal_event_payload_metrics();
+            let staging = desktop.app.omenchat_event_staging_metrics();
             lines = lines.push(
                 column![
                     wrapped_text_owned(omenchat_monitor_health_line(&totals), 13),
@@ -304,7 +319,54 @@ pub(in crate::desktop) fn omenchat_monitoring_card(desktop: &DesktopApp) -> Elem
             );
             lines = lines.push(wrapped_text_owned(
                 format!(
-                    "media cache: {media_cached} cached / {media_loading} loading / {media_failed} failed ({media_total} tracked)"
+                    "client transfers: upload offers {} / {} | inline downloads {} / {} reserved / {} retained / {} fragment(s) | rejected {} upload / {} inline",
+                    pending_uploads.items,
+                    human_bytes(pending_uploads.bytes as u64),
+                    inline_downloads.items,
+                    human_bytes(inline_downloads.reserved_bytes as u64),
+                    human_bytes(inline_downloads.retained_bytes as u64),
+                    inline_downloads.pending_chunks,
+                    pending_uploads.rejected,
+                    inline_downloads.rejected
+                ),
+                13,
+            ));
+            lines = lines.push(wrapped_text_owned(
+                format!(
+                    "event channel payload: {} item(s) / {} | rejected {}",
+                    event_queue.queued_items,
+                    human_bytes(event_queue.queued_bytes as u64),
+                    event_queue.rejected_events
+                ),
+                13,
+            ));
+            lines = lines.push(wrapped_text_owned(
+                format!(
+                    "event staging: frames {} ({}) / resources {} ({}) / closes {} ({}) | rejected {} frame / {} resource / {} close",
+                    staging.frame_items,
+                    human_bytes(staging.frame_bytes as u64),
+                    staging.resource_items,
+                    human_bytes(staging.resource_bytes as u64),
+                    staging.close_items,
+                    human_bytes(staging.close_bytes as u64),
+                    staging.rejected_frames,
+                    staging.rejected_resources,
+                    staging.rejected_closes
+                ),
+                13,
+            ));
+            lines = lines.push(wrapped_text_owned(
+                format!(
+                    "media cache: {media_cached} cached / {media_loading} loading / {media_failed} failed ({media_total} tracked / {} metadata)" ,
+                    human_bytes(media_metadata_bytes as u64)
+                ),
+                13,
+            ));
+            lines = lines.push(wrapped_text_owned(
+                format!(
+                    "animated GIF cache: {gif_cache_items} item(s) / {} decoded estimate | cache jobs: {media_job_items} / {} reserved",
+                    human_bytes(gif_cache_bytes),
+                    human_bytes(media_job_bytes as u64)
                 ),
                 13,
             ));
@@ -382,14 +444,28 @@ pub(in crate::desktop) fn omenchat_monitoring_card(desktop: &DesktopApp) -> Elem
                 };
                 let traffic_line = if let Some(transport) = transport {
                     format!(
-                        "traffic: frames {} in / {} out | wire {} rx / {} tx | resources {} ({}) | pending {}",
+                        "traffic: frames {} in / {} out | wire {} rx / {} tx | frame queues {} ({}) in / {} ({}) out | resources {} ({}) | cached {} ({}) | pending {} ({}) | resource queue {} ({}) | rejected {} frame-in / {} frame-out / {} resource-out / {} resource / {} offer",
                         transport.frames_in,
                         transport.frames_out,
                         human_bytes(transport.bytes_in),
                         human_bytes(transport.bytes_out),
+                        transport.incoming_frames.len(),
+                        human_bytes(transport.incoming_frame_bytes as u64),
+                        transport.outgoing_frames.len(),
+                        human_bytes(transport.outgoing_frame_bytes as u64),
                         transport.resources_in,
                         human_bytes(transport.resource_bytes_in),
-                        transport.pending_resource_offer_count()
+                        transport.resources.len(),
+                        human_bytes(transport.resource_cached_bytes as u64),
+                        transport.pending_resource_offer_count(),
+                        human_bytes(transport.pending_resource_offer_bytes as u64),
+                        transport.outgoing_resources.len(),
+                        human_bytes(transport.outgoing_resource_bytes as u64),
+                        transport.rejected_incoming_frames,
+                        transport.rejected_outgoing_frames,
+                        transport.rejected_outgoing_resources,
+                        transport.rejected_resources,
+                        transport.rejected_resource_offers,
                     )
                 } else {
                     "traffic: disconnected".into()

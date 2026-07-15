@@ -135,7 +135,9 @@ async fn same_destination_timeout_refreshes_path_for_retry() {
     let tab_id = app.active_browser_tab().id;
     let mut session = app.active_browser_tab().session.clone();
     let page = BrowserPage::mock_home(&current);
-    session.restore_page(page.clone(), vec![page.url.clone()], 0);
+    session
+        .restore_page(page.clone(), vec![page.url.clone()], 0)
+        .expect("restore page");
     app.active_browser_tab_mut().session = session;
     app.active_browser_tab_mut().loading = Some(LoadState {
         generation: 17,
@@ -242,7 +244,8 @@ async fn browser_reload_clears_stale_request_state() {
     let page = BrowserPage::mock_home("mock.node:/page/index.mu");
     app.active_browser_tab_mut()
         .session
-        .restore_page(page.clone(), vec![page.url.clone()], 0);
+        .restore_page(page.clone(), vec![page.url.clone()], 0)
+        .expect("restore page");
     install_stale_browser_request_state(&mut app, "mock.node:/page/old-submit.mu".into());
 
     app.reload_active_browser();
@@ -258,11 +261,14 @@ async fn browser_history_navigation_clears_stale_request_state() {
     let mut app = App::new(test_config("history-clears-stale-request-state"));
     let first = BrowserPage::mock_home("mock.node:/page/one.mu");
     let second = BrowserPage::mock_home("mock.node:/page/two.mu");
-    app.active_browser_tab_mut().session.restore_page(
-        second,
-        vec![first.url.clone(), "mock.node:/page/two.mu".into()],
-        1,
-    );
+    app.active_browser_tab_mut()
+        .session
+        .restore_page(
+            second,
+            vec![first.url.clone(), "mock.node:/page/two.mu".into()],
+            1,
+        )
+        .expect("restore page");
     install_stale_browser_request_state(&mut app, "mock.node:/page/old-submit.mu".into());
 
     app.browser_back();
@@ -381,7 +387,8 @@ async fn clicked_link_starts_with_fresh_request_state_for_same_target() {
     let page = BrowserPage::mock_home(&current);
     app.active_browser_tab_mut()
         .session
-        .restore_page(page.clone(), vec![page.url.clone()], 0);
+        .restore_page(page.clone(), vec![page.url.clone()], 0)
+        .expect("restore page");
     let now = current_epoch_ms();
     app.active_browser_tab_mut().retry_state = Some(BrowserRetryState {
         target: target.clone(),
@@ -510,7 +517,9 @@ fn successful_browser_load_clears_live_warning() {
     });
     let mut session = app.active_browser_tab().session.clone();
     let page = BrowserPage::mock_home("mock.node:/page/gallery.mu");
-    session.restore_page(page.clone(), vec![page.url.clone()], 0);
+    session
+        .restore_page(page.clone(), vec![page.url.clone()], 0)
+        .expect("restore page");
 
     assert!(app.apply_browser_task_result(BrowserTaskResult::Page {
         tab_id,

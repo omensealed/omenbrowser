@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 
 use super::client::{
-    ChatClient, ChatClientEvent, ChatClientRequest, ChatSessionId, ChatSessionView,
+    enforce_client_event_presentation_bounds, ChatClient, ChatClientEvent, ChatClientRequest,
+    ChatSessionId, ChatSessionView,
 };
 use super::descriptor::OmenChatDescriptor;
-use super::model::{ChatEvent, ChatEventKind, ChatRoomSummary, ChatServerSummary, ChatUserSummary};
+use super::model::{
+    bounded_chat_text, chat_text_fits, ChatEvent, ChatEventKind, ChatRoomSummary,
+    ChatServerSummary, ChatUserSummary, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES,
+    CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES,
+};
 use super::protocol::{RoomId, ServerId};
 use super::store::ChatStore;
 
@@ -60,7 +65,11 @@ impl MockChatStore {
     }
 }
 
-pub fn open_mock_session(client: &mut ChatClient) -> ChatSessionId {
+pub fn open_mock_session(client: &mut ChatClient) -> Option<ChatSessionId> {
+    try_open_mock_session(client)
+}
+
+fn try_open_mock_session(client: &mut ChatClient) -> Option<ChatSessionId> {
     let session_id = client.reserve_session_id();
     let server = ChatServerSummary {
         server_id: "mock-server".into(),
@@ -128,7 +137,7 @@ pub fn open_mock_session(client: &mut ChatClient) -> ChatSessionId {
             },
         },
     ];
-    client.push_session(ChatSessionView {
+    if !client.push_session(ChatSessionView {
         session_id,
         server,
         rooms,
@@ -136,15 +145,17 @@ pub fn open_mock_session(client: &mut ChatClient) -> ChatSessionId {
         users,
         events,
         status: "mock transport connected".into(),
-    });
-    session_id
+    }) {
+        return None;
+    }
+    Some(session_id)
 }
 
 pub fn handle_mock_request(
     client: &mut ChatClient,
     request: ChatClientRequest,
 ) -> Vec<ChatClientEvent> {
-    match request {
+    let mut events = match request {
         ChatClientRequest::OpenServer(descriptor) => open_mock_server(client, descriptor),
         ChatClientRequest::JoinRoom { session_id, room } => {
             join_mock_room(client, session_id, room)
@@ -234,6 +245,12 @@ pub fn handle_mock_request(
                 }]
             }),
         ChatClientRequest::SetTopic { session_id, topic } => {
+            if !chat_text_fits(topic.trim(), CHAT_ROOM_TOPIC_MAX_BYTES) {
+                return vec![ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "room topic exceeds client limits".into(),
+                }];
+            }
             let Some(session) = client.session_mut(session_id) else {
                 return vec![ChatClientEvent::Error {
                     session_id: Some(session_id),
@@ -267,10 +284,15 @@ pub fn handle_mock_request(
                 }];
             };
             let room_name = room.trim().trim_start_matches('#').to_owned();
-            if room_name.is_empty() {
+            if room_name.is_empty()
+                || !chat_text_fits(&room_name, CHAT_ROOM_NAME_MAX_BYTES)
+                || topic
+                    .as_deref()
+                    .is_some_and(|topic| !chat_text_fits(topic.trim(), CHAT_ROOM_TOPIC_MAX_BYTES))
+            {
                 return vec![ChatClientEvent::Error {
                     session_id: Some(session_id),
-                    message: "room name is required".into(),
+                    message: "room name or topic is empty or exceeds client limits".into(),
                 }];
             }
             let next_room_id = session
@@ -348,7 +370,10 @@ pub fn handle_mock_request(
                 .unwrap_or_default();
             vec![ChatClientEvent::HistoryPrepended { session_id, events }]
         }
-    }
+    };
+    client.enforce_status_bounds();
+    enforce_client_event_presentation_bounds(&mut events);
+    events
 }
 
 fn join_mock_room(
@@ -356,13 +381,19 @@ fn join_mock_room(
     session_id: ChatSessionId,
     room_name: String,
 ) -> Vec<ChatClientEvent> {
+    let normalized = room_name.trim().trim_start_matches('#');
+    if !chat_text_fits(normalized, CHAT_ROOM_NAME_MAX_BYTES) {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "mock room name exceeds client limits".into(),
+        }];
+    }
     let Some(session) = client.session_mut(session_id) else {
         return vec![ChatClientEvent::Error {
             session_id: Some(session_id),
             message: "mock session is not available".into(),
         }];
     };
-    let normalized = room_name.trim().trim_start_matches('#');
     let Some(room) = session
         .rooms
         .iter()
@@ -390,7 +421,23 @@ fn open_mock_server(
     client: &mut ChatClient,
     descriptor: OmenChatDescriptor,
 ) -> Vec<ChatClientEvent> {
-    let session_id = open_mock_session(client);
+    if !chat_text_fits(
+        &descriptor.server_destination,
+        CHAT_SERVER_DESTINATION_MAX_BYTES,
+    ) {
+        return vec![ChatClientEvent::Error {
+            session_id: None,
+            message: "OMENchat descriptor metadata exceeds client limits".into(),
+        }];
+    }
+    let Some(session_id) = try_open_mock_session(client) else {
+        return vec![ChatClientEvent::Error {
+            session_id: None,
+            message:
+                "OMENchat client session limit reached; close a session before opening another"
+                    .into(),
+        }];
+    };
     let Some(session) = client.session_mut(session_id) else {
         return vec![ChatClientEvent::Error {
             session_id: Some(session_id),
@@ -401,7 +448,8 @@ fn open_mock_server(
         session.server.destination = descriptor.server_destination;
     }
     if let Some(display_name) = descriptor.display_name {
-        session.server.display_name = display_name;
+        session.server.display_name =
+            bounded_chat_text(display_name.trim(), CHAT_SERVER_DISPLAY_MAX_BYTES);
     }
     vec![
         ChatClientEvent::ServerOpened {
@@ -429,7 +477,7 @@ fn send_mock_room_event(
     body: String,
     kind: impl FnOnce(String) -> ChatEventKind,
 ) -> bool {
-    let Some(session) = client.session_mut(session_id) else {
+    let Some(session) = client.session(session_id) else {
         return false;
     };
     let event_id = session
@@ -439,7 +487,7 @@ fn send_mock_room_event(
         .max()
         .unwrap_or(0)
         .saturating_add(1);
-    session.events.push(ChatEvent {
+    let event = ChatEvent {
         server_id: session.server.server_id.clone(),
         room_id: session.active_room.room_id,
         event_id,
@@ -447,8 +495,18 @@ fn send_mock_room_event(
         actor_display_name: Some("Operator".into()),
         at_unix: current_unix_seconds(),
         kind: kind(body),
-    });
-    session.status = "mock message appended locally".into();
+    };
+    if !client.append_event_bounded(
+        session_id,
+        event,
+        false,
+        super::client::HistoryWindowEdge::Newest,
+    ) {
+        return false;
+    }
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = "mock message appended locally".into();
+    }
     true
 }
 
@@ -505,7 +563,7 @@ fn part_mock_room(
 }
 
 pub fn load_older_mock_history(client: &mut ChatClient, session_id: ChatSessionId) -> bool {
-    let Some(session) = client.session_mut(session_id) else {
+    let Some(session) = client.session(session_id) else {
         return false;
     };
     let first_event_id = session
@@ -540,13 +598,18 @@ pub fn load_older_mock_history(client: &mut ChatClient, session_id: ChatSessionI
             .any(|event| event.event_id == candidate.event_id)
     });
     if older.is_empty() {
-        session.status = "mock history is at the beginning".into();
+        if let Some(session) = client.session_mut(session_id) {
+            session.status = "mock history is at the beginning".into();
+        }
         return false;
     }
-    older.extend(session.events.clone());
-    session.events = older;
-    session.status = "mock older history loaded".into();
-    true
+    let added = client.prepend_history_events(session_id, older);
+    if added > 0 {
+        if let Some(session) = client.session_mut(session_id) {
+            session.status = "mock older history loaded".into();
+        }
+    }
+    added > 0
 }
 
 fn current_unix_seconds() -> i64 {
@@ -672,12 +735,13 @@ impl ChatStore for MockChatStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::model::CHAT_STATUS_MAX_BYTES;
 
     #[test]
     fn mock_sessions_get_unique_ids_and_seed_state() {
         let mut client = ChatClient::new();
-        let first_id = open_mock_session(&mut client);
-        let second_id = open_mock_session(&mut client);
+        let first_id = open_mock_session(&mut client).expect("first mock session");
+        let second_id = open_mock_session(&mut client).expect("second mock session");
         let first = client.session(first_id).expect("first session");
         let second = client.session(second_id).expect("second session");
 
@@ -690,7 +754,7 @@ mod tests {
     #[test]
     fn mock_send_appends_and_history_prepends() {
         let mut client = ChatClient::new();
-        let session_id = open_mock_session(&mut client);
+        let session_id = open_mock_session(&mut client).expect("mock session");
 
         assert!(send_mock_message(&mut client, session_id, "hello".into()));
         let session = client.session(session_id).expect("session");
@@ -707,7 +771,7 @@ mod tests {
     #[test]
     fn mock_part_active_room_selects_next_joined_room() {
         let mut client = ChatClient::new();
-        let session_id = open_mock_session(&mut client);
+        let session_id = open_mock_session(&mut client).expect("mock session");
         if let Some(session) = client.session_mut(session_id) {
             if let Some(room) = session.rooms.iter_mut().find(|room| room.name == "support") {
                 room.joined = true;
@@ -774,5 +838,77 @@ mod tests {
             events.as_slice(),
             [ChatClientEvent::HistoryPrepended { .. }]
         ));
+    }
+
+    #[test]
+    fn mock_request_handler_bounds_descriptor_and_status_metadata() {
+        let mut client = ChatClient::new();
+        let events = handle_mock_request(
+            &mut client,
+            ChatClientRequest::OpenServer(OmenChatDescriptor {
+                server_destination: "dest".into(),
+                display_name: Some("☃".repeat(CHAT_SERVER_DISPLAY_MAX_BYTES)),
+                ..OmenChatDescriptor::default()
+            }),
+        );
+        let session_id = match events.first() {
+            Some(ChatClientEvent::ServerOpened { session_id, server }) => {
+                assert!(server.display_name.len() <= CHAT_SERVER_DISPLAY_MAX_BYTES);
+                *session_id
+            }
+            other => panic!("unexpected event: {other:?}"),
+        };
+        let _ = handle_mock_request(
+            &mut client,
+            ChatClientRequest::ModerateUser {
+                session_id,
+                action: "ban".into(),
+                target: "☃".repeat(CHAT_STATUS_MAX_BYTES),
+            },
+        );
+        assert!(client
+            .session(session_id)
+            .is_some_and(|session| session.status.len() <= CHAT_STATUS_MAX_BYTES));
+
+        let before = client.sessions().len();
+        let events = handle_mock_request(
+            &mut client,
+            ChatClientRequest::OpenServer(OmenChatDescriptor {
+                server_destination: "d".repeat(CHAT_SERVER_DESTINATION_MAX_BYTES + 1),
+                ..OmenChatDescriptor::default()
+            }),
+        );
+        assert_eq!(client.sessions().len(), before);
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+
+        let session = client.session(session_id).expect("session");
+        let room_count = session.rooms.len();
+        let active_topic = session.active_room.topic.clone();
+        for request in [
+            ChatClientRequest::SetTopic {
+                session_id,
+                topic: "t".repeat(CHAT_ROOM_TOPIC_MAX_BYTES + 1),
+            },
+            ChatClientRequest::CreateRoom {
+                session_id,
+                room: "r".repeat(CHAT_ROOM_NAME_MAX_BYTES + 1),
+                topic: None,
+            },
+        ] {
+            let events = handle_mock_request(&mut client, request);
+            assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+        }
+        assert_eq!(
+            client.session(session_id).expect("session").rooms.len(),
+            room_count
+        );
+        assert_eq!(
+            client
+                .session(session_id)
+                .expect("session")
+                .active_room
+                .topic,
+            active_topic
+        );
     }
 }

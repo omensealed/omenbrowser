@@ -24,6 +24,10 @@ use crate::runtime::RuntimeBusEvent;
 
 pub const NOMADNET_APP_NAME: &str = "nomadnetwork";
 pub const NOMADNET_NODE_ASPECT: &str = "node";
+pub const MAX_NOMADNET_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_NOMADNET_RESPONSE_CONTAINER_ITEMS: usize = 256;
+const MAX_NOMADNET_RESPONSE_TOTAL_VALUES: usize = 512;
+const MAX_NOMADNET_RESPONSE_DEPTH: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativePageRequest {
@@ -1066,10 +1070,25 @@ fn pack_msgpack_value(value: &Value) -> Result<Vec<u8>, NativeRuntimeError> {
 }
 
 fn unpack_msgpack_value(bytes: &[u8]) -> Result<Value, NativeRuntimeError> {
+    crate::msgpack::validate_msgpack_with_limits(
+        bytes,
+        MAX_NOMADNET_RESPONSE_BYTES,
+        MAX_NOMADNET_RESPONSE_BYTES,
+        MAX_NOMADNET_RESPONSE_CONTAINER_ITEMS,
+        MAX_NOMADNET_RESPONSE_TOTAL_VALUES,
+        MAX_NOMADNET_RESPONSE_DEPTH,
+    )
+    .map_err(|error| NativeRuntimeError::InvalidResponse(error.to_string()))?;
     let mut cursor = std::io::Cursor::new(bytes);
-    rmpv::decode::read_value(&mut cursor).map_err(|_| {
+    let value = rmpv::decode::read_value(&mut cursor).map_err(|_| {
         NativeRuntimeError::InvalidResponse("failed to decode Link.request msgpack".into())
-    })
+    })?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(NativeRuntimeError::InvalidResponse(
+            "trailing Link.request msgpack data".into(),
+        ));
+    }
+    Ok(value)
 }
 
 fn response_value_to_body(value: &Value) -> Result<Vec<u8>, NativeRuntimeError> {
@@ -1494,6 +1513,29 @@ mod tests {
         assert_eq!(binary.request_id, request_id);
         assert_eq!(binary.body, b">Page\nBody");
         assert_eq!(string.body, b"Text body");
+    }
+
+    #[test]
+    fn native_link_response_rejects_unbounded_or_trailing_msgpack() {
+        let request_id = [0x42; 16];
+        let mut trailing = pack_msgpack_value(&Value::Array(vec![
+            Value::Binary(request_id.to_vec()),
+            Value::Binary(b">Page".to_vec()),
+        ]))
+        .expect("pack response");
+        trailing.push(0xc0);
+        assert!(NativeLinkResponseFrame::parse(&trailing).is_err());
+
+        let oversized_scalar = [0xdb, 0x00, 0x40, 0x00, 0x01];
+        assert!(NativeLinkResponseFrame::parse(&oversized_scalar).is_err());
+
+        let mut deep = vec![0x91; MAX_NOMADNET_RESPONSE_DEPTH + 2];
+        deep.push(0xc0);
+        assert!(NativeLinkResponseFrame::parse(&deep).is_err());
+
+        assert!(
+            NativeLinkResponseFrame::parse(&vec![0xc0; MAX_NOMADNET_RESPONSE_BYTES + 1]).is_err()
+        );
     }
 
     #[test]

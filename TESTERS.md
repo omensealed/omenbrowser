@@ -6,6 +6,28 @@ OMENchat plugin client, and the standalone `omenchatd` server.
 Use release binaries for UI testing. Debug builds are not a useful performance
 baseline.
 
+Maintainers collecting repeatable Linux idle measurements can run
+`scripts/measure-desktop-idle.sh` from a source checkout. It uses a temporary
+isolated app root and records raw evidence under the requested results directory;
+set `HEADLESS=1` for a disposable Xvfb/i3 session, and see `docs/TESTING.md` for
+the measurement and before/after comparison contract.
+Maintainers can also run `scripts/measure-pane-stress.sh` to restore and
+close/reopen a deterministic isolated 50-pane workspace across three native
+Linux cycles; this never uses the normal identity or message roots.
+The standalone-server queue gate is
+`scripts/measure-omenchatd-backpressure.sh`; it runs for 60 seconds by default,
+uses only generated temporary state, and retains RSS/queue/control-latency
+evidence in the requested output directory.
+The standalone database-worker gate is
+`scripts/measure-omenchatd-db.sh`; it also defaults to 60 seconds, uses only a
+generated temporary root, and retains worker/heartbeat latency, RSS, file
+descriptor, restart, event-ID, and SQLite-integrity evidence. Neither harness
+is a substitute for the live Reticulum interoperability smoke.
+Media-performance testers can run `scripts/measure-omenchat-media.sh` from an
+interactive graphical session. It uses an isolated temporary identity root and
+guides visible/hidden/closed animation phases; do not substitute normal user
+data or report missing GPU tooling as zero activity.
+
 For release testing, start with `--app-root /tmp/omenbrowser-rs-test` or another
 dedicated root. Launch the default profile only when you intentionally want to
 use your normal OMENbrowser_rs identity, storage, messages, and pane layout.
@@ -96,10 +118,12 @@ Attach it to a TCP gateway:
 If your gateway uses IFAC/network credentials:
 
 ```bash
+printf '%s\n' 'your passphrase' > /tmp/omenchatd-ifac-passphrase
+chmod 600 /tmp/omenchatd-ifac-passphrase
 ./bin/omenchatd interfaces tcp-client <gateway-host:port> \
   --home /tmp/omenchatd-test \
   --network-name <network-name> \
-  --passphrase <passphrase>
+  --passphrase-file /tmp/omenchatd-ifac-passphrase
 ```
 
 Start the admin TUI:

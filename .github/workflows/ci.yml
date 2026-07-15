@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -9,6 +12,10 @@ on:
   workflow_dispatch:
 
 jobs:
+  native:
+    name: Native Windows and macOS
+    uses: ./.github/workflows/native-checks.yml
+
   quick:
     name: Quick checks
     runs-on: ubuntu-24.04
@@ -18,17 +25,25 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-07-11
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: |
             .
             src/server
+
+      - name: Install cargo-deny
+        run: cargo install --locked --version 0.20.2 cargo-deny
+
+      - name: Dependency policy
+        run: |
+          cargo deny --locked --all-features check licenses bans sources
+          cargo deny --manifest-path src/server/Cargo.toml --locked --all-features check licenses bans sources
 
       - name: Install Linux build dependencies
         run: |
@@ -51,6 +66,11 @@ jobs:
           bash -n scripts/package-deb.sh
           bash -n scripts/package-appimage.sh
           bash -n scripts/check-glibc-floor.sh
+          bash -n scripts/verify-product-features.sh
+          bash -n scripts/verify-tui-dependencies.sh
+          bash -n scripts/test-tui-lifecycle.sh
+          bash -n scripts/test-tui-real-pty.sh
           bash -n scripts/install-release.sh
           bash -n scripts/install-omenbrowser-user-launchers.sh
           bash -n scripts/install-omenchatd-user-service.sh
+          bash scripts/verify-workflow-security.sh

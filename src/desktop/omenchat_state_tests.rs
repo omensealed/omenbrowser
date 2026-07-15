@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::App;
+use crate::chat::client::{CHAT_CLIENT_MAX_SESSIONS, CHAT_SESSION_HISTORY_MAX_EVENTS};
 use crate::chat::store::ChatStore;
 use crate::chat::{ChatEvent, ChatEventKind, OmenChatDescriptor};
 use iced::widget::scrollable::RelativeOffset;
@@ -194,4 +195,98 @@ fn omenchat_history_prepended_event_persists_room_history() {
         event.event_id == 42
             && matches!(&event.kind, ChatEventKind::Message { body } if body == "persisted history")
     }));
+}
+
+#[test]
+fn omenchat_received_history_persists_rows_beyond_the_memory_window() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-history-window-persist");
+    let server_id = "11223344556677889900aabbccddeeff";
+    let session_id = desktop.open_omenchat_status_session(
+        OmenChatDescriptor {
+            server_destination: server_id.into(),
+            display_name: Some("Bounded History".into()),
+            rooms_hint: vec!["lobby".into()],
+            local_display_name: Some("tester".into()),
+            ..OmenChatDescriptor::default()
+        },
+        "connected".into(),
+    );
+    let received = (1..=CHAT_SESSION_HISTORY_MAX_EVENTS as u64 + 1)
+        .map(|event_id| ChatEvent {
+            server_id: server_id.into(),
+            room_id: 1,
+            event_id,
+            actor_user_id: Some(2),
+            actor_display_name: Some("Peer".into()),
+            at_unix: event_id as i64,
+            kind: ChatEventKind::Message {
+                body: format!("history {event_id}"),
+            },
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        desktop
+            .omenchat
+            .chat_client
+            .prepend_history_events(session_id, received.clone()),
+        CHAT_SESSION_HISTORY_MAX_EVENTS
+    );
+    desktop.apply_omenchat_client_events_status(&[ChatClientEvent::HistoryPrepended {
+        session_id,
+        events: received,
+    }]);
+
+    let session = desktop
+        .omenchat
+        .chat_client
+        .session(session_id)
+        .expect("bounded session");
+    assert_eq!(session.events.len(), CHAT_SESSION_HISTORY_MAX_EVENTS);
+    let stored = desktop
+        .omenchat
+        .chat_store
+        .as_ref()
+        .expect("chat store")
+        .latest_events(&server_id.into(), 1, CHAT_SESSION_HISTORY_MAX_EVENTS + 1)
+        .expect("persisted history");
+    assert_eq!(stored.len(), CHAT_SESSION_HISTORY_MAX_EVENTS + 1);
+}
+
+#[test]
+fn omenchat_ui_refuses_session_overload_without_creating_a_pane_target() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-session-overload");
+    for index in 0..CHAT_CLIENT_MAX_SESSIONS {
+        let session_id = desktop
+            .try_open_omenchat_status_session(
+                OmenChatDescriptor {
+                    server_destination: format!("{index:032x}"),
+                    display_name: Some(format!("Server {index}")),
+                    rooms_hint: vec!["lobby".into()],
+                    local_display_name: Some("tester".into()),
+                    ..OmenChatDescriptor::default()
+                },
+                "connected".into(),
+            )
+            .expect("session within limit");
+        assert!(desktop.omenchat.chat_client.session(session_id).is_some());
+    }
+
+    assert!(desktop
+        .try_open_omenchat_status_session(
+            OmenChatDescriptor {
+                server_destination: "ffffffffffffffffffffffffffffffff".into(),
+                display_name: Some("Overflow".into()),
+                rooms_hint: vec!["lobby".into()],
+                local_display_name: Some("tester".into()),
+                ..OmenChatDescriptor::default()
+            },
+            "connected".into(),
+        )
+        .is_none());
+    assert_eq!(
+        desktop.omenchat.chat_client.sessions().len(),
+        CHAT_CLIENT_MAX_SESSIONS
+    );
+    assert!(desktop.app.status.task.contains("session limit reached"));
 }

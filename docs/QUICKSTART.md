@@ -6,7 +6,7 @@ Browser with desktop UI, native networking, and OMENchat using the current
 live-tested clean Reticulum 0.6 path:
 
 ```bash
-cargo build --release --features chat-client-reticulum
+cargo build --release --locked --no-default-features --features desktop-product
 ```
 
 `chat-client-reticulum` uses the `reticulum-rs`/`lxmf` 0.6 stack without
@@ -16,7 +16,8 @@ remains as a compatibility alias for older local commands.
 Standalone OMENchat server:
 
 ```bash
-cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
+cargo build --release --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full
 ```
 
 ## Run The Browser

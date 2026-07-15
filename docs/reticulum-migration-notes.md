@@ -30,12 +30,13 @@ error stubs for stale local commands.
 
 Current browser feature intent:
 
-- `default`: mock/UI/chat client only. This keeps ordinary builds from pulling
-  either live Reticulum stack by accident.
+- `default`: empty. Development, mock, and release products must select an
+  explicit alias so test support cannot leak into a product artifact.
 - `native-reticulum`: reticulum-rs 0.6 core/transport only.
-- `native-lxmf`: lxmf 0.6 wire support.
-- `native-network`: `native-reticulum` + `native-lxmf`; this is the clean
-  reticulum-rs 0.6 path.
+- `native-lxmf`: feature-neutral LXMF wire support over `native-reticulum`.
+  This bare profile compiles without the desktop or OMENchat client.
+- `native-network`: `native-reticulum` + `native-lxmf-sdk`; this is the clean
+  reticulum-rs 0.6 live path.
 - `native-rpc`: explicit `reticulum-rs-rpc` 0.6 dependency for daemon/RPC
   parity work.
 - `native-lxmf-sdk`: opt-in SDK evaluation path through the `lxmf` umbrella
@@ -48,6 +49,13 @@ Current browser feature intent:
   reticulum-rs 0.6 path.
 - `chat-client-rns` and `chat-client-rns-clean`: compatibility aliases for the
   current clean live path.
+
+The root MessagePack allocation preflight and OMENchat wire ceilings live in
+feature-neutral modules shared by the browser chat and native request/LXMF
+paths. This keeps the declared bare `native-lxmf` profile closed without
+implicitly enabling `chat-client`, `desktop-ui`, or `mock-runtime`. The
+standalone `src/server` package intentionally retains its own protocol
+implementation so it remains buildable and movable from its own manifest.
 
 ## Current Findings
 
@@ -220,6 +228,37 @@ Request-resource timeout errors now include compact transfer counters such as
 `last_error`. These are surfaced through the normal page-load failure path so
 clean-stack field tests can be diagnosed from the runtime log without requiring
 a separate trace subscriber.
+
+Native NomadNet response-resource MessagePack is validated before value-tree
+allocation. The compatibility budget is 4 MiB encoded/body bytes, 256 items per
+container, 512 total values, eight nested levels, and exactly one object with no
+trailing data. This bounds response parsing; Reticulum resource buffering and
+streaming lifecycle limits remain separate work.
+
+Native LXMF delivery and propagation announce app-data is likewise scanned
+before either local or upstream MessagePack decoding. Announce limits are 4 KiB
+bytes/scalar, 64 container items, 256 total values, eight nested levels, and no
+trailing data. Existing Python-compatible display-name, metadata, and stamp-cost
+shapes remain accepted.
+
+Propagation-sync envelopes use a separate larger profile: 16 MiB encoded
+envelope, 8 MiB per binary entry, 256 container items, 512 total values, four
+nested levels, and exact input consumption. The normal UI sync count remains a
+request preference rather than being misused as a wire parser limit.
+
+The native adapter's Python-compatible propagation responses are split by
+shape. Transient-id lists allow 256 KiB, exactly 32-byte scalar ids, and 4,096
+entries. Payload lists allow 32 MiB total, 8 MiB entries, 4,096 entries, 8,192
+values, and four nested levels. Both require exact MessagePack consumption
+before building values.
+
+Inspection of pinned `lxmf-wire` 0.6.0 found that `Payload::from_msgpack` and
+the Python storage-container fallback deserialize recursive `rmpv::Value`
+without complexity budgets. OMENbrowser therefore preflights all inbound LXMF
+wire forms before calling upstream: raw signed wire payload, fixed `LXMFSTR0`
+storage payload, and the embedded raw wire inside a Python MessagePack storage
+container. The local profile allows 16 MiB total wire, 8 MiB scalar values,
+4,096 container items, 8,192 values, depth 16, and exact payload consumption.
 
 TCP client IFAC profile values are no longer only metadata on the clean path.
 Inspection of published `reticulum-rs-transport` 0.6.0 showed that the stock TCP
@@ -531,9 +570,11 @@ Verification:
 
 Smoke result:
 
-- local IFAC gateway: `target/debug/omen-reticulum-gateway --listen 127.0.0.1:42442 --network-name private_ret --passphrase private-pass`
-- server: `src/server/target/debug/omenchatd run --home /tmp/omenbrowser-rs-clean-smoke2/server-home --tcp-client 127.0.0.1:42442 --network-name private_ret --passphrase private-pass`
-- client: `target/debug/omenbrowser_rs --omenchat-smoke <dest> --tcp-client 127.0.0.1:42442 --network-name private_ret --passphrase private-pass --path-wait 90 --omenchat-message 'clean smoke stats'`
+- an owner-only passphrase file was prepared first with
+  `umask 077; printf '%s\n' 'private-pass' > /tmp/omen-ifac-passphrase`;
+- local IFAC gateway: `target/debug/omen-reticulum-gateway --listen 127.0.0.1:42442 --network-name private_ret --passphrase-file /tmp/omen-ifac-passphrase`
+- server: `src/server/target/debug/omenchatd run --home /tmp/omenbrowser-rs-clean-smoke2/server-home --tcp-client 127.0.0.1:42442 --network-name private_ret --passphrase-file /tmp/omen-ifac-passphrase`
+- client: `target/debug/omenbrowser_rs --omenchat-smoke <dest> --tcp-client 127.0.0.1:42442 --network-name private_ret --passphrase-file /tmp/omen-ifac-passphrase --path-wait 90 --omenchat-message 'clean smoke stats'`
 - outcome: pass; link opened, room joined, message echo observed;
   server stats reported `frames_in=3 frames_out=4`.
 
@@ -655,6 +696,14 @@ Clean LXMF propagation parity update:
   decrypting payloads. The decrypt path now matches the `lxmf` 0.6 wire crate:
   propagation transients are decrypted with the recipient identity hash as the
   transport-encryption salt, not the `lxmf.delivery` destination hash prefix.
+- The local delivered-transient duplicate cache retains the six-month policy
+  but is capped at 65,536 recent IDs and an 8 MiB serialized file. Oversized
+  and non-regular/symlink files fail closed without reads, backup, or mutation,
+  and item pressure deterministically drops the oldest timestamps to a 90%
+  low-water mark. Both the versioned object and legacy bare-map JSON remain
+  readable. Malformed bounded input remains in place after an exact private
+  no-clobber backup is synchronized; four application-owned backups/32 MiB are
+  retained. Valid saves use private synchronized atomic replacement.
 - Local smoke against the configured private gateway and propagation node passed
   in both directions: A-to-B decoded two retained payloads with zero failures;
   B-to-A decoded one retained payload with zero failures. A direct A-to-B smoke
@@ -667,6 +716,10 @@ Clean LXMF ticket parity update:
 
 - Clean native LXMF now supports both ticket directions in the normal
   `chat-client-rns-clean` path without enabling `rns-net`.
+- The optional SDK bridge hashes validation message IDs before retaining them
+  and caps unmatched validate-to-deliver ticket state at 1,024 entries/256 KiB.
+  Tickets above 256 bytes fail validation explicitly; successful delivery still
+  consumes the matching private ticket exactly once.
 - `include_ticket=true` inserts the LXMF ticket field into the signed wire
   payload. Inbound decode extracts that field into `native_lxmf_reply_ticket`
   metadata so future direct replies can reuse it.
@@ -679,3 +732,51 @@ Clean LXMF ticket parity update:
 - Verified with clean feature tests for ticket offer encoding, signed wire
   ticket metadata decode, reply-ticket stamp generation, ticket toggle/send
   state, and native ticket restore behavior.
+
+Outbound file attachments retain a single owned file buffer: construction now
+records its size before moving the buffer into the LXMF MessagePack binary
+field. This removes the former attachment-sized clone without changing the
+Python-compatible field layout, signed wire bytes, attachment summaries, or
+decoded stored content.
+
+The same clean codec boundary now admits at most 64 attachments, 8 MiB per
+attachment, 16 MiB aggregate, and 4 KiB filenames. Outbound sources are read
+through a limit-plus-one stable regular non-symlink reader; missing paths keep
+the Python adapter's skip behavior. Inbound storage uses deterministic
+message-bound paths and private synchronized atomic replacement, so replay no
+longer proliferates suffixed duplicates. Unsafe roots and destination links
+fail closed. These limits are local resource policy and do not alter the
+Python-compatible MessagePack field key, entry layout, or accepted bytes within
+the policy.
+
+Active clean Reticulum direct-link, full-wire, resource, and propagation-sync
+receive paths now transfer their owned/bounded LXMF bytes into a shared two-job
+`spawn_blocking` gate for decode and attachment publication. The permit is
+owned by the blocking closure, so dropping an async waiter cannot leak the
+permit or admit a third job while the dispatched operation finishes.
+Synchronous codec functions remain available for compatibility tests and
+non-async boundaries; active async receive paths do not call them directly.
+
+Clean resource admission update:
+
+- Propagation-sync payload candidate selection consumes each response-owned
+  buffer. Raw LXMF fallback retains that allocation instead of cloning it;
+  valid propagation envelopes still expand to the established LXMF-data plus
+  32-byte stamp representation.
+- Propagation stamp generation transfers ownership of the LXMF buffer into its
+  blocking worker and returns that allocation for envelope construction. Two
+  explicit permits bound stamp CPU work independently of Tokio's global
+  blocking-thread ceiling.
+- The embedded clean SDK submitter borrows the delivery object. Direct sends
+  pass the existing signed wire allocation to reticulum-rs; propagated sends
+  own only the new propagation envelope. The external submitter trait remains
+  borrowed and wire-compatible.
+
+- Pinned `reticulum-rs-transport` 0.6 rejects inbound advertisements above
+  64 MiB or 8,192 parts and reports `total_bytes` through progress events.
+- Its public `cancel_resource()` method cancels outbound state only; there is no
+  public receiver-side cancellation/admission hook before completion.
+- OMENbrowser therefore enforces explicit `omenchat-frame:` and
+  `omenchat-resource:` limits immediately on `ResourceComplete`, before cloning
+  payloads into the application event bus. Transfer-time allocation below that
+  callback remains an upstream API limitation and is not reported as fixed.

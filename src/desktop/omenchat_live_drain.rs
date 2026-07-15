@@ -96,12 +96,12 @@ impl DesktopApp {
                 .copied()
                 .map(scroll_offset_is_at_bottom)
                 .unwrap_or(true);
-            let Some((events, pending_resources, outgoing, resources)) = self
+            let Some((admitted, events, pending_resources, outgoing, resources)) = self
                 .omenchat
                 .omenchat_live_transports
                 .get_mut(&session_id)
                 .map(|transport| {
-                    transport.push_incoming_frame(data.frame_bytes, now);
+                    let admitted = transport.push_incoming_frame(data.frame_bytes, now);
                     let events = crate::chat::live::drain_live_events_with_state(
                         &mut self.omenchat.chat_client,
                         &mut self.omenchat.omenchat_live_state,
@@ -111,11 +111,17 @@ impl DesktopApp {
                     let pending_resources = transport.pending_resource_offer_count();
                     let outgoing = transport.take_outgoing_frames();
                     let resources = transport.take_outgoing_resources();
-                    (events, pending_resources, outgoing, resources)
+                    (admitted, events, pending_resources, outgoing, resources)
                 })
             else {
                 continue;
             };
+            if !admitted {
+                self.set_omenchat_session_status(
+                    session_id,
+                    "rejected OMENchat frame outside the per-link receive queue budget".into(),
+                );
+            }
             if pending_resources > 0 {
                 self.set_omenchat_session_status(
                     session_id,
@@ -156,25 +162,38 @@ impl DesktopApp {
                 .copied()
                 .map(scroll_offset_is_at_bottom)
                 .unwrap_or(true);
-            if let Some((events, pending_before, pending_after, outgoing, resources)) = self
-                .omenchat
-                .omenchat_live_transports
-                .get_mut(&session_id)
-                .map(|transport| {
-                    let pending_before = transport.pending_resource_offer_count();
-                    transport.push_resource(data.metadata, data.data, now);
-                    let events = crate::chat::live::drain_live_events_with_state(
-                        &mut self.omenchat.chat_client,
-                        &mut self.omenchat.omenchat_live_state,
-                        transport,
-                        Some(session_id),
-                    );
-                    let pending_after = transport.pending_resource_offer_count();
-                    let outgoing = transport.take_outgoing_frames();
-                    let resources = transport.take_outgoing_resources();
-                    (events, pending_before, pending_after, outgoing, resources)
-                })
+            if let Some((events, accepted, pending_before, pending_after, outgoing, resources)) =
+                self.omenchat
+                    .omenchat_live_transports
+                    .get_mut(&session_id)
+                    .map(|transport| {
+                        let pending_before = transport.pending_resource_offer_count();
+                        let accepted = transport.push_resource(data.metadata, data.data, now);
+                        let events = crate::chat::live::drain_live_events_with_state(
+                            &mut self.omenchat.chat_client,
+                            &mut self.omenchat.omenchat_live_state,
+                            transport,
+                            Some(session_id),
+                        );
+                        let pending_after = transport.pending_resource_offer_count();
+                        let outgoing = transport.take_outgoing_frames();
+                        let resources = transport.take_outgoing_resources();
+                        (
+                            events,
+                            accepted,
+                            pending_before,
+                            pending_after,
+                            outgoing,
+                            resources,
+                        )
+                    })
             {
+                if !accepted {
+                    self.set_omenchat_session_status(
+                        session_id,
+                        "rejected OMENchat Resource outside bounded lifecycle policy".into(),
+                    );
+                }
                 if pending_before > 0 && pending_after < pending_before {
                     self.set_omenchat_session_status(
                         session_id,

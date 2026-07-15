@@ -1,7 +1,11 @@
 name: Package
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 on:
   push:
@@ -19,8 +23,13 @@ on:
           - "false"
 
 jobs:
+  native:
+    name: Native release prerequisite
+    uses: ./.github/workflows/native-checks.yml
+
   package:
     name: Build release artifacts
+    needs: native
     runs-on: ubuntu-24.04
     container: rust:1-bullseye
     timeout-minutes: 90
@@ -30,13 +39,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-07-11
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: |
             .
@@ -62,10 +71,13 @@ jobs:
             pkg-config
 
       - name: Install appimagetool
+        env:
+          APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
         run: |
           curl -L \
             -o /tmp/appimagetool \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "$APPIMAGETOOL_SHA256  /tmp/appimagetool" | sha256sum --check --strict
           chmod +x /tmp/appimagetool
           /tmp/appimagetool --appimage-extract >/dev/null
           mv squashfs-root /opt/appimagetool
@@ -100,7 +112,7 @@ jobs:
             | tee dist/release-artifacts.sha256
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: omenbrowser-rs-release-artifacts
           path: |
@@ -114,10 +126,36 @@ jobs:
             dist/release-artifacts.sha256
           if-no-files-found: error
 
+  publish:
+    name: Publish release downloads
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download reviewed build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: omenbrowser-rs-release-artifacts
+          path: dist
+
       - name: Publish release downloads
-        if: startsWith(github.ref, 'refs/tags/')
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-        run: bash scripts/github-release-upload.sh dist
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --latest --draft=false --prerelease=false
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "OMENbrowser_rs ${RELEASE_TAG#v}" \
+              --notes "Public release package build for $RELEASE_TAG." \
+              --latest
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --clobber

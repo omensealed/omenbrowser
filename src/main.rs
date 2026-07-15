@@ -4,10 +4,20 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use omenbrowser_rs::app::{App, LogEntry, SmokePathWarmup};
+use omenbrowser_rs::app::{App, SmokePathWarmup};
 use omenbrowser_rs::browser::BrowserAddress;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use omenbrowser_rs::chat::rns::ChatLinkTransport;
+use omenbrowser_rs::cli_network::TcpClientOverride;
+use omenbrowser_rs::cli_overrides::SmokeOverrides;
+use omenbrowser_rs::cli_redaction::{
+    redact_bundle_log_message, redacted_argv, redacted_override_snapshot, redacted_path_hint,
+};
+use omenbrowser_rs::cli_report_logs::{
+    redacted_recent_persisted_logs, REPORT_LOG_DIRECTORY_ENTRY_LIMIT, REPORT_LOG_ENTRY_LIMIT,
+    REPORT_LOG_FILE_BYTES, REPORT_LOG_FILE_LIMIT, REPORT_LOG_TOTAL_BYTES,
+};
+use omenbrowser_rs::cli_values::{parse_lxmf_delivery_mode, parse_runtime_backend};
 use omenbrowser_rs::config::{AppConfig, AppPaths};
 #[cfg(feature = "desktop-ui")]
 use omenbrowser_rs::desktop;
@@ -19,12 +29,7 @@ use omenbrowser_rs::storage::settings::RuntimeBackendSetting;
 use omenbrowser_rs::ui;
 
 fn main() -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .thread_name("omen-main-async")
-        .worker_threads(4)
-        .max_blocking_threads(8)
-        .enable_all()
-        .build()
+    let runtime = omenbrowser_rs::runtime::bootstrap::build_app_runtime()
         .context("failed to start OMENbrowser async runtime")?;
     runtime.block_on(async_main())
 }
@@ -365,25 +370,6 @@ enum CliCommand {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct SmokeOverrides {
-    runtime_backend: Option<RuntimeBackendSetting>,
-    identity_path: Option<PathBuf>,
-    reticulum_config_path: Option<PathBuf>,
-    known_destinations_path: Option<PathBuf>,
-    known_destinations_fixture_path: Option<PathBuf>,
-    tcp_client: Option<TcpClientOverride>,
-    app_root: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TcpClientOverride {
-    host: String,
-    port: u16,
-    network_name: Option<String>,
-    passphrase: Option<String>,
-}
-
 struct NativeSmokeCommandInput {
     destination: String,
     live: bool,
@@ -483,15 +469,22 @@ struct GenerateNativeIdentityCommandInput {
 }
 
 fn default_frontend_command() -> CliCommand {
-    if cfg!(feature = "desktop-ui") {
-        CliCommand::Desktop { app_root: None }
-    } else {
-        CliCommand::Tui { app_root: None }
+    frontend_command(omenbrowser_rs::cli_frontend::default_frontend(), None)
+}
+
+fn frontend_command(
+    frontend: omenbrowser_rs::cli_frontend::Frontend,
+    app_root: Option<PathBuf>,
+) -> CliCommand {
+    match frontend {
+        omenbrowser_rs::cli_frontend::Frontend::Desktop => CliCommand::Desktop { app_root },
+        omenbrowser_rs::cli_frontend::Frontend::Tui => CliCommand::Tui { app_root },
     }
 }
 
 impl CliCommand {
     fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Self> {
+        let args = omenbrowser_rs::cli_secret::resolve_passphrase_args(args.into_iter().collect())?;
         let mut args = args.into_iter().peekable();
         if args.peek().is_none() {
             return Ok(default_frontend_command());
@@ -533,11 +526,19 @@ impl CliCommand {
         let mut overrides = SmokeOverrides::default();
 
         while let Some(arg) = args.next() {
+            if let Some(simple) = omenbrowser_rs::cli_frontend::classify_argument(&arg) {
+                match simple {
+                    omenbrowser_rs::cli_frontend::SimpleCommand::Help => return Ok(Self::Help),
+                    omenbrowser_rs::cli_frontend::SimpleCommand::Version => {
+                        return Ok(Self::Version);
+                    }
+                    omenbrowser_rs::cli_frontend::SimpleCommand::Frontend(selected) => {
+                        frontend = Some(selected);
+                    }
+                }
+                continue;
+            }
             match arg.as_str() {
-                "-h" | "--help" => return Ok(Self::Help),
-                "-V" | "--version" | "version" => return Ok(Self::Version),
-                "--desktop" | "--iced" => frontend = Some("desktop"),
-                "--tui" | "--terminal" => frontend = Some("tui"),
                 "--native-smoke" | "--smoke-test" => {
                     let destination = args.next().ok_or_else(|| {
                         anyhow::anyhow!("{arg} requires a destination:path value")
@@ -703,66 +704,61 @@ impl CliCommand {
                     let backend = args.next().ok_or_else(|| {
                         anyhow::anyhow!("{arg} requires auto, mock, or reticulum")
                     })?;
-                    overrides.runtime_backend = Some(parse_backend(&backend)?);
+                    overrides.set_runtime_backend(parse_runtime_backend(&backend)?);
                 }
                 "--identity" | "--identity-path" => {
                     let path = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a file path"))?;
-                    overrides.identity_path = Some(PathBuf::from(path));
+                    overrides.set_identity_path(PathBuf::from(path));
                 }
                 "--reticulum-config" | "--reticulum-config-path" => {
                     let path = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a directory path"))?;
-                    overrides.reticulum_config_path = Some(PathBuf::from(path));
+                    overrides.set_reticulum_config_path(PathBuf::from(path));
                 }
                 "--known-destinations" | "--known-destinations-path" => {
                     let path = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a file path"))?;
-                    overrides.known_destinations_path = Some(PathBuf::from(path));
+                    overrides.set_known_destinations_path(PathBuf::from(path));
                 }
                 "--generate-known-destinations-fixture" | "--write-known-destinations-fixture" => {
                     let path = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a file path"))?;
-                    overrides.known_destinations_fixture_path = Some(PathBuf::from(path));
+                    overrides.set_known_destinations_fixture_path(PathBuf::from(path));
                 }
                 "--tcp-client" => {
                     let endpoint = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires host:port"))?;
-                    let mut parsed_tcp = parse_tcp_client_endpoint(&endpoint)?;
-                    if let Some(existing) = overrides.tcp_client.take() {
-                        parsed_tcp.network_name = existing.network_name;
-                        parsed_tcp.passphrase = existing.passphrase;
+                    let mut parsed_tcp = TcpClientOverride::parse_endpoint(&endpoint)?;
+                    if let Some(existing) = overrides.take_tcp_client() {
+                        parsed_tcp.inherit_credentials(existing);
                     }
-                    overrides.tcp_client = Some(parsed_tcp);
+                    overrides.set_tcp_client(parsed_tcp);
                 }
                 "--network-name" => {
                     let name = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a value"))?;
-                    let tcp = overrides
-                        .tcp_client
-                        .get_or_insert_with(TcpClientOverride::empty);
-                    tcp.network_name = Some(name);
+                    let tcp = overrides.tcp_client_mut_or_insert_empty();
+                    tcp.set_network_name(name);
                 }
                 "--passphrase" => {
                     let passphrase = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a value"))?;
-                    let tcp = overrides
-                        .tcp_client
-                        .get_or_insert_with(TcpClientOverride::empty);
-                    tcp.passphrase = Some(passphrase);
+                    let tcp = overrides.tcp_client_mut_or_insert_empty();
+                    tcp.set_passphrase(passphrase);
                 }
                 "--app-root" => {
                     let path = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a directory path"))?;
-                    overrides.app_root = Some(PathBuf::from(path));
+                    overrides.set_app_root(PathBuf::from(path));
                 }
                 "--output" | "-o" => {
                     let path = args
@@ -807,15 +803,7 @@ impl CliCommand {
         }
 
         if let Some(frontend) = frontend {
-            match frontend {
-                "desktop" => Ok(Self::Desktop {
-                    app_root: overrides.app_root,
-                }),
-                "tui" => Ok(Self::Tui {
-                    app_root: overrides.app_root,
-                }),
-                _ => unreachable!("frontend parser only sets known frontend names"),
-            }
+            Ok(frontend_command(frontend, overrides.take_app_root()))
         } else if let Some(label) = generate_native_identity_label {
             Ok(Self::GenerateNativeIdentity {
                 label,
@@ -824,9 +812,7 @@ impl CliCommand {
                 overrides: Box::new(overrides),
             })
         } else if let Some(destination) = omenchat_smoke_destination {
-            if overrides.runtime_backend.is_none() {
-                overrides.runtime_backend = Some(RuntimeBackendSetting::Reticulum);
-            }
+            overrides.ensure_runtime_backend(RuntimeBackendSetting::Reticulum);
             Ok(Self::OmenChatSmoke {
                 destination,
                 room: omenchat_room,
@@ -842,9 +828,7 @@ impl CliCommand {
                 overrides: Box::new(overrides),
             })
         } else if let Some(destination) = native_live_sequence_destination {
-            if overrides.runtime_backend.is_none() {
-                overrides.runtime_backend = Some(RuntimeBackendSetting::Reticulum);
-            }
+            overrides.ensure_runtime_backend(RuntimeBackendSetting::Reticulum);
             Ok(Self::NativeLiveSequence {
                 destination,
                 lxmf_smoke_peer,
@@ -880,9 +864,7 @@ impl CliCommand {
                 overrides: Box::new(overrides),
             })
         } else if lxmf_sync_propagation {
-            if overrides.runtime_backend.is_none() {
-                overrides.runtime_backend = Some(RuntimeBackendSetting::Reticulum);
-            }
+            overrides.ensure_runtime_backend(RuntimeBackendSetting::Reticulum);
             Ok(Self::LxmfPropagationSync {
                 lxmf_smoke_propagation_node,
                 sync_limit: lxmf_sync_limit,
@@ -893,9 +875,7 @@ impl CliCommand {
                 overrides: Box::new(overrides),
             })
         } else if let Some(destination) = native_validate_destination {
-            if overrides.runtime_backend.is_none() {
-                overrides.runtime_backend = Some(RuntimeBackendSetting::Reticulum);
-            }
+            overrides.ensure_runtime_backend(RuntimeBackendSetting::Reticulum);
             Ok(Self::NativeSmoke {
                 destination,
                 live: true,
@@ -967,10 +947,10 @@ async fn run_native_smoke_command(input: NativeSmokeCommandInput) -> anyhow::Res
         bundle_report,
         overrides,
     } = input;
-    let mut config = load_config_for_smoke(overrides.app_root.clone())
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
         .context("failed to load smoke command app configuration")?;
-    let mut known_destinations_path = overrides.known_destinations_path.clone();
-    if let Some(path) = overrides.known_destinations_fixture_path.clone() {
+    let mut known_destinations_path = overrides.known_destinations_path().cloned();
+    if let Some(path) = overrides.known_destinations_fixture_path().cloned() {
         generate_known_destinations_fixture_for_smoke(&path, &destination)?;
         if known_destinations_path.is_none() {
             known_destinations_path = Some(path);
@@ -1203,9 +1183,9 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
     } = input;
     parse_16_byte_hex_hash(&destination)?;
 
-    let mut config = load_config_for_smoke(overrides.app_root.clone())
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
         .context("failed to load OMENchat smoke app configuration")?;
-    let known_destinations_path = overrides.known_destinations_path.clone();
+    let known_destinations_path = overrides.known_destinations_path().cloned();
     let interface_override = apply_smoke_overrides(&mut config, overrides.clone());
     let default_output = output.is_none() && !stdout;
     let diagnostics_dir = config.paths.diagnostics_dir.clone();
@@ -1353,12 +1333,14 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
     let join_events = wait_for_omenchat_condition(
         &*app.runtime,
         &mut runtime_events,
-        opened.link_id,
         &mut client,
         &mut live_state,
         &mut transport,
-        session_id,
-        Duration::from_secs(response_wait_secs),
+        OmenChatWaitOptions {
+            link_id: opened.link_id,
+            session_id,
+            wait: Duration::from_secs(response_wait_secs),
+        },
         |client| {
             client
                 .session(session_id)
@@ -1399,12 +1381,14 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         wait_for_omenchat_condition(
             &*app.runtime,
             &mut runtime_events,
-            opened.link_id,
             &mut client,
             &mut live_state,
             &mut transport,
-            session_id,
-            Duration::from_secs(response_wait_secs),
+            OmenChatWaitOptions {
+                link_id: opened.link_id,
+                session_id,
+                wait: Duration::from_secs(response_wait_secs),
+            },
             |client| omenchat_session_contains_message(client, session_id, &message),
         )
         .await
@@ -1458,12 +1442,14 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
             let upload_complete_events = wait_for_omenchat_condition(
                 &*app.runtime,
                 &mut runtime_events,
-                opened.link_id,
                 &mut client,
                 &mut live_state,
                 &mut transport,
-                session_id,
-                Duration::from_secs(response_wait_secs),
+                OmenChatWaitOptions {
+                    link_id: opened.link_id,
+                    session_id,
+                    wait: Duration::from_secs(response_wait_secs),
+                },
                 |client| {
                     omenchat_session_upload_resource_id(
                         client,
@@ -1630,17 +1616,28 @@ async fn send_omenchat_smoke_outgoing(
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Copy)]
+struct OmenChatWaitOptions {
+    link_id: [u8; 16],
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    wait: Duration,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 async fn wait_for_omenchat_condition(
     runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
     runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
-    link_id: [u8; 16],
     client: &mut omenbrowser_rs::chat::ChatClient,
     live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
     transport: &mut OmenChatSmokeTransport,
-    session_id: omenbrowser_rs::chat::ChatSessionId,
-    wait: Duration,
+    options: OmenChatWaitOptions,
     condition: impl Fn(&omenbrowser_rs::chat::ChatClient) -> bool,
 ) -> Vec<serde_json::Value> {
+    let OmenChatWaitOptions {
+        link_id,
+        session_id,
+        wait,
+    } = options;
     let deadline = tokio::time::Instant::now() + wait;
     let mut events = Vec::new();
     while tokio::time::Instant::now() < deadline && !condition(client) {
@@ -1774,12 +1771,14 @@ async fn run_omenchat_smoke_upload_fetch(
     let upload_fetch_events = wait_for_omenchat_condition(
         input.runtime,
         input.runtime_events,
-        input.link_id,
         input.client,
         input.live_state,
         input.transport,
-        input.session_id,
-        input.wait,
+        OmenChatWaitOptions {
+            link_id: input.link_id,
+            session_id: input.session_id,
+            wait: input.wait,
+        },
         |client| {
             omenchat_session_upload_resource_received(client, input.session_id, input.filename)
         },
@@ -2227,7 +2226,7 @@ async fn run_lxmf_interop_command(input: LxmfInteropCommandInput) -> anyhow::Res
         bundle_report,
         overrides,
     } = input;
-    let mut config = load_config_for_smoke(overrides.app_root.clone())
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
         .context("failed to load LXMF interop app configuration")?;
     let interface_override = apply_smoke_overrides(&mut config, overrides.clone());
     let default_output = output.is_none() && !stdout && bundle_report.is_none();
@@ -2312,7 +2311,7 @@ async fn run_lxmf_propagation_sync_command(
         bundle_report,
         overrides,
     } = input;
-    let mut config = load_config_for_smoke(overrides.app_root.clone())
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
         .context("failed to load LXMF propagation sync app configuration")?;
     let selected_node = lxmf_smoke_propagation_node
         .clone()
@@ -2393,14 +2392,14 @@ fn run_generate_native_identity_command(
         label,
         output,
         stdout,
-        overrides,
+        mut overrides,
     } = input;
-    let mut config = load_config_for_smoke(overrides.app_root.clone())
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
         .context("failed to load native identity app configuration")?;
-    if let Some(backend) = overrides.runtime_backend {
+    if let Some(backend) = overrides.take_runtime_backend() {
         config.settings.runtime_backend = backend;
     }
-    if let Some(reticulum_config_path) = overrides.reticulum_config_path {
+    if let Some(reticulum_config_path) = overrides.take_reticulum_config_path() {
         config.settings.reticulum_config_path = Some(reticulum_config_path);
     }
 
@@ -2491,13 +2490,13 @@ async fn run_native_preflight_command(input: NativePreflightCommandInput) -> any
         bundle_report,
         overrides,
     } = input;
-    let mut config = load_config_for_smoke(overrides.app_root.clone())
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
         .context("failed to load native preflight app configuration")?;
     let known_destinations_path = overrides
-        .known_destinations_fixture_path
-        .clone()
-        .or_else(|| overrides.known_destinations_path.clone());
-    if let Some(path) = overrides.known_destinations_fixture_path.clone() {
+        .known_destinations_fixture_path()
+        .cloned()
+        .or_else(|| overrides.known_destinations_path().cloned());
+    if let Some(path) = overrides.known_destinations_fixture_path().cloned() {
         generate_known_destinations_fixture_for_smoke(&path, &destination)?;
     }
     let interface_override = apply_smoke_overrides(&mut config, overrides.clone());
@@ -2578,7 +2577,7 @@ async fn run_native_startup_command(input: NativeStartupCommandInput) -> anyhow:
         bundle_report,
         overrides,
     } = input;
-    let mut config = load_config_for_smoke(overrides.app_root.clone())
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
         .context("failed to load native startup app configuration")?;
     let interface_override = apply_smoke_overrides(&mut config, overrides.clone());
     let default_output = output.is_none() && !stdout && bundle_report.is_none();
@@ -2655,13 +2654,13 @@ async fn run_native_live_sequence_command(
         bundle_report,
         overrides,
     } = input;
-    let mut config = load_config_for_smoke(overrides.app_root.clone())
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
         .context("failed to load native live sequence app configuration")?;
     let mut known_destinations_path = overrides
-        .known_destinations_fixture_path
-        .clone()
-        .or_else(|| overrides.known_destinations_path.clone());
-    if let Some(path) = overrides.known_destinations_fixture_path.clone() {
+        .known_destinations_fixture_path()
+        .cloned()
+        .or_else(|| overrides.known_destinations_path().cloned());
+    if let Some(path) = overrides.known_destinations_fixture_path().cloned() {
         generate_known_destinations_fixture_for_smoke(&path, &destination)?;
         if known_destinations_path.is_none() {
             known_destinations_path = Some(path);
@@ -3130,25 +3129,26 @@ fn load_config_for_smoke(app_root: Option<PathBuf>) -> anyhow::Result<AppConfig>
 
 fn apply_smoke_overrides(
     config: &mut AppConfig,
-    overrides: SmokeOverrides,
+    mut overrides: SmokeOverrides,
 ) -> Option<Vec<ReticulumInterfaceProfile>> {
-    if let Some(backend) = overrides.runtime_backend {
+    if let Some(backend) = overrides.take_runtime_backend() {
         config.settings.runtime_backend = backend;
     }
-    if let Some(identity_path) = overrides.identity_path {
+    if let Some(identity_path) = overrides.take_identity_path() {
         config.settings.identity_path = Some(identity_path);
     }
-    if let Some(reticulum_config_path) = overrides.reticulum_config_path {
+    if let Some(reticulum_config_path) = overrides.take_reticulum_config_path() {
         config.settings.reticulum_config_path = Some(reticulum_config_path);
     }
-    overrides.tcp_client.map(|tcp| {
+    overrides.take_tcp_client().map(|tcp| {
+        let (host, port, network_name, passphrase) = tcp.into_parts();
         let mut profile = ReticulumInterfaceProfile::tcp_client("cli-tcp-client", "CLI TCP Client");
-        profile.target_host = tcp.host;
-        profile.target_port = tcp.port;
-        if let Some(network_name) = tcp.network_name {
+        profile.target_host = host;
+        profile.target_port = port;
+        if let Some(network_name) = network_name {
             profile.network_name = network_name;
         }
-        if let Some(passphrase) = tcp.passphrase {
+        if let Some(passphrase) = passphrase {
             profile.passphrase = passphrase;
         }
         profile.enabled = true;
@@ -3200,61 +3200,6 @@ fn parse_16_byte_hex_hash(value: &str) -> anyhow::Result<[u8; 16]> {
             .with_context(|| format!("invalid destination hash hex byte {text}"))?;
     }
     Ok(output)
-}
-
-fn parse_backend(value: &str) -> anyhow::Result<RuntimeBackendSetting> {
-    match value {
-        "auto" => Ok(RuntimeBackendSetting::Auto),
-        "mock" => Ok(RuntimeBackendSetting::Mock),
-        "reticulum" | "native" | "native-reticulum" => Ok(RuntimeBackendSetting::Reticulum),
-        "bridge" => Ok(RuntimeBackendSetting::Bridge),
-        other => Err(anyhow::anyhow!(
-            "invalid backend {other}; expected auto, mock, or reticulum"
-        )),
-    }
-}
-
-fn parse_lxmf_delivery_mode(
-    value: &str,
-) -> anyhow::Result<omenbrowser_rs::messaging::DeliveryMode> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "direct" => Ok(omenbrowser_rs::messaging::DeliveryMode::Direct),
-        "propagated" | "propagation" | "prop" => {
-            Ok(omenbrowser_rs::messaging::DeliveryMode::Propagated)
-        }
-        other => Err(anyhow::anyhow!(
-            "invalid LXMF smoke delivery mode {other}; expected direct or propagated"
-        )),
-    }
-}
-
-fn parse_tcp_client_endpoint(value: &str) -> anyhow::Result<TcpClientOverride> {
-    let (host, port) = value
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("TCP client endpoint must be host:port"))?;
-    if host.trim().is_empty() {
-        return Err(anyhow::anyhow!("TCP client host must not be empty"));
-    }
-    let port = port
-        .parse::<u16>()
-        .with_context(|| format!("invalid TCP client port in {value}"))?;
-    Ok(TcpClientOverride {
-        host: host.into(),
-        port,
-        network_name: None,
-        passphrase: None,
-    })
-}
-
-impl TcpClientOverride {
-    fn empty() -> Self {
-        Self {
-            host: String::new(),
-            port: 0,
-            network_name: None,
-            passphrase: None,
-        }
-    }
 }
 
 fn default_smoke_report_path(diagnostics_dir: &std::path::Path) -> PathBuf {
@@ -4348,12 +4293,32 @@ fn write_report_bundle(input: ReportBundleInput<'_>) -> anyhow::Result<PathBuf> 
     )
     .with_context(|| "failed to write bundle environment.json")?;
 
-    let logs = redacted_recent_persisted_logs(logs_dir, overrides, identity_path, 50);
+    let logs = redacted_recent_persisted_logs(
+        logs_dir,
+        overrides,
+        identity_path.map(|path| path.as_path()),
+    );
     let logs_json = serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": "omenbrowser_rs.cli_recent_logs.v1",
         "source": "logs/omenbrowser_rs*.jsonl",
-        "limit": 50,
-        "entries": logs,
+        "limit": REPORT_LOG_ENTRY_LIMIT,
+        "limits": {
+            "directory_entries": REPORT_LOG_DIRECTORY_ENTRY_LIMIT,
+            "files": REPORT_LOG_FILE_LIMIT,
+            "bytes_per_file": REPORT_LOG_FILE_BYTES,
+            "total_bytes": REPORT_LOG_TOTAL_BYTES,
+        },
+        "collection": {
+            "directory_entries_scanned": logs.directory_entries_scanned,
+            "directory_scan_truncated": logs.directory_scan_truncated,
+            "matching_files": logs.matching_files,
+            "selected_files": logs.selected_files,
+            "files_read": logs.files_read,
+            "bytes_read": logs.bytes_read,
+            "truncated_files": logs.truncated_files,
+            "read_failures": logs.read_failures,
+        },
+        "entries": logs.entries,
     }))
     .context("failed to render bundle logs")?;
     std::fs::write(bundle_dir.join("logs.json"), logs_json.as_bytes())
@@ -4367,60 +4332,6 @@ fn current_epoch_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
-}
-
-fn redacted_argv(argv: Vec<String>) -> Vec<String> {
-    let mut redacted = Vec::with_capacity(argv.len());
-    let mut redact_next = false;
-    for arg in argv {
-        if redact_next {
-            redacted.push("<redacted-path>".into());
-            redact_next = false;
-            continue;
-        }
-        redact_next = matches!(
-            arg.as_str(),
-            "--identity"
-                | "--identity-path"
-                | "--reticulum-config"
-                | "--reticulum-config-path"
-                | "--known-destinations"
-                | "--known-destinations-path"
-                | "--generate-known-destinations-fixture"
-                | "--write-known-destinations-fixture"
-                | "--app-root"
-                | "--output"
-                | "-o"
-                | "--bundle-report"
-        );
-        redacted.push(arg);
-    }
-    redacted
-}
-
-fn redacted_override_snapshot(overrides: &SmokeOverrides) -> serde_json::Value {
-    serde_json::json!({
-        "runtime_backend": overrides.runtime_backend.as_ref().map(|backend| format!("{backend:?}")),
-        "identity_path": overrides.identity_path.as_ref().map(|path| redacted_path_hint(path)),
-        "reticulum_config_path": overrides.reticulum_config_path.as_ref().map(|path| redacted_path_hint(path)),
-        "known_destinations_path": overrides.known_destinations_path.as_ref().map(|path| redacted_path_hint(path)),
-        "known_destinations_fixture_path": overrides.known_destinations_fixture_path.as_ref().map(|path| redacted_path_hint(path)),
-        "app_root": overrides.app_root.as_ref().map(|path| redacted_path_hint(path)),
-        "tcp_client": overrides.tcp_client.as_ref().map(|tcp| serde_json::json!({
-            "host": tcp.host,
-            "port": tcp.port,
-            "network_name": tcp.network_name.as_ref().map(|_| "<redacted>"),
-            "passphrase": tcp.passphrase.as_ref().map(|_| "<redacted>"),
-        })),
-    })
-}
-
-fn redacted_path_hint(path: &std::path::Path) -> serde_json::Value {
-    serde_json::json!({
-        "redacted": true,
-        "file_name": path.file_name().and_then(|name| name.to_str()).unwrap_or("<none>"),
-        "is_absolute": path.is_absolute(),
-    })
 }
 
 fn redacted_environment_snapshot() -> serde_json::Value {
@@ -4446,99 +4357,6 @@ fn redacted_environment_snapshot() -> serde_json::Value {
             "TERM": std::env::var("TERM").ok(),
         },
     })
-}
-
-fn redacted_recent_persisted_logs(
-    logs_dir: &std::path::Path,
-    overrides: &SmokeOverrides,
-    identity_path: Option<&PathBuf>,
-    limit: usize,
-) -> Vec<serde_json::Value> {
-    if limit == 0 {
-        return Vec::new();
-    }
-    let mut entries = persisted_log_files(logs_dir)
-        .into_iter()
-        .filter_map(|path| std::fs::read_to_string(path).ok())
-        .flat_map(|raw| {
-            raw.lines()
-                .filter_map(|line| serde_json::from_str::<LogEntry>(line).ok())
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.epoch_ms);
-    if entries.len() > limit {
-        entries = entries.split_off(entries.len() - limit);
-    }
-    entries
-        .into_iter()
-        .map(|entry| {
-            serde_json::json!({
-                "epoch_ms": entry.epoch_ms,
-                "severity": format!("{:?}", entry.severity),
-                "source": format!("{:?}", entry.source),
-                "message": redact_bundle_log_message(&entry.message, overrides, identity_path),
-            })
-        })
-        .collect()
-}
-
-fn persisted_log_files(logs_dir: &std::path::Path) -> Vec<PathBuf> {
-    let Ok(read_dir) = std::fs::read_dir(logs_dir) else {
-        return Vec::new();
-    };
-    read_dir
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name == "omenbrowser_rs.jsonl"
-                        || (name.starts_with("omenbrowser_rs-") && name.ends_with(".jsonl"))
-                })
-        })
-        .collect()
-}
-
-fn redact_bundle_log_message(
-    message: &str,
-    overrides: &SmokeOverrides,
-    identity_path: Option<&PathBuf>,
-) -> String {
-    let lower = message.to_ascii_lowercase();
-    let mut redacted: String = if lower.contains("message body") || lower.contains("draft body") {
-        "<redacted message body log>".into()
-    } else {
-        message.into()
-    };
-    for path in redaction_paths(overrides, identity_path) {
-        let text = path.display().to_string();
-        if !text.is_empty() {
-            redacted = redacted.replace(&text, "<redacted-path>");
-        }
-    }
-    if redacted.chars().count() > 240 {
-        let truncated = redacted.chars().take(240).collect::<String>();
-        format!("{truncated}...")
-    } else {
-        redacted
-    }
-}
-
-fn redaction_paths(overrides: &SmokeOverrides, identity_path: Option<&PathBuf>) -> Vec<PathBuf> {
-    [
-        identity_path.cloned(),
-        overrides.identity_path.clone(),
-        overrides.reticulum_config_path.clone(),
-        overrides.known_destinations_path.clone(),
-        overrides.known_destinations_fixture_path.clone(),
-        overrides.app_root.clone(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
 }
 
 fn render_report_summary(report: &serde_json::Value) -> String {
@@ -4739,39 +4557,11 @@ fn render_lxmf_smoke_send_summary(report: &serde_json::Value) -> Vec<String> {
 }
 
 fn print_help() {
-    println!(
-        "OMENbrowser_rs\n\nUSAGE:\n  omenbrowser_rs\n  omenbrowser_rs --version\n  omenbrowser_rs --desktop [--app-root <dir>]\n  omenbrowser_rs --tui [--app-root <dir>]\n  omenbrowser_rs --generate-native-identity <label> [--app-root <dir>] [--reticulum-config <dir>] [--output <file>] [--stdout]\n  omenbrowser_rs --native-startup [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-live-sequence <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--preflight-wait <ms>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-validate <destination:path> [--known-destinations <file>] [--path-wait <secs>] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-preflight <destination:path> [--preflight-wait <ms>] [--send-lxmf-smoke <peer_hash>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--known-destinations <file>] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --native-smoke <destination:path> [--known-destinations <file>] [--generate-known-destinations-fixture <file>] [--warm-path] [--path-wait <secs>] [--live] [--fetch-page] [--send-lxmf-smoke <peer_hash>] [--lxmf-smoke-method direct|propagated] [--propagation-node <hash>] [--lxmf-include-ticket] [--lxmf-interop|--lxmf-wait <secs>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--output <file>] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n  omenbrowser_rs --omenchat-smoke <destination_hash> [--omenchat-room lobby] [--omenchat-message text] [--omenchat-upload-file <file>] [--omenchat-fetch-upload <filename>] [--omenchat-fetch-upload-bytes <n>] [--path-wait <secs>] [--known-destinations <file>] [--app-root <dir>] [--backend reticulum] [--identity <file>] [--reticulum-config <dir>] [--tcp-client host:port] [--network-name name] [--passphrase secret] [--output <file>] [--stdout]\n  omenbrowser_rs --lxmf-interop [--send-lxmf-smoke <peer_hash>] [--lxmf-wait <secs>] [--backend reticulum] [--identity <file>] [--tcp-client host:port] [--stdout] [--suggest-shell] [--bundle-report <dir>]\n\nOPTIONS:\n  --desktop, --iced            Open the iced desktop UI; this is the default when desktop-ui is compiled\n  --tui, --terminal            Open the legacy ratatui terminal UI when the tui feature is compiled\n  --version, -V                Print version and compiled feature summary\n  --generate-native-identity   Create and activate managed native Reticulum identity material; requires native-reticulum/native-network features\n  --native-startup             Start the configured runtime, collect status/interface data, then stop cleanly\n  --native-live-sequence       Run startup, preflight, live NomadNet validation, and optional LXMF interop into one JSON report\n  --native-validate            Run the live native NomadNet validation path: reticulum backend, path warmup, live probe, and fetch_page\n  --native-preflight, --preflight\n                               Validate native-network CLI inputs without starting live fetch or LXMF delivery\n  --preflight-wait <ms>        Runtime event wait for preflight transport startup; default is 250 ms\n  --native-smoke, --smoke-test  Run a non-TUI native-network smoke report for a NomadNet address\n  --omenchat-smoke <hash>      Open an OMENchat Link, join a room, send one message, optionally upload/fetch a file or fetch an existing room upload, and report JSON evidence\n  --known-destinations <file>  Preload a Python/RNS-compatible known_destinations cache for this command\n  --generate-known-destinations-fixture <file>\n                               Write a dev/test known_destinations fixture for the smoke destination and preload it\n  --warm-path, --request-path   Request/warm the destination path before probing; default wait is 5 seconds\n  --path-wait <secs>           Set warm-path event wait seconds and enable path warmup\n  --live                       Include the explicit live page probe step\n  --fetch-page, --live-fetch   Also call the normal runtime fetch_page path and include response metadata\n  --send-lxmf-smoke <peer_hash>\n                               Explicitly send a labeled native LXMF smoke-test message when readiness passes\n  --lxmf-interop               Announce local lxmf.delivery and wait up to 10s for LXMF/proof events; can be used without --native-smoke\n  --lxmf-wait <secs>           Announce local lxmf.delivery and wait this many seconds for LXMF/proof events\n  --app-root <dir>             Temporarily use this app data root for frontend and smoke command files\n  --backend <name>             Temporarily use auto, mock, or reticulum for this command\n  --identity <file>            Temporarily attach this identity path for this command\n  --reticulum-config <dir>     Temporarily use this Reticulum config directory\n  --tcp-client <host:port>     Temporarily use a TCP client interface endpoint\n  --network-name <name>        Set IFAC network name for the temporary TCP client\n  --passphrase <secret>        Set IFAC passphrase for the temporary TCP client\n  --output, -o <file>          Write report JSON to this path\n  --stdout                     Print report JSON to stdout\n  --suggest-shell              Include shell-escaped suggested command lines in stderr summaries and bundle summary.txt\n  --bundle-report <dir>        Write report.json, summary.txt, command.json, environment.json, and logs.json under a timestamped directory\n  --help, -h                   Show this help\n\nWithout --output, --stdout, or --bundle-report, reports are written under the diagnostics directory. CLI overrides are command-local and do not rewrite saved settings, except --generate-native-identity activates the new managed identity."
-    );
+    print!("{}", omenbrowser_rs::cli_help::help_text());
 }
 
 fn print_version() {
-    println!(
-        "OMENbrowser_rs {} features={}",
-        env!("CARGO_PKG_VERSION"),
-        compiled_feature_summary()
-    );
-}
-
-fn compiled_feature_summary() -> String {
-    [
-        ("desktop-ui", cfg!(feature = "desktop-ui")),
-        ("tui", cfg!(feature = "tui")),
-        (
-            "chat-client-reticulum",
-            cfg!(feature = "chat-client-reticulum"),
-        ),
-        ("chat-client-rns", cfg!(feature = "chat-client-rns")),
-        (
-            "chat-client-rns-clean",
-            cfg!(feature = "chat-client-rns-clean"),
-        ),
-        ("native-reticulum", cfg!(feature = "native-reticulum")),
-        ("native-network", cfg!(feature = "native-network")),
-    ]
-    .into_iter()
-    .map(|(name, enabled)| format!("{name}:{}", if enabled { "on" } else { "off" }))
-    .collect::<Vec<_>>()
-    .join(",")
+    println!("{}", omenbrowser_rs::product_identity::version_line());
 }
 
 #[cfg(test)]
@@ -4792,11 +4582,17 @@ mod tests {
 
     #[test]
     fn cli_parses_version_command() {
-        assert_eq!(
-            CliCommand::parse(["--version".to_string()]).expect("parse"),
-            CliCommand::Version
-        );
-        let features = compiled_feature_summary();
+        for argument in ["--version", "-V", "version"] {
+            assert_eq!(
+                CliCommand::parse([argument.to_string()]).expect("parse"),
+                CliCommand::Version
+            );
+        }
+        let features = omenbrowser_rs::product_identity::compiled_feature_summary();
+        assert!(features.contains("desktop-product:"));
+        assert!(features.contains("desktop-dev:"));
+        assert!(features.contains("desktop-test:"));
+        assert!(features.contains("mock-runtime:"));
         assert!(features.contains("chat-client-reticulum:"));
         assert!(features.contains("chat-client-rns:"));
         assert!(features.contains("chat-client-rns-clean:"));
@@ -4805,15 +4601,30 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_help_command_and_alias() {
+        for argument in ["--help", "-h"] {
+            assert_eq!(
+                CliCommand::parse([argument.to_string()]).expect("parse"),
+                CliCommand::Help
+            );
+        }
+        assert!(CliCommand::parse(["help".to_string()]).is_err());
+    }
+
+    #[test]
     fn cli_parses_explicit_frontend_selection() {
-        assert_eq!(
-            CliCommand::parse(["--desktop".to_string()]).expect("parse"),
-            CliCommand::Desktop { app_root: None }
-        );
-        assert_eq!(
-            CliCommand::parse(["--tui".to_string()]).expect("parse"),
-            CliCommand::Tui { app_root: None }
-        );
+        for argument in ["--desktop", "--iced"] {
+            assert_eq!(
+                CliCommand::parse([argument.to_string()]).expect("parse"),
+                CliCommand::Desktop { app_root: None }
+            );
+        }
+        for argument in ["--tui", "--terminal"] {
+            assert_eq!(
+                CliCommand::parse([argument.to_string()]).expect("parse"),
+                CliCommand::Tui { app_root: None }
+            );
+        }
     }
 
     #[test]
@@ -4840,6 +4651,50 @@ mod tests {
                 app_root: Some(PathBuf::from("/tmp/omenbrowser-test")),
             }
         );
+    }
+
+    #[test]
+    fn cli_resolves_owner_only_passphrase_file_before_command_parsing() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-cli-passphrase-integration-{}-{}",
+            std::process::id(),
+            current_epoch_millis()
+        ));
+        std::fs::create_dir(&root).expect("create isolated root");
+        let path = root.join("passphrase");
+        std::fs::write(&path, b"integration-secret\n").expect("write passphrase");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("permissions");
+        }
+
+        let parsed = CliCommand::parse([
+            "--native-preflight".to_string(),
+            FIXTURE_DESTINATION_URL.to_string(),
+            "--passphrase-file".to_string(),
+            path.display().to_string(),
+            "--network-name".to_string(),
+            "private-integration".to_string(),
+            "--tcp-client".to_string(),
+            "127.0.0.1:4242".to_string(),
+        ])
+        .expect("parse safe passphrase source");
+        let CliCommand::NativePreflight { overrides, .. } = parsed else {
+            panic!("expected native preflight command");
+        };
+        assert_eq!(
+            overrides
+                .tcp_client()
+                .and_then(TcpClientOverride::passphrase),
+            Some("integration-secret")
+        );
+        let tcp = overrides.tcp_client().expect("TCP override");
+        assert_eq!(tcp.host(), "127.0.0.1");
+        assert_eq!(tcp.port(), 4242);
+        assert_eq!(tcp.network_name(), Some("private-integration"));
+        std::fs::remove_dir_all(root).expect("remove isolated root");
     }
 
     #[test]
@@ -4877,16 +4732,16 @@ mod tests {
                 warmup: Some(SmokePathWarmup { wait_secs: 3 }),
                 output: None,
                 stdout: true,
-                overrides: Box::new(SmokeOverrides {
-                    runtime_backend: Some(RuntimeBackendSetting::Reticulum),
-                    tcp_client: Some(TcpClientOverride {
-                        host: "127.0.0.1".into(),
-                        port: 4242,
-                        network_name: Some("private_ret".into()),
-                        passphrase: Some("secret".into()),
-                    }),
-                    ..SmokeOverrides::default()
-                }),
+                overrides: Box::new(
+                    SmokeOverrides::default()
+                        .with_runtime_backend(RuntimeBackendSetting::Reticulum)
+                        .with_tcp_client(TcpClientOverride::new(
+                            "127.0.0.1",
+                            4242,
+                            Some("private_ret".into()),
+                            Some("secret".into()),
+                        )),
+                ),
             }
         );
     }
@@ -5116,23 +4971,70 @@ mod tests {
                 stdout: false,
                 suggest_shell: false,
                 bundle_report: None,
-                overrides: Box::new(SmokeOverrides {
-                    runtime_backend: Some(RuntimeBackendSetting::Reticulum),
-                    app_root: Some(PathBuf::from("/tmp/omen-app")),
-                    identity_path: Some(PathBuf::from("/tmp/identity")),
-                    reticulum_config_path: Some(PathBuf::from("/tmp/rns")),
-                    known_destinations_path: Some(PathBuf::from("/tmp/known_destinations")),
-                    known_destinations_fixture_path: Some(PathBuf::from(
-                        "/tmp/fixture_known_destinations",
-                    )),
-                    tcp_client: Some(TcpClientOverride {
-                        host: "127.0.0.1".into(),
-                        port: 4242,
-                        network_name: None,
-                        passphrase: None,
-                    }),
-                }),
+                overrides: Box::new(
+                    SmokeOverrides::default()
+                        .with_runtime_backend(RuntimeBackendSetting::Reticulum)
+                        .with_app_root("/tmp/omen-app")
+                        .with_identity_path("/tmp/identity")
+                        .with_reticulum_config_path("/tmp/rns")
+                        .with_known_destinations_path("/tmp/known_destinations")
+                        .with_known_destinations_fixture_path("/tmp/fixture_known_destinations",)
+                        .with_tcp_client(TcpClientOverride::new("127.0.0.1", 4242, None, None,)),
+                ),
             }
+        );
+    }
+
+    #[test]
+    fn cli_delegates_typed_backend_and_delivery_values() {
+        let parsed = CliCommand::parse([
+            "--native-smoke".to_string(),
+            FIXTURE_DESTINATION_URL.to_string(),
+            "--backend".to_string(),
+            "native-reticulum".to_string(),
+            "--lxmf-delivery".to_string(),
+            " PROP ".to_string(),
+        ])
+        .expect("parse compatibility aliases");
+
+        let CliCommand::NativeSmoke {
+            lxmf_smoke_delivery_mode,
+            overrides,
+            ..
+        } = parsed
+        else {
+            panic!("expected native smoke command");
+        };
+        assert_eq!(
+            lxmf_smoke_delivery_mode,
+            omenbrowser_rs::messaging::DeliveryMode::Propagated
+        );
+        assert_eq!(
+            overrides.runtime_backend(),
+            Some(&RuntimeBackendSetting::Reticulum)
+        );
+
+        assert_eq!(
+            CliCommand::parse([
+                "--native-smoke".to_string(),
+                FIXTURE_DESTINATION_URL.to_string(),
+                "--backend".to_string(),
+                "RETICULUM".to_string(),
+            ])
+            .expect_err("backend remains case-sensitive")
+            .to_string(),
+            "invalid backend RETICULUM; expected auto, mock, or reticulum"
+        );
+        assert_eq!(
+            CliCommand::parse([
+                "--native-smoke".to_string(),
+                FIXTURE_DESTINATION_URL.to_string(),
+                "--lxmf-smoke-method".to_string(),
+                " Unknown ".to_string(),
+            ])
+            .expect_err("invalid delivery value")
+            .to_string(),
+            "invalid LXMF smoke delivery mode unknown; expected direct or propagated"
         );
     }
 
@@ -5172,17 +5074,12 @@ mod tests {
                 stdout: true,
                 suggest_shell: false,
                 bundle_report: None,
-                overrides: Box::new(SmokeOverrides {
-                    runtime_backend: Some(RuntimeBackendSetting::Reticulum),
-                    known_destinations_path: Some(PathBuf::from("/tmp/known_destinations")),
-                    tcp_client: Some(TcpClientOverride {
-                        host: "127.0.0.1".into(),
-                        port: 4242,
-                        network_name: None,
-                        passphrase: None,
-                    }),
-                    ..SmokeOverrides::default()
-                }),
+                overrides: Box::new(
+                    SmokeOverrides::default()
+                        .with_runtime_backend(RuntimeBackendSetting::Reticulum)
+                        .with_known_destinations_path("/tmp/known_destinations")
+                        .with_tcp_client(TcpClientOverride::new("127.0.0.1", 4242, None, None,)),
+                ),
             }
         );
     }
@@ -5275,10 +5172,10 @@ mod tests {
                 stdout: true,
                 suggest_shell: false,
                 bundle_report: None,
-                overrides: Box::new(SmokeOverrides {
-                    runtime_backend: Some(RuntimeBackendSetting::Reticulum),
-                    ..SmokeOverrides::default()
-                }),
+                overrides: Box::new(
+                    SmokeOverrides::default()
+                        .with_runtime_backend(RuntimeBackendSetting::Reticulum),
+                ),
             }
         );
     }
@@ -5374,10 +5271,10 @@ mod tests {
                 stdout: true,
                 suggest_shell: false,
                 bundle_report: None,
-                overrides: Box::new(SmokeOverrides {
-                    runtime_backend: Some(RuntimeBackendSetting::Reticulum),
-                    ..SmokeOverrides::default()
-                }),
+                overrides: Box::new(
+                    SmokeOverrides::default()
+                        .with_runtime_backend(RuntimeBackendSetting::Reticulum),
+                ),
             }
         );
     }
@@ -5403,17 +5300,12 @@ mod tests {
                 stdout: true,
                 suggest_shell: false,
                 bundle_report: None,
-                overrides: Box::new(SmokeOverrides {
-                    runtime_backend: Some(RuntimeBackendSetting::Reticulum),
-                    identity_path: Some(PathBuf::from("/tmp/identity")),
-                    tcp_client: Some(TcpClientOverride {
-                        host: "127.0.0.1".into(),
-                        port: 4242,
-                        network_name: None,
-                        passphrase: None,
-                    }),
-                    ..SmokeOverrides::default()
-                }),
+                overrides: Box::new(
+                    SmokeOverrides::default()
+                        .with_runtime_backend(RuntimeBackendSetting::Reticulum)
+                        .with_identity_path("/tmp/identity")
+                        .with_tcp_client(TcpClientOverride::new("127.0.0.1", 4242, None, None,)),
+                ),
             }
         );
     }
@@ -5438,11 +5330,11 @@ mod tests {
                 label: "Live Identity".into(),
                 output: Some(PathBuf::from("/tmp/identity-report.json")),
                 stdout: false,
-                overrides: Box::new(SmokeOverrides {
-                    app_root: Some(PathBuf::from("/tmp/omen-app")),
-                    reticulum_config_path: Some(PathBuf::from("/tmp/omen-rns")),
-                    ..SmokeOverrides::default()
-                }),
+                overrides: Box::new(
+                    SmokeOverrides::default()
+                        .with_app_root("/tmp/omen-app")
+                        .with_reticulum_config_path("/tmp/omen-rns"),
+                ),
             }
         );
     }
@@ -5461,11 +5353,9 @@ mod tests {
             label: "CLI Native".into(),
             output: Some(output.clone()),
             stdout: false,
-            overrides: SmokeOverrides {
-                app_root: Some(root.clone()),
-                runtime_backend: Some(RuntimeBackendSetting::Reticulum),
-                ..SmokeOverrides::default()
-            },
+            overrides: SmokeOverrides::default()
+                .with_app_root(root.clone())
+                .with_runtime_backend(RuntimeBackendSetting::Reticulum),
         })
         .expect("generate identity");
 
@@ -5780,33 +5670,16 @@ mod tests {
     }
 
     #[test]
-    fn redacted_argv_hides_path_values() {
-        let argv = redacted_argv(vec![
-            "omenbrowser_rs".into(),
-            "--identity".into(),
-            "/tmp/private/identity".into(),
-            "--reticulum-config".into(),
-            "/tmp/private/rns".into(),
-            "--tcp-client".into(),
-            "127.0.0.1:4242".into(),
-            "--bundle-report".into(),
-            "/tmp/private/bundles".into(),
-        ]);
-
-        assert_eq!(
-            argv,
-            vec![
-                "omenbrowser_rs",
-                "--identity",
-                "<redacted-path>",
-                "--reticulum-config",
-                "<redacted-path>",
-                "--tcp-client",
-                "127.0.0.1:4242",
-                "--bundle-report",
-                "<redacted-path>",
-            ]
+    fn tcp_override_debug_redacts_passphrase() {
+        let value = TcpClientOverride::new(
+            "gateway.example",
+            42420,
+            Some("private".into()),
+            Some("debug-secret-value".into()),
         );
+        let debug = format!("{value:?}");
+        assert!(!debug.contains("debug-secret-value"));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]
@@ -5816,7 +5689,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let logs_dir = dir.join("logs");
         std::fs::create_dir_all(&logs_dir).expect("logs dir");
-        let log_entry = LogEntry {
+        let log_entry = omenbrowser_rs::app::LogEntry {
             epoch_ms: 1,
             severity: omenbrowser_rs::app::LogSeverity::Warn,
             source: omenbrowser_rs::app::LogSource::Runtime,
@@ -5839,11 +5712,9 @@ mod tests {
                 "next_step": "preload known_destinations",
             }
         });
-        let overrides = SmokeOverrides {
-            identity_path: Some(PathBuf::from("/tmp/private/identity")),
-            reticulum_config_path: Some(PathBuf::from("/tmp/private/rns")),
-            ..SmokeOverrides::default()
-        };
+        let overrides = SmokeOverrides::default()
+            .with_identity_path("/tmp/private/identity")
+            .with_reticulum_config_path("/tmp/private/rns");
 
         let bundle_dir = write_report_bundle(ReportBundleInput {
             root: &dir,
@@ -5853,7 +5724,7 @@ mod tests {
             summary: "summary text",
             overrides: &overrides,
             logs_dir: &logs_dir,
-            identity_path: overrides.identity_path.as_ref(),
+            identity_path: overrides.identity_path(),
         })
         .expect("write bundle");
 
@@ -5875,6 +5746,31 @@ mod tests {
         assert!(logs.contains("omenbrowser_rs.cli_recent_logs.v1"));
         assert!(logs.contains("<redacted message body log>"));
         assert!(!logs.contains("/tmp/private/identity"));
+        let logs_json: serde_json::Value = serde_json::from_str(&logs).expect("logs JSON");
+        assert_eq!(
+            logs_json.pointer("/limits/directory_entries"),
+            Some(&serde_json::json!(REPORT_LOG_DIRECTORY_ENTRY_LIMIT))
+        );
+        assert_eq!(
+            logs_json.pointer("/limits/files"),
+            Some(&serde_json::json!(REPORT_LOG_FILE_LIMIT))
+        );
+        assert_eq!(
+            logs_json.pointer("/limits/bytes_per_file"),
+            Some(&serde_json::json!(REPORT_LOG_FILE_BYTES))
+        );
+        assert_eq!(
+            logs_json.pointer("/limits/total_bytes"),
+            Some(&serde_json::json!(REPORT_LOG_TOTAL_BYTES))
+        );
+        assert_eq!(
+            logs_json.pointer("/collection/files_read"),
+            Some(&serde_json::json!(1))
+        );
+        assert!(logs_json
+            .pointer("/collection/bytes_read")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|bytes| bytes <= REPORT_LOG_TOTAL_BYTES as u64));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5908,13 +5804,5 @@ mod tests {
         assert!(detail.contains("\"destination_present\":true"));
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn tcp_client_endpoint_requires_host_and_port() {
-        assert!(parse_tcp_client_endpoint("127.0.0.1:4242").is_ok());
-        assert!(parse_tcp_client_endpoint("127.0.0.1").is_err());
-        assert!(parse_tcp_client_endpoint(":4242").is_err());
-        assert!(parse_tcp_client_endpoint("127.0.0.1:notaport").is_err());
     }
 }

@@ -7,7 +7,7 @@ use crate::chat::ChatSessionId;
 
 #[cfg(feature = "chat-client")]
 use super::is_pending_omenchat_destination;
-use super::{DesktopApp, DesktopPane, Message};
+use super::{DesktopApp, DesktopPane, Message, WorkspacePaneMessage};
 
 impl DesktopApp {
     pub(super) fn dispatch_workspace_pane_message(
@@ -15,33 +15,39 @@ impl DesktopApp {
         message: Message,
     ) -> Result<Task<Message>, Message> {
         match message {
-            Message::NewConversationPane => Ok(self.update_new_conversation_pane()),
-            Message::CloseConversationPaneTab(conversation_id) => {
+            Message::WorkspacePane(WorkspacePaneMessage::NewConversation) => {
+                Ok(self.update_new_conversation_pane())
+            }
+            Message::WorkspacePane(WorkspacePaneMessage::CloseConversationTab(conversation_id)) => {
                 self.update_close_conversation_pane_tab(conversation_id);
                 Ok(Task::none())
             }
-            Message::WorkspacePaneClicked(pane) => {
+            Message::WorkspacePane(WorkspacePaneMessage::Clicked(pane)) => {
                 self.update_workspace_pane_clicked(pane);
                 Ok(Task::none())
             }
-            Message::WorkspacePaneDragged(event) => {
+            Message::WorkspacePane(WorkspacePaneMessage::Dragged(event)) => {
                 self.update_workspace_pane_dragged(event);
                 Ok(Task::none())
             }
-            Message::WorkspacePaneResized(event) => {
+            Message::WorkspacePane(WorkspacePaneMessage::Resized(event)) => {
                 self.update_workspace_pane_resized(event);
                 Ok(Task::none())
             }
-            Message::WorkspacePaneMaximize(pane) => {
+            Message::WorkspacePane(WorkspacePaneMessage::Maximize(pane)) => {
                 self.update_workspace_pane_maximize(pane);
                 Ok(Task::none())
             }
-            Message::WorkspacePaneRestore => {
+            Message::WorkspacePane(WorkspacePaneMessage::Restore) => {
                 self.update_workspace_pane_restore();
                 Ok(Task::none())
             }
-            Message::WorkspacePaneClose(pane) => Ok(self.update_workspace_pane_close(pane)),
-            Message::RestoreDesktopPane(kind) => Ok(self.update_restore_desktop_pane(kind)),
+            Message::WorkspacePane(WorkspacePaneMessage::Close(pane)) => {
+                Ok(self.update_workspace_pane_close(pane))
+            }
+            Message::WorkspacePane(WorkspacePaneMessage::RestoreDesktop(kind)) => {
+                Ok(self.update_restore_desktop_pane(kind))
+            }
             _ => Err(message),
         }
     }

@@ -8,7 +8,7 @@ use super::super::*;
 
 impl DesktopApp {
     pub(in crate::desktop) fn view(&self) -> Element<'_, Message> {
-        if self.ui.shutdown_requested {
+        if !self.ui.shutdown_phase.is_running() {
             return text("Shutting down OMENbrowser_rs...").into();
         }
 
@@ -21,7 +21,11 @@ impl DesktopApp {
         let identity_label = compact_identity_status_label(&self.app.status.identity);
         let (trusted_unread, untrusted_unread) = self.footer_lxmf_unread_counts();
         let mut status = row![
-            tooltip_icon_button(ICON_STATUS_MENU, "Menu", Message::ToggleNavigation),
+            tooltip_icon_button(
+                ICON_STATUS_MENU,
+                "Menu",
+                Message::Shell(ShellMessage::ToggleNavigation)
+            ),
             container(text(runtime_icon).font(emoji_font())).width(Length::Fixed(18.0)),
             row![
                 text(format!("{ICON_STATUS_IDENTITY} ")).font(nerd_icon_font()),
@@ -155,9 +159,15 @@ impl DesktopApp {
             .filter(|section| **section != WorkspaceSection::Messages)
             .fold(column![].spacing(8), |nav, section| {
                 let button = if *section == self.app.workspace.active_section {
-                    omen_button(section.label(), Message::SwitchSection(*section))
+                    omen_button(
+                        section.label(),
+                        Message::Shell(ShellMessage::SwitchSection(*section)),
+                    )
                 } else {
-                    subtle_button(section.label(), Message::SwitchSection(*section))
+                    subtle_button(
+                        section.label(),
+                        Message::Shell(ShellMessage::SwitchSection(*section)),
+                    )
                 };
                 nav.push(button)
             });
@@ -165,7 +175,7 @@ impl DesktopApp {
         container(
             column![
                 sections,
-                subtle_button("Hide Menu", Message::ToggleNavigation),
+                subtle_button("Hide Menu", Message::Shell(ShellMessage::ToggleNavigation)),
             ]
             .spacing(u32::from(DESKTOP_PANEL_PADDING)),
         )

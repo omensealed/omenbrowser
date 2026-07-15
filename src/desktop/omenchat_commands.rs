@@ -48,7 +48,7 @@ impl DesktopApp {
         }
         if events.iter().any(|event| {
             matches!(event, ChatClientEvent::EventAppended { event, .. }
-                if !is_omenchat_local_echo_event(&event))
+                if !is_omenchat_local_echo_event(event))
         }) {
             self.persist_omenchat_session(session_id);
         }
@@ -91,7 +91,7 @@ impl DesktopApp {
         let events = self.handle_omenchat_request(request);
         let replacement_queued = events.iter().any(|event| {
             matches!(event, ChatClientEvent::EventAppended { event, .. }
-                if is_omenchat_local_echo_event(&event))
+                if is_omenchat_local_echo_event(event))
         });
         if replacement_queued {
             if let Some(session) = self.omenchat.chat_client.session_mut(session_id) {
@@ -110,7 +110,7 @@ impl DesktopApp {
         }
         if events.iter().any(|event| {
             matches!(event, ChatClientEvent::EventAppended { event, .. }
-                if !is_omenchat_local_echo_event(&event))
+                if !is_omenchat_local_echo_event(event))
         }) || replacement_queued
         {
             self.lock_omenchat_bottom_until_restore_settles(session_id);

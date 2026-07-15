@@ -92,7 +92,7 @@ impl DesktopApp {
         desktop_workspace_node_to_settings(self.workspace.workspace_panes.layout(), self)
     }
 
-    pub(in crate::desktop) fn remove_workspace_panes_for_missing_targets(
+    pub(in crate::desktop) fn reconcile_workspace_panes_after_target_mutation(
         &mut self,
         closing_browser_id: Option<TabId>,
         closing_conversation_id: Option<u64>,

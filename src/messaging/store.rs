@@ -1,12 +1,31 @@
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::error::AppResult;
+use sha2::{Digest, Sha256};
+
+use crate::error::{AppError, AppResult};
 use crate::messaging::{
     direct_lxmf_timeout_transition, ConversationThread, MessageSummary, NativeLxmfReplyTicket,
     TransportMethod,
 };
+
+pub const MESSAGE_STORE_THREAD_MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub const MESSAGE_STORE_THREAD_MAX_MESSAGES: usize = 4096;
+pub const MESSAGE_STORE_MAX_THREADS: usize = 256;
+pub const MESSAGE_STORE_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+pub const MESSAGE_STORE_MAX_SCAN_ENTRIES: usize = 4096;
+pub const MESSAGE_STORE_PEER_KEY_MAX_BYTES: usize = 256;
+pub const MESSAGE_STORE_CORRUPT_BACKUP_MAX_FILES: usize = 4;
+pub const MESSAGE_STORE_CORRUPT_BACKUP_MAX_TOTAL_BYTES: u64 =
+    MESSAGE_STORE_CORRUPT_BACKUP_MAX_FILES as u64 * MESSAGE_STORE_THREAD_MAX_BYTES;
+
+const MESSAGE_STORE_CORRUPT_BACKUP_PREFIX: &str = "omen-message.corrupt.";
+const MESSAGE_STORE_CORRUPT_BACKUP_SUFFIX: &str = ".bak";
+static MESSAGE_STORE_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
 pub struct MessageStore {
@@ -15,7 +34,7 @@ pub struct MessageStore {
 
 impl MessageStore {
     pub fn new(root: PathBuf) -> AppResult<Self> {
-        std::fs::create_dir_all(&root)?;
+        ensure_real_directory(&root)?;
         Ok(Self { root })
     }
 
@@ -24,35 +43,48 @@ impl MessageStore {
     }
 
     pub fn import_missing_threads_from(&self, source_root: &Path) -> AppResult<usize> {
-        if !source_root.is_dir() {
-            return Ok(0);
-        }
-
-        std::fs::create_dir_all(&self.root)?;
-        let mut imported = 0usize;
-        for entry in std::fs::read_dir(source_root)? {
-            let path = entry?.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
+        match std::fs::symlink_metadata(source_root) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(AppError::Runtime(
+                    "message import root must be a directory and not a symbolic link".into(),
+                ));
             }
-            let Some(file_name) = path.file_name() else {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.into()),
+        }
+        ensure_real_directory(&self.root)?;
+        let target_inventory = inventory_thread_files(&self.root)?;
+        let mut target_threads = target_inventory.len();
+        let mut target_bytes = target_inventory
+            .iter()
+            .fold(0_u64, |total, (_, bytes)| total.saturating_add(*bytes));
+        let mut imported = 0usize;
+        for (path, _) in inventory_thread_files(source_root)? {
+            let raw = read_thread_file(&path)?;
+            let Ok(thread) = serde_json::from_slice::<ConversationThread>(&raw) else {
                 continue;
             };
-            let target = self.root.join(file_name);
-            if target.exists() {
+            if validate_thread(&thread).is_err() {
                 continue;
             }
-            if serde_json::from_str::<ConversationThread>(&std::fs::read_to_string(&path)?).is_err()
-            {
-                continue;
+            let target = self.thread_path(&thread.peer_hash)?;
+            match std::fs::symlink_metadata(&target) {
+                Ok(_) => continue,
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-            std::fs::copy(&path, target)?;
+            ensure_thread_capacity(target_threads, target_bytes, raw.len() as u64)?;
+            publish_thread_bytes(&target, &raw, ThreadPublishMode::CreateNew)?;
+            target_threads = target_threads.saturating_add(1);
+            target_bytes = target_bytes.saturating_add(raw.len() as u64);
             imported += 1;
         }
         Ok(imported)
     }
 
     pub fn append(&self, mut message: MessageSummary) -> AppResult<MessageSummary> {
+        validate_message(&message)?;
         if message.message_id.is_none() {
             message.message_id = Some(format!("msg-{}", timestamp_millis()));
         }
@@ -71,7 +103,7 @@ impl MessageStore {
             }
         }
         if message.incoming && message.unread {
-            thread.unread_count += 1;
+            thread.unread_count = thread.unread_count.saturating_add(1);
         }
         thread.messages.push(message.clone());
         remember_reply_ticket_from_message(&mut thread, &message, timestamp_secs());
@@ -81,21 +113,19 @@ impl MessageStore {
                 .then_with(|| left.message_id.cmp(&right.message_id))
                 .then_with(|| left.content.cmp(&right.content))
         });
+        validate_thread(&thread)?;
         self.save_thread(&thread)?;
         Ok(message)
     }
 
     pub fn list_threads(&self) -> AppResult<Vec<ConversationThread>> {
         let mut threads = Vec::new();
-        for entry in std::fs::read_dir(&self.root)? {
-            let path = entry?.path();
-            if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-                let peer_hash = path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or_default();
-                threads.push(self.load_thread(peer_hash, None)?);
-            }
+        for (path, _) in inventory_thread_files(&self.root)? {
+            let peer_hash = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default();
+            threads.push(self.load_thread_path(&path, peer_hash, None)?);
         }
         threads.sort_by(|left, right| {
             recent_timestamp(right)
@@ -146,32 +176,35 @@ impl MessageStore {
             return Ok(false);
         }
         let mut removed = false;
-        let path = self.thread_path(peer_hash);
-        if path.exists() {
+        let canonical_path = self.thread_path(peer_hash)?;
+        let path = self
+            .existing_thread_path(peer_hash)?
+            .unwrap_or(canonical_path);
+        if std::fs::symlink_metadata(&path).is_ok() {
             std::fs::remove_file(&path)?;
             removed = true;
         }
 
         if self.root.is_dir() {
-            for entry in std::fs::read_dir(&self.root)? {
-                let path = entry?.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            for (candidate, _) in inventory_thread_files(&self.root)? {
+                if candidate == path {
                     continue;
                 }
-                if path == self.thread_path(peer_hash) {
-                    continue;
-                }
-                let Ok(raw) = std::fs::read_to_string(&path) else {
+                let Ok(raw) = read_thread_file(&candidate) else {
                     continue;
                 };
-                let Ok(thread) = serde_json::from_str::<ConversationThread>(&raw) else {
+                let Ok(thread) = serde_json::from_slice::<ConversationThread>(&raw) else {
                     continue;
                 };
                 if thread.peer_hash.trim().eq_ignore_ascii_case(peer_hash) {
-                    std::fs::remove_file(path)?;
+                    std::fs::remove_file(candidate)?;
                     removed = true;
                 }
             }
+        }
+
+        if removed {
+            sync_directory(&self.root)?;
         }
 
         Ok(removed)
@@ -396,8 +429,38 @@ impl MessageStore {
         Ok(stale)
     }
 
-    fn thread_path(&self, peer_hash: &str) -> PathBuf {
-        self.root.join(format!("{peer_hash}.json"))
+    fn thread_path(&self, peer_hash: &str) -> AppResult<PathBuf> {
+        validate_peer_key(peer_hash)?;
+        Ok(self
+            .root
+            .join(format!("{}.json", portable_peer_file_stem(peer_hash))))
+    }
+
+    fn existing_thread_path(&self, peer_hash: &str) -> AppResult<Option<PathBuf>> {
+        let canonical = self.thread_path(peer_hash)?;
+        match std::fs::symlink_metadata(&canonical) {
+            Ok(_) => return Ok(Some(canonical)),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if peer_hash.is_empty()
+            || matches!(peer_hash, "." | "..")
+            || peer_hash.contains('/')
+            || peer_hash.contains('\\')
+        {
+            return Ok(None);
+        }
+        let legacy = self.root.join(format!("{peer_hash}.json"));
+        if legacy == canonical {
+            return Ok(None);
+        }
+        match std::fs::symlink_metadata(&legacy) {
+            Ok(_) => Ok(Some(legacy)),
+            Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::InvalidInput) => {
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn load_thread(
@@ -405,53 +468,72 @@ impl MessageStore {
         peer_hash: &str,
         peer_label: Option<&str>,
     ) -> AppResult<ConversationThread> {
-        let path = self.thread_path(peer_hash);
-        if !path.exists() {
-            return Ok(ConversationThread {
-                peer_hash: peer_hash.into(),
-                peer_label: peer_label
-                    .map(str::to_string)
-                    .unwrap_or_else(|| peer_hash.chars().take(8).collect()),
-                messages: Vec::new(),
-                unread_count: 0,
-                lxmf_reply_ticket: None,
-            });
-        }
-        let raw = std::fs::read_to_string(&path)?;
-        match serde_json::from_str::<ConversationThread>(&raw) {
+        let Some(path) = self.existing_thread_path(peer_hash)? else {
+            return Ok(empty_thread(peer_hash, peer_label));
+        };
+        self.load_thread_path(&path, peer_hash, peer_label)
+    }
+
+    fn load_thread_path(
+        &self,
+        path: &Path,
+        fallback_peer_hash: &str,
+        peer_label: Option<&str>,
+    ) -> AppResult<ConversationThread> {
+        let raw = read_thread_file(path)?;
+        match serde_json::from_slice::<ConversationThread>(&raw) {
             Ok(mut thread) => {
+                validate_thread(&thread)?;
                 if thread.peer_label.is_empty() {
                     thread.peer_label = peer_label
                         .map(str::to_string)
-                        .unwrap_or_else(|| peer_hash.chars().take(8).collect());
+                        .unwrap_or_else(|| fallback_peer_hash.chars().take(8).collect());
                 }
                 Ok(thread)
             }
             Err(_) => {
-                backup_corrupt_file(&path)?;
-                Ok(ConversationThread {
-                    peer_hash: peer_hash.into(),
-                    peer_label: peer_label
-                        .map(str::to_string)
-                        .unwrap_or_else(|| peer_hash.chars().take(8).collect()),
-                    messages: Vec::new(),
-                    unread_count: 0,
-                    lxmf_reply_ticket: None,
-                })
+                backup_corrupt_file(&self.root, &raw)?;
+                Ok(empty_thread(fallback_peer_hash, peer_label))
             }
         }
     }
 
     fn save_thread(&self, thread: &ConversationThread) -> AppResult<()> {
-        std::fs::create_dir_all(&self.root)?;
-        let path = self.thread_path(&thread.peer_hash);
-        let temp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        std::fs::write(
-            &temp,
-            serde_json::to_vec_pretty(thread).expect("thread serializes"),
-        )?;
-        std::fs::rename(temp, path)?;
-        Ok(())
+        validate_thread(thread)?;
+        ensure_real_directory(&self.root)?;
+        let canonical_path = self.thread_path(&thread.peer_hash)?;
+        let path = self
+            .existing_thread_path(&thread.peer_hash)?
+            .unwrap_or(canonical_path);
+        let raw = serde_json::to_vec_pretty(thread).map_err(|error| {
+            AppError::Runtime(format!("message thread serialization failed: {error}"))
+        })?;
+        if raw.len() as u64 > MESSAGE_STORE_THREAD_MAX_BYTES {
+            return Err(AppError::Runtime(format!(
+                "message thread exceeds the {MESSAGE_STORE_THREAD_MAX_BYTES} byte limit"
+            )));
+        }
+        if std::fs::symlink_metadata(&path).is_err_and(|error| error.kind() == ErrorKind::NotFound)
+        {
+            let inventory = inventory_thread_files(&self.root)?;
+            let total_bytes = inventory
+                .iter()
+                .fold(0_u64, |total, (_, bytes)| total.saturating_add(*bytes));
+            ensure_thread_capacity(inventory.len(), total_bytes, raw.len() as u64)?;
+        }
+        publish_thread_bytes(&path, &raw, ThreadPublishMode::Replace)
+    }
+}
+
+fn empty_thread(peer_hash: &str, peer_label: Option<&str>) -> ConversationThread {
+    ConversationThread {
+        peer_hash: peer_hash.into(),
+        peer_label: peer_label
+            .map(str::to_string)
+            .unwrap_or_else(|| peer_hash.chars().take(8).collect()),
+        messages: Vec::new(),
+        unread_count: 0,
+        lxmf_reply_ticket: None,
     }
 }
 
@@ -491,7 +573,7 @@ fn remember_reply_ticket_from_message(
 
 fn hex_to_bytes(value: &str) -> Option<Vec<u8>> {
     let value = value.trim();
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
@@ -607,15 +689,421 @@ fn recent_timestamp(thread: &ConversationThread) -> f64 {
         .unwrap_or_default()
 }
 
-fn backup_corrupt_file(path: &Path) -> AppResult<()> {
-    let backup = path.with_file_name(format!(
-        "{}.corrupt.{}.bak",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("thread.json"),
-        timestamp_millis()
+fn validate_peer_key(peer_hash: &str) -> AppResult<()> {
+    if peer_hash.len() > MESSAGE_STORE_PEER_KEY_MAX_BYTES || peer_hash.chars().any(char::is_control)
+    {
+        return Err(AppError::Runtime(
+            "message peer key is too long or contains control characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn portable_peer_file_stem(peer_hash: &str) -> String {
+    let portable = !peer_hash.is_empty()
+        && !matches!(peer_hash, "." | "..")
+        && !peer_hash.ends_with('.')
+        && !peer_hash.ends_with(' ')
+        && !peer_hash.chars().any(|character| {
+            matches!(
+                character,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            )
+        });
+    if portable {
+        return peer_hash.to_owned();
+    }
+    let digest = Sha256::digest(peer_hash.as_bytes());
+    format!("peer-{digest:x}")
+}
+
+fn validate_message(message: &MessageSummary) -> AppResult<()> {
+    const LABEL_MAX_BYTES: usize = 4 * 1024;
+    const TITLE_MAX_BYTES: usize = 64 * 1024;
+    const CONTENT_MAX_BYTES: usize = 1024 * 1024;
+    const MESSAGE_ID_MAX_BYTES: usize = 4 * 1024;
+    const FIELD_MAX_ITEMS: usize = 128;
+    const FIELD_KEY_MAX_BYTES: usize = 4 * 1024;
+    const FIELD_VALUE_MAX_BYTES: usize = 512 * 1024;
+    const FIELD_TOTAL_MAX_BYTES: usize = 2 * 1024 * 1024;
+    const ATTACHMENT_MAX_ITEMS: usize = 64;
+    const ATTACHMENT_NAME_MAX_BYTES: usize = 4 * 1024;
+    const ATTACHMENT_PATH_MAX_BYTES: usize = 32 * 1024;
+
+    validate_peer_key(&message.peer_hash)?;
+    if message.peer_label.len() > LABEL_MAX_BYTES
+        || message.title.len() > TITLE_MAX_BYTES
+        || message.content.len() > CONTENT_MAX_BYTES
+        || message
+            .message_id
+            .as_ref()
+            .is_some_and(|message_id| message_id.len() > MESSAGE_ID_MAX_BYTES)
+        || !message.timestamp.is_finite()
+    {
+        return Err(AppError::Runtime(
+            "message retained scalar exceeds its safety limit".into(),
+        ));
+    }
+    if message.fields.len() > FIELD_MAX_ITEMS {
+        return Err(AppError::Runtime(format!(
+            "message fields exceed the {FIELD_MAX_ITEMS} item limit"
+        )));
+    }
+    let mut field_bytes = 0_usize;
+    for (key, value) in &message.fields {
+        if key.len() > FIELD_KEY_MAX_BYTES || value.len() > FIELD_VALUE_MAX_BYTES {
+            return Err(AppError::Runtime(
+                "message field key or value exceeds its safety limit".into(),
+            ));
+        }
+        field_bytes = field_bytes
+            .checked_add(key.len().saturating_add(value.len()))
+            .ok_or_else(|| AppError::Runtime("message field byte count overflow".into()))?;
+    }
+    if field_bytes > FIELD_TOTAL_MAX_BYTES {
+        return Err(AppError::Runtime(format!(
+            "message fields exceed the {FIELD_TOTAL_MAX_BYTES} byte limit"
+        )));
+    }
+    if message.attachments.len() > ATTACHMENT_MAX_ITEMS
+        || message.attachments.iter().any(|attachment| {
+            attachment.name.len() > ATTACHMENT_NAME_MAX_BYTES
+                || attachment.path.as_ref().is_some_and(|path| {
+                    path.as_os_str().to_string_lossy().len() > ATTACHMENT_PATH_MAX_BYTES
+                })
+        })
+    {
+        return Err(AppError::Runtime(
+            "message attachments exceed their retained item or string limit".into(),
+        ));
+    }
+    if let TransportMethod::Unknown(value) = &message.transport_method {
+        if value.len() > 256 {
+            return Err(AppError::Runtime(
+                "message transport label exceeds the 256 byte limit".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_thread(thread: &ConversationThread) -> AppResult<()> {
+    validate_peer_key(&thread.peer_hash)?;
+    if thread.peer_label.len() > 4 * 1024 {
+        return Err(AppError::Runtime(
+            "message thread peer label exceeds the 4096 byte limit".into(),
+        ));
+    }
+    if thread.messages.len() > MESSAGE_STORE_THREAD_MAX_MESSAGES {
+        return Err(AppError::Runtime(format!(
+            "message thread exceeds the {MESSAGE_STORE_THREAD_MAX_MESSAGES} message limit"
+        )));
+    }
+    for message in &thread.messages {
+        validate_message(message)?;
+    }
+    if thread
+        .lxmf_reply_ticket
+        .as_ref()
+        .is_some_and(|ticket| ticket.ticket.len() > 64 || !ticket.expires.is_finite())
+    {
+        return Err(AppError::Runtime(
+            "message thread reply ticket exceeds its retained limit".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_real_directory(path: &Path) -> AppResult<()> {
+    std::fs::create_dir_all(path)?;
+    if !std::fs::symlink_metadata(path)?.file_type().is_dir() {
+        return Err(AppError::Runtime(format!(
+            "message storage root must be a directory and not a symbolic link: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn inventory_thread_files(root: &Path) -> AppResult<Vec<(PathBuf, u64)>> {
+    if !std::fs::symlink_metadata(root)?.file_type().is_dir() {
+        return Err(AppError::Runtime(
+            "message storage root must be a directory and not a symbolic link".into(),
+        ));
+    }
+    let mut files = Vec::new();
+    let mut total_bytes = 0_u64;
+    for (scanned, entry) in std::fs::read_dir(root)?.enumerate() {
+        if scanned == MESSAGE_STORE_MAX_SCAN_ENTRIES {
+            return Err(AppError::Runtime(format!(
+                "message discovery exceeds the {MESSAGE_STORE_MAX_SCAN_ENTRIES} entry scan limit"
+            )));
+        }
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
+            || !entry.file_type()?.is_file()
+        {
+            continue;
+        }
+        let peer_key = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| {
+                AppError::Runtime("message thread filename is not valid UTF-8".into())
+            })?;
+        if peer_key.len() > 512 || peer_key.chars().any(char::is_control) {
+            return Err(AppError::Runtime(
+                "message thread filename exceeds its portable admission limit".into(),
+            ));
+        }
+        if files.len() == MESSAGE_STORE_MAX_THREADS {
+            return Err(AppError::Runtime(format!(
+                "message discovery exceeds the {MESSAGE_STORE_MAX_THREADS} thread limit"
+            )));
+        }
+        let bytes = entry.metadata()?.len();
+        if bytes > MESSAGE_STORE_THREAD_MAX_BYTES {
+            return Err(AppError::Runtime(format!(
+                "message thread exceeds the {MESSAGE_STORE_THREAD_MAX_BYTES} byte limit"
+            )));
+        }
+        total_bytes = total_bytes.saturating_add(bytes);
+        if total_bytes > MESSAGE_STORE_MAX_TOTAL_BYTES {
+            return Err(AppError::Runtime(format!(
+                "message discovery exceeds the {MESSAGE_STORE_MAX_TOTAL_BYTES} retained byte limit"
+            )));
+        }
+        files.push((path, bytes));
+    }
+    Ok(files)
+}
+
+fn ensure_thread_capacity(
+    thread_count: usize,
+    total_bytes: u64,
+    incoming_bytes: u64,
+) -> AppResult<()> {
+    if thread_count >= MESSAGE_STORE_MAX_THREADS {
+        return Err(AppError::Runtime(format!(
+            "message store cannot exceed {MESSAGE_STORE_MAX_THREADS} threads"
+        )));
+    }
+    if total_bytes.saturating_add(incoming_bytes) > MESSAGE_STORE_MAX_TOTAL_BYTES {
+        return Err(AppError::Runtime(format!(
+            "message store cannot exceed {MESSAGE_STORE_MAX_TOTAL_BYTES} retained bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn read_thread_file(path: &Path) -> AppResult<Vec<u8>> {
+    let path_metadata = std::fs::symlink_metadata(path)?;
+    if !path_metadata.file_type().is_file() {
+        return Err(AppError::Runtime(
+            "message thread must be a regular file and not a symbolic link".into(),
+        ));
+    }
+    if path_metadata.len() > MESSAGE_STORE_THREAD_MAX_BYTES {
+        return Err(AppError::Runtime(format!(
+            "message thread exceeds the {MESSAGE_STORE_THREAD_MAX_BYTES} byte limit"
+        )));
+    }
+    let file = File::open(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() {
+        return Err(AppError::Runtime(
+            "message thread must open as a regular file".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if path_metadata.dev() != opened_metadata.dev()
+            || path_metadata.ino() != opened_metadata.ino()
+        {
+            return Err(AppError::Runtime(
+                "message thread changed while it was being opened".into(),
+            ));
+        }
+    }
+    let mut raw = Vec::with_capacity(path_metadata.len() as usize);
+    file.take(MESSAGE_STORE_THREAD_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut raw)?;
+    if raw.len() as u64 > MESSAGE_STORE_THREAD_MAX_BYTES {
+        return Err(AppError::Runtime(format!(
+            "message thread exceeds the {MESSAGE_STORE_THREAD_MAX_BYTES} byte limit"
+        )));
+    }
+    Ok(raw)
+}
+
+#[derive(Clone, Copy)]
+enum ThreadPublishMode {
+    CreateNew,
+    Replace,
+}
+
+fn publish_thread_bytes(path: &Path, raw: &[u8], mode: ThreadPublishMode) -> AppResult<()> {
+    publish_thread_bytes_with(path, raw, mode, || Ok(()))
+}
+
+fn publish_thread_bytes_with(
+    path: &Path,
+    raw: &[u8],
+    mode: ThreadPublishMode,
+    before_commit: impl FnOnce() -> std::io::Result<()>,
+) -> AppResult<()> {
+    if raw.len() as u64 > MESSAGE_STORE_THREAD_MAX_BYTES {
+        return Err(AppError::Runtime(format!(
+            "message thread exceeds the {MESSAGE_STORE_THREAD_MAX_BYTES} byte limit"
+        )));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(ErrorKind::InvalidInput, "message destination has no parent")
+    })?;
+    ensure_real_directory(parent)?;
+    match (mode, std::fs::symlink_metadata(path)) {
+        (ThreadPublishMode::CreateNew, Ok(_)) => {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "message destination already exists",
+            )
+            .into());
+        }
+        (ThreadPublishMode::Replace, Ok(metadata)) if !metadata.file_type().is_file() => {
+            return Err(AppError::Runtime(
+                "message destination must be a regular file and not a symbolic link".into(),
+            ));
+        }
+        (_, Err(error)) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "message destination has no safe filename",
+            )
+        })?;
+    let sequence = MESSAGE_STORE_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{file_name}.{}.{}.message.tmp",
+        std::process::id(),
+        sequence
     ));
-    std::fs::copy(path, backup)?;
+    let result = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(raw)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        before_commit()?;
+        match mode {
+            ThreadPublishMode::CreateNew => {
+                std::fs::hard_link(&temporary, path)?;
+                sync_directory(parent)?;
+                std::fs::remove_file(&temporary)?;
+            }
+            ThreadPublishMode::Replace => {
+                crate::storage::files::atomic_replace(&temporary, path)?;
+            }
+        }
+        sync_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(Into::into)
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn backup_corrupt_file(root: &Path, raw: &[u8]) -> AppResult<()> {
+    let sequence = MESSAGE_STORE_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let backup = root.join(format!(
+        "{MESSAGE_STORE_CORRUPT_BACKUP_PREFIX}{}.{}.{}{MESSAGE_STORE_CORRUPT_BACKUP_SUFFIX}",
+        timestamp_millis(),
+        std::process::id(),
+        sequence
+    ));
+    publish_thread_bytes(&backup, raw, ThreadPublishMode::CreateNew)?;
+    prune_corrupt_backups(root)?;
+    Ok(())
+}
+
+fn is_corrupt_backup_name(name: &str) -> bool {
+    let Some(body) = name
+        .strip_prefix(MESSAGE_STORE_CORRUPT_BACKUP_PREFIX)
+        .and_then(|name| name.strip_suffix(MESSAGE_STORE_CORRUPT_BACKUP_SUFFIX))
+    else {
+        return false;
+    };
+    let mut parts = body.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(timestamp), Some(process), Some(sequence), None)
+            if [timestamp, process, sequence]
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    )
+}
+
+fn prune_corrupt_backups(root: &Path) -> AppResult<()> {
+    let mut backups = Vec::new();
+    let mut total_bytes = 0_u64;
+    for (scanned, entry) in std::fs::read_dir(root)?.enumerate() {
+        if scanned == MESSAGE_STORE_MAX_SCAN_ENTRIES {
+            return Err(AppError::Runtime(format!(
+                "message backup discovery exceeds the {MESSAGE_STORE_MAX_SCAN_ENTRIES} entry scan limit"
+            )));
+        }
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_corrupt_backup_name(name) || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let bytes = entry.metadata()?.len();
+        total_bytes = total_bytes.saturating_add(bytes);
+        backups.push((name.to_owned(), entry.path(), bytes));
+    }
+    backups.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut retained = backups.len();
+    let mut removed = false;
+    for (_, path, bytes) in backups {
+        if retained <= MESSAGE_STORE_CORRUPT_BACKUP_MAX_FILES
+            && total_bytes <= MESSAGE_STORE_CORRUPT_BACKUP_MAX_TOTAL_BYTES
+        {
+            break;
+        }
+        std::fs::remove_file(path)?;
+        retained = retained.saturating_sub(1);
+        total_bytes = total_bytes.saturating_sub(bytes);
+        removed = true;
+    }
+    if removed {
+        sync_directory(root)?;
+    }
     Ok(())
 }
 
@@ -677,4 +1165,44 @@ fn is_stale_native_lxmf_propagated(
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(message.timestamp);
     now >= submitted_at + timeout_seconds
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::{publish_thread_bytes_with, ThreadPublishMode, MESSAGE_STORE_FILE_SEQUENCE};
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-message-publication-{name}-{}-{}",
+            std::process::id(),
+            MESSAGE_STORE_FILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("publication fixture");
+        root
+    }
+
+    #[test]
+    fn precommit_failure_preserves_prior_thread_and_cleans_stage() {
+        let root = fixture("replace-fault");
+        let target = root.join("peer.json");
+        std::fs::write(&target, b"previous thread").expect("previous thread");
+
+        publish_thread_bytes_with(&target, b"replacement", ThreadPublishMode::Replace, || {
+            Err(std::io::Error::other("injected precommit failure"))
+        })
+        .expect_err("publication must fail");
+
+        assert_eq!(
+            std::fs::read(&target).expect("preserved thread"),
+            b"previous thread"
+        );
+        assert_eq!(
+            std::fs::read_dir(root)
+                .expect("fixture entries")
+                .filter_map(Result::ok)
+                .count(),
+            1
+        );
+    }
 }

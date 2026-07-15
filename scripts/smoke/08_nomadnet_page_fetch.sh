@@ -7,10 +7,10 @@ cd "$REPO_ROOT"
 
 smoke_run "browser cache tests" cargo test --test browser_cache
 smoke_run "browser partials tests" cargo test --test browser_partials
-smoke_run "browser path retry tests" cargo test --features chat-client-reticulum --test browser_path_retry
+smoke_run "browser path retry tests" cargo test --locked --no-default-features --features desktop-product --test browser_path_retry
 
-smoke_run "build browser release" cargo build --release --features chat-client-reticulum,live-network --bin omenbrowser_rs
-smoke_run "build server release" cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
+smoke_run "build browser release" cargo build --release --locked --no-default-features --features desktop-product --bin omenbrowser_rs
+smoke_run "build server release" cargo build --release --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
 
 browser_bin="$REPO_ROOT/target/release/omenbrowser_rs"
 server_bin="$REPO_ROOT/src/server/target/release/omenchatd"

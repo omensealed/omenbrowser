@@ -1,0 +1,34 @@
+[package]
+name = "omenbrowser-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+omenbrowser_rs = { path = "..", default-features = false, features = ["chat-client"] }
+omenchatd = { path = "../src/server", default-features = false }
+
+[[bin]]
+name = "client_msgpack"
+path = "fuzz_targets/client_msgpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_msgpack"
+path = "fuzz_targets/server_msgpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "measure_msgpack"
+path = "measure_msgpack.rs"
+test = false
+doc = false
+bench = false

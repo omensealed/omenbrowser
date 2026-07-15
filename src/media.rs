@@ -268,6 +268,18 @@ mod tests {
     }
 
     #[test]
+    fn avif_remains_a_supported_remote_image_kind() {
+        assert_eq!(
+            media_kind("https://example.com/image.avif?size=large"),
+            RemoteMediaKind::Image
+        );
+        assert_eq!(
+            media_kind(&format!("{FIXTURE_RETICULUM_HASH}:/files/image.AVIF")),
+            RemoteMediaKind::Image
+        );
+    }
+
+    #[test]
     fn onion_images_never_fall_back_to_direct_fetch() {
         let settings = settings(true);
         let decision = decide_remote_media(RemoteMediaContext {

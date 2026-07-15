@@ -9,7 +9,8 @@ use super::super::{
     interface_kind_display_label, interface_restart_recommendation_line,
     interface_runtime_state_line, interface_runtime_status_label, omen_button,
     optional_interface_runtime_detail_line, section_card, subtle_button, ui_size, warning_button,
-    wrapped_panel_text, DesktopApp, Message,
+    wrapped_panel_text, DesktopApp, DiagnosticsMessage, InterfaceMessage, Message, RuntimeMessage,
+    ShellMessage,
 };
 
 pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, Message> {
@@ -29,12 +30,18 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
             };
             let mut body = column![
                 row![
-                    subtle_button("Select", Message::SelectInterfaceProfile(index)),
+                    subtle_button(
+                        "Select",
+                        Message::Interface(InterfaceMessage::SelectProfile(index))
+                    ),
                     subtle_button(
                         if profile.enabled { "Disable" } else { "Enable" },
-                        Message::ToggleInterfaceEnabled(index)
+                        Message::Interface(InterfaceMessage::ToggleEnabled(index))
                     ),
-                    warning_button("Delete", Message::DeleteInterfaceProfile(index)),
+                    warning_button(
+                        "Delete",
+                        Message::Interface(InterfaceMessage::DeleteProfile(index))
+                    ),
                 ]
                 .spacing(8)
                 .wrap(),
@@ -71,9 +78,11 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                 text_input("interface name", &profile.name)
                     .on_input({
                         let profile_id = profile.profile_id.clone();
-                        move |value| Message::InterfaceNameChanged {
-                            profile_id: profile_id.clone(),
-                            value,
+                        move |value| {
+                            Message::Interface(InterfaceMessage::NameChanged {
+                                profile_id: profile_id.clone(),
+                                value,
+                            })
                         }
                     })
                     .padding(6)
@@ -117,9 +126,13 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                                 text_input("host", &profile.target_host)
                                     .on_input({
                                         let profile_id = profile.profile_id.clone();
-                                        move |value| Message::TcpClientHostChanged {
-                                            profile_id: profile_id.clone(),
-                                            value,
+                                        move |value| {
+                                            Message::Interface(
+                                                InterfaceMessage::TcpClientHostChanged {
+                                                    profile_id: profile_id.clone(),
+                                                    value,
+                                                },
+                                            )
                                         }
                                     })
                                     .padding(6)
@@ -127,9 +140,13 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                                 text_input("port", &profile.target_port.to_string())
                                     .on_input({
                                         let profile_id = profile.profile_id.clone();
-                                        move |value| Message::TcpClientPortChanged {
-                                            profile_id: profile_id.clone(),
-                                            value,
+                                        move |value| {
+                                            Message::Interface(
+                                                InterfaceMessage::TcpClientPortChanged {
+                                                    profile_id: profile_id.clone(),
+                                                    value,
+                                                },
+                                            )
                                         }
                                     })
                                     .padding(6)
@@ -139,19 +156,25 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                             .wrap(),
                             row![
                                 text_input("IFAC network name", &profile.network_name)
-                                    .on_input(move |value| Message::TcpClientIfacNetworkChanged {
-                                        profile_id: ifac_network_id.clone(),
-                                        value,
+                                    .on_input(move |value| {
+                                        Message::Interface(
+                                            InterfaceMessage::TcpClientIfacNetworkChanged {
+                                                profile_id: ifac_network_id.clone(),
+                                                value,
+                                            },
+                                        )
                                     })
                                     .padding(6)
                                     .width(Length::FillPortion(1)),
                                 text_input("IFAC passphrase", &profile.passphrase)
                                     .secure(true)
                                     .on_input(move |value| {
-                                        Message::TcpClientIfacPassphraseChanged {
-                                            profile_id: ifac_pass_id.clone(),
-                                            value,
-                                        }
+                                        Message::Interface(
+                                            InterfaceMessage::TcpClientIfacPassphraseChanged {
+                                                profile_id: ifac_pass_id.clone(),
+                                                value,
+                                            },
+                                        )
                                     })
                                     .padding(6)
                                     .width(Length::FillPortion(1)),
@@ -194,16 +217,20 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                             .width(Length::Fill),
                             row![
                                 text_input("listen IP", &profile.target_host)
-                                    .on_input(move |value| Message::TcpServerHostChanged {
-                                        profile_id: host_id.clone(),
-                                        value,
+                                    .on_input(move |value| {
+                                        Message::Interface(InterfaceMessage::TcpServerHostChanged {
+                                            profile_id: host_id.clone(),
+                                            value,
+                                        })
                                     })
                                     .padding(6)
                                     .width(Length::FillPortion(3)),
                                 text_input("listen port", &profile.target_port.to_string())
-                                    .on_input(move |value| Message::TcpServerPortChanged {
-                                        profile_id: port_id.clone(),
-                                        value,
+                                    .on_input(move |value| {
+                                        Message::Interface(InterfaceMessage::TcpServerPortChanged {
+                                            profile_id: port_id.clone(),
+                                            value,
+                                        })
                                     })
                                     .padding(6)
                                     .width(Length::FillPortion(1)),
@@ -213,20 +240,24 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                             row![
                                 text_input("IFAC network name", &profile.network_name)
                                     .on_input(move |value| {
-                                        Message::TcpServerIfacNetworkChanged {
-                                            profile_id: ifac_network_id.clone(),
-                                            value,
-                                        }
+                                        Message::Interface(
+                                            InterfaceMessage::TcpServerIfacNetworkChanged {
+                                                profile_id: ifac_network_id.clone(),
+                                                value,
+                                            },
+                                        )
                                     })
                                     .padding(6)
                                     .width(Length::FillPortion(1)),
                                 text_input("IFAC passphrase", &profile.passphrase)
                                     .secure(true)
                                     .on_input(move |value| {
-                                        Message::TcpServerIfacPassphraseChanged {
-                                            profile_id: ifac_pass_id.clone(),
-                                            value,
-                                        }
+                                        Message::Interface(
+                                            InterfaceMessage::TcpServerIfacPassphraseChanged {
+                                                profile_id: ifac_pass_id.clone(),
+                                                value,
+                                            },
+                                        )
                                     })
                                     .padding(6)
                                     .width(Length::FillPortion(1)),
@@ -245,7 +276,7 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                             } else {
                                 "Set Connectable"
                             },
-                            Message::ToggleI2pConnectable(index)
+                            Message::Interface(InterfaceMessage::ToggleI2pConnectable(index))
                         ),
                         text(format!("I2P connectable: {}", profile.connectable)).size(ui_size(14)),
                         text(format!(
@@ -262,9 +293,11 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                         text_input("comma-separated I2P peers", &profile.peers.join(", "))
                             .on_input({
                                 let profile_id = profile.profile_id.clone();
-                                move |value| Message::I2pPeersChanged {
-                                    profile_id: profile_id.clone(),
-                                    value,
+                                move |value| {
+                                    Message::Interface(InterfaceMessage::I2pPeersChanged {
+                                        profile_id: profile_id.clone(),
+                                        value,
+                                    })
                                 }
                             })
                             .padding(6)
@@ -299,9 +332,11 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                         text_input("device port, e.g. /dev/ttyUSB0", &profile.device_port)
                             .on_input({
                                 let profile_id = profile.profile_id.clone();
-                                move |value| Message::RNodeDevicePortChanged {
-                                    profile_id: profile_id.clone(),
-                                    value,
+                                move |value| {
+                                    Message::Interface(InterfaceMessage::RNodeDevicePortChanged {
+                                        profile_id: profile_id.clone(),
+                                        value,
+                                    })
                                 }
                             })
                             .padding(6)
@@ -310,18 +345,26 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                             text_input("frequency Hz", &profile.frequency.to_string())
                                 .on_input({
                                     let profile_id = profile.profile_id.clone();
-                                    move |value| Message::RNodeFrequencyChanged {
-                                        profile_id: profile_id.clone(),
-                                        value,
+                                    move |value| {
+                                        Message::Interface(
+                                            InterfaceMessage::RNodeFrequencyChanged {
+                                                profile_id: profile_id.clone(),
+                                                value,
+                                            },
+                                        )
                                     }
                                 })
                                 .padding(6),
                             text_input("bandwidth Hz", &profile.bandwidth.to_string())
                                 .on_input({
                                     let profile_id = profile.profile_id.clone();
-                                    move |value| Message::RNodeBandwidthChanged {
-                                        profile_id: profile_id.clone(),
-                                        value,
+                                    move |value| {
+                                        Message::Interface(
+                                            InterfaceMessage::RNodeBandwidthChanged {
+                                                profile_id: profile_id.clone(),
+                                                value,
+                                            },
+                                        )
                                     }
                                 })
                                 .padding(6),
@@ -332,27 +375,37 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                             text_input("TX power dBm", &profile.tx_power.to_string())
                                 .on_input({
                                     let profile_id = profile.profile_id.clone();
-                                    move |value| Message::RNodeTxPowerChanged {
-                                        profile_id: profile_id.clone(),
-                                        value,
+                                    move |value| {
+                                        Message::Interface(InterfaceMessage::RNodeTxPowerChanged {
+                                            profile_id: profile_id.clone(),
+                                            value,
+                                        })
                                     }
                                 })
                                 .padding(6),
                             text_input("spreading factor", &profile.spreading_factor.to_string())
                                 .on_input({
                                     let profile_id = profile.profile_id.clone();
-                                    move |value| Message::RNodeSpreadingFactorChanged {
-                                        profile_id: profile_id.clone(),
-                                        value,
+                                    move |value| {
+                                        Message::Interface(
+                                            InterfaceMessage::RNodeSpreadingFactorChanged {
+                                                profile_id: profile_id.clone(),
+                                                value,
+                                            },
+                                        )
                                     }
                                 })
                                 .padding(6),
                             text_input("coding rate", &profile.coding_rate.to_string())
                                 .on_input({
                                     let profile_id = profile.profile_id.clone();
-                                    move |value| Message::RNodeCodingRateChanged {
-                                        profile_id: profile_id.clone(),
-                                        value,
+                                    move |value| {
+                                        Message::Interface(
+                                            InterfaceMessage::RNodeCodingRateChanged {
+                                                profile_id: profile_id.clone(),
+                                                value,
+                                            },
+                                        )
                                     }
                                 })
                                 .padding(6),
@@ -383,14 +436,20 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
         .unwrap_or_else(|| "No generated Reticulum config preview loaded.".into());
 
     let mut interface_setup_actions = vec![
-        omen_button("Add TCP Gateway", Message::CreateTcpClientInterface),
-        subtle_button("Add I2P", Message::CreateI2pInterface),
-        subtle_button("Add RNode", Message::CreateRNodeInterface),
+        omen_button(
+            "Add TCP Gateway",
+            Message::Interface(InterfaceMessage::CreateTcpClient),
+        ),
+        subtle_button("Add I2P", Message::Interface(InterfaceMessage::CreateI2p)),
+        subtle_button(
+            "Add RNode",
+            Message::Interface(InterfaceMessage::CreateRNode),
+        ),
     ];
     interface_setup_actions.extend(desktop.gateway_preset_buttons());
     interface_setup_actions.push(subtle_button(
         "Settings",
-        Message::SwitchSection(WorkspaceSection::Settings),
+        Message::Shell(ShellMessage::SwitchSection(WorkspaceSection::Settings)),
     ));
 
     let mut native_runtime_body = column![
@@ -418,13 +477,34 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
     native_runtime_body = native_runtime_body
         .push(action_grid(
             vec![
-                omen_button("Start Native Runtime", Message::StartNativeRuntime),
-                subtle_button("Preview Config", Message::PreviewManagedConfig),
-                subtle_button("Export Config", Message::ExportManagedConfig),
-                subtle_button("Preflight", Message::NativePreflight),
-                subtle_button("Dry Smoke", Message::NativeSmokeDryRun),
-                subtle_button("Live Probe", Message::NativeSmokeLiveProbe),
-                omen_button("Live Fetch", Message::NativeLiveFetchValidate),
+                omen_button(
+                    "Start Native Runtime",
+                    Message::Runtime(RuntimeMessage::StartNativeRuntime),
+                ),
+                subtle_button(
+                    "Preview Config",
+                    Message::Diagnostics(DiagnosticsMessage::PreviewManagedConfig),
+                ),
+                subtle_button(
+                    "Export Config",
+                    Message::Diagnostics(DiagnosticsMessage::ExportManagedConfig),
+                ),
+                subtle_button(
+                    "Preflight",
+                    Message::Diagnostics(DiagnosticsMessage::NativePreflight),
+                ),
+                subtle_button(
+                    "Dry Smoke",
+                    Message::Diagnostics(DiagnosticsMessage::NativeSmokeDryRun),
+                ),
+                subtle_button(
+                    "Live Probe",
+                    Message::Diagnostics(DiagnosticsMessage::NativeSmokeLiveProbe),
+                ),
+                omen_button(
+                    "Live Fetch",
+                    Message::Diagnostics(DiagnosticsMessage::NativeLiveFetchValidate),
+                ),
             ],
             4,
         ))
@@ -482,8 +562,14 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                 text("This removes the profile and reapplies the generated config. The last remaining profile cannot be deleted.")
                     .size(ui_size(13)),
                 row![
-                    warning_button("Confirm Delete", Message::ConfirmInterfaceDelete),
-                    subtle_button("Cancel", Message::CancelInterfaceDelete),
+                    warning_button(
+                        "Confirm Delete",
+                        Message::Interface(InterfaceMessage::ConfirmDelete)
+                    ),
+                    subtle_button(
+                        "Cancel",
+                        Message::Interface(InterfaceMessage::CancelDelete)
+                    ),
                 ]
                 .spacing(10)
                 .wrap(),

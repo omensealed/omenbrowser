@@ -58,10 +58,19 @@ impl DesktopApp {
     }
 
     pub(in crate::desktop) fn workspace_scroll_pane_is_visible(&self, pane: DesktopPane) -> bool {
+        self.workspace_pane_is_visible(&pane)
+    }
+
+    pub(in crate::desktop) fn workspace_pane_is_visible(&self, pane: &DesktopPane) -> bool {
         matches!(
             self.app.workspace.active_section,
             WorkspaceSection::Browser | WorkspaceSection::Messages
-        ) && self.find_workspace_pane(&pane).is_some()
+        ) && self.find_workspace_pane(pane).is_some_and(|pane_id| {
+            self.workspace
+                .workspace_panes
+                .maximized()
+                .is_none_or(|maximized| maximized == pane_id)
+        })
     }
 
     pub(in crate::desktop) fn schedule_visible_workspace_scroll_restore(&mut self, ticks: u8) {

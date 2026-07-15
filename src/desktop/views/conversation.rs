@@ -57,16 +57,20 @@ pub(in crate::desktop) fn messages_view_for_conversation(
                 "LXMF peer destination hash",
                 conversation.peer_hash.as_str()
             )
-            .on_input(move |value| Message::ConversationPanePeerChanged {
-                conversation_id,
-                value,
-            })
-            .width(Length::Fill),
-            text_input("subject", &conversation.draft_title)
-                .on_input(move |value| Message::ConversationPaneTitleChanged {
+            .on_input(
+                move |value| Message::Conversation(ConversationMessage::PanePeerChanged {
                     conversation_id,
                     value,
                 })
+            )
+            .width(Length::Fill),
+            text_input("subject", &conversation.draft_title)
+                .on_input(move |value| Message::Conversation(
+                    ConversationMessage::PaneTitleChanged {
+                        conversation_id,
+                        value,
+                    }
+                ))
                 .width(Length::Fill),
             desktop
                 .conversation
@@ -74,9 +78,11 @@ pub(in crate::desktop) fn messages_view_for_conversation(
                 .get(&conversation_id)
                 .map(|editor| {
                     let editor_element: Element<'_, Message> = text_editor(editor)
-                        .on_action(move |action| Message::ConversationPaneBodyEdited {
-                            conversation_id,
-                            action,
+                        .on_action(move |action| {
+                            Message::Conversation(ConversationMessage::PaneBodyEdited {
+                                conversation_id,
+                                action,
+                            })
                         })
                         .wrapping(Wrapping::WordOrGlyph)
                         .height(Length::Fixed(112.0))
@@ -85,9 +91,11 @@ pub(in crate::desktop) fn messages_view_for_conversation(
                 })
                 .unwrap_or_else(|| {
                     text_input("message body", &conversation.draft_body)
-                        .on_input(move |value| Message::ConversationPaneBodyChanged {
-                            conversation_id,
-                            value,
+                        .on_input(move |value| {
+                            Message::Conversation(ConversationMessage::PaneBodyChanged {
+                                conversation_id,
+                                value,
+                            })
                         })
                         .width(Length::Fill)
                         .into()
@@ -98,7 +106,9 @@ pub(in crate::desktop) fn messages_view_for_conversation(
             row![
                 tooltip_button(
                     button(centered_toolbar_icon(ICON_ATTACH))
-                        .on_press(Message::PickConversationAttachment(conversation_id))
+                        .on_press(Message::Conversation(ConversationMessage::PickAttachment(
+                            conversation_id,
+                        )))
                         .padding(0)
                         .width(Length::Fixed(toolbar_icon_button_side()))
                         .height(Length::Fixed(toolbar_icon_button_side()))
@@ -107,7 +117,9 @@ pub(in crate::desktop) fn messages_view_for_conversation(
                 ),
                 subtle_button(
                     "Delivery",
-                    Message::ToggleConversationPaneDeliveryMode(conversation_id)
+                    Message::Conversation(ConversationMessage::TogglePaneDeliveryMode(
+                        conversation_id,
+                    ))
                 ),
                 subtle_button(
                     if conversation.include_ticket {
@@ -115,22 +127,33 @@ pub(in crate::desktop) fn messages_view_for_conversation(
                     } else {
                         "Ticket Off"
                     },
-                    Message::ToggleConversationPaneTicket(conversation_id)
+                    Message::Conversation(ConversationMessage::TogglePaneTicket(conversation_id))
                 ),
-                omen_button("Send", Message::SendConversationPaneDraft(conversation_id)),
+                omen_button(
+                    "Send",
+                    Message::Conversation(ConversationMessage::SendPaneDraft(conversation_id)),
+                ),
                 subtle_button(
                     "Path",
-                    Message::RequestConversationPanePeerPath(conversation_id)
+                    Message::Conversation(ConversationMessage::RequestPanePeerPath(
+                        conversation_id,
+                    ))
                 ),
-                subtle_button("Sync Propagation", Message::SyncPropagationNow),
-                subtle_button("Sync", Message::SyncMessages),
+                subtle_button(
+                    "Sync Propagation",
+                    Message::Diagnostics(super::super::DiagnosticsMessage::SyncPropagationNow)
+                ),
+                subtle_button(
+                    "Sync",
+                    Message::Conversation(ConversationMessage::SyncMessages),
+                ),
                 subtle_button(
                     trust_label,
-                    Message::ToggleConversationPaneTrust(conversation_id)
+                    Message::Conversation(ConversationMessage::TogglePaneTrust(conversation_id))
                 ),
                 subtle_button(
                     "Diag",
-                    Message::ConversationPaneDiagnostics(conversation_id)
+                    Message::Conversation(ConversationMessage::PaneDiagnostics(conversation_id))
                 ),
             ]
             .spacing(8)
@@ -141,9 +164,11 @@ pub(in crate::desktop) fn messages_view_for_conversation(
 
     let message_scroll = app_scrollable(column![messages, selected_details].spacing(12))
         .id(conversation_scroll_id(conversation_id))
-        .on_scroll(move |viewport: Viewport| Message::ConversationScrolled {
-            conversation_id,
-            offset: sanitize_scroll_offset(viewport.relative_offset()),
+        .on_scroll(move |viewport: Viewport| {
+            Message::Conversation(ConversationMessage::Scrolled {
+                conversation_id,
+                offset: sanitize_scroll_offset(viewport.relative_offset()),
+            })
         })
         .height(Length::Fill)
         .width(Length::Fill);
@@ -155,7 +180,7 @@ pub(in crate::desktop) fn messages_view_for_conversation(
                     text("You're viewing older messages").size(ui_size(12)),
                     omen_button(
                         "Jump To Present",
-                        Message::JumpConversationToPresent(conversation_id),
+                        Message::Conversation(ConversationMessage::JumpToPresent(conversation_id)),
                     )
                 ]
                 .spacing(6)

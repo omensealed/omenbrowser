@@ -1,7 +1,9 @@
 use super::*;
 use crate::app::App;
 use crate::chat::ChatSessionId;
-use crate::desktop::omenchat_scroll_id;
+use crate::desktop::{
+    omenchat_scroll_id, ConversationMessage, OmenChatMessage, ShellMessage, WorkspacePaneMessage,
+};
 use iced::widget::pane_grid;
 
 fn desktop_with_temp_root(name: &str) -> DesktopApp {
@@ -100,10 +102,9 @@ fn resizing_workspace_pane_preserves_visible_chat_scrollback_position() {
         .next()
         .expect("conversation split");
 
-    let _ = desktop.update(Message::WorkspacePaneResized(pane_grid::ResizeEvent {
-        split,
-        ratio: 0.42,
-    }));
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::Resized(
+        pane_grid::ResizeEvent { split, ratio: 0.42 },
+    )));
 
     assert_eq!(
         desktop.conversation.scroll_offsets.get(&conversation_id),
@@ -134,14 +135,13 @@ fn resizing_workspace_pane_keeps_bottom_anchored_chat_at_bottom() {
         .next()
         .expect("conversation split");
 
-    let _ = desktop.update(Message::WorkspacePaneResized(pane_grid::ResizeEvent {
-        split,
-        ratio: 0.42,
-    }));
-    let _ = desktop.update(Message::ConversationScrolled {
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::Resized(
+        pane_grid::ResizeEvent { split, ratio: 0.42 },
+    )));
+    let _ = desktop.update(Message::Conversation(ConversationMessage::Scrolled {
         conversation_id,
         offset: RelativeOffset { x: 0.0, y: 0.0 },
-    });
+    }));
 
     assert_eq!(
         desktop.conversation.scroll_offsets.get(&conversation_id),
@@ -198,6 +198,27 @@ fn new_conversation_messages_follow_bottom_when_already_at_present() {
 }
 
 #[test]
+fn handled_conversation_messages_reconcile_follow_bottom_without_a_tick() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-conversation-event-snap");
+    let conversation_id = desktop.app.active_conversation().id;
+    desktop.ensure_pane_for_active_conversation();
+    desktop
+        .conversation
+        .message_counts
+        .insert(conversation_id, 0);
+    push_conversation_message(&mut desktop, conversation_id, "event boundary");
+
+    let _ = desktop.update(Message::Conversation(ConversationMessage::BodyChanged(
+        String::new(),
+    )));
+
+    assert_eq!(
+        desktop.conversation.message_counts.get(&conversation_id),
+        Some(&1)
+    );
+}
+
+#[test]
 fn conversation_history_notice_requires_meaningful_scrollback() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-conversation-history-notice");
     let conversation_id = desktop.app.active_conversation().id;
@@ -243,15 +264,32 @@ fn programmatic_conversation_scroll_restore_does_not_persist_top_callback() {
         .insert(conversation_id, saved_offset);
 
     desktop.schedule_visible_workspace_scroll_restore(2);
-    let _ = desktop.update(Message::ConversationScrolled {
+    let _ = desktop.update(Message::Conversation(ConversationMessage::Scrolled {
         conversation_id,
         offset: RelativeOffset { x: 0.0, y: 0.0 },
-    });
+    }));
 
     assert_eq!(
         desktop.conversation.scroll_offsets.get(&conversation_id),
         Some(&saved_offset)
     );
+}
+
+#[test]
+fn scroll_settling_advances_only_from_its_conditional_subscription() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-scroll-deadline");
+    desktop.schedule_visible_workspace_bottom_anchor(2);
+    let initial_restore_ticks = desktop.workspace.restore_workspace_scrolls_remaining;
+
+    let _ = desktop.update_workspace_scroll_tick();
+    assert_eq!(
+        desktop.workspace.restore_workspace_scrolls_remaining,
+        initial_restore_ticks - 1
+    );
+    assert_eq!(desktop.workspace.pending_workspace_bottom_anchor_ticks, 1);
+
+    let _ = desktop.update_workspace_scroll_tick();
+    assert_eq!(desktop.workspace.pending_workspace_bottom_anchor_ticks, 0);
 }
 
 #[test]
@@ -265,11 +303,13 @@ fn hidden_workspace_conversation_scroll_callback_does_not_persist_top_offset() {
         .scroll_offsets
         .insert(conversation_id, saved_offset);
 
-    let _ = desktop.update(Message::SwitchSection(WorkspaceSection::Logs));
-    let _ = desktop.update(Message::ConversationScrolled {
+    let _ = desktop.update(Message::Shell(ShellMessage::SwitchSection(
+        WorkspaceSection::Logs,
+    )));
+    let _ = desktop.update(Message::Conversation(ConversationMessage::Scrolled {
         conversation_id,
         offset: RelativeOffset { x: 0.0, y: 0.0 },
-    });
+    }));
 
     assert_eq!(
         desktop.conversation.scroll_offsets.get(&conversation_id),
@@ -310,10 +350,12 @@ fn omenchat_upload_picker_cancel_does_not_touch_scroll_restore() {
         .restore_workspace_scroll_locks_release_pending = false;
     desktop.omenchat.chat_scroll_bottom_locks.clear();
 
-    let _ = desktop.update(Message::OmenChatUploadPicked {
-        session_id,
-        result: Ok(None),
-    });
+    let _ = desktop.update(Message::OmenChatMediaCompletion(
+        crate::desktop::OmenChatMediaCompletionMessage::UploadPicked {
+            session_id,
+            result: Ok(None),
+        },
+    ));
 
     assert!(!desktop.workspace.restore_workspace_scrolls_pending);
     assert!(!desktop
@@ -379,6 +421,28 @@ fn new_omenchat_events_follow_bottom_when_already_at_present() {
 }
 
 #[test]
+fn handled_omenchat_messages_reconcile_follow_bottom_without_a_tick() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-event-snap");
+    let session_id = open_test_omenchat_session(&mut desktop);
+    let _ = desktop.restore_desktop_pane(DesktopPane::OmenChat(session_id));
+    desktop
+        .omenchat
+        .chat_event_counts
+        .insert((session_id, 1), 0);
+    push_omenchat_message(&mut desktop, session_id, "event boundary");
+
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::DraftChanged {
+        session_id,
+        value: String::new(),
+    }));
+
+    assert_eq!(
+        desktop.omenchat.chat_event_counts.get(&(session_id, 1)),
+        Some(&1)
+    );
+}
+
+#[test]
 fn omenchat_history_notice_requires_meaningful_scrollback() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-history-notice");
     let session_id = open_test_omenchat_session(&mut desktop);
@@ -408,11 +472,11 @@ fn programmatic_omenchat_scroll_restore_does_not_persist_top_callback() {
         .insert((session_id, 1), saved_offset);
 
     desktop.schedule_visible_workspace_scroll_restore(2);
-    let _ = desktop.update(Message::OmenChatScrolled {
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::Scrolled {
         session_id,
         room_id: 1,
         offset: RelativeOffset { x: 0.0, y: 0.0 },
-    });
+    }));
 
     assert_eq!(
         desktop
@@ -435,12 +499,14 @@ fn hidden_workspace_omenchat_scroll_callback_does_not_persist_top_offset() {
         .chat_scroll_offsets
         .insert((session_id, 1), saved_offset);
 
-    let _ = desktop.update(Message::SwitchSection(WorkspaceSection::Logs));
-    let _ = desktop.update(Message::OmenChatScrolled {
+    let _ = desktop.update(Message::Shell(ShellMessage::SwitchSection(
+        WorkspaceSection::Logs,
+    )));
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::Scrolled {
         session_id,
         room_id: 1,
         offset: RelativeOffset { x: 0.0, y: 0.0 },
-    });
+    }));
 
     assert_eq!(
         desktop

@@ -22,14 +22,14 @@ pub fn render(frame: &mut Frame, app: &App) {
             Constraint::Min(10),
             Constraint::Length(2),
         ])
-        .split(frame.size());
+        .split(frame.area());
 
     render_header(frame, root[0], app);
     render_body(frame, root[1], app);
     render_footer(frame, root[2], app);
 
     if app.workspace.show_help {
-        render_help(frame, centered_rect(70, 50, frame.size()));
+        render_help(frame, centered_rect(70, 50, frame.area()));
     }
 }
 
@@ -706,18 +706,17 @@ fn selected_interface_detail(
         InterfaceEditField::TcpIfacNetworkName,
     )
     .unwrap_or_else(|| profile.network_name.clone());
-    let ifac_passphrase = active_interface_value(
-        app,
-        &profile.profile_id,
-        InterfaceEditField::TcpIfacPassphrase,
-    )
-    .unwrap_or_else(|| {
-        if profile.passphrase.is_empty() {
-            "not set".into()
-        } else {
-            "configured".into()
-        }
+    let passphrase_edit_active = app.input.active.as_ref().is_some_and(|active| {
+        matches!(
+            &active.target,
+            InputTarget::InterfaceField {
+                profile_id,
+                field: InterfaceEditField::TcpIfacPassphrase,
+            } if profile_id == &profile.profile_id
+        )
     });
+    let ifac_passphrase =
+        masked_passphrase_status(passphrase_edit_active, !profile.passphrase.is_empty());
     let peers = active_interface_value(app, &profile.profile_id, InterfaceEditField::I2pPeers)
         .unwrap_or_else(|| profile.peers.join(", "));
     let device_port = active_interface_value(
@@ -833,6 +832,16 @@ fn active_interface_value(
             Some(active.buffer.display_with_cursor())
         }
         _ => None,
+    }
+}
+
+fn masked_passphrase_status(edit_active: bool, configured: bool) -> &'static str {
+    if edit_active {
+        "editing (hidden)"
+    } else if configured {
+        "configured"
+    } else {
+        "not set"
     }
 }
 
@@ -1244,6 +1253,7 @@ fn diagnostics_known_destinations_input(app: &App) -> String {
 
 fn render_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
     let native_readiness = app.native_reticulum_readiness();
+    let log_metrics = app.structured_log_worker_metrics();
     let mut content = vec![
         Line::from("[preview] redacted JSON | [export] write JSON | [clear] preview/export state"),
         Line::from("[probe dry-run] active browser address | [probe live] active browser address"),
@@ -1286,6 +1296,23 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
             app.paths.reticulum_storage_dir.display()
         )),
         Line::from(app.native_lxmf_sdk_rpc_probe_line()),
+        Line::from(format!(
+            "structured log queue: items={} bytes={} oldest_ms={} dropped={} completed={}",
+            log_metrics.queued_items,
+            log_metrics.queued_bytes,
+            log_metrics.oldest_age_ms,
+            log_metrics.dropped_records,
+            log_metrics.completed_records
+        )),
+        Line::from(format!(
+            "structured log disk: write_failures={} rotations={} removed={} removal_failures={} unsafe_refused={} truncated_scans={}",
+            log_metrics.write_failures,
+            log_metrics.rotations,
+            log_metrics.removed_files,
+            log_metrics.removal_failures,
+            log_metrics.unsafe_paths_refused,
+            log_metrics.truncated_directory_scans
+        )),
         Line::from(
             app.diagnostics_state
                 .last_snapshot
@@ -1664,33 +1691,42 @@ fn json_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String>
 }
 
 fn render_logs(frame: &mut Frame, area: Rect, app: &App) {
+    let metrics = app.structured_log_worker_metrics();
+    let worker_status = Line::from(format!(
+        "writer: queued={}/{} bytes oldest_ms={} dropped={} completed={} write_failures={} unsafe_refused={}",
+        metrics.queued_items,
+        metrics.queued_bytes,
+        metrics.oldest_age_ms,
+        metrics.dropped_records,
+        metrics.completed_records,
+        metrics.write_failures,
+        metrics.unsafe_paths_refused
+    ));
     let content = if app.logs.entries.is_empty() {
-        app.logs
-            .lines
-            .iter()
-            .cloned()
-            .map(Line::from)
+        std::iter::once(worker_status)
+            .chain(app.logs.lines.iter().cloned().map(Line::from))
             .collect::<Vec<_>>()
     } else {
         let filtered = app.logs.filtered_entries();
-        std::iter::once(Line::from(format!(
-            "filters: severity={} source={} | f severity | s source",
-            app.logs
-                .severity_filter
-                .map(|severity| format!("{severity:?}"))
-                .unwrap_or_else(|| "all".into()),
-            app.logs
-                .source_filter
-                .map(|source| format!("{source:?}"))
-                .unwrap_or_else(|| "all".into())
-        )))
-        .chain(filtered.into_iter().map(|entry| {
-            Line::from(format!(
-                "{} {:?} {:?} {}",
-                entry.epoch_ms, entry.severity, entry.source, entry.message
-            ))
-        }))
-        .collect::<Vec<_>>()
+        std::iter::once(worker_status)
+            .chain(std::iter::once(Line::from(format!(
+                "filters: severity={} source={} | f severity | s source",
+                app.logs
+                    .severity_filter
+                    .map(|severity| format!("{severity:?}"))
+                    .unwrap_or_else(|| "all".into()),
+                app.logs
+                    .source_filter
+                    .map(|source| format!("{source:?}"))
+                    .unwrap_or_else(|| "all".into())
+            ))))
+            .chain(filtered.into_iter().map(|entry| {
+                Line::from(format!(
+                    "{} {:?} {:?} {}",
+                    entry.epoch_ms, entry.severity, entry.source, entry.message
+                ))
+            }))
+            .collect::<Vec<_>>()
     };
     frame.render_widget(
         Paragraph::new(content).block(
@@ -1797,7 +1833,7 @@ fn render_placeholder(frame: &mut Frame, area: Rect, section: WorkspaceSection) 
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let help = Line::from(vec![
-        Span::raw(" q quit | Tab focus | mouse select | PgUp/PgDn scroll | Ctrl-t tab | Ctrl-w close | Ctrl-f partials | Ctrl-n convo | ? help "),
+        Span::raw(" q/Ctrl-c quit | Tab focus | mouse select | PgUp/PgDn scroll | Ctrl-t tab | Ctrl-w close | Ctrl-f partials | Ctrl-n convo | ? help "),
     ]);
     let lines = vec![status::status_line(&app.status), help];
     frame.render_widget(Paragraph::new(lines), area);
@@ -1807,7 +1843,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, area);
     let help = Paragraph::new(vec![
         Line::from("OMENbrowser_rs starter keys"),
-        Line::from("q exits"),
+        Line::from("q or Ctrl-c exits"),
         Line::from("Tab cycles focus"),
         Line::from("In browser workspace, Tab cycles Micron controls when controls are present"),
         Line::from("Ctrl-t creates a browser tab"),
@@ -1854,4 +1890,17 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::masked_passphrase_status;
+
+    #[test]
+    fn passphrase_status_never_renders_the_active_secret() {
+        assert_eq!(masked_passphrase_status(true, true), "editing (hidden)");
+        assert_eq!(masked_passphrase_status(true, false), "editing (hidden)");
+        assert_eq!(masked_passphrase_status(false, true), "configured");
+        assert_eq!(masked_passphrase_status(false, false), "not set");
+    }
 }

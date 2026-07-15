@@ -1,4 +1,10 @@
-use super::model::{ChatEvent, ChatEventKind, ChatRoomSummary, ChatServerSummary, ChatUserSummary};
+use super::model::{
+    ChatEvent, ChatEventKind, ChatRoomSummary, ChatServerSummary, ChatUserSummary,
+    CHAT_CLIENT_MAX_SESSIONS, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES,
+    CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES, CHAT_SERVER_ID_MAX_BYTES,
+    CHAT_SESSION_MAX_ROOMS, CHAT_SESSION_MAX_ROOM_BYTES, CHAT_SESSION_MAX_USERS,
+    CHAT_SESSION_MAX_USER_BYTES, CHAT_USER_DISPLAY_MAX_BYTES,
+};
 use super::protocol::{EventId, RoomId, ServerId};
 use anyhow::Context;
 
@@ -90,15 +96,29 @@ impl ChatStore for SqliteChatStore {
 
     fn saved_servers(&self) -> anyhow::Result<Vec<ChatServerSummary>> {
         let mut statement = self.connection.prepare(
-            "SELECT server_id, destination, display_name FROM saved_servers ORDER BY display_name",
+            "SELECT server_id, destination, display_name
+             FROM saved_servers
+             WHERE length(CAST(server_id AS BLOB)) <= ?2
+               AND length(CAST(destination AS BLOB)) <= ?3
+               AND length(CAST(display_name AS BLOB)) <= ?4
+             ORDER BY display_name
+             LIMIT ?1",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok(ChatServerSummary {
-                server_id: row.get(0)?,
-                destination: row.get(1)?,
-                display_name: row.get(2)?,
-            })
-        })?;
+        let rows = statement.query_map(
+            (
+                CHAT_CLIENT_MAX_SESSIONS as i64,
+                CHAT_SERVER_ID_MAX_BYTES as i64,
+                CHAT_SERVER_DESTINATION_MAX_BYTES as i64,
+                CHAT_SERVER_DISPLAY_MAX_BYTES as i64,
+            ),
+            |row| {
+                Ok(ChatServerSummary {
+                    server_id: row.get(0)?,
+                    destination: row.get(1)?,
+                    display_name: row.get(2)?,
+                })
+            },
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -169,19 +189,51 @@ impl ChatStore for SqliteChatStore {
             "SELECT server_id, room_id, name, topic, joined
              FROM rooms
              WHERE server_id = ?1
-             ORDER BY name",
+               AND length(server_id) + length(name) + COALESCE(length(topic), 0) <= ?2
+               AND length(CAST(name AS BLOB)) <= ?4
+               AND COALESCE(length(CAST(topic AS BLOB)), 0) <= ?5
+             ORDER BY
+               room_id = COALESCE(
+                 (SELECT active_room_id FROM saved_servers WHERE server_id = ?1), -1
+               ) DESC,
+               joined DESC,
+               name
+             LIMIT ?3",
         )?;
-        let rows = statement.query_map([server_id], |row| {
-            Ok(ChatRoomSummary {
-                server_id: row.get(0)?,
-                room_id: row.get::<_, i64>(1)? as RoomId,
-                name: row.get(2)?,
-                topic: row.get(3)?,
-                unread: 0,
-                joined: row.get::<_, i64>(4)? != 0,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let rows = statement.query_map(
+            (
+                server_id,
+                CHAT_SESSION_MAX_ROOM_BYTES as i64,
+                CHAT_SESSION_MAX_ROOMS as i64,
+                CHAT_ROOM_NAME_MAX_BYTES as i64,
+                CHAT_ROOM_TOPIC_MAX_BYTES as i64,
+            ),
+            |row| {
+                Ok(ChatRoomSummary {
+                    server_id: row.get(0)?,
+                    room_id: row.get::<_, i64>(1)? as RoomId,
+                    name: row.get(2)?,
+                    topic: row.get(3)?,
+                    unread: 0,
+                    joined: row.get::<_, i64>(4)? != 0,
+                })
+            },
+        )?;
+        let mut rooms = Vec::with_capacity(CHAT_SESSION_MAX_ROOMS);
+        let mut retained_bytes = 0_usize;
+        for room in rows {
+            let room = room?;
+            let room_bytes = std::mem::size_of::<ChatRoomSummary>()
+                .saturating_add(room.server_id.len())
+                .saturating_add(room.name.len())
+                .saturating_add(room.topic.as_ref().map_or(0, String::len));
+            if retained_bytes.saturating_add(room_bytes) > CHAT_SESSION_MAX_ROOM_BYTES {
+                break;
+            }
+            retained_bytes = retained_bytes.saturating_add(room_bytes);
+            rooms.push(room);
+        }
+        Ok(rooms)
     }
 
     fn replace_userlist(
@@ -233,19 +285,44 @@ impl ChatStore for SqliteChatStore {
              FROM room_userlist r
              JOIN users u ON u.server_id = r.server_id AND u.user_id = r.user_id
              WHERE r.server_id = ?1 AND r.room_id = ?2
-             ORDER BY u.display_name",
+               AND length(u.server_id) + length(u.display_name) <= ?3
+               AND length(CAST(u.display_name AS BLOB)) <= ?5
+             ORDER BY u.display_name
+             LIMIT ?4",
         )?;
-        let rows = statement.query_map((server_id, room_id), |row| {
-            Ok(ChatUserSummary {
-                server_id: row.get(0)?,
-                user_id: row.get::<_, i64>(1)? as u32,
-                display_name: row.get(2)?,
-                role_bits: row.get::<_, i64>(3)? as u64,
-                status_bits: row.get::<_, i64>(4)? as u32,
-                lxmf_available: row.get::<_, i64>(5)? != 0,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let rows = statement.query_map(
+            (
+                server_id,
+                room_id,
+                CHAT_SESSION_MAX_USER_BYTES as i64,
+                CHAT_SESSION_MAX_USERS as i64,
+                CHAT_USER_DISPLAY_MAX_BYTES as i64,
+            ),
+            |row| {
+                Ok(ChatUserSummary {
+                    server_id: row.get(0)?,
+                    user_id: row.get::<_, i64>(1)? as u32,
+                    display_name: row.get(2)?,
+                    role_bits: row.get::<_, i64>(3)? as u64,
+                    status_bits: row.get::<_, i64>(4)? as u32,
+                    lxmf_available: row.get::<_, i64>(5)? != 0,
+                })
+            },
+        )?;
+        let mut users = Vec::with_capacity(CHAT_SESSION_MAX_USERS);
+        let mut retained_bytes = 0_usize;
+        for user in rows {
+            let user = user?;
+            let user_bytes = std::mem::size_of::<ChatUserSummary>()
+                .saturating_add(user.server_id.len())
+                .saturating_add(user.display_name.len());
+            if retained_bytes.saturating_add(user_bytes) > CHAT_SESSION_MAX_USER_BYTES {
+                break;
+            }
+            retained_bytes = retained_bytes.saturating_add(user_bytes);
+            users.push(user);
+        }
+        Ok(users)
     }
 
     fn append_events(&mut self, events: Vec<ChatEvent>) -> anyhow::Result<()> {
@@ -533,6 +610,179 @@ mod tests {
             .expect("users for room");
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].display_name, "Bob");
+    }
+
+    #[test]
+    fn sqlite_catalog_reads_apply_item_and_byte_admission_limits() {
+        let mut store = SqliteChatStore::in_memory().expect("store");
+        for index in 0..=CHAT_CLIENT_MAX_SESSIONS {
+            store
+                .save_server(ChatServerSummary {
+                    server_id: format!("server-{index:04}"),
+                    destination: format!("destination-{index:04}"),
+                    display_name: format!("Server {index:04}"),
+                })
+                .expect("save server");
+        }
+        assert_eq!(
+            store.saved_servers().expect("bounded servers").len(),
+            CHAT_CLIENT_MAX_SESSIONS
+        );
+
+        let server = ChatServerSummary {
+            server_id: "catalog-server".into(),
+            destination: "catalog-destination".into(),
+            display_name: "Catalog Server".into(),
+        };
+        store
+            .save_server(server.clone())
+            .expect("save catalog server");
+        for room_id in 1..=CHAT_SESSION_MAX_ROOMS as RoomId + 1 {
+            store
+                .save_room(ChatRoomSummary {
+                    server_id: server.server_id.clone(),
+                    room_id,
+                    name: format!("room-{room_id:04}"),
+                    topic: None,
+                    unread: 0,
+                    joined: room_id % 2 == 0,
+                })
+                .expect("save room");
+        }
+        let active_room_id = CHAT_SESSION_MAX_ROOMS as RoomId + 1;
+        store
+            .set_active_room(&server.server_id, active_room_id)
+            .expect("set active room");
+        let rooms = store
+            .rooms_for_server(&server.server_id)
+            .expect("bounded rooms");
+        assert_eq!(rooms.len(), CHAT_SESSION_MAX_ROOMS);
+        assert_eq!(rooms[0].room_id, active_room_id);
+
+        let users = (1..=CHAT_SESSION_MAX_USERS as u32 + 1)
+            .map(|user_id| ChatUserSummary {
+                server_id: server.server_id.clone(),
+                user_id,
+                display_name: format!("user-{user_id:04}"),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+            })
+            .collect();
+        store
+            .replace_userlist(&server.server_id, active_room_id, users)
+            .expect("save users");
+        assert_eq!(
+            store
+                .users_for_room(&server.server_id, active_room_id)
+                .expect("bounded users")
+                .len(),
+            CHAT_SESSION_MAX_USERS
+        );
+
+        store
+            .save_room(ChatRoomSummary {
+                server_id: server.server_id.clone(),
+                room_id: active_room_id + 1,
+                name: "x".repeat(CHAT_SESSION_MAX_ROOM_BYTES + 1),
+                topic: None,
+                unread: 0,
+                joined: true,
+            })
+            .expect("save oversized room");
+        assert!(store
+            .rooms_for_server(&server.server_id)
+            .expect("rooms after oversized row")
+            .iter()
+            .all(|room| room.room_id != active_room_id + 1));
+    }
+
+    #[test]
+    fn sqlite_presentation_metadata_reads_reject_oversized_rows() {
+        let mut store = SqliteChatStore::in_memory().expect("store");
+        let server = sample_server();
+        store.save_server(server.clone()).expect("save server");
+        store
+            .save_server(ChatServerSummary {
+                server_id: "oversized-server".into(),
+                destination: "destination".into(),
+                display_name: "☃".repeat(CHAT_SERVER_DISPLAY_MAX_BYTES),
+            })
+            .expect("save oversized server");
+        assert_eq!(
+            store.saved_servers().expect("bounded servers"),
+            vec![server.clone()]
+        );
+
+        store
+            .save_room(ChatRoomSummary {
+                server_id: server.server_id.clone(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            })
+            .expect("save valid room");
+        store
+            .save_room(ChatRoomSummary {
+                server_id: server.server_id.clone(),
+                room_id: 2,
+                name: "r".repeat(CHAT_ROOM_NAME_MAX_BYTES + 1),
+                topic: None,
+                unread: 0,
+                joined: false,
+            })
+            .expect("save oversized room name");
+        store
+            .save_room(ChatRoomSummary {
+                server_id: server.server_id.clone(),
+                room_id: 3,
+                name: "topic".into(),
+                topic: Some("t".repeat(CHAT_ROOM_TOPIC_MAX_BYTES + 1)),
+                unread: 0,
+                joined: false,
+            })
+            .expect("save oversized topic");
+        assert_eq!(
+            store
+                .rooms_for_server(&server.server_id)
+                .expect("bounded rooms")
+                .len(),
+            1
+        );
+
+        store
+            .replace_userlist(
+                &server.server_id,
+                1,
+                vec![
+                    ChatUserSummary {
+                        server_id: server.server_id.clone(),
+                        user_id: 1,
+                        display_name: "Alice".into(),
+                        role_bits: 0,
+                        status_bits: 0,
+                        lxmf_available: false,
+                    },
+                    ChatUserSummary {
+                        server_id: server.server_id.clone(),
+                        user_id: 2,
+                        display_name: "u".repeat(CHAT_USER_DISPLAY_MAX_BYTES + 1),
+                        role_bits: 0,
+                        status_bits: 0,
+                        lxmf_available: false,
+                    },
+                ],
+            )
+            .expect("save users");
+        assert_eq!(
+            store
+                .users_for_room(&server.server_id, 1)
+                .expect("bounded users")
+                .len(),
+            1
+        );
     }
 
     #[test]

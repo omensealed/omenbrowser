@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS upload_files (
   created_at INTEGER NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_upload_files_actor_created
+ON upload_files(actor_user_id, created_at, resource_id);
+
 CREATE TABLE IF NOT EXISTS room_members (
   room_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,

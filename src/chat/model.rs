@@ -1,5 +1,44 @@
 use super::protocol::{EventId, RoomId, ServerId, UserId};
 
+pub const CHAT_CLIENT_MAX_SESSIONS: usize = 64;
+pub const CHAT_SESSION_MAX_ROOMS: usize = 256;
+pub const CHAT_SESSION_MAX_ROOM_BYTES: usize = 512 * 1024;
+pub const CHAT_SESSION_MAX_USERS: usize = 1_024;
+pub const CHAT_SESSION_MAX_USER_BYTES: usize = 1024 * 1024;
+pub const CHAT_SERVER_DISPLAY_MAX_BYTES: usize = 256;
+pub const CHAT_SERVER_ID_MAX_BYTES: usize = 4 * 1024;
+pub const CHAT_SERVER_DESTINATION_MAX_BYTES: usize = 4 * 1024;
+pub const CHAT_ROOM_NAME_MAX_BYTES: usize = 64;
+pub const CHAT_ROOM_TOPIC_MAX_BYTES: usize = 4 * 1024;
+pub const CHAT_USER_DISPLAY_MAX_BYTES: usize = 256;
+pub const CHAT_ACTOR_DISPLAY_MAX_BYTES: usize = 256;
+pub const CHAT_MOTD_MAX_BYTES: usize = 16 * 1024;
+pub const CHAT_STATUS_MAX_BYTES: usize = 4 * 1024;
+pub const CHAT_RESOURCE_ID_MAX_BYTES: usize = 4 * 1024;
+pub const CHAT_UPLOAD_FILENAME_MAX_BYTES: usize = 4 * 1024;
+pub const CHAT_CONTENT_TYPE_MAX_BYTES: usize = 1_024;
+
+pub fn bounded_chat_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    if max_bytes < '…'.len_utf8() {
+        return String::new();
+    }
+    let mut end = max_bytes - '…'.len_utf8();
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let mut bounded = String::with_capacity(max_bytes);
+    bounded.push_str(&value[..end]);
+    bounded.push('…');
+    bounded
+}
+
+pub fn chat_text_fits(value: &str, max_bytes: usize) -> bool {
+    value.len() <= max_bytes
+}
+
 pub const CHAT_STATUS_BANNED: u32 = 1;
 pub const CHAT_STATUS_MUTED: u32 = 1 << 1;
 pub const CHAT_ROLE_TRUSTED: u64 = 1;
@@ -118,6 +157,16 @@ mod tests {
             status_bits,
             lxmf_available: false,
         }
+    }
+
+    #[test]
+    fn bounded_chat_text_preserves_utf8_and_exact_byte_ceiling() {
+        assert_eq!(bounded_chat_text("hello", 5), "hello");
+        let bounded = bounded_chat_text(&"☃".repeat(10), 10);
+        assert!(bounded.is_char_boundary(bounded.len()));
+        assert!(bounded.len() <= 10);
+        assert!(bounded.ends_with('…'));
+        assert_eq!(bounded_chat_text("hello", 2), "");
     }
 
     #[test]

@@ -3,7 +3,7 @@ use iced::widget::scrollable::Status as ScrollableStatus;
 use iced::widget::{button, container};
 use iced::{Background, Border, Color, Shadow, Theme};
 
-use super::{set_desktop_font_size, DesktopApp, Message};
+use super::{set_desktop_font_size, DesktopApp, Message, ThemeMessage};
 
 pub(in crate::desktop) const DESKTOP_THEME_CHOICES: &[&str] = &[
     "default",
@@ -48,12 +48,16 @@ impl DesktopApp {
         message: Message,
     ) -> Result<iced::Task<Message>, Message> {
         match message {
-            Message::SetTheme(theme) => {
+            Message::Theme(ThemeMessage::SetTheme(theme)) => {
                 self.update_set_theme(theme);
                 Ok(iced::Task::none())
             }
-            Message::SetFontSize(size) => {
+            Message::Theme(ThemeMessage::SetFontSize(size)) => {
                 self.update_set_font_size(size);
+                Ok(iced::Task::none())
+            }
+            Message::Theme(ThemeMessage::ToggleReducedMotion) => {
+                self.update_toggle_reduced_motion();
                 Ok(iced::Task::none())
             }
             _ => Err(message),
@@ -67,6 +71,10 @@ impl DesktopApp {
     pub(super) fn update_set_font_size(&mut self, size: u16) {
         self.app.set_settings_font_size(size);
         set_desktop_font_size(size);
+    }
+
+    pub(super) fn update_toggle_reduced_motion(&mut self) {
+        self.app.toggle_settings_reduced_motion();
     }
 }
 

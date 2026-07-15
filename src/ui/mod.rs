@@ -4,6 +4,8 @@ pub mod tabs;
 pub mod workspace;
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -21,20 +23,152 @@ use crate::app::{current_epoch_ms, App};
 use crate::error::AppResult;
 use crate::ui::mouse::MouseAction;
 
-struct TerminalGuard;
+trait TerminalLifecycle {
+    fn enable_raw(&mut self) -> io::Result<()>;
+    fn enter_alternate_screen(&mut self) -> io::Result<()>;
+    fn enable_mouse_capture(&mut self) -> io::Result<()>;
+    fn disable_raw(&mut self) -> io::Result<()>;
+    fn disable_mouse_capture(&mut self) -> io::Result<()>;
+    fn leave_alternate_screen(&mut self) -> io::Result<()>;
+}
 
-impl TerminalGuard {
-    fn enter() -> AppResult<Self> {
-        enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-        Ok(Self)
+struct CrosstermLifecycle;
+
+struct ExternalSignalTask(tokio::task::JoinHandle<()>);
+
+impl ExternalSignalTask {
+    fn install(shutdown_requested: Arc<AtomicBool>) -> Self {
+        Self(tokio::spawn(async move {
+            if let Err(error) = listen_for_external_shutdown(&shutdown_requested).await {
+                tracing::warn!(%error, "failed to listen for TUI shutdown signal");
+            }
+        }))
     }
 }
 
-impl Drop for TerminalGuard {
+impl Drop for ExternalSignalTask {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        self.0.abort();
+    }
+}
+
+#[cfg(unix)]
+async fn listen_for_external_shutdown(shutdown_requested: &AtomicBool) -> io::Result<()> {
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    loop {
+        let (name, received) = tokio::select! {
+            received = interrupt.recv() => ("SIGINT", received),
+            received = terminate.recv() => ("SIGTERM", received),
+        };
+        if received.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("{name} stream closed"),
+            ));
+        }
+        request_external_shutdown(shutdown_requested);
+    }
+}
+
+#[cfg(not(unix))]
+async fn listen_for_external_shutdown(shutdown_requested: &AtomicBool) -> io::Result<()> {
+    loop {
+        tokio::signal::ctrl_c().await?;
+        request_external_shutdown(shutdown_requested);
+    }
+}
+
+fn request_external_shutdown(requested: &AtomicBool) {
+    requested.store(true, Ordering::Release);
+}
+
+impl TerminalLifecycle for CrosstermLifecycle {
+    fn enable_raw(&mut self) -> io::Result<()> {
+        enable_raw_mode()
+    }
+
+    fn enter_alternate_screen(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), EnterAlternateScreen)
+    }
+
+    fn enable_mouse_capture(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), EnableMouseCapture)
+    }
+
+    fn disable_raw(&mut self) -> io::Result<()> {
+        disable_raw_mode()
+    }
+
+    fn disable_mouse_capture(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), DisableMouseCapture)
+    }
+
+    fn leave_alternate_screen(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), LeaveAlternateScreen)
+    }
+}
+
+struct TerminalGuard<L: TerminalLifecycle> {
+    lifecycle: L,
+    raw_enabled: bool,
+    alternate_screen_entered: bool,
+    mouse_capture_enabled: bool,
+}
+
+impl TerminalGuard<CrosstermLifecycle> {
+    fn enter() -> AppResult<Self> {
+        Self::enter_with(CrosstermLifecycle)
+    }
+}
+
+impl<L: TerminalLifecycle> TerminalGuard<L> {
+    fn enter_with(lifecycle: L) -> AppResult<Self> {
+        let mut guard = Self {
+            lifecycle,
+            raw_enabled: false,
+            alternate_screen_entered: false,
+            mouse_capture_enabled: false,
+        };
+
+        guard.raw_enabled = true;
+        if let Err(error) = guard.lifecycle.enable_raw() {
+            guard.restore();
+            return Err(error.into());
+        }
+        guard.alternate_screen_entered = true;
+        if let Err(error) = guard.lifecycle.enter_alternate_screen() {
+            guard.restore();
+            return Err(error.into());
+        }
+        guard.mouse_capture_enabled = true;
+        if let Err(error) = guard.lifecycle.enable_mouse_capture() {
+            guard.restore();
+            return Err(error.into());
+        }
+
+        Ok(guard)
+    }
+
+    fn restore(&mut self) {
+        if self.raw_enabled {
+            let _ = self.lifecycle.disable_raw();
+            self.raw_enabled = false;
+        }
+        if self.mouse_capture_enabled {
+            let _ = self.lifecycle.disable_mouse_capture();
+            self.mouse_capture_enabled = false;
+        }
+        if self.alternate_screen_entered {
+            let _ = self.lifecycle.leave_alternate_screen();
+            self.alternate_screen_entered = false;
+        }
+    }
+}
+
+impl<L: TerminalLifecycle> Drop for TerminalGuard<L> {
+    fn drop(&mut self) {
+        self.restore();
     }
 }
 
@@ -42,9 +176,14 @@ pub async fn run(mut app: App) -> AppResult<()> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
+    let external_shutdown = Arc::new(AtomicBool::new(false));
+    let _signal_task = ExternalSignalTask::install(Arc::clone(&external_shutdown));
     app.start_configured_runtime_nonblocking();
 
     while !app.should_quit() {
+        if apply_external_shutdown(&mut app, &external_shutdown) {
+            continue;
+        }
         let now = current_epoch_ms();
         app.refresh_due_browser_partials(now);
         app.flush_due_ui_preferences(now);
@@ -52,8 +191,8 @@ pub async fn run(mut app: App) -> AppResult<()> {
         app.drain_browser_task_results();
         app.drain_message_task_results();
         app.drain_diagnostics_task_results();
-        let size = terminal.size()?;
-        let (browser_width, browser_height) = mouse::browser_content_inner_size(size);
+        let terminal_area = terminal.size()?.into();
+        let (browser_width, browser_height) = mouse::browser_content_inner_size(terminal_area);
         app.set_browser_viewport(browser_width as usize, browser_height as usize);
         terminal.draw(|frame| workspace::render(frame, &app))?;
         if event::poll(Duration::from_millis(200))? {
@@ -65,7 +204,7 @@ pub async fn run(mut app: App) -> AppResult<()> {
                     app.drain_diagnostics_task_results();
                 }
                 Event::Mouse(mouse) => {
-                    handle_mouse(&mut app, size, mouse).await;
+                    handle_mouse(&mut app, terminal_area, mouse).await;
                     app.drain_browser_task_results();
                     app.drain_message_task_results();
                     app.drain_diagnostics_task_results();
@@ -75,8 +214,21 @@ pub async fn run(mut app: App) -> AppResult<()> {
         }
     }
     app.flush_pending_ui_preferences();
+    let _ = app.flush_structured_logs(Duration::from_secs(3));
 
     Ok(())
+}
+
+fn apply_external_shutdown(app: &mut App, requested: &AtomicBool) -> bool {
+    consume_external_shutdown(requested, || app.quit())
+}
+
+fn consume_external_shutdown(requested: &AtomicBool, synchronous_shutdown: impl FnOnce()) -> bool {
+    if !requested.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+    synchronous_shutdown();
+    true
 }
 
 async fn handle_mouse(app: &mut App, terminal: ratatui::layout::Rect, event: MouseEvent) {
@@ -316,6 +468,11 @@ async fn apply_mouse_action(app: &mut App, action: MouseAction) {
 
 async fn handle_key(app: &mut App, key: KeyEvent) {
     match (key.modifiers, key.code) {
+        (modifiers, KeyCode::Char(character))
+            if modifiers.contains(KeyModifiers::CONTROL) && matches!(character, 'c' | 'C') =>
+        {
+            app.quit();
+        }
         (_, KeyCode::Enter)
             if matches!(
                 app.input.active.as_ref().map(|active| &active.target),
@@ -843,5 +1000,300 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         (_, KeyCode::Delete) => app.input_delete(),
         (_, KeyCode::Char(ch)) => app.edit_address_char(ch),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    use ratatui::backend::TestBackend;
+
+    use crate::config::{AppConfig, AppPaths};
+    use crate::storage::settings::AppSettings;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum EnterFailure {
+        None,
+        Raw,
+        AlternateScreen,
+        MouseCapture,
+    }
+
+    struct RecordingLifecycle {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        failure: EnterFailure,
+    }
+
+    impl RecordingLifecycle {
+        fn record(&self, call: &'static str) -> io::Result<()> {
+            self.calls.lock().expect("record lifecycle call").push(call);
+            let should_fail = matches!(
+                (self.failure, call),
+                (EnterFailure::Raw, "enable_raw")
+                    | (EnterFailure::AlternateScreen, "enter_alternate_screen")
+                    | (EnterFailure::MouseCapture, "enable_mouse_capture")
+            );
+            if should_fail {
+                Err(io::Error::other(format!("injected {call} failure")))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl TerminalLifecycle for RecordingLifecycle {
+        fn enable_raw(&mut self) -> io::Result<()> {
+            self.record("enable_raw")
+        }
+
+        fn enter_alternate_screen(&mut self) -> io::Result<()> {
+            self.record("enter_alternate_screen")
+        }
+
+        fn enable_mouse_capture(&mut self) -> io::Result<()> {
+            self.record("enable_mouse_capture")
+        }
+
+        fn disable_raw(&mut self) -> io::Result<()> {
+            self.record("disable_raw")
+        }
+
+        fn disable_mouse_capture(&mut self) -> io::Result<()> {
+            self.record("disable_mouse_capture")
+        }
+
+        fn leave_alternate_screen(&mut self) -> io::Result<()> {
+            self.record("leave_alternate_screen")
+        }
+    }
+
+    fn lifecycle(failure: EnterFailure) -> (RecordingLifecycle, Arc<Mutex<Vec<&'static str>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        (
+            RecordingLifecycle {
+                calls: Arc::clone(&calls),
+                failure,
+            },
+            calls,
+        )
+    }
+
+    #[test]
+    fn terminal_guard_restores_every_successfully_entered_mode_on_drop() {
+        let (lifecycle, calls) = lifecycle(EnterFailure::None);
+        let guard = TerminalGuard::enter_with(lifecycle).expect("enter terminal lifecycle");
+        drop(guard);
+
+        assert_eq!(
+            *calls.lock().expect("read lifecycle calls"),
+            [
+                "enable_raw",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "disable_raw",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_guard_rolls_back_every_partial_enter_failure() {
+        let cases = [
+            (EnterFailure::Raw, vec!["enable_raw", "disable_raw"]),
+            (
+                EnterFailure::AlternateScreen,
+                vec![
+                    "enable_raw",
+                    "enter_alternate_screen",
+                    "disable_raw",
+                    "leave_alternate_screen",
+                ],
+            ),
+            (
+                EnterFailure::MouseCapture,
+                vec![
+                    "enable_raw",
+                    "enter_alternate_screen",
+                    "enable_mouse_capture",
+                    "disable_raw",
+                    "disable_mouse_capture",
+                    "leave_alternate_screen",
+                ],
+            ),
+        ];
+
+        for (failure, expected) in cases {
+            let (lifecycle, calls) = lifecycle(failure);
+            let result = TerminalGuard::enter_with(lifecycle);
+            assert!(result.is_err(), "{failure:?} must fail");
+            assert_eq!(*calls.lock().expect("read lifecycle calls"), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn isolated_tui_render_and_quit_smoke_preserves_root_boundary() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-lifecycle-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        assert_eq!(app.paths.root, root);
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("create test terminal");
+        terminal
+            .draw(|frame| workspace::render(frame, &app))
+            .expect("render initial TUI frame");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("OMENbrowser_rs"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(app.should_quit());
+        app.flush_pending_ui_preferences();
+        assert_eq!(app.paths.root, root);
+
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[tokio::test]
+    async fn control_c_requests_graceful_quit_even_while_editing() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-control-c-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        app.focus_address_bar();
+        assert!(app.input.active.is_some());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        )
+        .await;
+
+        assert!(app.should_quit());
+        assert_eq!(app.paths.root, root);
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[test]
+    fn repeated_external_signal_requests_coalesce_into_graceful_quit() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-external-signal-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        let requested = AtomicBool::new(false);
+
+        request_external_shutdown(&requested);
+        request_external_shutdown(&requested);
+        assert!(requested.load(Ordering::Acquire));
+        assert!(apply_external_shutdown(&mut app, &requested));
+        assert!(app.should_quit());
+        assert!(!requested.load(Ordering::Acquire));
+        assert!(!apply_external_shutdown(&mut app, &requested));
+        assert_eq!(app.paths.root, root);
+
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[test]
+    fn repeated_signal_during_synchronous_shutdown_stays_bounded_and_restores_terminal() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-signal-during-persistence-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        app.toggle_help();
+
+        let (lifecycle, calls) = lifecycle(EnterFailure::None);
+        let guard = TerminalGuard::enter_with(lifecycle).expect("enter terminal lifecycle");
+        let requested = Arc::new(AtomicBool::new(false));
+        request_external_shutdown(&requested);
+
+        let (shutdown_entered_tx, shutdown_entered_rx) = mpsc::sync_channel(0);
+        let (release_shutdown_tx, release_shutdown_rx) = mpsc::sync_channel(0);
+        let repeated_request = Arc::clone(&requested);
+        let requester = std::thread::spawn(move || {
+            shutdown_entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("synchronous shutdown boundary entered");
+            request_external_shutdown(&repeated_request);
+            request_external_shutdown(&repeated_request);
+            release_shutdown_tx
+                .send(())
+                .expect("release synchronous shutdown boundary");
+        });
+
+        assert!(consume_external_shutdown(&requested, || {
+            shutdown_entered_tx
+                .send(())
+                .expect("announce synchronous shutdown boundary");
+            release_shutdown_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("receive shutdown release");
+            app.quit();
+        }));
+        requester.join().expect("join repeated signal requester");
+
+        assert!(app.should_quit());
+        assert!(requested.swap(false, Ordering::AcqRel));
+        assert!(!requested.load(Ordering::Acquire));
+        let settings = std::fs::read_to_string(&app.paths.settings_file)
+            .expect("read settings flushed by graceful quit");
+        serde_json::from_str::<serde_json::Value>(&settings)
+            .expect("parse settings flushed by graceful quit");
+
+        drop(guard);
+        assert_eq!(
+            *calls.lock().expect("read lifecycle calls"),
+            [
+                "enable_raw",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "disable_raw",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+            ]
+        );
+        assert_eq!(app.paths.root, root);
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
     }
 }

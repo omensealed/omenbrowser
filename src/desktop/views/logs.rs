@@ -7,6 +7,7 @@ use super::super::{
 };
 
 pub(in crate::desktop) fn logs_view(desktop: &DesktopApp) -> Element<'_, Message> {
+    let metrics = desktop.app.structured_log_worker_metrics();
     let mut entries = desktop.app.logs.filtered_entries();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.epoch_ms));
     let rows =
@@ -38,6 +39,29 @@ pub(in crate::desktop) fn logs_view(desktop: &DesktopApp) -> Element<'_, Message
                             entries.len().min(LOG_VISIBLE_ENTRIES),
                             desktop.app.logs.severity_filter,
                             desktop.app.logs.source_filter
+                        ),
+                        14
+                    ),
+                    wrapped_text_owned(
+                        format!(
+                            "writer queue: items={} bytes={} oldest_ms={} dropped={} completed={}",
+                            metrics.queued_items,
+                            metrics.queued_bytes,
+                            metrics.oldest_age_ms,
+                            metrics.dropped_records,
+                            metrics.completed_records
+                        ),
+                        14
+                    ),
+                    wrapped_text_owned(
+                        format!(
+                            "writer disk: failures={} rotations={} removed={} removal_failures={} unsafe_refused={} truncated_scans={}",
+                            metrics.write_failures,
+                            metrics.rotations,
+                            metrics.removed_files,
+                            metrics.removal_failures,
+                            metrics.unsafe_paths_refused,
+                            metrics.truncated_directory_scans
                         ),
                         14
                     ),

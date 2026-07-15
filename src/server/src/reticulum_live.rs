@@ -1,8 +1,8 @@
+use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rand_core::OsRng;
@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::config::ServerConfig;
 use crate::error::{ServerError, ServerResult};
-use crate::live::{OmenchatLinkEvent, OmenchatLiveServer};
+use crate::live::{LiveServerStats, OmenchatLinkEvent, OmenchatLiveServer};
 use crate::protocol::codec::decode_frame;
 use crate::session::{ServerPeer, SessionEngine};
 use crate::store::OmenchatStore;
@@ -33,6 +33,233 @@ mod ifac_tcp;
 pub const OMENCHAT_RNS_APP_NAME: &str = "omenchat";
 pub const NOMADNET_RNS_APP_NAME: &str = "nomadnetwork";
 
+const TRANSPORT_QUEUE_ITEMS: usize = 256;
+const TRANSPORT_CONTROL_ITEMS: usize = 32;
+const TRANSPORT_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+const TRANSPORT_PER_LINK_BYTES: usize = 4 * 1024 * 1024;
+const EVENT_QUEUE_ITEMS: usize = 512;
+const EVENT_CONTROL_ITEMS: usize = 64;
+const EVENT_QUEUE_BYTES: usize = 32 * 1024 * 1024;
+const EVENT_PER_LINK_BYTES: usize = 8 * 1024 * 1024;
+const CONTROL_QUEUE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QueueMetricsSnapshot {
+    pub queued_items: usize,
+    pub queued_bytes: usize,
+    pub rejected_items: u64,
+    pub oldest_age_ms: u64,
+}
+
+impl QueueMetricsSnapshot {
+    fn summary(&self, name: &str) -> String {
+        format!(
+            "{name}=items:{} bytes:{} oldest_ms:{} rejected:{}",
+            self.queued_items, self.queued_bytes, self.oldest_age_ms, self.rejected_items
+        )
+    }
+}
+
+#[derive(Clone)]
+struct EventQueueSender {
+    payload_tx: mpsc::Sender<Queued<OmenchatLinkEvent>>,
+    control_tx: mpsc::Sender<Queued<OmenchatLinkEvent>>,
+    budget: Arc<QueueBudget>,
+    log_path: std::path::PathBuf,
+}
+
+impl EventQueueSender {
+    async fn send_control(&self, event: OmenchatLinkEvent) {
+        let link_id = event_link_id(&event);
+        let Some(permit) = self.budget.reserve(link_id, 0) else {
+            return;
+        };
+        let queued = Queued {
+            value: event,
+            _permit: permit,
+        };
+        match tokio::time::timeout(CONTROL_QUEUE_TIMEOUT, self.control_tx.send(queued)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                self.budget.reject();
+                append_server_log_warning_path(
+                    &self.log_path,
+                    "reticulum-rs event control queue stopped",
+                );
+            }
+            Err(_) => {
+                self.budget.reject();
+                append_server_log_warning_path(
+                    &self.log_path,
+                    "reticulum-rs event control queue timed out",
+                );
+            }
+        }
+    }
+
+    fn try_send_payload(&self, link_id: LinkId, bytes: usize, event: OmenchatLinkEvent) {
+        let Some(permit) = self.budget.reserve(link_id, bytes) else {
+            append_server_log_warning_path(
+                &self.log_path,
+                format!(
+                    "reticulum-rs event queue overloaded link={} bytes={} action=drop",
+                    hex_lower(&link_id),
+                    bytes
+                ),
+            );
+            return;
+        };
+        if let Err(error) = self.payload_tx.try_send(Queued {
+            value: event,
+            _permit: permit,
+        }) {
+            self.budget.reject();
+            append_server_log_warning_path(
+                &self.log_path,
+                format!(
+                    "reticulum-rs event queue overloaded link={} bytes={} action=drop error={error}",
+                    hex_lower(&link_id),
+                    bytes
+                ),
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+struct QueueBudget {
+    max_bytes: usize,
+    max_link_bytes: usize,
+    queued_items: AtomicUsize,
+    queued_bytes: AtomicUsize,
+    rejected_items: AtomicU64,
+    oldest_epoch_ms: AtomicU64,
+    next_reservation_id: AtomicU64,
+    state: Mutex<QueueBudgetState>,
+}
+
+#[derive(Debug, Default)]
+struct QueueBudgetState {
+    link_bytes: BTreeMap<LinkId, usize>,
+    pending_epochs: BTreeMap<u64, u64>,
+}
+
+impl QueueBudget {
+    fn new(max_bytes: usize, max_link_bytes: usize) -> Arc<Self> {
+        Arc::new(Self {
+            max_bytes,
+            max_link_bytes,
+            queued_items: AtomicUsize::new(0),
+            queued_bytes: AtomicUsize::new(0),
+            rejected_items: AtomicU64::new(0),
+            oldest_epoch_ms: AtomicU64::new(0),
+            next_reservation_id: AtomicU64::new(1),
+            state: Mutex::new(QueueBudgetState::default()),
+        })
+    }
+
+    fn reserve(self: &Arc<Self>, link_id: LinkId, bytes: usize) -> Option<QueuePermit> {
+        if bytes > self.max_bytes || bytes > self.max_link_bytes {
+            self.rejected_items.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let link_total = state.link_bytes.get(&link_id).copied().unwrap_or(0);
+        let total = self.queued_bytes.load(Ordering::Acquire);
+        if link_total.saturating_add(bytes) > self.max_link_bytes
+            || total.saturating_add(bytes) > self.max_bytes
+        {
+            self.rejected_items.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let reservation_id = self.next_reservation_id.fetch_add(1, Ordering::Relaxed);
+        let reserved_epoch_ms = current_epoch_ms();
+        state.link_bytes.insert(link_id, link_total + bytes);
+        state
+            .pending_epochs
+            .insert(reservation_id, reserved_epoch_ms);
+        self.queued_bytes.fetch_add(bytes, Ordering::AcqRel);
+        if self.queued_items.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.oldest_epoch_ms
+                .store(reserved_epoch_ms, Ordering::Release);
+        }
+        Some(QueuePermit {
+            budget: self.clone(),
+            link_id,
+            bytes,
+            reservation_id,
+        })
+    }
+
+    fn reject(&self) {
+        self.rejected_items.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> QueueMetricsSnapshot {
+        let oldest = self.oldest_epoch_ms.load(Ordering::Acquire);
+        QueueMetricsSnapshot {
+            queued_items: self.queued_items.load(Ordering::Acquire),
+            queued_bytes: self.queued_bytes.load(Ordering::Acquire),
+            rejected_items: self.rejected_items.load(Ordering::Relaxed),
+            oldest_age_ms: if oldest == 0 {
+                0
+            } else {
+                current_epoch_ms().saturating_sub(oldest)
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+struct QueuePermit {
+    budget: Arc<QueueBudget>,
+    link_id: LinkId,
+    bytes: usize,
+    reservation_id: u64,
+}
+
+impl Drop for QueuePermit {
+    fn drop(&mut self) {
+        let mut state = self.budget.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(link_total) = state.link_bytes.get_mut(&self.link_id) {
+            *link_total = link_total.saturating_sub(self.bytes);
+            if *link_total == 0 {
+                state.link_bytes.remove(&self.link_id);
+            }
+        }
+        state.pending_epochs.remove(&self.reservation_id);
+        let next_oldest = state
+            .pending_epochs
+            .first_key_value()
+            .map(|(_, epoch)| *epoch);
+        self.budget
+            .queued_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+        if self.budget.queued_items.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.budget.oldest_epoch_ms.store(0, Ordering::Release);
+        } else if let Some(next_oldest) = next_oldest {
+            self.budget
+                .oldest_epoch_ms
+                .store(next_oldest, Ordering::Release);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Queued<T> {
+    value: T,
+    _permit: QueuePermit,
+}
+
+fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 pub struct ReticulumLiveRuntime {
     transport: Arc<Transport>,
     destination: Arc<tokio::sync::Mutex<SingleInputDestination>>,
@@ -42,9 +269,143 @@ pub struct ReticulumLiveRuntime {
     pub nomadnet_destination_hash: [u8; 16],
     pub destination_name: String,
     pub nomadnet_destination_name: String,
-    event_rx: mpsc::UnboundedReceiver<OmenchatLinkEvent>,
-    pub live_server: OmenchatLiveServer<ReticulumOmenchatTransport>,
+    event_control_rx: mpsc::Receiver<Queued<OmenchatLinkEvent>>,
+    event_rx: mpsc::Receiver<Queued<OmenchatLinkEvent>>,
+    event_queue_budget: Arc<QueueBudget>,
+    transport_queue_budget: Arc<QueueBudget>,
+    pub live_server: LiveServerWorker<ReticulumOmenchatTransport>,
     interface_statuses: Vec<ReticulumInterfaceStatus>,
+}
+
+pub struct LiveServerWorker<T> {
+    server: Arc<std::sync::Mutex<OmenchatLiveServer<T>>>,
+    permit: Arc<tokio::sync::Semaphore>,
+    metrics: Arc<LiveServerWorkerMetrics>,
+}
+
+#[derive(Default)]
+struct LiveServerWorkerMetrics {
+    in_flight: AtomicUsize,
+    completed: AtomicU64,
+    rejected: AtomicU64,
+    total_micros: AtomicU64,
+    max_micros: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LiveServerWorkerMetricsSnapshot {
+    pub in_flight: usize,
+    pub completed: u64,
+    pub rejected: u64,
+    pub average_micros: u64,
+    pub max_micros: u64,
+}
+
+impl LiveServerWorkerMetricsSnapshot {
+    fn summary(self) -> String {
+        format!(
+            "db-worker: in_flight={} completed={} rejected={} latency_avg_us={} latency_max_us={}",
+            self.in_flight, self.completed, self.rejected, self.average_micros, self.max_micros
+        )
+    }
+}
+
+impl<T> LiveServerWorker<T>
+where
+    T: OmenchatTransport + Send + 'static,
+{
+    fn new(server: OmenchatLiveServer<T>) -> Self {
+        Self {
+            server: Arc::new(std::sync::Mutex::new(server)),
+            permit: Arc::new(tokio::sync::Semaphore::new(1)),
+            metrics: Arc::new(LiveServerWorkerMetrics::default()),
+        }
+    }
+
+    pub async fn handle_event(&self, event: OmenchatLinkEvent) -> ServerResult<()> {
+        let permit = self.permit.clone().try_acquire_owned().map_err(|_| {
+            self.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+            ServerError::Message("live-server worker is busy".into())
+        })?;
+        let server = self.server.clone();
+        let metrics = self.metrics.clone();
+        metrics.in_flight.store(1, Ordering::Release);
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let started = Instant::now();
+            let result = match server.lock() {
+                Ok(mut server) => server.handle_event(event),
+                Err(_) => Err(ServerError::Message(
+                    "live-server worker lock poisoned".into(),
+                )),
+            };
+            let elapsed = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
+            (result, elapsed)
+        })
+        .await;
+        metrics.in_flight.store(0, Ordering::Release);
+        let (result, elapsed) = task
+            .map_err(|error| ServerError::Message(format!("live-server worker failed: {error}")))?;
+        metrics.total_micros.fetch_add(elapsed, Ordering::Relaxed);
+        metrics.max_micros.fetch_max(elapsed, Ordering::Relaxed);
+        metrics.completed.fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
+    pub fn worker_metrics(&self) -> LiveServerWorkerMetricsSnapshot {
+        let completed = self.metrics.completed.load(Ordering::Relaxed);
+        let total_micros = self.metrics.total_micros.load(Ordering::Relaxed);
+        LiveServerWorkerMetricsSnapshot {
+            in_flight: self.metrics.in_flight.load(Ordering::Acquire),
+            completed,
+            rejected: self.metrics.rejected.load(Ordering::Relaxed),
+            average_micros: total_micros.checked_div(completed).unwrap_or(0),
+            max_micros: self.metrics.max_micros.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn stats(&self) -> LiveServerStats {
+        self.server
+            .lock()
+            .expect("live-server worker lock")
+            .stats()
+            .clone()
+    }
+
+    pub fn recent_closed_link_summaries(&self) -> Vec<crate::live::ClosedLinkSummary> {
+        self.server
+            .lock()
+            .expect("live-server worker lock")
+            .recent_closed_link_summaries()
+    }
+
+    pub fn active_room_counts(&self) -> Vec<(crate::protocol::RoomId, usize)> {
+        self.server
+            .lock()
+            .expect("live-server worker lock")
+            .active_room_counts()
+    }
+
+    pub fn active_link_summaries(&self) -> Vec<crate::live::ActiveLinkSummary> {
+        self.server
+            .lock()
+            .expect("live-server worker lock")
+            .active_link_summaries()
+    }
+
+    pub fn active_identity_counts(&self) -> Vec<(Vec<u8>, usize)> {
+        self.server
+            .lock()
+            .expect("live-server worker lock")
+            .active_identity_counts()
+    }
+
+    pub fn disconnect_identity(&self, identity_hash: &[u8]) -> usize {
+        self.server
+            .lock()
+            .expect("live-server worker lock")
+            .disconnect_identity(identity_hash)
+    }
 }
 
 #[derive(Clone)]
@@ -133,20 +494,6 @@ impl ReticulumInterfaceStatus {
             }
         }
     }
-
-    fn is_connected(&self) -> bool {
-        match &self.kind {
-            ReticulumInterfaceStatusKind::TcpClient(handle) => {
-                json_str(&handle.to_json(), "stream_state") == "connected"
-            }
-            ReticulumInterfaceStatusKind::IfacTcpClient(handle) => {
-                json_str(&handle.to_json(), "stream_state") == "connected"
-            }
-            ReticulumInterfaceStatusKind::TcpServer(handle) => {
-                json_str(&handle.to_json(), "listener_state") == "listening"
-            }
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,7 +517,9 @@ impl InterfaceHealth {
 
 #[derive(Clone)]
 pub struct ReticulumOmenchatTransport {
-    tx: mpsc::UnboundedSender<TransportCommand>,
+    tx: mpsc::Sender<Queued<TransportCommand>>,
+    control_tx: mpsc::Sender<Queued<TransportCommand>>,
+    queue_budget: Arc<QueueBudget>,
     sent_frames: Arc<AtomicU64>,
     offered_resources: Arc<AtomicU64>,
     sent_frame_bytes: Arc<AtomicU64>,
@@ -184,23 +533,68 @@ enum TransportCommand {
     },
     OfferResource {
         link_id: LinkId,
-        payload: Vec<u8>,
-        metadata: Vec<u8>,
+        offer: ResourceOffer,
     },
     CloseLink {
         link_id: LinkId,
     },
 }
 
+struct ResourceOffer {
+    payload: Vec<u8>,
+    metadata: Vec<u8>,
+}
+
+impl ResourceOffer {
+    fn new(payload: Vec<u8>, metadata: Vec<u8>) -> Self {
+        Self { payload, metadata }
+    }
+
+    fn queued_bytes(&self) -> usize {
+        self.payload.len().saturating_add(self.metadata.len())
+    }
+}
+
 impl ReticulumOmenchatTransport {
     fn new(transport: Arc<Transport>, log_path: std::path::PathBuf) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<TransportCommand>();
+        let (tx, mut rx) = mpsc::channel::<Queued<TransportCommand>>(TRANSPORT_QUEUE_ITEMS);
+        let (control_tx, mut control_rx) =
+            mpsc::channel::<Queued<TransportCommand>>(TRANSPORT_CONTROL_ITEMS);
+        let queue_budget = QueueBudget::new(TRANSPORT_QUEUE_BYTES, TRANSPORT_PER_LINK_BYTES);
         let sent_frames = Arc::new(AtomicU64::new(0));
         let offered_resources = Arc::new(AtomicU64::new(0));
         let sent_frame_bytes = Arc::new(AtomicU64::new(0));
         let offered_resource_bytes = Arc::new(AtomicU64::new(0));
         tokio::spawn(async move {
-            while let Some(command) = rx.recv().await {
+            let mut control_open = true;
+            let mut payload_open = true;
+            while control_open || payload_open {
+                let selected = tokio::select! {
+                    biased;
+                    queued = control_rx.recv(), if control_open => match queued {
+                        Some(queued) => {
+                            let Queued { value, _permit } = queued;
+                            Some((value, Some(_permit)))
+                        }
+                        None => {
+                            control_open = false;
+                            None
+                        }
+                    },
+                    queued = rx.recv(), if payload_open => match queued {
+                        Some(queued) => {
+                            let Queued { value, _permit } = queued;
+                            Some((value, Some(_permit)))
+                        }
+                        None => {
+                            payload_open = false;
+                            None
+                        }
+                    },
+                };
+                let Some((command, _permit)) = selected else {
+                    continue;
+                };
                 match command {
                     TransportCommand::SendFrame {
                         link_id,
@@ -209,7 +603,7 @@ impl ReticulumOmenchatTransport {
                         let link_hash = AddressHash::new(link_id);
                         let link = transport.find_in_link(&link_hash).await;
                         let Some(link) = link else {
-                            append_server_log_path(
+                            append_server_log_error_path(
                                 &log_path,
                                 format!(
                                     "reticulum-rs OMENchat frame send failed link={} bytes={} error=inbound link not found",
@@ -236,7 +630,7 @@ impl ReticulumOmenchatTransport {
                                     ),
                                 );
                             }
-                            Err(error) => append_server_log_path(
+                            Err(error) => append_server_log_error_path(
                                 &log_path,
                                 format!(
                                     "reticulum-rs OMENchat frame send failed link={} bytes={} error={error:?}",
@@ -246,13 +640,14 @@ impl ReticulumOmenchatTransport {
                             ),
                         }
                     }
-                    TransportCommand::OfferResource {
-                        link_id,
-                        payload,
-                        metadata,
-                    } => {
+                    TransportCommand::OfferResource { link_id, offer } => {
+                        let payload_bytes = offer.payload.len();
                         match transport
-                            .send_resource(&AddressHash::new(link_id), payload.clone(), Some(metadata))
+                            .send_resource(
+                                &AddressHash::new(link_id),
+                                offer.payload,
+                                Some(offer.metadata),
+                            )
                             .await
                         {
                             Ok(hash) => {
@@ -262,16 +657,16 @@ impl ReticulumOmenchatTransport {
                                         "reticulum-rs OMENchat resource offered link={} hash={} bytes={}",
                                         hex_lower(&link_id),
                                         hash,
-                                        payload.len()
+                                        payload_bytes
                                     ),
                                 );
                             }
-                            Err(error) => append_server_log_path(
+                            Err(error) => append_server_log_error_path(
                                 &log_path,
                                 format!(
                                     "reticulum-rs OMENchat offer resource failed link={} bytes={} error={error:?}",
                                     hex_lower(&link_id),
-                                    payload.len()
+                                    payload_bytes
                                 ),
                             ),
                         }
@@ -279,7 +674,7 @@ impl ReticulumOmenchatTransport {
                     TransportCommand::CloseLink { link_id } => {
                         let channel = transport.channel(AddressHash::new(link_id));
                         if let Err(error) = channel.close().await {
-                            append_server_log_path(
+                            append_server_log_error_path(
                                 &log_path,
                                 format!(
                                     "reticulum-rs OMENchat close link failed link={} error={error:?}",
@@ -294,6 +689,8 @@ impl ReticulumOmenchatTransport {
 
         Self {
             tx,
+            control_tx,
+            queue_budget,
             sent_frames,
             offered_resources,
             sent_frame_bytes,
@@ -305,12 +702,24 @@ impl ReticulumOmenchatTransport {
 impl OmenchatTransport for ReticulumOmenchatTransport {
     fn send_frame(&mut self, link_id: LinkId, frame_bytes: Vec<u8>) -> ServerResult<()> {
         let byte_count = frame_bytes.len() as u64;
+        let permit = self
+            .queue_budget
+            .reserve(link_id, frame_bytes.len())
+            .ok_or_else(|| transport_overload_error("frame", frame_bytes.len()))?;
         self.tx
-            .send(TransportCommand::SendFrame {
-                link_id,
-                frame_bytes,
+            .try_send(Queued {
+                value: TransportCommand::SendFrame {
+                    link_id,
+                    frame_bytes,
+                },
+                _permit: permit,
             })
-            .map_err(|_| ServerError::Message("reticulum-rs transport task stopped".into()))?;
+            .map_err(|error| {
+                self.queue_budget.reject();
+                ServerError::Message(format!(
+                    "reticulum-rs transport overloaded: frame queue unavailable ({error})"
+                ))
+            })?;
         self.sent_frames.fetch_add(1, Ordering::Relaxed);
         self.sent_frame_bytes
             .fetch_add(byte_count, Ordering::Relaxed);
@@ -334,13 +743,23 @@ impl OmenchatTransport for ReticulumOmenchatTransport {
         metadata: Vec<u8>,
     ) -> ServerResult<()> {
         let byte_count = payload.len() as u64;
+        let offer = ResourceOffer::new(payload, metadata);
+        let queued_bytes = offer.queued_bytes();
+        let permit = self
+            .queue_budget
+            .reserve(link_id, queued_bytes)
+            .ok_or_else(|| transport_overload_error("resource", queued_bytes))?;
         self.tx
-            .send(TransportCommand::OfferResource {
-                link_id,
-                payload,
-                metadata,
+            .try_send(Queued {
+                value: TransportCommand::OfferResource { link_id, offer },
+                _permit: permit,
             })
-            .map_err(|_| ServerError::Message("reticulum-rs transport task stopped".into()))?;
+            .map_err(|error| {
+                self.queue_budget.reject();
+                ServerError::Message(format!(
+                    "reticulum-rs transport overloaded: resource queue unavailable ({error})"
+                ))
+            })?;
         self.offered_resources.fetch_add(1, Ordering::Relaxed);
         self.offered_resource_bytes
             .fetch_add(byte_count, Ordering::Relaxed);
@@ -364,9 +783,36 @@ impl OmenchatTransport for ReticulumOmenchatTransport {
     }
 
     fn close_link(&mut self, link_id: LinkId) -> ServerResult<()> {
-        self.tx
-            .send(TransportCommand::CloseLink { link_id })
-            .map_err(|_| ServerError::Message("reticulum-rs transport task stopped".into()))
+        let permit = self
+            .queue_budget
+            .reserve(link_id, 0)
+            .ok_or_else(|| transport_overload_error("control", 0))?;
+        self.control_tx
+            .try_send(Queued {
+                value: TransportCommand::CloseLink { link_id },
+                _permit: permit,
+            })
+            .map_err(|error| {
+                self.queue_budget.reject();
+                ServerError::Message(format!(
+                    "reticulum-rs transport control queue unavailable ({error})"
+                ))
+            })
+    }
+}
+
+fn transport_overload_error(kind: &str, bytes: usize) -> ServerError {
+    ServerError::Message(format!(
+        "reticulum-rs transport overloaded: rejected {kind} bytes={bytes}"
+    ))
+}
+
+fn event_link_id(event: &OmenchatLinkEvent) -> LinkId {
+    match event {
+        OmenchatLinkEvent::LinkOpened { link_id, .. }
+        | OmenchatLinkEvent::LinkData { link_id, .. }
+        | OmenchatLinkEvent::ResourceReceived { link_id, .. }
+        | OmenchatLinkEvent::LinkClosed { link_id, .. } => *link_id,
     }
 }
 
@@ -434,9 +880,12 @@ async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
     println!("reticulum: {}", config.reticulum_config_path.display());
 
     loop {
-        while let Ok(event) = runtime.event_rx.try_recv() {
-            if let Err(error) = runtime.live_server.handle_event(event) {
-                append_server_log(&config, format!("reticulum-rs live event failed: {error}"));
+        while let Some(event) = runtime.try_recv_event() {
+            if let Err(error) = runtime.live_server.handle_event(event).await {
+                append_server_log_error(
+                    &config,
+                    format!("reticulum-rs live event failed: {error}"),
+                );
             }
         }
 
@@ -454,6 +903,16 @@ async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
             let stats = runtime.live_server.stats();
             println!("{}", stats.summary_line());
             append_server_log(&config, stats.summary_line());
+            let (transport_queue, event_queue) = runtime.queue_metrics();
+            let queue_line = format!(
+                "queues: {} {} {} {}",
+                transport_queue.summary("transport"),
+                event_queue.summary("events"),
+                runtime.live_server.worker_metrics().summary(),
+                crate::server_log::metrics().summary()
+            );
+            println!("{queue_line}");
+            append_server_log(&config, queue_line);
             next_stats = Instant::now() + stats_interval;
         }
 
@@ -504,15 +963,24 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
     crate::config::ensure_nomadnet_portal(config, &destination_hash.to_hex_string())?;
     announce_destinations(&transport, &destination, &nomadnet_destination, config).await?;
 
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
-    spawn_link_event_bridge(transport.clone(), event_tx.clone(), config.log_path());
-    spawn_received_data_bridge(transport.clone(), event_tx.clone(), config.log_path());
+    let (event_payload_tx, event_rx) = mpsc::channel(EVENT_QUEUE_ITEMS);
+    let (event_control_tx, event_control_rx) = mpsc::channel(EVENT_CONTROL_ITEMS);
+    let event_queue_budget = QueueBudget::new(EVENT_QUEUE_BYTES, EVENT_PER_LINK_BYTES);
+    let event_tx = EventQueueSender {
+        payload_tx: event_payload_tx,
+        control_tx: event_control_tx,
+        budget: event_queue_budget.clone(),
+        log_path: config.log_path(),
+    };
+    spawn_link_event_bridge(transport.clone(), event_tx.clone());
+    spawn_received_data_bridge(transport.clone(), event_tx.clone());
     spawn_resource_event_bridge(transport.clone(), event_tx, config.clone());
 
     let store = OmenchatStore::open(&config.database_path)?;
     let engine =
         SessionEngine::with_limits_and_motd(store, config.into(), Some(config.motd.clone()));
     let transport_impl = ReticulumOmenchatTransport::new(transport.clone(), config.log_path());
+    let transport_queue_budget = transport_impl.queue_budget.clone();
 
     append_server_log(
         config,
@@ -533,8 +1001,11 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
         nomadnet_destination_hash: address_hash_bytes(nomadnet_destination_hash),
         destination_name: "omenchat.node".into(),
         nomadnet_destination_name: "nomadnetwork.node".into(),
+        event_control_rx,
         event_rx,
-        live_server: OmenchatLiveServer::new(engine, transport_impl),
+        event_queue_budget,
+        transport_queue_budget,
+        live_server: LiveServerWorker::new(OmenchatLiveServer::new(engine, transport_impl)),
         interface_statuses: attached,
     })
 }
@@ -564,33 +1035,53 @@ impl ReticulumLiveRuntime {
     pub fn interface_health(&self) -> InterfaceHealth {
         if self.interface_statuses.is_empty() {
             InterfaceHealth::NoInterfaces
-        } else if self
-            .interface_statuses
-            .iter()
-            .any(ReticulumInterfaceStatus::is_connected)
-        {
-            InterfaceHealth::Connected
         } else {
             InterfaceHealth::Connected
         }
     }
+
+    pub fn queue_metrics(&self) -> (QueueMetricsSnapshot, QueueMetricsSnapshot) {
+        (
+            self.transport_queue_budget.snapshot(),
+            self.event_queue_budget.snapshot(),
+        )
+    }
+
+    pub fn queue_summary_line(&self) -> String {
+        let (transport_queue, event_queue) = self.queue_metrics();
+        format!(
+            "queues: {} {} {} {}",
+            transport_queue.summary("transport"),
+            event_queue.summary("events"),
+            self.live_server.worker_metrics().summary(),
+            crate::server_log::metrics().summary()
+        )
+    }
+
+    fn try_recv_event(&mut self) -> Option<OmenchatLinkEvent> {
+        match self.event_control_rx.try_recv() {
+            Ok(queued) => return Some(queued.value),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+            | Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+        }
+        self.event_rx.try_recv().ok().map(|queued| queued.value)
+    }
 }
 
-pub fn drain_live_events_logged(
+pub async fn drain_live_events_logged(
     runtime: &mut ReticulumLiveRuntime,
     max_events: usize,
     config: &ServerConfig,
 ) -> ServerResult<usize> {
     let mut drained = 0usize;
     while drained < max_events {
-        match runtime.event_rx.try_recv() {
-            Ok(event) => {
+        match runtime.try_recv_event() {
+            Some(event) => {
                 append_server_log(config, describe_live_event(&event));
-                runtime.live_server.handle_event(event)?;
+                runtime.live_server.handle_event(event).await?;
                 drained += 1;
             }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            None => break,
         }
     }
     Ok(drained)
@@ -653,11 +1144,8 @@ async fn send_announce_broadcast(
     Ok((destination_hash, trace))
 }
 
-fn spawn_link_event_bridge(
-    transport: Arc<Transport>,
-    event_tx: mpsc::UnboundedSender<OmenchatLinkEvent>,
-    log_path: std::path::PathBuf,
-) {
+fn spawn_link_event_bridge(transport: Arc<Transport>, event_tx: EventQueueSender) {
+    let log_path = event_tx.log_path.clone();
     let mut events = transport.in_link_events();
     tokio::spawn(async move {
         loop {
@@ -678,7 +1166,9 @@ fn spawn_link_event_bridge(
                             display_name: format!("link-{}", &hex_lower(&link_id)[..8]),
                             lxmf_destination: None,
                         };
-                        let _ = event_tx.send(OmenchatLinkEvent::LinkOpened { link_id, peer });
+                        event_tx
+                            .send_control(OmenchatLinkEvent::LinkOpened { link_id, peer })
+                            .await;
                     }
                     LinkEvent::Data(payload) => {
                         let link_id = address_hash_bytes(event.id);
@@ -698,11 +1188,15 @@ fn spawn_link_event_bridge(
                                 decoded_frame_summary(payload.as_slice())
                             ),
                         );
-                        let _ = event_tx.send(OmenchatLinkEvent::LinkData {
+                        event_tx.try_send_payload(
                             link_id,
-                            context: payload.context() as u8,
-                            data: payload.as_slice().to_vec(),
-                        });
+                            payload.as_slice().len(),
+                            OmenchatLinkEvent::LinkData {
+                                link_id,
+                                context: payload.context() as u8,
+                                data: payload.as_slice().to_vec(),
+                            },
+                        );
                     }
                     LinkEvent::Closed => {
                         let link_id = address_hash_bytes(event.id);
@@ -710,15 +1204,17 @@ fn spawn_link_event_bridge(
                             &log_path,
                             format!("reticulum-rs in-link closed link={}", hex_lower(&link_id)),
                         );
-                        let _ = event_tx.send(OmenchatLinkEvent::LinkClosed {
-                            link_id,
-                            reason: Some("closed".into()),
-                        });
+                        event_tx
+                            .send_control(OmenchatLinkEvent::LinkClosed {
+                                link_id,
+                                reason: Some("closed".into()),
+                            })
+                            .await;
                     }
                     LinkEvent::PeerIdentified(_) => {}
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    append_server_log_path(
+                    append_server_log_warning_path(
                         &log_path,
                         format!("reticulum-rs in-link event receiver lagged skipped={skipped}"),
                     );
@@ -729,11 +1225,8 @@ fn spawn_link_event_bridge(
     });
 }
 
-fn spawn_received_data_bridge(
-    transport: Arc<Transport>,
-    event_tx: mpsc::UnboundedSender<OmenchatLinkEvent>,
-    log_path: std::path::PathBuf,
-) {
+fn spawn_received_data_bridge(transport: Arc<Transport>, event_tx: EventQueueSender) {
+    let log_path = event_tx.log_path.clone();
     let mut events = transport.received_data_events();
     tokio::spawn(async move {
         loop {
@@ -758,14 +1251,18 @@ fn spawn_received_data_bridge(
                             decoded_frame_summary(event.data.as_slice())
                         ),
                     );
-                    let _ = event_tx.send(OmenchatLinkEvent::LinkData {
+                    event_tx.try_send_payload(
                         link_id,
-                        context: 0,
-                        data: event.data.as_slice().to_vec(),
-                    });
+                        event.data.as_slice().len(),
+                        OmenchatLinkEvent::LinkData {
+                            link_id,
+                            context: 0,
+                            data: event.data.as_slice().to_vec(),
+                        },
+                    );
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    append_server_log_path(
+                    append_server_log_warning_path(
                         &log_path,
                         format!("reticulum-rs received-data receiver lagged skipped={skipped}"),
                     );
@@ -778,7 +1275,7 @@ fn spawn_received_data_bridge(
 
 fn spawn_resource_event_bridge(
     transport: Arc<Transport>,
-    event_tx: mpsc::UnboundedSender<OmenchatLinkEvent>,
+    event_tx: EventQueueSender,
     config: ServerConfig,
 ) {
     let log_path = config.log_path();
@@ -792,7 +1289,7 @@ fn spawn_resource_event_bridge(
                     };
                     if complete.is_request {
                         let Some(request_id) = complete.request_id.clone() else {
-                            append_server_log_path(
+                            append_server_log_warning_path(
                                 &log_path,
                                 format!(
                                     "reticulum-rs NomadNet resource request ignored link={} hash={} missing request_id",
@@ -804,7 +1301,7 @@ fn spawn_resource_event_bridge(
                         let Some(request_path) =
                             nomadnet_request_path_for_payload(&config, complete.data.as_slice())
                         else {
-                            append_server_log_path(
+                            append_server_log_warning_path(
                                 &log_path,
                                 format!(
                                     "reticulum-rs NomadNet resource request ignored link={} hash={} unknown path hash bytes={}",
@@ -837,7 +1334,7 @@ fn spawn_resource_event_bridge(
                                         response_bytes
                                     ),
                                 ),
-                                Err(error) => append_server_log_path(
+                                Err(error) => append_server_log_error_path(
                                     &log_path,
                                     format!(
                                         "reticulum-rs NomadNet response resource failed link={} request_path={} error={error:?}",
@@ -846,7 +1343,7 @@ fn spawn_resource_event_bridge(
                                 ),
                                 }
                             }
-                            Err(error) => append_server_log_path(
+                            Err(error) => append_server_log_error_path(
                                 &log_path,
                                 format!(
                                     "reticulum-rs NomadNet response payload failed link={} request_path={} error={error}",
@@ -873,14 +1370,19 @@ fn spawn_resource_event_bridge(
                             metadata.len()
                         ),
                     );
-                    let _ = event_tx.send(OmenchatLinkEvent::ResourceReceived {
+                    let queued_bytes = complete.data.len().saturating_add(metadata.len());
+                    event_tx.try_send_payload(
                         link_id,
-                        data: complete.data,
-                        metadata: Some(metadata),
-                    });
+                        queued_bytes,
+                        OmenchatLinkEvent::ResourceReceived {
+                            link_id,
+                            data: complete.data,
+                            metadata: Some(metadata),
+                        },
+                    );
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    append_server_log_path(
+                    append_server_log_warning_path(
                         &log_path,
                         format!("reticulum-rs resource event receiver lagged skipped={skipped}"),
                     );
@@ -1167,17 +1669,32 @@ fn append_server_log(config: &ServerConfig, message: impl AsRef<str>) {
     append_server_log_path(&config.log_path(), message);
 }
 
+fn append_server_log_error(config: &ServerConfig, message: impl AsRef<str>) {
+    append_server_log_error_path(&config.log_path(), message);
+}
+
 fn append_server_log_path(path: &Path, message: impl AsRef<str>) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(file, "{} {}", unix_timestamp(), message.as_ref());
-    }
+    crate::server_log::append_with_severity(
+        path,
+        crate::server_log::ServerLogSeverity::Info,
+        message.as_ref(),
+    );
+}
+
+fn append_server_log_warning_path(path: &Path, message: impl AsRef<str>) {
+    crate::server_log::append_with_severity(
+        path,
+        crate::server_log::ServerLogSeverity::Warning,
+        message.as_ref(),
+    );
+}
+
+fn append_server_log_error_path(path: &Path, message: impl AsRef<str>) {
+    crate::server_log::append_with_severity(
+        path,
+        crate::server_log::ServerLogSeverity::Error,
+        message.as_ref(),
+    );
 }
 
 fn describe_live_event(event: &OmenchatLinkEvent) -> String {
@@ -1226,7 +1743,20 @@ fn decoded_frame_summary(data: &[u8]) -> String {
 }
 
 fn nomadnet_request_path_for_payload(config: &ServerConfig, payload: &[u8]) -> Option<String> {
-    let value = unpack_msgpack_value(payload).ok()?;
+    const MAX_REQUEST_BYTES: usize = 4 * 1024;
+    const MAX_REQUEST_SCALAR_BYTES: usize = 1024;
+    const MAX_REQUEST_CONTAINER_ITEMS: usize = 32;
+    const MAX_REQUEST_TOTAL_VALUES: usize = 64;
+    const MAX_REQUEST_DEPTH: usize = 4;
+    let value = unpack_msgpack_value(
+        payload,
+        MAX_REQUEST_BYTES,
+        MAX_REQUEST_SCALAR_BYTES,
+        MAX_REQUEST_CONTAINER_ITEMS,
+        MAX_REQUEST_TOTAL_VALUES,
+        MAX_REQUEST_DEPTH,
+    )
+    .ok()?;
     let Value::Array(items) = value else {
         return None;
     };
@@ -1259,9 +1789,32 @@ fn nomadnet_response_resource_payload(
     ]))
 }
 
-fn unpack_msgpack_value(bytes: &[u8]) -> ServerResult<Value> {
-    rmpv::decode::read_value(&mut Cursor::new(bytes))
-        .map_err(|_| ServerError::Message("failed to decode NomadNet request msgpack".into()))
+fn unpack_msgpack_value(
+    bytes: &[u8],
+    max_bytes: usize,
+    max_scalar_bytes: usize,
+    max_container_items: usize,
+    max_total_values: usize,
+    max_depth: usize,
+) -> ServerResult<Value> {
+    crate::protocol::codec::validate_msgpack_with_limits(
+        bytes,
+        max_bytes,
+        max_scalar_bytes,
+        max_container_items,
+        max_total_values,
+        max_depth,
+    )
+    .map_err(|error| ServerError::Message(error.to_string()))?;
+    let mut cursor = Cursor::new(bytes);
+    let value = rmpv::decode::read_value(&mut cursor)
+        .map_err(|_| ServerError::Message("failed to decode NomadNet request msgpack".into()))?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(ServerError::Message(
+            "trailing NomadNet request msgpack data".into(),
+        ));
+    }
+    Ok(value)
 }
 
 fn pack_msgpack_value(value: &Value) -> ServerResult<Vec<u8>> {
@@ -1278,13 +1831,6 @@ fn truncated_sha256(bytes: &[u8]) -> [u8; 16] {
     out
 }
 
-fn unix_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or_default()
-}
-
 fn hex_lower(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -1292,6 +1838,21 @@ fn hex_lower(bytes: &[u8; 16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_offer_preserves_owned_allocations() {
+        let payload = vec![0x41; 1024 * 1024];
+        let metadata = vec![0x42; 4096];
+        let payload_ptr = payload.as_ptr();
+        let metadata_ptr = metadata.as_ptr();
+
+        let offer = ResourceOffer::new(payload, metadata);
+
+        assert_eq!(offer.payload.as_ptr(), payload_ptr);
+        assert_eq!(offer.metadata.as_ptr(), metadata_ptr);
+        assert_eq!(offer.queued_bytes(), 1024 * 1024 + 4096);
+    }
+    use crate::transport::CapturedTransport;
 
     fn test_config(name: &str) -> ServerConfig {
         ServerConfig::for_root(std::env::temp_dir().join(format!(
@@ -1307,6 +1868,149 @@ mod tests {
             Value::Nil,
         ]))
         .expect("pack request")
+    }
+
+    fn test_live_worker() -> LiveServerWorker<CapturedTransport> {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        LiveServerWorker::new(OmenchatLiveServer::new(
+            engine,
+            CapturedTransport::default(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn live_worker_rejects_saturation_without_queuing_waiters() {
+        let worker = test_live_worker();
+        let held = worker.permit.clone().try_acquire_owned().expect("permit");
+
+        let error = worker
+            .handle_event(OmenchatLinkEvent::LinkClosed {
+                link_id: [1; 16],
+                reason: Some("test".into()),
+            })
+            .await
+            .expect_err("busy worker must reject");
+        assert!(error.to_string().contains("worker is busy"));
+        assert_eq!(worker.worker_metrics().rejected, 1);
+        assert_eq!(worker.worker_metrics().completed, 0);
+
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn blocked_live_worker_does_not_stall_tokio_timers() {
+        let worker = Arc::new(test_live_worker());
+        let server = worker.server.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let lock_thread = std::thread::spawn(move || {
+            let _held_server = server.lock().expect("hold worker lock");
+            ready_tx.send(()).expect("report held lock");
+            release_rx.recv().expect("release held lock");
+        });
+        ready_rx.recv().expect("worker lock ready");
+        let task_worker = worker.clone();
+        let task = tokio::spawn(async move {
+            task_worker
+                .handle_event(OmenchatLinkEvent::LinkClosed {
+                    link_id: [2; 16],
+                    reason: Some("test".into()),
+                })
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while worker.worker_metrics().in_flight == 0 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        })
+        .await
+        .expect("Tokio timer must progress while blocking worker waits");
+
+        release_tx.send(()).expect("release worker lock");
+        lock_thread.join().expect("lock thread");
+        task.await.expect("worker task").expect("handle event");
+        let metrics = worker.worker_metrics();
+        assert_eq!(metrics.in_flight, 0);
+        assert_eq!(metrics.completed, 1);
+        assert!(metrics.max_micros >= 10_000);
+    }
+
+    #[tokio::test]
+    async fn sqlite_write_lock_is_bounded_without_stalling_tokio() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-reticulum-live-sqlite-lock-{}-{nonce}",
+            std::process::id()
+        ));
+        let path = root.join("omenchat.sqlite");
+        let store = OmenchatStore::open_for_lock_test(&path, Duration::from_millis(100))
+            .expect("test store");
+        let locker = rusqlite::Connection::open(&path).expect("lock connection");
+        locker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("acquire SQLite write lock");
+
+        let worker = Arc::new(LiveServerWorker::new(OmenchatLiveServer::new(
+            SessionEngine::new(store),
+            CapturedTransport::default(),
+        )));
+        let session_open = crate::protocol::codec::encode_frame(&crate::protocol::Frame::new(
+            crate::protocol::ChatOp::SessionOpen,
+            1,
+            None,
+            crate::protocol::FrameBody::Fields(vec![
+                crate::protocol::FrameValue::String("omenchat/0.1".into()),
+                crate::protocol::FrameValue::String("Locked Client".into()),
+                crate::protocol::FrameValue::String("locked-client-destination".into()),
+            ]),
+        ))
+        .expect("session frame");
+        let task_worker = worker.clone();
+        let started = Instant::now();
+        let task = tokio::spawn(async move {
+            task_worker
+                .handle_event(OmenchatLinkEvent::LinkData {
+                    link_id: [3; 16],
+                    context: OMENCHAT_LINK_CONTEXT,
+                    data: session_open,
+                })
+                .await
+        });
+
+        tokio::time::timeout(
+            Duration::from_millis(75),
+            tokio::time::sleep(Duration::from_millis(10)),
+        )
+        .await
+        .expect("Tokio timer must progress during SQLite busy wait");
+        task.await
+            .expect("worker task")
+            .expect("handled protocol error");
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(90));
+        assert!(elapsed < Duration::from_secs(1));
+        let stats = worker.stats();
+        assert_eq!(stats.protocol_errors, 1);
+        assert!(stats
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("database is locked"));
+        assert!(worker.worker_metrics().max_micros >= 90_000);
+
+        locker.execute_batch("ROLLBACK").expect("release lock");
+        drop(locker);
+        drop(worker);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        std::fs::remove_dir(root).expect("remove isolated database root");
     }
 
     #[test]
@@ -1328,6 +2032,23 @@ mod tests {
     }
 
     #[test]
+    fn nomadnet_resource_request_rejects_unbounded_or_trailing_msgpack() {
+        let config = test_config("request-bounds");
+        let mut trailing = pack_request_for_path("/page/index.mu");
+        trailing.push(0xc0);
+        assert!(nomadnet_request_path_for_payload(&config, &trailing).is_none());
+
+        let oversized_scalar = [0xdb, 0x00, 0x00, 0x04, 0x01];
+        assert!(nomadnet_request_path_for_payload(&config, &oversized_scalar).is_none());
+
+        let mut deep = vec![0x91; 6];
+        deep.push(0xc0);
+        assert!(nomadnet_request_path_for_payload(&config, &deep).is_none());
+
+        assert!(nomadnet_request_path_for_payload(&config, &vec![0xc0; 4097]).is_none());
+    }
+
+    #[test]
     fn nomadnet_response_resource_payload_roundtrips_request_id_and_body() {
         let config = test_config("response-payload");
         crate::config::init_files(&config).expect("init");
@@ -1335,7 +2056,15 @@ mod tests {
 
         let request_id = [0x42u8; 16];
         let payload = nomadnet_response_resource_payload(&config, &request_id).expect("payload");
-        let value = unpack_msgpack_value(&payload).expect("decode");
+        let value = unpack_msgpack_value(
+            &payload,
+            4 * 1024 * 1024,
+            4 * 1024 * 1024,
+            16 * 1024,
+            64 * 1024,
+            16,
+        )
+        .expect("decode");
         let Value::Array(items) = value else {
             panic!("response must be an array");
         };
@@ -1345,4 +2074,191 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(config.root_dir());
     }
+
+    #[test]
+    fn queue_budget_enforces_global_and_per_link_byte_limits() {
+        let budget = QueueBudget::new(10, 6);
+        let link_a = [0x11; 16];
+        let link_b = [0x22; 16];
+
+        let first = budget.reserve(link_a, 6).expect("first reservation");
+        assert!(budget.reserve(link_a, 1).is_none());
+        let second = budget.reserve(link_b, 4).expect("second reservation");
+        assert!(budget.reserve(link_b, 1).is_none());
+
+        let snapshot = budget.snapshot();
+        assert_eq!(snapshot.queued_items, 2);
+        assert_eq!(snapshot.queued_bytes, 10);
+        assert_eq!(snapshot.rejected_items, 2);
+
+        drop(first);
+        assert_eq!(budget.snapshot().queued_bytes, 4);
+        drop(second);
+        let snapshot = budget.snapshot();
+        assert_eq!(snapshot.queued_items, 0);
+        assert_eq!(snapshot.queued_bytes, 0);
+        assert_eq!(snapshot.oldest_age_ms, 0);
+        assert_eq!(snapshot.rejected_items, 2);
+    }
+
+    #[test]
+    fn bounded_queue_releases_permits_on_saturation_and_receiver_drop() {
+        let budget = QueueBudget::new(1024, 1024);
+        let (tx, rx) = mpsc::channel::<Queued<Vec<u8>>>(2);
+        let link_id = [0x33; 16];
+        let mut accepted = 0;
+
+        for _ in 0..20 {
+            let permit = budget.reserve(link_id, 4).expect("byte budget");
+            if tx
+                .try_send(Queued {
+                    value: vec![0; 4],
+                    _permit: permit,
+                })
+                .is_ok()
+            {
+                accepted += 1;
+            } else {
+                budget.reject();
+            }
+        }
+
+        assert_eq!(accepted, 2);
+        assert_eq!(budget.snapshot().queued_items, 2);
+        assert_eq!(budget.snapshot().queued_bytes, 8);
+        assert_eq!(budget.snapshot().rejected_items, 18);
+
+        drop(rx);
+        assert_eq!(budget.snapshot().queued_items, 0);
+        assert_eq!(budget.snapshot().queued_bytes, 0);
+    }
+
+    #[test]
+    fn queue_permit_release_is_cancellation_safe_and_tracks_oldest_age() {
+        let budget = QueueBudget::new(128, 128);
+        let first = budget.reserve([0x44; 16], 64).expect("first reservation");
+        std::thread::sleep(Duration::from_millis(20));
+        let second = budget.reserve([0x44; 16], 32).expect("second reservation");
+        std::thread::sleep(Duration::from_millis(2));
+        let first_age = budget.snapshot().oldest_age_ms;
+        assert!(first_age >= 20);
+
+        drop(first);
+        let second_age = budget.snapshot().oldest_age_ms;
+        assert!(second_age < first_age);
+        assert_eq!(budget.snapshot().queued_items, 1);
+
+        drop(second);
+        let snapshot = budget.snapshot();
+        assert_eq!(snapshot.queued_items, 0);
+        assert_eq!(snapshot.queued_bytes, 0);
+        assert_eq!(snapshot.oldest_age_ms, 0);
+    }
+
+    #[test]
+    fn queue_budget_rejects_single_payload_larger_than_any_budget() {
+        let budget = QueueBudget::new(16, 8);
+        assert!(budget.reserve([0x55; 16], 9).is_none());
+        assert_eq!(budget.snapshot().rejected_items, 1);
+    }
+
+    #[tokio::test]
+    async fn control_lane_remains_responsive_while_payload_lane_is_saturated() {
+        let budget = QueueBudget::new(128, 128);
+        let (payload_tx, mut payload_rx) = mpsc::channel::<Queued<Vec<u8>>>(1);
+        let (control_tx, mut control_rx) = mpsc::channel::<Queued<&'static str>>(1);
+        let link_id = [0x66; 16];
+
+        payload_tx
+            .try_send(Queued {
+                value: vec![0; 64],
+                _permit: budget.reserve(link_id, 64).expect("payload permit"),
+            })
+            .expect("fill payload lane");
+        assert!(payload_tx
+            .try_send(Queued {
+                value: vec![0; 1],
+                _permit: budget.reserve(link_id, 1).expect("rejected payload permit"),
+            })
+            .is_err());
+
+        control_tx
+            .send(Queued {
+                value: "close",
+                _permit: budget.reserve(link_id, 0).expect("control permit"),
+            })
+            .await
+            .expect("control admission");
+        assert_eq!(
+            control_rx.recv().await.expect("control event").value,
+            "close"
+        );
+        assert_eq!(
+            payload_rx.recv().await.expect("payload event").value.len(),
+            64
+        );
+        assert_eq!(budget.snapshot().queued_items, 0);
+        assert_eq!(budget.snapshot().queued_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn closed_lanes_drain_without_spinning_or_retaining_permits() {
+        let budget = QueueBudget::new(128, 128);
+        let (payload_tx, mut payload_rx) = mpsc::channel::<Queued<u8>>(2);
+        let (control_tx, mut control_rx) = mpsc::channel::<Queued<u8>>(2);
+        let link_id = [0x77; 16];
+        payload_tx
+            .send(Queued {
+                value: 1,
+                _permit: budget.reserve(link_id, 64).expect("payload permit"),
+            })
+            .await
+            .expect("payload send");
+        control_tx
+            .send(Queued {
+                value: 2,
+                _permit: budget.reserve(link_id, 0).expect("control permit"),
+            })
+            .await
+            .expect("control send");
+        drop(payload_tx);
+        drop(control_tx);
+
+        let drained = tokio::time::timeout(Duration::from_secs(1), async move {
+            let mut control_open = true;
+            let mut payload_open = true;
+            let mut values = Vec::new();
+            while control_open || payload_open {
+                let queued = tokio::select! {
+                    biased;
+                    queued = control_rx.recv(), if control_open => match queued {
+                        Some(value) => Some(value),
+                        None => { control_open = false; None }
+                    },
+                    queued = payload_rx.recv(), if payload_open => match queued {
+                        Some(value) => Some(value),
+                        None => { payload_open = false; None }
+                    },
+                };
+                if let Some(queued) = queued {
+                    values.push(queued.value);
+                }
+            }
+            values
+        })
+        .await
+        .expect("closed queues must terminate");
+
+        assert_eq!(drained, vec![2, 1]);
+        assert_eq!(budget.snapshot().queued_items, 0);
+        assert_eq!(budget.snapshot().queued_bytes, 0);
+    }
 }
+
+#[cfg(test)]
+#[path = "reticulum_live_soak_tests.rs"]
+mod soak_tests;
+
+#[cfg(test)]
+#[path = "reticulum_live_db_soak_tests.rs"]
+mod db_soak_tests;

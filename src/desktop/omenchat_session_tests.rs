@@ -2,7 +2,7 @@ use super::*;
 use crate::app::App;
 use crate::chat::store::ChatStore;
 use crate::chat::OmenChatDescriptor;
-use crate::desktop::{is_pending_omenchat_destination, DesktopPane, Message};
+use crate::desktop::{is_pending_omenchat_destination, DesktopPane, Message, OmenChatMessage};
 
 const FIXTURE_CHAT_SERVER_HASH: &str = "00112233445566778899aabbccddeeff";
 const FIXTURE_OMENCHAT_HASH: &str = "ffeeddccbbaa99887766554433221100";
@@ -55,7 +55,7 @@ fn close_omenchat_session_deletes_plugin_store_rows() {
         .any(|server| server.server_id == server_id));
 
     desktop.close_omenchat_session(session_id);
-    desktop.remove_workspace_panes_for_missing_targets(None, None);
+    desktop.reconcile_workspace_panes_after_target_mutation(None, None);
     desktop.persist_workspace_panes("workspace panes");
 
     assert!(desktop
@@ -149,7 +149,7 @@ fn close_omenchat_session_message_updates_session_store() {
         "connected".into(),
     );
 
-    let _ = desktop.update(Message::CloseOmenChatSession(session_id));
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::CloseSession(session_id)));
 
     assert!(desktop.omenchat.chat_client.session(session_id).is_none());
     assert_eq!(desktop.app.status.task, "closed OMENchat session");
@@ -166,7 +166,7 @@ fn new_chat_creates_blank_session_instead_of_restoring_existing_chat() {
         .expect("existing pane");
     desktop.close_workspace_pane(existing_pane);
 
-    let _ = desktop.update(Message::NewOmenChatPane);
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::NewPane));
 
     let sessions = desktop.omenchat.chat_client.sessions();
     assert_eq!(sessions.len(), 2);
@@ -200,7 +200,7 @@ fn opening_existing_omenchat_destination_restores_without_duplicate_session() {
     desktop.close_workspace_pane(existing_pane);
 
     desktop.omenchat.omenchat_server_entry = format!("omenchat://{FIXTURE_CHAT_SERVER_HASH}");
-    let _ = desktop.update(Message::OpenOmenChatServerEntry);
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::OpenServerEntry));
 
     assert_eq!(desktop.omenchat.chat_client.sessions().len(), 1);
     assert!(desktop
@@ -219,7 +219,7 @@ fn opening_destination_from_blank_chat_replaces_blank_pane() {
     let (mut desktop, _) = desktop_with_paths("omenbrowser-rs-desktop-open-from-blank-chat");
     desktop.app.runtime_status.connected = false;
 
-    let _ = desktop.update(Message::NewOmenChatPane);
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::NewPane));
     let blank_id = desktop.omenchat.chat_client.sessions()[0].session_id;
     assert!(is_pending_omenchat_destination(
         &desktop.omenchat.chat_client.sessions()[0]
@@ -228,7 +228,7 @@ fn opening_destination_from_blank_chat_replaces_blank_pane() {
     ));
 
     desktop.omenchat.omenchat_server_entry = FIXTURE_CHAT_SERVER_HASH.into();
-    let _ = desktop.update(Message::OpenOmenChatServerEntry);
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::OpenServerEntry));
 
     let sessions = desktop.omenchat.chat_client.sessions();
     assert_eq!(sessions.len(), 1);
@@ -256,9 +256,9 @@ fn opening_different_omenchat_destinations_creates_separate_sessions() {
     desktop.app.runtime_status.connected = false;
 
     desktop.omenchat.omenchat_server_entry = FIXTURE_CHAT_SERVER_HASH.into();
-    let _ = desktop.update(Message::OpenOmenChatServerEntry);
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::OpenServerEntry));
     desktop.omenchat.omenchat_server_entry = FIXTURE_OMENCHAT_HASH.into();
-    let _ = desktop.update(Message::OpenOmenChatServerEntry);
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::OpenServerEntry));
 
     let sessions = desktop.omenchat.chat_client.sessions();
     assert_eq!(sessions.len(), 2);
@@ -283,7 +283,7 @@ fn opening_different_omenchat_destinations_creates_separate_sessions() {
         .any(|(_, pane)| *pane == DesktopPane::OmenChat(second.session_id)));
 
     desktop.omenchat.omenchat_server_entry = format!("omenchat://{FIXTURE_CHAT_SERVER_HASH}");
-    let _ = desktop.update(Message::OpenOmenChatServerEntry);
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::OpenServerEntry));
 
     assert_eq!(desktop.omenchat.chat_client.sessions().len(), 2);
     assert!(desktop

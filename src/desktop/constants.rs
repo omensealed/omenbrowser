@@ -1,7 +1,6 @@
 pub(in crate::desktop) const DIRECTORY_RENDER_LIMIT: usize = 80;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub(in crate::desktop) const OMENCHAT_RECENT_SYNC_MAX_ATTEMPTS: u8 = 3;
-pub(in crate::desktop) const DESKTOP_IDLE_TICK_MS: u64 = 1_000;
 pub(in crate::desktop) const DESKTOP_LIVE_TICK_MS: u64 = 250;
 // Reticulum links can go stale quickly on quiet paths. A lightweight OMENchat
 // ping below that window is less noisy than repeated teardown/reconnect/history sync.
@@ -17,6 +16,50 @@ pub(in crate::desktop) const OMENCHAT_LOCAL_ECHO_RESEND_SECS: i64 = 15;
 pub(in crate::desktop) const OMENCHAT_INLINE_MEDIA_HEADER_BYTES: usize = 128 * 1024;
 #[cfg(feature = "chat-client")]
 pub(in crate::desktop) const OMENCHAT_GIF_ANIMATION_SCAN_BYTES: usize = 512 * 1024;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_GIF_ENCODED_MAX_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_GIF_DECODED_MAX_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_GIF_MAX_DIMENSION: u32 = 4096;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_GIF_MAX_FRAMES: usize = 128;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_GIF_CACHE_MAX_ITEMS: usize = 12;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_MEDIA_JOB_MAX_ITEMS: usize = 16;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_MEDIA_JOB_MAX_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_MEDIA_STATE_MAX_ITEMS: usize = 256;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_MEDIA_STATE_MAX_BYTES: usize = 256 * 1024;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_MEDIA_DISK_MAX_ITEMS: usize = 64;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_MEDIA_DISK_MAX_BYTES: u64 = 128 * 1024 * 1024;
+#[cfg(feature = "chat-client")]
+pub(in crate::desktop) const OMENCHAT_MEDIA_DISK_DIRTY_MARKER: &str = ".omenchat-media-dirty";
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_RESOURCE_MAX_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_RESOURCE_CACHE_MAX_ITEMS: usize = 16;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_RESOURCE_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_PENDING_RESOURCE_OFFER_MAX_ITEMS: usize = 32;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_PENDING_RESOURCE_OFFER_MAX_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_TRANSPORT_FRAME_QUEUE_MAX_ITEMS: usize = 64;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_TRANSPORT_FRAME_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_TRANSPORT_RESOURCE_QUEUE_MAX_ITEMS: usize = 4;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_TRANSPORT_RESOURCE_QUEUE_MAX_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) const OMENCHAT_TRANSPORT_RESOURCE_ID_MAX_BYTES: usize = 4 * 1024;
 #[cfg(feature = "chat-client")]
 pub(in crate::desktop) const OMENCHAT_INLINE_MEDIA_MAX_WIDTH: f32 = 520.0;
 #[cfg(feature = "chat-client")]

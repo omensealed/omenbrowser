@@ -7,8 +7,8 @@ use crate::workspace::WorkspaceSection;
 use super::super::{
     action_grid, app_scrollable, compact_elapsed_ms, human_bytes,
     monitoring_interface_reconnect_line, monitoring_interface_status_lines, recent_activity_column,
-    section_card, subtle_button, ui_size, wrapped_panel_text, wrapped_text_owned, DesktopApp,
-    Message,
+    section_card, subtle_button, ui_size, wrapped_panel_text, wrapped_text_owned, BrowserMessage,
+    DesktopApp, Message, ShellMessage,
 };
 use super::network_doctor_model::{
     network_doctor_active_resource_rows, network_doctor_health_summary,
@@ -170,10 +170,15 @@ pub(in crate::desktop) fn network_doctor_view(desktop: &DesktopApp) -> Element<'
             wrapped_panel_text("Detailed per-destination path state is not normalized into the desktop facade yet. Use Diagnostics for current path reports."),
             action_grid(
                 vec![
-                    subtle_button("Path Diagnostics", Message::PathDiagnostics),
+                    subtle_button(
+                        "Path Diagnostics",
+                        Message::Browser(BrowserMessage::PathDiagnostics),
+                    ),
                     subtle_button(
                         "Diagnostics",
-                        Message::SwitchSection(WorkspaceSection::Diagnostics)
+                        Message::Shell(ShellMessage::SwitchSection(
+                            WorkspaceSection::Diagnostics,
+                        ))
                     ),
                 ],
                 2,
@@ -290,7 +295,7 @@ pub(in crate::desktop) fn network_doctor_view(desktop: &DesktopApp) -> Element<'
             ),
             subtle_button(
                 "Open Directory",
-                Message::SwitchSection(WorkspaceSection::Directory)
+                Message::Shell(ShellMessage::SwitchSection(WorkspaceSection::Directory))
             ),
         ]
         .spacing(4),

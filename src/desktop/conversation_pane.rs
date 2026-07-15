@@ -55,9 +55,13 @@ impl DesktopApp {
     ) -> Task<Message> {
         Task::perform(
             async move { pick_conversation_attachment_file() },
-            move |result| Message::ConversationAttachmentPicked {
-                conversation_id,
-                result,
+            move |result| {
+                Message::ConversationCompletion(
+                    super::ConversationCompletionMessage::AttachmentPicked {
+                        conversation_id,
+                        result,
+                    },
+                )
             },
         )
     }

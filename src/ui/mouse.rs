@@ -534,7 +534,10 @@ fn hit_tab_line<'a>(
 
 fn body_rect(terminal: Rect) -> Option<Rect> {
     let used = HEADER_HEIGHT.saturating_add(FOOTER_HEIGHT);
-    (terminal.height > used).then_some(Rect {
+    if terminal.height <= used {
+        return None;
+    }
+    Some(Rect {
         x: terminal.x,
         y: terminal.y + HEADER_HEIGHT,
         width: terminal.width,
@@ -579,6 +582,16 @@ mod tests {
             action_for_click(&app, terminal, 2, HEADER_HEIGHT + 4),
             Some(MouseAction::ActivateSidebarIndex(3))
         );
+    }
+
+    #[test]
+    fn zero_and_header_only_terminals_do_not_underflow_body_layout() {
+        let app = app("tiny");
+        for height in 0..=HEADER_HEIGHT.saturating_add(FOOTER_HEIGHT) {
+            let terminal = Rect::new(0, 0, 0, height);
+            assert_eq!(browser_content_inner_size(terminal), (1, 1));
+            assert_eq!(action_for_click(&app, terminal, 0, 0), None);
+        }
     }
 
     #[test]
@@ -1055,9 +1068,25 @@ mod tests {
     fn maps_header_nav_click_to_section() {
         let app = app("header");
         let terminal = Rect::new(0, 0, 120, 40);
+        let labels = WorkspaceSection::ALL
+            .iter()
+            .map(|section| format!(" {} ", section.label()))
+            .collect::<Vec<_>>();
+        let browser_index = WorkspaceSection::ALL
+            .iter()
+            .position(|section| *section == WorkspaceSection::Browser)
+            .expect("browser section");
+        let nav_width = labels.iter().map(|label| label.len() as u16).sum::<u16>();
+        let browser_column = terminal.x
+            + terminal.width.saturating_sub(nav_width) / 2
+            + labels[..browser_index]
+                .iter()
+                .map(|label| label.len() as u16)
+                .sum::<u16>()
+            + labels[browser_index].len() as u16 / 2;
 
         assert_eq!(
-            action_for_click(&app, terminal, 25, 1),
+            action_for_click(&app, terminal, browser_column, 1),
             Some(MouseAction::SwitchSection(WorkspaceSection::Browser))
         );
     }

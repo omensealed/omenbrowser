@@ -4,6 +4,32 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_FG_DARK: &str = "ccc";
 pub const DEFAULT_BG: &str = "default";
+pub const MICRON_LINK_RAW_MAX_BYTES: usize = 96 * 1024;
+pub const MICRON_LINK_LABEL_MAX_BYTES: usize = 16 * 1024;
+pub const MICRON_LINK_TARGET_MAX_BYTES: usize = 8 * 1024;
+pub const MICRON_LINK_MAX_FIELDS: usize = 128;
+pub const MICRON_LINK_FIELD_MAX_BYTES: usize = 4 * 1024;
+pub const MICRON_LINK_FIELDS_MAX_BYTES: usize = 64 * 1024;
+pub const MICRON_CONTROL_RAW_MAX_BYTES: usize = 72 * 1024;
+pub const MICRON_CONTROL_NAME_MAX_BYTES: usize = 256;
+pub const MICRON_CONTROL_VALUE_MAX_BYTES: usize = 64 * 1024;
+pub const MICRON_CONTROL_FLAGS_MAX_BYTES: usize = 32;
+pub const MICRON_CONTROL_MAX_WIDTH: usize = 256;
+pub const MICRON_CONTROL_MAX_ITEMS: usize = 128;
+pub const MICRON_CONTROL_MAX_OWNED_BYTES: usize = 4 * 1024 * 1024;
+pub const MICRON_DOCUMENT_MAX_ROWS: usize = 16 * 1024;
+pub const MICRON_DOCUMENT_MAX_LINE_BYTES: usize = 256 * 1024;
+pub const MICRON_METADATA_MAX_ITEMS: usize = 64;
+pub const MICRON_METADATA_KEY_MAX_BYTES: usize = 256;
+pub const MICRON_METADATA_VALUE_MAX_BYTES: usize = 4 * 1024;
+pub const MICRON_METADATA_MAX_OWNED_BYTES: usize = 64 * 1024;
+pub const MICRON_DOCUMENT_MAX_FRAGMENTS: usize = 64 * 1024;
+pub const MICRON_DOCUMENT_SPAN_TEXT_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const MICRON_DOCUMENT_MAX_LINK_ACTIONS: usize = 4 * 1024;
+pub const MICRON_DOCUMENT_LINK_ACTIONS_MAX_BYTES: usize = 4 * 1024 * 1024;
+const MICRON_STYLE_METADATA_VALUE_MAX_BYTES: usize = 16;
+const MICRON_DOCUMENT_LIMIT_NOTICE: &str =
+    "[OMENbrowser: page content was truncated at a safe rendering limit]";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Alignment {
@@ -94,6 +120,8 @@ pub struct RenderRow {
 pub struct Document {
     pub rows: Vec<RenderRow>,
     pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub limits_applied: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -105,6 +133,13 @@ pub struct ParserState {
     default_fg: String,
     default_bg: Option<String>,
     style: TextStyle,
+    control_items: usize,
+    control_owned_bytes: usize,
+    fragment_items: usize,
+    span_text_bytes: usize,
+    link_action_items: usize,
+    link_action_owned_bytes: usize,
+    limits_applied: bool,
 }
 
 impl Default for ParserState {
@@ -117,6 +152,13 @@ impl Default for ParserState {
             default_fg: DEFAULT_FG_DARK.into(),
             default_bg: None,
             style: TextStyle::default(),
+            control_items: 0,
+            control_owned_bytes: 0,
+            fragment_items: 0,
+            span_text_bytes: 0,
+            link_action_items: 0,
+            link_action_owned_bytes: 0,
+            limits_applied: false,
         }
     }
 }
@@ -125,26 +167,122 @@ pub fn parse_micron(markup: &str) -> Document {
     let mut state = ParserState::default();
     let mut rows = Vec::new();
     let mut metadata = BTreeMap::new();
+    let mut limits_applied = false;
 
     for raw_line in markup.lines() {
+        if raw_line.len() > MICRON_DOCUMENT_MAX_LINE_BYTES {
+            limits_applied = true;
+            continue;
+        }
         if let Some(meta) = raw_line.strip_prefix("#!") {
             if let Some((key, value)) = meta.split_once('=') {
-                apply_metadata_directive(key, value, &mut state, &mut metadata);
+                limits_applied |= !apply_metadata_directive(key, value, &mut state, &mut metadata);
             }
             continue;
         }
 
         if let Some((key, value)) = bare_metadata_directive(raw_line) {
-            apply_metadata_directive(key, value, &mut state, &mut metadata);
+            limits_applied |= !apply_metadata_directive(key, value, &mut state, &mut metadata);
             continue;
         }
 
-        if let Some(row) = parse_line(raw_line, &mut state) {
+        if let Some(mut row) = parse_line(raw_line, &mut state) {
+            if rows.len() >= MICRON_DOCUMENT_MAX_ROWS.saturating_sub(1) {
+                limits_applied = true;
+                break;
+            }
+            admit_row_fragments(&mut row, &mut state);
             rows.push(row);
         }
     }
 
-    Document { rows, metadata }
+    limits_applied |= state.limits_applied;
+
+    if limits_applied {
+        rows.push(limit_notice_row(&state));
+    }
+
+    Document {
+        rows,
+        metadata,
+        limits_applied,
+    }
+}
+
+fn admit_row_fragments(row: &mut RenderRow, state: &mut ParserState) {
+    let mut admitted = Vec::with_capacity(row.fragments.len());
+    for mut fragment in std::mem::take(&mut row.fragments) {
+        if state.fragment_items >= MICRON_DOCUMENT_MAX_FRAGMENTS.saturating_sub(1) {
+            state.limits_applied = true;
+            break;
+        }
+        match &mut fragment {
+            Fragment::Span(span) => {
+                let Some(next_text_bytes) = state.span_text_bytes.checked_add(span.text.len())
+                else {
+                    state.limits_applied = true;
+                    break;
+                };
+                if next_text_bytes
+                    > MICRON_DOCUMENT_SPAN_TEXT_MAX_BYTES
+                        .saturating_sub(MICRON_DOCUMENT_LIMIT_NOTICE.len())
+                {
+                    state.limits_applied = true;
+                    break;
+                }
+                state.span_text_bytes = next_text_bytes;
+
+                if let Some(link) = span.link.as_ref() {
+                    let action_bytes = link
+                        .fields
+                        .iter()
+                        .try_fold(link.target.len(), |total, field| {
+                            total.checked_add(field.len())
+                        });
+                    let action_admitted = state.link_action_items
+                        < MICRON_DOCUMENT_MAX_LINK_ACTIONS
+                        && action_bytes.is_some_and(|action_bytes| {
+                            state
+                                .link_action_owned_bytes
+                                .checked_add(action_bytes)
+                                .is_some_and(|total| {
+                                    total <= MICRON_DOCUMENT_LINK_ACTIONS_MAX_BYTES
+                                })
+                        });
+                    if action_admitted {
+                        state.link_action_items += 1;
+                        state.link_action_owned_bytes +=
+                            action_bytes.expect("checked action bytes");
+                    } else {
+                        span.link = None;
+                        state.limits_applied = true;
+                    }
+                }
+            }
+            Fragment::Control(_) => {}
+        }
+        state.fragment_items += 1;
+        admitted.push(fragment);
+    }
+    row.fragments = admitted;
+}
+
+fn limit_notice_row(state: &ParserState) -> RenderRow {
+    RenderRow {
+        kind: RowKind::Text,
+        depth: 0,
+        fragments: vec![Fragment::Span(TextSpan {
+            text: MICRON_DOCUMENT_LIMIT_NOTICE.into(),
+            style: state.style.clone(),
+            link: None,
+        })],
+        align: Alignment::Left,
+        base_style: state.style.clone(),
+        divider: '─',
+        cell_preserving: false,
+        partial: None,
+        raw: MICRON_DOCUMENT_LIMIT_NOTICE.into(),
+    }
 }
 
 fn parse_line(line: &str, state: &mut ParserState) -> Option<RenderRow> {
@@ -309,9 +447,32 @@ fn apply_metadata_directive(
     value: &str,
     state: &mut ParserState,
     metadata: &mut BTreeMap<String, String>,
-) {
-    let key = key.trim().to_string();
-    let value = value.trim().to_string();
+) -> bool {
+    let key = key.trim();
+    let value = value.trim();
+    if key.is_empty()
+        || key.len() > MICRON_METADATA_KEY_MAX_BYTES
+        || value.len() > MICRON_METADATA_VALUE_MAX_BYTES
+        || (matches!(key, "fg" | "bg") && value.len() > MICRON_STYLE_METADATA_VALUE_MAX_BYTES)
+        || (!metadata.contains_key(key) && metadata.len() >= MICRON_METADATA_MAX_ITEMS)
+    {
+        return false;
+    }
+    let retained_bytes = metadata
+        .iter()
+        .filter(|(current_key, _)| current_key.as_str() != key)
+        .fold(0usize, |total, (current_key, current_value)| {
+            total.saturating_add(current_key.len().saturating_add(current_value.len()))
+        });
+    if retained_bytes
+        .checked_add(key.len())
+        .and_then(|total| total.checked_add(value.len()))
+        .is_none_or(|total| total > MICRON_METADATA_MAX_OWNED_BYTES)
+    {
+        return false;
+    }
+    let key = key.to_string();
+    let value = value.to_string();
     if key == "fg" {
         state.default_fg = value.clone();
         state.style.fg = Some(value.clone());
@@ -327,6 +488,7 @@ fn apply_metadata_directive(
         state.default_align = state.align;
     }
     metadata.insert(key, value);
+    true
 }
 
 fn bare_metadata_directive(line: &str) -> Option<(&str, &str)> {
@@ -527,19 +689,22 @@ fn parse_inline_and_controls_with_style(
             }
             'a' if chars.get(i + 1) == Some(&'=') => {
                 if let Some(end) = find_sequence(&chars, i + 2, &['`', 'a']) {
-                    let shorthand = chars[i + 2..end].iter().collect::<String>();
-                    let (target, label) = shorthand
-                        .split_once('|')
-                        .map(|(target, label)| (target.to_string(), label.to_string()))
-                        .unwrap_or_else(|| (shorthand.clone(), shorthand));
-                    fragments.push(Fragment::Span(TextSpan {
-                        text: label,
-                        style: current_style.clone(),
-                        link: Some(LinkAction {
-                            target,
-                            fields: Vec::new(),
-                        }),
-                    }));
+                    let raw_chars = &chars[i + 2..end];
+                    if chars_utf8_len(raw_chars)
+                        .is_some_and(|bytes| bytes <= MICRON_LINK_RAW_MAX_BYTES)
+                    {
+                        let shorthand = raw_chars.iter().collect::<String>();
+                        if let Some(span) = parse_shorthand_link(&shorthand, &current_style) {
+                            fragments.push(Fragment::Span(span));
+                        } else {
+                            fragments.push(plain_span(format!("`a={shorthand}`a"), &current_style));
+                        }
+                    } else {
+                        let mut literal = String::from("`a=");
+                        literal.extend(raw_chars);
+                        literal.push_str("`a");
+                        fragments.push(plain_span(literal, &current_style));
+                    }
                     i = end + 2;
                 } else {
                     buffer.push_str("`a");
@@ -557,13 +722,21 @@ fn parse_inline_and_controls_with_style(
             }
             '[' => {
                 if let Some(end) = find_char(&chars, i + 1, ']') {
-                    let raw = chars[i + 1..end].iter().collect::<String>();
-                    if let Some(span) = parse_link(&raw, &current_style) {
-                        fragments.push(Fragment::Span(span));
+                    let raw_chars = &chars[i + 1..end];
+                    if chars_utf8_len(raw_chars)
+                        .is_some_and(|bytes| bytes <= MICRON_LINK_RAW_MAX_BYTES)
+                    {
+                        let raw = raw_chars.iter().collect::<String>();
+                        if let Some(span) = parse_link(&raw, &current_style) {
+                            fragments.push(Fragment::Span(span));
+                        } else {
+                            fragments.push(plain_span(format!("`[{raw}]"), &current_style));
+                        }
                     } else {
-                        buffer.push_str("`[");
-                        buffer.push_str(&raw);
-                        buffer.push(']');
+                        let mut literal = String::from("`[");
+                        literal.extend(raw_chars);
+                        literal.push(']');
+                        fragments.push(plain_span(literal, &current_style));
                     }
                     i = end + 1;
                 } else {
@@ -573,13 +746,31 @@ fn parse_inline_and_controls_with_style(
             }
             '<' => {
                 if let Some(end) = find_char(&chars, i + 1, '>') {
-                    let raw = chars[i + 1..end].iter().collect::<String>();
-                    if let Some(control) = parse_control(&raw, &current_style) {
-                        fragments.push(Fragment::Control(control));
+                    let raw_chars = &chars[i + 1..end];
+                    if chars_utf8_len(raw_chars)
+                        .is_some_and(|bytes| bytes <= MICRON_CONTROL_RAW_MAX_BYTES)
+                    {
+                        let raw = raw_chars.iter().collect::<String>();
+                        let parsed = (state.control_items < MICRON_CONTROL_MAX_ITEMS)
+                            .then(|| parse_control(&raw, &current_style))
+                            .flatten();
+                        if let Some((control, owned_bytes)) = parsed.filter(|(_, owned_bytes)| {
+                            state
+                                .control_owned_bytes
+                                .checked_add(*owned_bytes)
+                                .is_some_and(|total| total <= MICRON_CONTROL_MAX_OWNED_BYTES)
+                        }) {
+                            state.control_items += 1;
+                            state.control_owned_bytes += owned_bytes;
+                            fragments.push(Fragment::Control(control));
+                        } else {
+                            fragments.push(plain_span(format!("`<{raw}>"), &current_style));
+                        }
                     } else {
-                        buffer.push_str("`<");
-                        buffer.push_str(&raw);
-                        buffer.push('>');
+                        let mut literal = String::from("`<");
+                        literal.extend(raw_chars);
+                        literal.push('>');
+                        fragments.push(plain_span(literal, &current_style));
                     }
                     i = end + 1;
                 } else {
@@ -608,6 +799,14 @@ fn flush_text(fragments: &mut Vec<Fragment>, buffer: &mut String, style: &TextSt
     buffer.clear();
 }
 
+fn plain_span(text: String, style: &TextStyle) -> Fragment {
+    Fragment::Span(TextSpan {
+        text,
+        style: style.clone(),
+        link: None,
+    })
+}
+
 fn autolink_lxmf(text: &str, style: &TextStyle) -> Vec<Fragment> {
     let mut fragments = Vec::new();
     let mut rest = text;
@@ -627,10 +826,12 @@ fn autolink_lxmf(text: &str, style: &TextStyle) -> Vec<Fragment> {
         fragments.push(Fragment::Span(TextSpan {
             text: address.into(),
             style: style.clone(),
-            link: (address.len() >= "lxmf@".len() + 16).then(|| LinkAction {
-                target: address.into(),
-                fields: Vec::new(),
-            }),
+            link: (address.len() >= "lxmf@".len() + 16
+                && address.len() <= MICRON_LINK_TARGET_MAX_BYTES)
+                .then(|| LinkAction {
+                    target: address.into(),
+                    fields: Vec::new(),
+                }),
         }));
         rest = &candidate[end..];
     }
@@ -655,29 +856,83 @@ fn parse_color(chars: &[char]) -> (String, usize) {
 }
 
 fn parse_link(raw: &str, style: &TextStyle) -> Option<TextSpan> {
-    if raw.is_empty() {
+    if raw.is_empty() || raw.len() > MICRON_LINK_RAW_MAX_BYTES {
         return None;
     }
     let mut parts = raw.split('`');
-    let label = parts.next()?.to_string();
-    let target = parts.next().unwrap_or(&label).to_string();
-    let fields = parts
-        .next()
-        .map(|blob| {
-            blob.split('|')
-                .filter(|field| !field.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let label = parts.next()?;
+    let target = parts.next().unwrap_or(label);
+    if label.len() > MICRON_LINK_LABEL_MAX_BYTES
+        || target.is_empty()
+        || target.len() > MICRON_LINK_TARGET_MAX_BYTES
+    {
+        return None;
+    }
+    let fields = match parts.next() {
+        Some(blob) => {
+            collect_bounded_link_fields(blob.split('|').filter(|field| !field.is_empty()))?
+        }
+        None => Vec::new(),
+    };
     Some(TextSpan {
-        text: label,
+        text: label.to_owned(),
         style: style.clone(),
-        link: Some(LinkAction { target, fields }),
+        link: Some(LinkAction {
+            target: target.to_owned(),
+            fields,
+        }),
     })
 }
 
-fn parse_control(raw: &str, style: &TextStyle) -> Option<FieldControl> {
+fn parse_shorthand_link(raw: &str, style: &TextStyle) -> Option<TextSpan> {
+    if raw.is_empty() || raw.len() > MICRON_LINK_RAW_MAX_BYTES {
+        return None;
+    }
+    let (target, label) = raw.split_once('|').unwrap_or((raw, raw));
+    if target.is_empty()
+        || target.len() > MICRON_LINK_TARGET_MAX_BYTES
+        || label.len() > MICRON_LINK_LABEL_MAX_BYTES
+    {
+        return None;
+    }
+    Some(TextSpan {
+        text: label.to_owned(),
+        style: style.clone(),
+        link: Some(LinkAction {
+            target: target.to_owned(),
+            fields: Vec::new(),
+        }),
+    })
+}
+
+pub(crate) fn collect_bounded_link_fields<'a>(
+    input: impl IntoIterator<Item = &'a str>,
+) -> Option<Vec<String>> {
+    let mut fields = Vec::new();
+    let mut total_bytes = 0usize;
+    for field in input {
+        if fields.len() >= MICRON_LINK_MAX_FIELDS || field.len() > MICRON_LINK_FIELD_MAX_BYTES {
+            return None;
+        }
+        total_bytes = total_bytes.checked_add(field.len())?;
+        if total_bytes > MICRON_LINK_FIELDS_MAX_BYTES {
+            return None;
+        }
+        fields.push(field.to_owned());
+    }
+    Some(fields)
+}
+
+fn chars_utf8_len(chars: &[char]) -> Option<usize> {
+    chars
+        .iter()
+        .try_fold(0usize, |total, ch| total.checked_add(ch.len_utf8()))
+}
+
+fn parse_control(raw: &str, style: &TextStyle) -> Option<(FieldControl, usize)> {
+    if raw.len() > MICRON_CONTROL_RAW_MAX_BYTES {
+        return None;
+    }
     let (descriptor, value) = raw.split_once('`')?;
     let mut kind = "field";
     let mut name = descriptor;
@@ -687,9 +942,15 @@ fn parse_control(raw: &str, style: &TextStyle) -> Option<FieldControl> {
     let mut field_value = "";
 
     if descriptor.contains('|') {
-        let parts: Vec<_> = descriptor.split('|').collect();
-        let mut flags = parts.first().copied().unwrap_or_default().to_string();
-        name = parts.get(1).copied().unwrap_or(descriptor);
+        let mut parts = descriptor.split('|');
+        let raw_flags = parts.next().unwrap_or_default();
+        name = parts.next().unwrap_or(descriptor);
+        field_value = parts.next().unwrap_or_default();
+        prechecked = parts.next() == Some("*");
+        if parts.next().is_some() || raw_flags.len() > MICRON_CONTROL_FLAGS_MAX_BYTES {
+            return None;
+        }
+        let mut flags = raw_flags.to_string();
         if flags.contains('^') {
             kind = "radio";
             flags = flags.replace('^', "");
@@ -701,31 +962,45 @@ fn parse_control(raw: &str, style: &TextStyle) -> Option<FieldControl> {
             flags = flags.replace('!', "");
         }
         if !flags.is_empty() {
-            width = flags.parse().unwrap_or(24);
+            width = match flags.parse() {
+                Ok(width @ 1..=MICRON_CONTROL_MAX_WIDTH) => width,
+                Ok(_) => return None,
+                Err(_) => 24,
+            };
         }
-        field_value = parts.get(2).copied().unwrap_or_default();
-        prechecked = parts.get(3).copied() == Some("*");
     }
 
-    Some(FieldControl {
+    if name.is_empty()
+        || name.len() > MICRON_CONTROL_NAME_MAX_BYTES
+        || value.len() > MICRON_CONTROL_VALUE_MAX_BYTES
+        || field_value.len() > MICRON_CONTROL_VALUE_MAX_BYTES
+    {
+        return None;
+    }
+    let selected_value = if field_value.is_empty() {
+        value
+    } else {
+        field_value
+    };
+    let label = matches!(kind, "checkbox" | "radio").then_some(value);
+    let owned_bytes = kind
+        .len()
+        .checked_add(name.len())?
+        .checked_add(selected_value.len())?
+        .checked_add(label.map_or(0, str::len))?
+        .checked_add(style.fg.as_deref().map_or(0, str::len))?
+        .checked_add(style.bg.as_deref().map_or(0, str::len))?;
+    let control = FieldControl {
         kind: kind.into(),
         name: name.into(),
-        value: if field_value.is_empty() {
-            value
-        } else {
-            field_value
-        }
-        .into(),
-        label: if matches!(kind, "checkbox" | "radio") {
-            value.into()
-        } else {
-            String::new()
-        },
+        value: selected_value.into(),
+        label: label.unwrap_or_default().into(),
         width,
         masked,
         prechecked,
         style: style.clone(),
-    })
+    };
+    Some((control, owned_bytes))
 }
 
 fn find_char(chars: &[char], start: usize, target: char) -> Option<usize> {
@@ -756,6 +1031,24 @@ mod tests {
                 Fragment::Control(_) => None,
             })
             .collect()
+    }
+
+    fn document_link_count(document: &Document) -> usize {
+        document
+            .rows
+            .iter()
+            .flat_map(|row| &row.fragments)
+            .filter(|fragment| matches!(fragment, Fragment::Span(TextSpan { link: Some(_), .. })))
+            .count()
+    }
+
+    fn document_control_count(document: &Document) -> usize {
+        document
+            .rows
+            .iter()
+            .flat_map(|row| &row.fragments)
+            .filter(|fragment| matches!(fragment, Fragment::Control(_)))
+            .count()
     }
 
     #[test]
@@ -823,6 +1116,57 @@ mod tests {
     }
 
     #[test]
+    fn rejects_link_targets_and_field_collections_above_parser_budgets() {
+        let too_many_fields = (0..=MICRON_LINK_MAX_FIELDS)
+            .map(|index| format!("field{index}"))
+            .collect::<Vec<_>>()
+            .join("|");
+        let too_many_field_bytes = (0..17)
+            .map(|index| format!("{index:02}{}", "x".repeat(4_000)))
+            .collect::<Vec<_>>()
+            .join("|");
+        for markup in [
+            format!("`[label`{}]", "t".repeat(MICRON_LINK_TARGET_MAX_BYTES + 1)),
+            format!(
+                "`[label`target`{}]",
+                "f".repeat(MICRON_LINK_FIELD_MAX_BYTES + 1)
+            ),
+            format!("`[label`target`{too_many_fields}]"),
+            format!("`[label`target`{too_many_field_bytes}]"),
+        ] {
+            assert_eq!(document_link_count(&parse_micron(&markup)), 0);
+        }
+    }
+
+    #[test]
+    fn shorthand_and_lxmf_autolinks_reject_oversized_targets() {
+        let shorthand = format!(
+            "`a={}|label`a",
+            "t".repeat(MICRON_LINK_TARGET_MAX_BYTES + 1)
+        );
+        assert_eq!(document_link_count(&parse_micron(&shorthand)), 0);
+
+        let lxmf = format!("lxmf@{}", "a".repeat(MICRON_LINK_TARGET_MAX_BYTES + 1));
+        assert_eq!(document_link_count(&parse_micron(&lxmf)), 0);
+    }
+
+    #[test]
+    fn oversized_raw_link_syntax_is_not_materialized_as_an_action() {
+        let markup = format!("`[label`target`{}]", "x".repeat(MICRON_LINK_RAW_MAX_BYTES));
+        let document = parse_micron(&markup);
+        assert_eq!(document_link_count(&document), 0);
+        assert_eq!(span_text(&document.rows[0]), markup);
+
+        let embedded_autolink = format!(
+            "`[label`{} lxmf@0011223344556677]",
+            "t".repeat(MICRON_LINK_TARGET_MAX_BYTES)
+        );
+        let document = parse_micron(&embedded_autolink);
+        assert_eq!(document_link_count(&document), 0);
+        assert_eq!(span_text(&document.rows[0]), embedded_autolink);
+    }
+
+    #[test]
     fn links_inherit_document_default_foreground() {
         let doc = parse_micron("#!fg=f11\nopen `[label`mock.node:/path]");
         let Fragment::Span(span) = &doc.rows[0].fragments[1] else {
@@ -876,6 +1220,220 @@ mod tests {
         assert_eq!(checkbox.kind, "checkbox");
         assert!(checkbox.prechecked);
         assert_eq!(radio.kind, "radio");
+    }
+
+    #[test]
+    fn oversized_or_malformed_controls_remain_non_actionable() {
+        for markup in [
+            format!(
+                "`<{} `lxmf@0011223344556677>",
+                "n".repeat(MICRON_CONTROL_NAME_MAX_BYTES + 1)
+            ),
+            format!("`<name`{}>", "v".repeat(MICRON_CONTROL_VALUE_MAX_BYTES + 1)),
+            format!("`<{}|name`value>", MICRON_CONTROL_MAX_WIDTH + 1),
+            "`<24|name|value|*|extra`label>".into(),
+        ] {
+            let document = parse_micron(&markup);
+            assert_eq!(document_control_count(&document), 0);
+            assert_eq!(document_link_count(&document), 0);
+            assert_eq!(span_text(&document.rows[0]), markup);
+        }
+    }
+
+    #[test]
+    fn document_controls_are_item_and_owned_byte_bounded() {
+        let item_markup = (0..=MICRON_CONTROL_MAX_ITEMS)
+            .map(|index| format!("`<field{index}`value>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            document_control_count(&parse_micron(&item_markup)),
+            MICRON_CONTROL_MAX_ITEMS
+        );
+
+        let value = "v".repeat(MICRON_CONTROL_VALUE_MAX_BYTES);
+        let byte_markup = (0..MICRON_CONTROL_MAX_ITEMS)
+            .map(|index| format!("`<field{index}`{value}>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let document = parse_micron(&byte_markup);
+        let controls = document
+            .rows
+            .iter()
+            .flat_map(|row| &row.fragments)
+            .filter_map(|fragment| match fragment {
+                Fragment::Control(control) => Some(control),
+                Fragment::Span(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!controls.is_empty());
+        assert!(controls.len() < MICRON_CONTROL_MAX_ITEMS);
+        assert!(
+            controls
+                .iter()
+                .map(|control| {
+                    control.kind.len()
+                        + control.name.len()
+                        + control.value.len()
+                        + control.label.len()
+                        + control.style.fg.as_deref().map_or(0, str::len)
+                        + control.style.bg.as_deref().map_or(0, str::len)
+                })
+                .sum::<usize>()
+                <= MICRON_CONTROL_MAX_OWNED_BYTES
+        );
+    }
+
+    #[test]
+    fn document_metadata_is_item_and_owned_byte_bounded() {
+        let item_markup = (0..=MICRON_METADATA_MAX_ITEMS)
+            .map(|index| format!("#!key-{index}=value"))
+            .chain(std::iter::once("body".into()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let item_document = parse_micron(&item_markup);
+        assert_eq!(item_document.metadata.len(), MICRON_METADATA_MAX_ITEMS);
+        assert!(item_document.limits_applied);
+        assert!(item_document
+            .rows
+            .last()
+            .is_some_and(|row| row.raw == MICRON_DOCUMENT_LIMIT_NOTICE));
+
+        let value = "v".repeat(MICRON_METADATA_VALUE_MAX_BYTES);
+        let byte_markup = (0..MICRON_METADATA_MAX_ITEMS)
+            .map(|index| format!("#!key-{index}={value}"))
+            .chain(std::iter::once("body".into()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let byte_document = parse_micron(&byte_markup);
+        let retained_bytes = byte_document
+            .metadata
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum::<usize>();
+        assert!(retained_bytes <= MICRON_METADATA_MAX_OWNED_BYTES);
+        assert!(byte_document.metadata.len() < MICRON_METADATA_MAX_ITEMS);
+        assert!(byte_document.limits_applied);
+
+        let style_document = parse_micron(&format!(
+            "#!fg={}\nbody",
+            "f".repeat(MICRON_STYLE_METADATA_VALUE_MAX_BYTES + 1)
+        ));
+        assert!(!style_document.metadata.contains_key("fg"));
+        assert_eq!(
+            style_document.rows[0].base_style.fg.as_deref(),
+            Some(DEFAULT_FG_DARK)
+        );
+        assert!(style_document.limits_applied);
+    }
+
+    #[test]
+    fn document_source_lines_and_rows_are_bounded_with_visible_notice() {
+        let oversized_line = "x".repeat(MICRON_DOCUMENT_MAX_LINE_BYTES + 1);
+        let line_document = parse_micron(&format!("{oversized_line}\nsafe tail"));
+        assert!(line_document.limits_applied);
+        assert_eq!(line_document.rows.len(), 2);
+        assert_eq!(line_document.rows[0].raw, "safe tail");
+        assert_eq!(line_document.rows[1].raw, MICRON_DOCUMENT_LIMIT_NOTICE);
+
+        let row_markup = std::iter::repeat_n("row", MICRON_DOCUMENT_MAX_ROWS)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let row_document = parse_micron(&row_markup);
+        assert!(row_document.limits_applied);
+        assert_eq!(row_document.rows.len(), MICRON_DOCUMENT_MAX_ROWS);
+        assert_eq!(
+            row_document.rows.last().map(|row| row.raw.as_str()),
+            Some(MICRON_DOCUMENT_LIMIT_NOTICE)
+        );
+    }
+
+    #[test]
+    fn document_fragments_and_span_text_are_aggregate_bounded() {
+        let fragment_markup = "x`!".repeat(MICRON_DOCUMENT_MAX_FRAGMENTS);
+        let fragment_document = parse_micron(&fragment_markup);
+        let fragment_count = fragment_document
+            .rows
+            .iter()
+            .map(|row| row.fragments.len())
+            .sum::<usize>();
+        assert_eq!(fragment_count, MICRON_DOCUMENT_MAX_FRAGMENTS);
+        assert!(fragment_document.limits_applied);
+        assert_eq!(
+            fragment_document.rows.last().map(|row| row.raw.as_str()),
+            Some(MICRON_DOCUMENT_LIMIT_NOTICE)
+        );
+
+        let line = "t".repeat(MICRON_DOCUMENT_MAX_LINE_BYTES);
+        let text_document =
+            parse_micron(&std::iter::repeat_n(line, 17).collect::<Vec<_>>().join("\n"));
+        let span_text_bytes = text_document
+            .rows
+            .iter()
+            .flat_map(|row| row.fragments.iter())
+            .filter_map(|fragment| match fragment {
+                Fragment::Span(span) => Some(span.text.len()),
+                Fragment::Control(_) => None,
+            })
+            .sum::<usize>();
+        assert!(span_text_bytes <= MICRON_DOCUMENT_SPAN_TEXT_MAX_BYTES);
+        assert!(text_document.limits_applied);
+        assert_eq!(
+            text_document.rows.last().map(|row| row.raw.as_str()),
+            Some(MICRON_DOCUMENT_LIMIT_NOTICE)
+        );
+    }
+
+    #[test]
+    fn document_link_actions_are_item_and_owned_byte_bounded() {
+        let item_markup =
+            std::iter::repeat_n("`[x`mock.node:/]", MICRON_DOCUMENT_MAX_LINK_ACTIONS + 1)
+                .collect::<Vec<_>>()
+                .join("\n");
+        let item_document = parse_micron(&item_markup);
+        let item_links = document_links(&item_document);
+        assert_eq!(item_links.len(), MICRON_DOCUMENT_MAX_LINK_ACTIONS);
+        assert!(item_document.limits_applied);
+
+        let target = "d".repeat(MICRON_LINK_TARGET_MAX_BYTES);
+        let byte_markup = std::iter::repeat_n(
+            format!("`[x`{target}]"),
+            MICRON_DOCUMENT_LINK_ACTIONS_MAX_BYTES / MICRON_LINK_TARGET_MAX_BYTES + 1,
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+        let byte_document = parse_micron(&byte_markup);
+        let byte_links = document_links(&byte_document);
+        let retained_bytes = byte_links
+            .iter()
+            .map(|link| link.target.len() + link.fields.iter().map(String::len).sum::<usize>())
+            .sum::<usize>();
+        assert!(retained_bytes <= MICRON_DOCUMENT_LINK_ACTIONS_MAX_BYTES);
+        assert_eq!(
+            byte_links.len(),
+            MICRON_DOCUMENT_LINK_ACTIONS_MAX_BYTES / MICRON_LINK_TARGET_MAX_BYTES
+        );
+        assert!(byte_document.limits_applied);
+        assert!(byte_document.rows.iter().any(|row| {
+            row.fragments.iter().any(|fragment| {
+                matches!(
+                    fragment,
+                    Fragment::Span(span) if span.text == "x" && span.link.is_none()
+                )
+            })
+        }));
+    }
+
+    fn document_links(document: &Document) -> Vec<&LinkAction> {
+        document
+            .rows
+            .iter()
+            .flat_map(|row| row.fragments.iter())
+            .filter_map(|fragment| match fragment {
+                Fragment::Span(span) => span.link.as_ref(),
+                Fragment::Control(_) => None,
+            })
+            .collect()
     }
 
     #[test]

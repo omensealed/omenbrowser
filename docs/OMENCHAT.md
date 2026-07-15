@@ -25,6 +25,47 @@ Typical isolated test home:
 The server home contains identity material, Reticulum config/storage, the SQLite
 database, logs, uploads, and the NomadNet portal page.
 
+Persistent server databases use SQLite WAL mode with foreign-key enforcement,
+NORMAL synchronization, and a finite five-second busy timeout. Room event IDs
+are selected and inserted under one immediate transaction, preserving unique,
+monotonic per-room IDs when multiple database connections contend. Database
+calls remain synchronous inside the store, but live Reticulum session/database
+handling runs through a single-admission Tokio blocking worker. Additional work
+is rejected instead of creating unbounded blocking tasks; the bounded Reticulum
+ingress queue retains pending events.
+CLI room list/create/topic/archive operations and line-console room/user
+administration use a separate single-owner
+administrative database worker with a 16-item request queue, explicit overload
+rejection, a six-second response deadline, and queue/in-flight/completion/
+rejection/latency metrics. The interactive dashboard keeps room metadata in a
+1,024-item/1 MiB cache, refreshes it asynchronously only while a room-consuming
+panel is visible, and submits create/topic/archive operations without waiting
+on SQLite. Interactive room and moderation views use bounded, visible-only
+five-second caches; moderation mutations and transactional stale-user pruning
+complete asynchronously through the same worker. The command-driven line
+console waits synchronously on that same bounded owner. Upload-ledger repair
+still uses its existing synchronous maintenance path.
+The current schema is recorded as SQLite `user_version = 2`; it adds an
+actor/time index for upload quota planning. Existing version-0/version-1
+databases migrate in one immediate transaction. A database from a
+newer omenchatd version is refused without modification instead of being
+silently downgraded.
+Before migrating a non-empty older database, omenchatd creates an owner-only
+SQLite-consistent sibling backup named
+`omenchat.sqlite.pre-v2-from-v<old>.bak`. It never overwrites an existing backup;
+backup failure aborts migration, and a successful backup is retained for
+operator recovery.
+Schema statements and the version update share one immediate transaction, so a
+failed migration leaves neither a partial schema nor an advanced version.
+Offline recovery is available as `omenchatd database
+restore-migration-backup --from <generated-sibling-backup> --confirm --home
+<path>`. It rejects a running/WAL-active database, symlinks, corrupt backups,
+current/future schema inputs, and filename/version mismatches. A private staging
+copy must migrate and pass SQLite integrity/foreign-key checks before atomic
+publication. The selected source remains unchanged and the prior active
+database is retained as an owner-only `pre-restore` backup. Operators must run
+`doctor` before restarting.
+
 ## Server Commands
 
 ```bash
@@ -44,11 +85,17 @@ omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-test
 For IFAC-protected gateways:
 
 ```bash
+printf '%s\n' 'your passphrase' > /tmp/omenchatd-ifac-passphrase
+chmod 600 /tmp/omenchatd-ifac-passphrase
 omenchatd interfaces tcp-client <gateway-host:port> \
   --home /tmp/omenchatd-test \
   --network-name <network-name> \
-  --passphrase <passphrase>
+  --passphrase-file /tmp/omenchatd-ifac-passphrase
 ```
+
+Use `--passphrase-prompt` for a hidden terminal prompt or
+`--passphrase-stdin` for a protected pipe. Direct `--passphrase` values are
+deprecated because argv may be visible to other users and support tools.
 
 ## Browser Client
 
@@ -85,13 +132,292 @@ watchdog`.
 - NomadNet/Reticulum images can be loaded inline.
 - Clearweb image loading is gated by media privacy settings and SOCKS5/Tor
   detection.
+- SOCKS clearweb image bodies are streamed to a create-new same-directory
+  temporary file with an 8 MiB cumulative cap. Oversized declared lengths fail
+  before file creation; unknown/chunked lengths are checked before every write.
+  Successful content is flushed, synchronized, and atomically renamed to its
+  final cache name. Any response, write, overflow, flush, sync, or rename
+  failure removes the temporary file, and an existing final file is preserved.
+- SOCKS clients are reused through a four-entry LRU keyed by proxy endpoint and
+  timeout. Initial and redirected URLs reject credentials, non-HTTP schemes,
+  local/single-label/mDNS names, and private/link-local/special-use IP literals.
+  Redirects are capped at five hops and may not downgrade HTTPS to HTTP.
 - Non-image clearweb links open through the external browser prompt. Use Copy
   URL for Tor Browser and paste into the running Tor Browser window.
+
+Upload quota changes are serialized per identity within the server process. A
+replacement is written to an owner-only same-directory temporary file, flushed
+and synchronized, renamed to its final path, and recorded in SQLite before any
+older committed upload is evicted. A failed write or database record leaves the
+older committed files intact. Failed post-commit eviction is conservative: the
+server retains the extra old file rather than invalidating the new upload.
+The new ledger row commits before any old file is removed. Old ledger rows are
+deleted only for files whose physical eviction succeeded. A crash before file
+eviction therefore over-counts quota; a crash after file eviction leaves a
+missing row that restart reconciliation blocks. Neither boundary can
+under-count physical storage.
+Linux fault coverage also drives a real kernel `ENOSPC` from `/dev/full`
+through the upload write path and proves the prior committed upload survives.
+
+Animated GIF previews enforce an 8 MiB encoded limit, 4096-pixel dimension
+limit, 128-frame limit, and 64 MiB decoded estimate before decoder admission.
+Remote cached GIF reads and decoding run through two bounded blocking permits,
+not the Iced update path. Decoded animations are retained in a deterministic
+12-item/64 MiB cache; monitoring reports its item and decoded-byte totals.
+Inbound upload-resource writes and accepted local-upload copies now use the
+same worker boundary and return through typed Iced completion messages. Their
+pending payload queue is capped at 16 jobs and 16 MiB reserved bytes; local
+file jobs reserve the full 8 MiB per-file ceiling. Failed decode removes the
+new cache file rather than retaining an untracked partial result.
+Each job uniquely owns its queued byte buffer. After disk publication,
+animated input moves into `iced_gif`; the worker no longer retains an
+`Arc<[u8]>` and creates a second full `Vec<u8>` solely for decoder ownership.
+Every queued cache job carries a monotonically increasing per-key generation.
+Only the current session/key generation may update UI cache state. Replaced or
+closed-session completions are ignored, and any file already produced by a
+stale completion is removed asynchronously.
+Each session-owned cache/decode job also carries a cooperative cancellation
+token. Replacing a key cancels the previous generation, and closing a session
+cancels all of its queued or active jobs. File admission, source loading, GIF
+policy stages, decoder entry/return, pruning, and final publication check the
+token; cancellation failures remove any partial output. The third-party GIF
+decoder call itself is monolithic and cannot be interrupted mid-instruction.
+Animated frame handles are supplied to the OMENchat view only while its pane is
+actually visible in the Browser/Messages workspace. Tiled panes remain visible;
+siblings hidden by pane maximization and every pane behind another top-level
+section receive the static image fallback and submit no GIF animation widget.
+The persisted desktop **Reduce motion** preference applies at this same frame
+handle boundary. When enabled, even visible panes render the cached static GIF
+image and do not construct an animated widget. Encoded media limits, cache
+ownership, and wire behavior are unchanged.
+Decoder regression coverage includes named empty, truncated, zero/oversized
+dimension, excessive-frame, and malformed-LZW inputs plus 512 deterministic
+mutations of a valid one-pixel GIF. The corpus is dependency-free, bounded to
+tiny inputs, and exercises the complete production admission/panic boundary.
+Animation is an explicit `chat-client-gif` capability. The canonical
+`desktop-product` enables it; `desktop-product-static-media` excludes the
+decoder and frame widget while retaining the same live networking and media
+cache. In that profile GIF files remain ordinary static image previews and
+never enter the animation decoder/cache.
+The separate UI media-state cache is limited to 256 entries and 256 KiB of
+URL/resource/path/status metadata. Deterministic oldest-entry eviction bounds
+hostile or long-running status accumulation, and monitoring exposes the
+retained metadata byte estimate. The identity-scoped on-disk `omenchat-media`
+cache is capped at 64 regular files and 128 MiB. A serialized, bounded-memory
+persistent index protects the just-committed file, retains the newest
+admissible files, and removes evicted paths from UI state without enumerating
+the directory on normal writes. A missing, malformed, internally inconsistent,
+or path-unsafe index is rebuilt from regular files under the cache root; the
+index never authorizes paths outside that root. Writers synchronize a dirty
+marker before publication. If a process stops between file commit and index
+commit, the next prune performs one repair scan, incorporates committed files,
+removes abandoned `.tmp` files, saves the repaired index, and only then clears
+the marker. Upload-resource, local-upload,
+Reticulum-download, and SOCKS media writers all pass this boundary.
+Buffered Reticulum and mock downloads use the shared same-directory atomic
+writer: a create-new temporary file is written, flushed, synchronized, renamed,
+and followed by a parent-directory sync on Unix. Buffered writes run behind two
+blocking permits, so filesystem synchronization cannot create an unbounded
+blocking-worker backlog. Existing final files are never deliberately replaced;
+numbered download selection preserves prior content.
+Live Reticulum resource payloads are single-consumer: decoding removes the
+stored payload instead of cloning and retaining it. Unmatched completed
+resources are capped at 8 MiB each and 16 items/16 MiB per link with oldest
+eviction. Deferred resource-offer frames are capped at 32 items/4 MiB per link;
+matching arrival releases their byte accounting. Monitoring exposes retained
+items/bytes and rejected resource/offer totals, and overload is surfaced in the
+session status.
+The live client session engine independently bounds transfers waiting above the
+link adapter. Outgoing upload offers retain at most four payloads/16 MiB, with
+an 8 MiB per-payload cap. Inline downloads reserve at most 16 resources/16 MiB,
+with an 8 MiB per-resource cap and at most 1,024 out-of-order fragments per
+resource. Retained fragment bytes may never exceed the resource's declared
+length; conflicting, overlapping-over-budget, inconsistent, and oversized
+chunks abort that assembly and release its state. Closing or reconnecting a
+session cancels all of its retained transfers. Monitoring shows current items,
+reserved/retained bytes, fragments, and cumulative overload rejections.
+The desktop link adapter also bounds its transient per-link transport queues.
+Incoming and outgoing frames each retain at most 64 items/4 MiB; outbound
+resources retain at most four items/16 MiB, with the existing 8 MiB per-resource
+ceiling and a 4 KiB resource identifier cap. Consuming a frame or taking an
+outbound batch releases its exact byte accounting. Incoming overload is dropped
+before protocol dispatch and shown in session status; outbound overload returns
+an error to the existing session engine. Monitoring shows current queue
+items/bytes and rejection totals for all three directions.
+The internal event channel remains bounded to 256 total events. OMENchat frame,
+resource, and close payloads additionally share a cumulative 32 MiB permit.
+The permit travels with the queued event across asynchronous waits and deferred
+drains, and is released only when the receiver handles or rejects the event.
+Byte-budget and item-channel overload are counted; both queue depth/bytes and
+rejections are visible in OMENchat monitoring. After the channel wakes the
+desktop, completed OMENchat events cross one short-lived global staging
+boundary before session dispatch. That boundary retains at most 256 frames/16
+MiB, 16 resources/32 MiB, and 256 close events/256 KiB of close reasons. Frame
+and resource payload ownership is moved into staging rather than cloned. Drain
+resets exact byte accounting; staging overload is counted separately.
+At the clean reticulum-rs bridge, explicit `omenchat-frame:` completions are
+limited to the 1 MiB frame ceiling and `omenchat-resource:` completions to
+8 MiB before an application event is created. Oversize completions produce a
+failed lifecycle event and are not cloned into the desktop bus. The pinned
+transport reports advertised totals during progress, but exposes cancellation
+only for outbound resources, so it cannot yet stop an oversized inbound
+receiver before `ResourceComplete.data` is assembled.
+
+SQLite upload metadata now exposes a non-mutating reconciliation report per
+identity: tracked/disk file and byte totals, missing tracked paths, untracked
+orphans, and tracked paths outside the expected identity directory. Uncertain
+files and rows are never deleted automatically. Admission uses this defensive
+scan once before trusting an identity's indexed quota ledger.
+`omenchatd doctor` now performs this inspection through a read-only bounded
+database actor. Missing/orphan discrepancies produce a warning; a tracked path
+outside its identity root is a failure. Doctor never repairs or deletes these
+paths implicitly.
+
+Explicit repair is available only as the offline operator command
+`omenchatd uploads repair-ledger --confirm --home <path>`. It transactionally
+removes database records for missing or out-of-root files, but never deletes
+any file and deliberately preserves orphan files as recovery evidence. It
+refuses missing or non-current schemas instead of creating or migrating the
+database. The confirmed repair waits for the owned worker's final result rather
+than timing out while a commit could still occur. Normal startup and `doctor`
+remain non-repair paths.
+
+Upload admission now performs one lazy reconciliation scan per identity and
+server process. A discrepancy blocks uploads until the operator resolves it.
+After a clean scan, quota totals and oldest-first eviction plans come from the
+indexed SQLite ledger; normal offers and commits do not rescan the directory.
+Recorded byte lengths must match regular-file metadata before the ledger is
+trusted.
 
 ## Expected Client Behavior
 
 - Reconnect when a live link drops.
 - Preserve recent history after restart.
 - Sync recent room history on join/reconnect.
+- Schedule live heartbeat, reconnect, and delayed recent-history maintenance
+  from the nearest explicit deadline; idle desktops do not poll these paths.
 - Keep local echo messages and retry failed sends.
 - Show unread state when chat panes are minimized.
+
+Each open client session retains at most 1,024 history events and an estimated
+8 MiB of owned event/string storage. Initial restore and new live events keep
+the recent edge; **Load Older** keeps the older edge so pagination continues to
+move backward. Eviction changes only the in-memory view. Received history is
+written to the SQLite store before the retained window is persisted, including
+rows from a batch that do not fit in memory, and can be paged again later. The
+byte estimate uses owned string capacities plus event storage rather than wire
+length alone. These are local cache limits and do not change event IDs, frames,
+history page sizes, or deduplication keys.
+
+The client admits at most 64 simultaneously retained server sessions. Opening
+another session is refused with a visible error; an existing session is never
+silently evicted. Each retained session's room catalog is limited to 256 items
+and an estimated 512 KiB of owned storage, while its active-room user catalog is
+limited to 1,024 items and an estimated 1 MiB. Active, joined, and unread rooms
+are preferred when a room snapshot must be reduced. Oversized live snapshots
+are truncated deterministically and reported in session status. SQLite restore
+applies the same item and byte admission before materializing catalogs, prefers
+the active then joined rooms, and leaves every non-resident row on disk. These
+limits are local view policy only; they do not alter OMENchat frames or server
+quotas.
+
+Retained presentation metadata has smaller semantic limits than the general
+MessagePack scalar ceiling. Server display names, user/actor display names, and
+room names are limited to 256, 256, and 64 UTF-8 bytes respectively; room topics
+to 4 KiB; MOTDs to 16 KiB; and session status/error text to 4 KiB. Resource IDs
+remain exact and are rejected above 4 KiB; upload filenames and content types
+are limited to 4 KiB and 1 KiB. Display-only text is shortened on a UTF-8
+boundary with an ellipsis. Oversized operational room/user names are rejected
+rather than renamed, so later join/moderation commands cannot target a truncated
+identifier. SQLite restore applies byte-length predicates before materializing
+these rows. These are client retention limits, not new server-side validation or
+wire fields.
+
+Declarative `[omenchat]` descriptors are separately capped at 64 KiB, 128
+lines, and 32 KiB per line before recognized values are retained. Room hints
+and capabilities each allow at most 64 entries; room hints use the 64-byte room
+limit, while capabilities allow 128 bytes each and 8 KiB total. Destination,
+LXMF, descriptor-path, theme, and signature fields are exact and rejected above
+their respective limits; display names use the same UTF-8-safe 256-byte
+shortener as session metadata. Lowering does not join a descriptor exceeding
+the block budget. Micron OMENchat links admit at most 32 fields/16 KiB and apply
+the same recognized-field rules atomically before opening a session.
+
+## Server Backpressure
+
+The live Reticulum server uses bounded payload and control queues. Transport
+commands are limited to 256 payload items and 16 MiB globally, with a 4 MiB
+per-link payload share. Inbound live events are limited to 512 payload items and
+32 MiB globally, with an 8 MiB per-link share. Small separate control lanes keep
+link-open/link-close work responsive while payload queues are saturated.
+
+Outbound overload is returned to the session engine as an explicit error rather
+than retaining unlimited payloads. Inbound payloads that cannot be admitted are
+dropped at the bridge and logged with `action=drop`; lifecycle control events
+wait up to two seconds for their bounded lane. Monitoring shows queue item
+count, queued bytes, actual oldest remaining item age, and cumulative rejects.
+Reservation identities advance the oldest timestamp whenever the prior oldest
+item is consumed or cancelled; a continuously non-empty queue therefore reports
+queue dwell time rather than total overload duration.
+
+The explicit release-mode backpressure soak is:
+
+```sh
+scripts/measure-omenchatd-backpressure.sh /tmp/omenchatd-backpressure-results
+```
+
+It drives the production transport-command and inbound-event queue types with
+64 KiB resources at a 1 ms producer interval and 20 ms consumer interval for 60
+seconds. Eight link identities share each budget while repeated link-close
+controls probe the priority lanes. The Linux harness records queue items/bytes,
+oldest age, rejects, RSS, file descriptors, control latency, and final permit
+release under an isolated temporary root. This is queue/backpressure evidence;
+Reticulum/LXMF wire interoperability remains a separate live smoke gate.
+
+Outbound resource queueing transfers its uniquely owned payload and metadata
+buffers directly into reticulum-rs. The server records the payload length
+before that move for logging, avoiding the former full resource clone. These
+buffers remain `Vec<u8>` at this boundary because reticulum-rs consumes that
+type; shared immutable storage should be introduced only at actual fan-out
+boundaries.
+The same monitoring line reports live database-worker in-flight, completed,
+rejected, average-latency, and maximum-latency counters.
+
+The release-mode database contention gate is:
+
+```sh
+scripts/measure-omenchatd-db.sh /tmp/omenchatd-db-results
+```
+
+It drives the production session engine, live blocking-worker boundary, frame
+decoder, and persistent SQLite store for 60 seconds under an isolated temporary
+root. It records explicit busy rejection, worker and independent Tokio
+heartbeat latency, RSS, file descriptors, database size, restart persistence,
+consecutive event IDs, and `integrity_check`. The 2026-07-13 reference run
+committed 6,000 events while rejecting 42,000 concurrent submissions; maximum
+worker/heartbeat latency was 1,272/1,817 us, RSS grew 794,624 bytes, and file
+descriptors stayed at 13. A discard-only test transport keeps wire networking
+out of this database measurement, so the live Reticulum smoke remains a
+separate qualification gate.
+
+Live Reticulum logs use one background buffered writer rather than opening and
+writing the file on callback paths. Admission is capped at 1,024 records, 1 MiB
+queued bytes, and 16 KiB per record. Monitoring reports queued items/bytes,
+oldest age, overload drops, and file-write failures. The writer flushes at most
+250 ms after activity and supports an explicit bounded flush. Rotation caps
+each file at 8 MiB and keeps three backups (`omenchatd.log.1` through `.3`),
+bounding normal retained log storage to approximately 32 MiB. Priority sampling
+uses a reserved lane: call sites submit routine records as typed `Info` and
+operational failures/overload/lag/malformed requests as typed `Warning` or
+`Error`. Priority records receive 128 items/256 KiB and are drained first;
+message words never select the lane. Monitoring reports priority depth and
+drops separately. Severity controls admission only, preserving the existing
+timestamp/text file format.
+`scripts/measure-omenchatd-logging.sh` runs the optimized repeated-lifecycle
+slow-writer qualification with real isolated rotating files and a deterministic
+2 ms delay at the write boundary. The 2026-07-13 reference run kept callback
+admission at 1,778 ns p95 under sustained explicit overload, lost no priority
+records, reported no write failures, held FDs flat, rotated all three
+lifecycles, and stayed within each writer's 32 MiB retention cap. Against the
+identical former text-classifier run, median/p95 admission fell 95.1%/86.6%.
+This is a repeatable slow-disk simulation, not Reticulum wire evidence.

@@ -270,7 +270,7 @@ pub(super) fn is_focused(
 ) -> bool {
     cell.control
         .as_ref()
-        .is_some_and(|control| focused_control.as_deref() == Some(control.name.as_str()))
+        .is_some_and(|control| focused_control.as_deref() == Some(control.name.as_ref()))
         || cell
             .link
             .as_ref()

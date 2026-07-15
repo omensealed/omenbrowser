@@ -5,13 +5,14 @@ out_root="${1:-dist}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
 target_dir="${out_root%/}/OMENbrowser_rs-${version:-unknown}-${timestamp}"
-browser_features="${OMENBROWSER_BROWSER_FEATURES:-chat-client-reticulum}"
+browser_features="${OMENBROWSER_BROWSER_FEATURES:-desktop-product}"
 
 echo "== Building OMENbrowser_rs release =="
-cargo build --release --features "$browser_features"
+cargo build --release --locked --no-default-features --features "$browser_features"
+bash scripts/verify-product-features.sh
 
 echo "== Building omenchatd release =="
-cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
+cargo build --release --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full
 
 echo "== Staging release package =="
 mkdir -p "$target_dir/bin" "$target_dir/docs" "$target_dir/scripts" "$target_dir/src-server" "$target_dir/packaging/systemd"
@@ -68,10 +69,12 @@ Attach that server to a backbone TCP gateway:
 
 For IFAC-protected gateways:
 
+  printf '%s\n' 'your passphrase' > /tmp/omenchatd-ifac-passphrase
+  chmod 600 /tmp/omenchatd-ifac-passphrase
   ./bin/omenchatd interfaces tcp-client <gateway-host:port> \
     --home /tmp/omenchatd-test \
     --network-name <network-name> \
-    --passphrase <passphrase>
+    --passphrase-file /tmp/omenchatd-ifac-passphrase
 
 Start the OMENchat server TUI:
 
@@ -165,6 +168,8 @@ echo "== Verifying staged binaries =="
 grep -q "OMENbrowser_rs ${version:-unknown}" "$target_dir/omenbrowser_rs-version.txt"
 grep -q "chat-client-reticulum:on" "$target_dir/omenbrowser_rs-version.txt"
 grep -q "native-network:on" "$target_dir/omenbrowser_rs-version.txt"
+grep -q "desktop-product:on" "$target_dir/omenbrowser_rs-version.txt"
+grep -q "mock-runtime:off" "$target_dir/omenbrowser_rs-version.txt"
 grep -q "omenchatd" "$target_dir/omenchatd-version.txt"
 grep -q "live-reticulum:on" "$target_dir/omenchatd-version.txt"
 

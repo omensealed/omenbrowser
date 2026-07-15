@@ -140,20 +140,46 @@ Browser with desktop UI, native network, and OMENchat client using the current
 live-tested path:
 
 ```bash
-cargo build --release --features chat-client-reticulum
+cargo build --release --locked --no-default-features --features desktop-product
 ```
 
-`chat-client-reticulum` is the preferred feature name for this live-tested
+`desktop-product` is the canonical release identity and includes bundled SQLite
+for installer/portable builds plus the `chat-client-reticulum` live-tested
 clean Reticulum 0.6 path. `chat-client-rns-clean` remains as a compatibility
 alias for older local commands. It builds
 the browser against `reticulum-rs`, `reticulum-rs-transport`, and `lxmf`
 without pulling the old `rns-net` compatibility stack into normal native
 networking builds.
 
+Cargo defaults are intentionally empty. For a product-equivalent development
+build with the mock adapter also compiled, use
+`--no-default-features --features desktop-dev`; tests that need Iced's tester
+features use `desktop-test`. Neither development alias is permitted in release
+artifacts.
+
+`omenbrowser_rs --version` prints the Cargo version, source Git commit, target
+triple, canonical compiled profile, and stable feature identity. Release checks
+reject product binaries whose commit or target identity is unavailable. Source
+archives built outside a Git checkout can provide the commit explicitly with
+`OMENBROWSER_GIT_COMMIT=<hex-commit>`.
+
+For low-resource systems that do not need animated previews,
+`desktop-product-static-media` keeps the same live Reticulum/OMENchat product
+stack but excludes `iced_gif`. GIF files are still cached and shown through the
+static image path. The canonical `desktop-product` continues to enable
+animation.
+
+Linux desktop builds enable Iced's X11 and Wayland backends and the XDG portal
+file picker. Those Linux-only features are excluded from native Windows and
+macOS dependency graphs. `scripts/verify-product-features.sh` checks this target
+routing and bundled SQLite without requiring cross-compilation to stand in for
+the native release gates.
+
 Standalone OMENchat server:
 
 ```bash
-cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
+cargo build --release --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full
 ```
 
 Release bundle with both binaries and starter docs:
@@ -242,11 +268,17 @@ If the gateway uses IFAC/network credentials, include them when writing the
 isolated Reticulum config:
 
 ```bash
+printf '%s\n' 'your passphrase' > /tmp/omenchatd-ifac-passphrase
+chmod 600 /tmp/omenchatd-ifac-passphrase
 ./src/server/target/release/omenchatd interfaces tcp-client <gateway-host:port> \
   --home /tmp/omenchatd-test \
   --network-name <network-name> \
-  --passphrase <passphrase>
+  --passphrase-file /tmp/omenchatd-ifac-passphrase
 ```
+
+For an interactive terminal, `--passphrase-prompt` reads with echo disabled;
+`--passphrase-stdin` supports a protected pipe. The legacy `--passphrase` form
+is deprecated because command arguments may be visible in process listings.
 
 You can also set it during init/run:
 
@@ -349,14 +381,15 @@ Browser:
 
 ```bash
 cargo fmt --check
-cargo test --features chat-client-reticulum
+cargo test --locked --no-default-features --features desktop-product
 ```
 
 Server:
 
 ```bash
 cargo fmt --manifest-path src/server/Cargo.toml --check
-cargo test --manifest-path src/server/Cargo.toml --features live-reticulum
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full
 ```
 
 ## Release Runbook

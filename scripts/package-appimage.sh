@@ -18,13 +18,16 @@ if ! command -v "$appimagetool" >/dev/null 2>&1; then
 fi
 
 echo "== Building release binaries =="
-browser_features="${OMENBROWSER_BROWSER_FEATURES:-chat-client-reticulum}"
-cargo build --release --features "$browser_features"
-cargo build --release --manifest-path src/server/Cargo.toml --features live-reticulum
+browser_features="${OMENBROWSER_BROWSER_FEATURES:-desktop-product}"
+cargo build --release --locked --no-default-features --features "$browser_features"
+bash scripts/verify-product-features.sh
+cargo build --release --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full
 mkdir -p "${out_root%/}"
 target/release/omenbrowser_rs --version > "${out_root%/}/omenbrowser_rs-appimage-version.txt"
 grep -q "chat-client-reticulum:on" "${out_root%/}/omenbrowser_rs-appimage-version.txt"
 grep -q "native-network:on" "${out_root%/}/omenbrowser_rs-appimage-version.txt"
+grep -q "desktop-product:on" "${out_root%/}/omenbrowser_rs-appimage-version.txt"
+grep -q "mock-runtime:off" "${out_root%/}/omenbrowser_rs-appimage-version.txt"
 src/server/target/release/omenchatd --version > "${out_root%/}/omenchatd-appimage-version.txt"
 grep -q "live-reticulum:on" "${out_root%/}/omenchatd-appimage-version.txt"
 

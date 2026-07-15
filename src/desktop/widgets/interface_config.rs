@@ -6,7 +6,7 @@ use crate::app::App;
 use crate::interfaces::{InterfaceKind, ReticulumInterfaceProfile};
 use crate::workspace::WorkspaceSection;
 
-use super::super::{subtle_button, ui_size, Message};
+use super::super::{subtle_button, ui_size, InterfaceMessage, Message};
 use super::interface_status::interface_runtime_detail_line;
 
 pub(in crate::desktop) fn optional_interface_runtime_detail_line<'a>(
@@ -33,15 +33,19 @@ pub(in crate::desktop) fn setup_tcp_client_editor(app: &App) -> Element<'_, Mess
             row![
                 text("TCP gateway").size(ui_size(14)),
                 text_input("host", &profile.target_host)
-                    .on_input(move |value| Message::TcpClientHostChanged {
-                        profile_id: host_id.clone(),
-                        value,
+                    .on_input(move |value| {
+                        Message::Interface(InterfaceMessage::TcpClientHostChanged {
+                            profile_id: host_id.clone(),
+                            value,
+                        })
                     })
                     .width(Length::FillPortion(2)),
                 text_input("port", &profile.target_port.to_string())
-                    .on_input(move |value| Message::TcpClientPortChanged {
-                        profile_id: port_id.clone(),
-                        value,
+                    .on_input(move |value| {
+                        Message::Interface(InterfaceMessage::TcpClientPortChanged {
+                            profile_id: port_id.clone(),
+                            value,
+                        })
                     })
                     .width(Length::FillPortion(1)),
             ]
@@ -50,16 +54,20 @@ pub(in crate::desktop) fn setup_tcp_client_editor(app: &App) -> Element<'_, Mess
             row![
                 text("IFAC").size(ui_size(14)),
                 text_input("network name", &profile.network_name)
-                    .on_input(move |value| Message::TcpClientIfacNetworkChanged {
-                        profile_id: ifac_network_id.clone(),
-                        value,
+                    .on_input(move |value| {
+                        Message::Interface(InterfaceMessage::TcpClientIfacNetworkChanged {
+                            profile_id: ifac_network_id.clone(),
+                            value,
+                        })
                     })
                     .width(Length::FillPortion(2)),
                 text_input("passphrase", &profile.passphrase)
                     .secure(true)
-                    .on_input(move |value| Message::TcpClientIfacPassphraseChanged {
-                        profile_id: ifac_pass_id.clone(),
-                        value,
+                    .on_input(move |value| {
+                        Message::Interface(InterfaceMessage::TcpClientIfacPassphraseChanged {
+                            profile_id: ifac_pass_id.clone(),
+                            value,
+                        })
                     })
                     .width(Length::FillPortion(2)),
             ]
@@ -71,10 +79,15 @@ pub(in crate::desktop) fn setup_tcp_client_editor(app: &App) -> Element<'_, Mess
     } else {
         row![
             text("TCP gateway: none configured").size(ui_size(14)),
-            subtle_button("Add TCP Gateway", Message::CreateTcpClientInterface),
+            subtle_button(
+                "Add TCP Gateway",
+                Message::Interface(InterfaceMessage::CreateTcpClient)
+            ),
             subtle_button(
                 "Open Interfaces",
-                Message::SwitchSection(WorkspaceSection::Interfaces)
+                Message::Shell(super::super::ShellMessage::SwitchSection(
+                    WorkspaceSection::Interfaces,
+                ))
             ),
         ]
         .spacing(8)

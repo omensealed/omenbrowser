@@ -6,13 +6,13 @@ smoke_init "04_omenchat_resource_transfer.sh"
 cd "$REPO_ROOT"
 
 smoke_run "omenchat resource metadata tests" \
-  cargo test --features chat-client-reticulum test_omenchat_resource_metadata_roundtrip
+  cargo test --locked --no-default-features --features desktop-product test_omenchat_resource_metadata_roundtrip
 
 smoke_run "build OMENbrowser_rs clean OMENchat smoke binary" \
-  cargo build --release --features chat-client-reticulum,live-network
+  cargo build --release --locked --no-default-features --features desktop-product
 
 smoke_run "build omenchatd clean Reticulum server" \
-  cargo build --manifest-path src/server/Cargo.toml --release --features live-reticulum
+  cargo build --locked --manifest-path src/server/Cargo.toml --release --no-default-features --features server-headless
 
 payload="$SMOKE_RUN_ROOT/omenchat-resource-payload.bin"
 dd if=/dev/zero of="$payload" bs=1024 count=640 status=none

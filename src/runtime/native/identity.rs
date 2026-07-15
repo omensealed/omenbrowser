@@ -4,7 +4,7 @@ use rand_core::OsRng;
 use reticulum_rs::core::identity::{PrivateIdentity, PRIVATE_KEY_LENGTH};
 
 use crate::error::AppResult;
-use crate::identity::IdentityMaterialProvider;
+use crate::identity::{read_identity_material, IdentityMaterialProvider};
 use crate::runtime::native::NativeRuntimeError;
 
 #[derive(Clone, Debug, Default)]
@@ -53,21 +53,21 @@ pub fn load_private_identity(raw: &[u8]) -> Result<PrivateIdentity, NativeRuntim
 pub fn load_private_identity_file(
     path: &Path,
 ) -> Result<NativeIdentitySummary, NativeRuntimeError> {
-    let raw = std::fs::read(path).map_err(|_| NativeRuntimeError::IdentityMissing)?;
+    let raw = read_identity_material(path).map_err(|_| NativeRuntimeError::IdentityMissing)?;
     load_private_identity_bytes(&raw)
 }
 
 pub fn load_native_private_identity_file(
     path: &Path,
 ) -> Result<PrivateIdentity, NativeRuntimeError> {
-    let raw = std::fs::read(path).map_err(|_| NativeRuntimeError::IdentityMissing)?;
+    let raw = read_identity_material(path).map_err(|_| NativeRuntimeError::IdentityMissing)?;
     load_private_identity(&raw)
 }
 
 pub fn load_transport_private_identity_file(
     path: &Path,
 ) -> Result<rns_transport::identity::PrivateIdentity, NativeRuntimeError> {
-    let raw = std::fs::read(path).map_err(|_| NativeRuntimeError::IdentityMissing)?;
+    let raw = read_identity_material(path).map_err(|_| NativeRuntimeError::IdentityMissing)?;
     if raw.is_empty() {
         return Err(NativeRuntimeError::IdentityMissing);
     }
@@ -77,7 +77,7 @@ pub fn load_transport_private_identity_file(
 
 #[cfg(all(feature = "native-rns-net", any()))]
 pub fn load_rns_net_proof_signing_key_file(path: &Path) -> Result<[u8; 64], NativeRuntimeError> {
-    let raw = std::fs::read(path).map_err(|_| NativeRuntimeError::IdentityMissing)?;
+    let raw = read_identity_material(path).map_err(|_| NativeRuntimeError::IdentityMissing)?;
     load_private_identity_bytes(&raw)?;
     raw.try_into()
         .map_err(|_| NativeRuntimeError::IdentityInvalid)

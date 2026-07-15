@@ -4,7 +4,7 @@ use iced::{Element, Length};
 
 use super::super::{
     status_container_style, subtle_button_style, ui_size, ExternalBrowserChoice,
-    ExternalLinkPrompt, Message,
+    ExternalBrowserMessage, ExternalLinkPrompt, Message,
 };
 use super::omen_button_style;
 
@@ -28,18 +28,27 @@ pub(in crate::desktop) fn external_link_prompt_view<'a>(
                 };
                 let width = external_prompt_button_width(&label);
                 row.push(
-                    external_prompt_subtle_button(label, Message::OpenExternalLinkWith(index))
-                        .width(Length::Fixed(width)),
+                    external_prompt_subtle_button(
+                        label,
+                        Message::ExternalBrowser(ExternalBrowserMessage::OpenWith(index)),
+                    )
+                    .width(Length::Fixed(width)),
                 )
             },
         )
         .push(
-            external_prompt_omen_button("Copy URL", Message::CopyExternalLinkUrl)
-                .width(Length::Fixed(90.0)),
+            external_prompt_omen_button(
+                "Copy URL",
+                Message::ExternalBrowser(ExternalBrowserMessage::CopyUrl),
+            )
+            .width(Length::Fixed(90.0)),
         )
         .push(
-            external_prompt_subtle_button("X", Message::DismissExternalLinkPrompt)
-                .width(Length::Fixed(38.0)),
+            external_prompt_subtle_button(
+                "X",
+                Message::ExternalBrowser(ExternalBrowserMessage::DismissPrompt),
+            )
+            .width(Length::Fixed(38.0)),
         )
         .wrap();
     let proxy_status = external_prompt_proxy_status(socks_proxy_enabled, proxy_endpoint);

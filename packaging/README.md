@@ -6,8 +6,8 @@ These scripts build local packages from the current source tree. They do not
 delete or overwrite user identities, Reticulum storage, message history, or
 OMENchat server homes.
 
-Public release packages must use the live-tested browser feature set:
-`chat-client-rns-clean` with `native-network:on`. The packaging scripts verify
+Public release packages must use the canonical `desktop-product` feature with
+`chat-client-reticulum:on`, `native-network:on`, and `mock-runtime:off`. The packaging scripts verify
 this through the browser `--version` output. Server packages must report
 `live-reticulum:on` from `omenchatd --version`.
 
@@ -130,10 +130,19 @@ Two workflows are included:
   - runs `bash scripts/release-check.sh quick`;
   - syntax-checks package and installer scripts.
 - `.github/workflows/package.yml`
-  - manual `workflow_dispatch` only;
+  - runs manually or for `v*` tags;
   - builds the release tarball, `.deb`, and AppImage;
   - can run the packaged local OMENchat smoke;
-  - uploads package artifacts and checksums.
+  - uploads package artifacts and checksums from a read-only build job;
+  - publishes tag artifacts only from a dependent `release` environment job
+    with narrowly scoped `contents: write` permission.
 
-The package workflow downloads `appimagetool` on the runner, extracts it, and
-uses the extracted `AppRun` so it does not depend on FUSE being available.
+Configure the repository's `release` GitHub environment with required reviewer
+approval before enabling public tag publication. The build job does not receive
+write authority or release secrets. All actions use reviewed commit SHAs.
+
+The package workflow downloads the immutable AppImageTool 1.9.1 x86-64 asset,
+checks its reviewed SHA-256 before execution, extracts it, and uses the extracted
+`AppRun` so it does not depend on FUSE being available. Run
+`bash scripts/verify-workflow-security.sh` whenever updating actions, workflow
+permissions, or packaging tools.

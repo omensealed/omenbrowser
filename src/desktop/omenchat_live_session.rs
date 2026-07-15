@@ -7,6 +7,7 @@ use crate::chat::{ChatClientEvent, ChatClientRequest, ChatSessionId, OmenChatDes
 
 use super::{
     hex_bytes, omenchat_live_open_error_status, DesktopApp, DesktopOmenChatTransport, Message,
+    OmenChatLiveOpenCompletion, OmenChatLiveReconnectCompletion,
 };
 
 impl DesktopApp {
@@ -28,7 +29,13 @@ impl DesktopApp {
                     .map_err(|error| error.to_string());
                 (descriptor, result)
             },
-            |(descriptor, result)| Message::OmenChatLiveOpenResult { descriptor, result },
+            |(descriptor, result)| {
+                Message::OmenChatTransportCompletion(
+                    super::OmenChatTransportCompletionMessage::LiveOpen(Box::new(
+                        OmenChatLiveOpenCompletion { descriptor, result },
+                    )),
+                )
+            },
         )
     }
 
@@ -52,11 +59,17 @@ impl DesktopApp {
                     .map_err(|error| error.to_string());
                 (session_id, generation, descriptor, result)
             },
-            |(session_id, generation, descriptor, result)| Message::OmenChatLiveReconnectResult {
-                session_id,
-                generation,
-                descriptor,
-                result,
+            |(session_id, generation, descriptor, result)| {
+                Message::OmenChatTransportCompletion(
+                    super::OmenChatTransportCompletionMessage::LiveReconnect(Box::new(
+                        OmenChatLiveReconnectCompletion {
+                            session_id,
+                            generation,
+                            descriptor,
+                            result,
+                        },
+                    )),
+                )
             },
         )
     }
@@ -138,10 +151,15 @@ impl DesktopApp {
         let opened = match result {
             Ok(opened) => opened,
             Err(error) => {
-                let session_id = self.open_omenchat_status_session(
+                let Some(session_id) = self.try_open_omenchat_status_session(
                     descriptor,
                     omenchat_live_open_error_status(&error),
-                );
+                ) else {
+                    self.app.status.task = format!(
+                        "OMENchat live link failed and the session catalog is full: {error}"
+                    );
+                    return Task::none();
+                };
                 self.place_omenchat_session_preferring_active_blank(session_id);
                 self.persist_workspace_panes("workspace panes");
                 self.app.status.task = format!("OMENchat live link failed: {error}");
@@ -376,11 +394,13 @@ mod tests {
             DesktopOmenChatTransport::new([0x31; 16], current_epoch_ms()),
         );
 
-        let _ = desktop.update(Message::OmenChatPathRequestResult {
-            session_id,
-            destination: destination.clone(),
-            result: Ok(true),
-        });
+        let _ = desktop.update(Message::OmenChatTransportCompletion(
+            crate::desktop::OmenChatTransportCompletionMessage::PathRequest {
+                session_id,
+                destination: destination.clone(),
+                result: Ok(true),
+            },
+        ));
 
         assert!(desktop
             .omenchat
@@ -395,11 +415,13 @@ mod tests {
             .omenchat_live_transports
             .remove(&session_id);
         desktop.omenchat.omenchat_live_opening.insert(session_id);
-        let _ = desktop.update(Message::OmenChatPathRequestResult {
-            session_id,
-            destination: destination.clone(),
-            result: Ok(true),
-        });
+        let _ = desktop.update(Message::OmenChatTransportCompletion(
+            crate::desktop::OmenChatTransportCompletionMessage::PathRequest {
+                session_id,
+                destination: destination.clone(),
+                result: Ok(true),
+            },
+        ));
 
         assert!(desktop
             .omenchat
@@ -410,11 +432,13 @@ mod tests {
             .contains("reconnect already pending"));
 
         desktop.omenchat.omenchat_live_opening.remove(&session_id);
-        let _ = desktop.update(Message::OmenChatPathRequestResult {
-            session_id,
-            destination,
-            result: Ok(true),
-        });
+        let _ = desktop.update(Message::OmenChatTransportCompletion(
+            crate::desktop::OmenChatTransportCompletionMessage::PathRequest {
+                session_id,
+                destination,
+                result: Ok(true),
+            },
+        ));
 
         assert!(desktop
             .omenchat
@@ -449,7 +473,9 @@ mod tests {
             .omenchat_live_reconnect_generation
             .insert(session_id, 9);
 
-        let _ = desktop.update(Message::ReconnectOmenChatSessionIfDisconnected(session_id));
+        let _ = desktop.update(Message::OmenChat(
+            crate::desktop::OmenChatMessage::ReconnectSessionIfDisconnected(session_id),
+        ));
 
         assert!(desktop
             .omenchat

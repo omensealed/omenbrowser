@@ -1,7 +1,21 @@
 use super::descriptor::OmenChatDescriptor;
-use super::model::{ChatEvent, ChatRoomSummary, ChatServerSummary, ChatUserSummary};
+use super::model::{
+    bounded_chat_text, chat_text_fits, ChatEvent, ChatRoomSummary, ChatServerSummary,
+    ChatUserSummary, CHAT_ACTOR_DISPLAY_MAX_BYTES, CHAT_MOTD_MAX_BYTES, CHAT_ROOM_NAME_MAX_BYTES,
+    CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES,
+    CHAT_SERVER_ID_MAX_BYTES, CHAT_STATUS_MAX_BYTES, CHAT_UPLOAD_FILENAME_MAX_BYTES,
+    CHAT_USER_DISPLAY_MAX_BYTES,
+};
+pub use super::model::{
+    CHAT_CLIENT_MAX_SESSIONS, CHAT_SESSION_MAX_ROOMS, CHAT_SESSION_MAX_ROOM_BYTES,
+    CHAT_SESSION_MAX_USERS, CHAT_SESSION_MAX_USER_BYTES,
+};
 use super::protocol::{EventId, RoomId, ServerId};
 use super::store::ChatStore;
+use std::collections::BTreeSet;
+
+pub const CHAT_SESSION_HISTORY_MAX_EVENTS: usize = 1_024;
+pub const CHAT_SESSION_HISTORY_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub type ChatSessionId = u64;
 
@@ -150,6 +164,44 @@ pub enum ChatClientEvent {
     },
 }
 
+pub(crate) fn enforce_client_event_presentation_bounds(events: &mut [ChatClientEvent]) {
+    for event in events {
+        match event {
+            ChatClientEvent::ServerOpened { server, .. } => {
+                server.display_name =
+                    bounded_chat_text(server.display_name.trim(), CHAT_SERVER_DISPLAY_MAX_BYTES);
+            }
+            ChatClientEvent::ServerMotd { motd, .. } => {
+                *motd = bounded_chat_text(motd.trim(), CHAT_MOTD_MAX_BYTES);
+            }
+            ChatClientEvent::EventAppended { event, .. } => {
+                if let Some(actor) = event.actor_display_name.take() {
+                    event.actor_display_name = Some(bounded_chat_text(
+                        actor.trim(),
+                        CHAT_ACTOR_DISPLAY_MAX_BYTES,
+                    ));
+                }
+                if let super::model::ChatEventKind::Upload { filename, .. } = &mut event.kind {
+                    *filename = bounded_chat_text(filename, CHAT_UPLOAD_FILENAME_MAX_BYTES);
+                }
+            }
+            ChatClientEvent::UploadAccepted { filename, .. }
+            | ChatClientEvent::UploadCompleted { filename, .. }
+            | ChatClientEvent::UploadResourceProgress { filename, .. }
+            | ChatClientEvent::UploadResourceAvailable { filename, .. } => {
+                *filename = bounded_chat_text(filename, CHAT_UPLOAD_FILENAME_MAX_BYTES);
+            }
+            ChatClientEvent::UploadRejected { reason, .. }
+            | ChatClientEvent::Error {
+                message: reason, ..
+            } => {
+                *reason = bounded_chat_text(reason, CHAT_STATUS_MAX_BYTES);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatSessionView {
     pub session_id: ChatSessionId,
@@ -159,6 +211,75 @@ pub struct ChatSessionView {
     pub users: Vec<ChatUserSummary>,
     pub events: Vec<ChatEvent>,
     pub status: String,
+}
+
+impl ChatSessionView {
+    pub fn set_status(&mut self, status: impl AsRef<str>) {
+        self.status = bounded_chat_text(status.as_ref(), CHAT_STATUS_MAX_BYTES);
+    }
+
+    pub fn retained_history_bytes(&self) -> usize {
+        retained_history_bytes(&self.events)
+    }
+
+    pub fn retained_room_catalog_bytes(&self) -> usize {
+        retained_room_catalog_bytes(&self.rooms)
+    }
+
+    pub fn retained_user_catalog_bytes(&self) -> usize {
+        retained_user_catalog_bytes(&self.users)
+    }
+
+    pub(crate) fn enforce_catalog_bounds(&mut self) -> (usize, usize) {
+        let rooms_before = self.rooms.len();
+        let users_before = self.users.len();
+        enforce_room_catalog_bounds(&mut self.rooms, self.active_room.room_id);
+        enforce_user_catalog_bounds(&mut self.users);
+        (
+            rooms_before.saturating_sub(self.rooms.len()),
+            users_before.saturating_sub(self.users.len()),
+        )
+    }
+
+    fn enforce_presentation_bounds(&mut self) {
+        self.server.display_name = bounded_chat_text(
+            self.server.display_name.trim(),
+            CHAT_SERVER_DISPLAY_MAX_BYTES,
+        );
+        self.active_room.name = self.active_room.name.trim().to_owned();
+        self.active_room.server_id = self.server.server_id.clone();
+        self.active_room.topic = self
+            .active_room
+            .topic
+            .as_deref()
+            .map(str::trim)
+            .filter(|topic| !topic.is_empty())
+            .map(|topic| bounded_chat_text(topic, CHAT_ROOM_TOPIC_MAX_BYTES));
+        self.rooms
+            .retain(|room| chat_text_fits(room.name.trim(), CHAT_ROOM_NAME_MAX_BYTES));
+        for room in &mut self.rooms {
+            room.name = room.name.trim().to_owned();
+            room.topic = room
+                .topic
+                .as_deref()
+                .map(str::trim)
+                .filter(|topic| !topic.is_empty())
+                .map(|topic| bounded_chat_text(topic, CHAT_ROOM_TOPIC_MAX_BYTES));
+        }
+        self.users
+            .retain(|user| chat_text_fits(user.display_name.trim(), CHAT_USER_DISPLAY_MAX_BYTES));
+        for user in &mut self.users {
+            user.display_name = user.display_name.trim().to_owned();
+        }
+        let status = std::mem::take(&mut self.status);
+        self.set_status(status);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HistoryWindowEdge {
+    Oldest,
+    Newest,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -197,8 +318,30 @@ impl ChatClient {
             .find(|session| session.session_id == session_id)
     }
 
-    pub fn push_session(&mut self, session: ChatSessionView) {
+    pub(crate) fn enforce_status_bounds(&mut self) {
+        for session in &mut self.sessions {
+            let status = std::mem::take(&mut session.status);
+            session.set_status(status);
+        }
+    }
+
+    pub fn push_session(&mut self, mut session: ChatSessionView) -> bool {
+        if self.sessions.len() >= CHAT_CLIENT_MAX_SESSIONS
+            || !chat_text_fits(&session.server.server_id, CHAT_SERVER_ID_MAX_BYTES)
+            || !chat_text_fits(
+                &session.server.destination,
+                CHAT_SERVER_DESTINATION_MAX_BYTES,
+            )
+            || session.active_room.name.trim().is_empty()
+            || !chat_text_fits(session.active_room.name.trim(), CHAT_ROOM_NAME_MAX_BYTES)
+        {
+            return false;
+        }
+        enforce_history_window(&mut session.events, HistoryWindowEdge::Newest, None);
+        session.enforce_presentation_bounds();
+        session.enforce_catalog_bounds();
         self.sessions.push(session);
+        true
     }
 
     pub fn remove_session(&mut self, session_id: ChatSessionId) -> Option<ChatSessionView> {
@@ -258,8 +401,14 @@ impl ChatClient {
         let Some(session) = self.session_mut(session_id) else {
             return 0;
         };
-        let before = session.events.len();
+        let existing = session
+            .events
+            .iter()
+            .map(|event| (event.room_id, event.event_id))
+            .collect::<BTreeSet<_>>();
+        let mut candidates = BTreeSet::new();
         for event in events {
+            candidates.insert((event.room_id, event.event_id));
             if !session.events.iter().any(|existing| {
                 existing.room_id == event.room_id && existing.event_id == event.event_id
             }) {
@@ -269,11 +418,51 @@ impl ChatClient {
         session
             .events
             .sort_by_key(|event| (event.room_id, event.event_id));
-        let added = session.events.len().saturating_sub(before);
+        enforce_history_window(&mut session.events, HistoryWindowEdge::Oldest, None);
+        let retained = session
+            .events
+            .iter()
+            .map(|event| (event.room_id, event.event_id))
+            .collect::<BTreeSet<_>>();
+        let added = candidates
+            .difference(&existing)
+            .filter(|key| retained.contains(key))
+            .count();
         if added > 0 {
             session.status = format!("loaded {added} older cached event(s)");
         }
         added
+    }
+
+    pub(crate) fn append_event_bounded(
+        &mut self,
+        session_id: ChatSessionId,
+        event: ChatEvent,
+        sort_after: bool,
+        edge: HistoryWindowEdge,
+    ) -> bool {
+        let key = (event.room_id, event.event_id);
+        let Some(session) = self.session_mut(session_id) else {
+            return false;
+        };
+        if session
+            .events
+            .iter()
+            .any(|existing| (existing.room_id, existing.event_id) == key)
+        {
+            return false;
+        }
+        session.events.push(event);
+        if sort_after {
+            session
+                .events
+                .sort_by_key(|event| (event.room_id, event.event_id));
+        }
+        enforce_history_window(&mut session.events, edge, Some(key));
+        session
+            .events
+            .iter()
+            .any(|event| (event.room_id, event.event_id) == key)
     }
 
     pub fn load_cached_history_before<S: ChatStore>(
@@ -320,6 +509,9 @@ impl ChatClient {
     ) -> anyhow::Result<usize> {
         let mut restored = 0;
         for server in store.saved_servers()? {
+            if self.sessions.len() >= CHAT_CLIENT_MAX_SESSIONS {
+                break;
+            }
             if !is_restorable_server_destination(&server.destination) {
                 continue;
             }
@@ -341,7 +533,7 @@ impl ChatClient {
             events.sort_by_key(|event| (event.room_id, event.event_id));
             events.dedup_by_key(|event| (event.room_id, event.event_id));
             let session_id = self.reserve_session_id();
-            self.push_session(ChatSessionView {
+            if !self.push_session(ChatSessionView {
                 session_id,
                 server,
                 rooms,
@@ -349,11 +541,165 @@ impl ChatClient {
                 users,
                 events,
                 status: "restored from local cache".into(),
-            });
+            }) {
+                break;
+            }
             restored += 1;
         }
         Ok(restored)
     }
+}
+
+fn retained_room_catalog_bytes(rooms: &[ChatRoomSummary]) -> usize {
+    rooms
+        .iter()
+        .map(|room| {
+            std::mem::size_of::<ChatRoomSummary>()
+                .saturating_add(room.server_id.capacity())
+                .saturating_add(room.name.capacity())
+                .saturating_add(room.topic.as_ref().map_or(0, String::capacity))
+        })
+        .fold(0, usize::saturating_add)
+}
+
+fn retained_user_catalog_bytes(users: &[ChatUserSummary]) -> usize {
+    users
+        .iter()
+        .map(|user| {
+            std::mem::size_of::<ChatUserSummary>()
+                .saturating_add(user.server_id.capacity())
+                .saturating_add(user.display_name.capacity())
+        })
+        .fold(0, usize::saturating_add)
+}
+
+pub(crate) fn enforce_room_catalog_bounds(
+    rooms: &mut Vec<ChatRoomSummary>,
+    active_room_id: RoomId,
+) -> usize {
+    let before = rooms.len();
+    let mut retained_bytes = retained_room_catalog_bytes(rooms);
+    if rooms.len() <= CHAT_SESSION_MAX_ROOMS && retained_bytes <= CHAT_SESSION_MAX_ROOM_BYTES {
+        return 0;
+    }
+    let mut ranked = (0..rooms.len()).collect::<Vec<_>>();
+    ranked.sort_by_key(|index| {
+        let room = &rooms[*index];
+        (
+            room.room_id == active_room_id,
+            room.joined,
+            room.unread > 0,
+            std::cmp::Reverse(*index),
+        )
+    });
+    let mut remove = vec![false; rooms.len()];
+    let mut retained_items = rooms.len();
+    for index in ranked {
+        if retained_items <= CHAT_SESSION_MAX_ROOMS && retained_bytes <= CHAT_SESSION_MAX_ROOM_BYTES
+        {
+            break;
+        }
+        remove[index] = true;
+        retained_items = retained_items.saturating_sub(1);
+        retained_bytes = retained_bytes.saturating_sub(retained_room_catalog_bytes(
+            std::slice::from_ref(&rooms[index]),
+        ));
+    }
+    let mut index = 0;
+    rooms.retain(|_| {
+        let keep = !remove[index];
+        index += 1;
+        keep
+    });
+    before.saturating_sub(rooms.len())
+}
+
+pub(crate) fn enforce_user_catalog_bounds(users: &mut Vec<ChatUserSummary>) -> usize {
+    let before = users.len();
+    let mut retained_bytes = retained_user_catalog_bytes(users);
+    while users.len() > CHAT_SESSION_MAX_USERS || retained_bytes > CHAT_SESSION_MAX_USER_BYTES {
+        let Some(user) = users.pop() else {
+            break;
+        };
+        retained_bytes =
+            retained_bytes.saturating_sub(retained_user_catalog_bytes(std::slice::from_ref(&user)));
+    }
+    before.saturating_sub(users.len())
+}
+
+fn retained_history_bytes(events: &[ChatEvent]) -> usize {
+    events
+        .iter()
+        .map(chat_event_retained_bytes)
+        .fold(0, usize::saturating_add)
+}
+
+fn chat_event_retained_bytes(event: &ChatEvent) -> usize {
+    let kind_bytes = match &event.kind {
+        super::model::ChatEventKind::Message { body }
+        | super::model::ChatEventKind::Action { body }
+        | super::model::ChatEventKind::Notice { body }
+        | super::model::ChatEventKind::System { body } => body.capacity(),
+        super::model::ChatEventKind::Upload {
+            resource_id,
+            filename,
+            ..
+        } => resource_id.capacity().saturating_add(filename.capacity()),
+    };
+    std::mem::size_of::<ChatEvent>()
+        .saturating_add(event.server_id.capacity())
+        .saturating_add(
+            event
+                .actor_display_name
+                .as_ref()
+                .map_or(0, String::capacity),
+        )
+        .saturating_add(kind_bytes)
+}
+
+fn enforce_history_window(
+    events: &mut Vec<ChatEvent>,
+    edge: HistoryWindowEdge,
+    protected: Option<(RoomId, EventId)>,
+) {
+    let mut retained_bytes = retained_history_bytes(events);
+    if events.len() <= CHAT_SESSION_HISTORY_MAX_EVENTS
+        && retained_bytes <= CHAT_SESSION_HISTORY_MAX_BYTES
+    {
+        return;
+    }
+    let mut ranked = (0..events.len()).collect::<Vec<_>>();
+    ranked.sort_by_key(|index| {
+        let event = &events[*index];
+        (event.at_unix, event.room_id, event.event_id)
+    });
+    if matches!(edge, HistoryWindowEdge::Oldest) {
+        ranked.reverse();
+    }
+    if let Some(protected) = protected {
+        ranked.sort_by_key(|index| {
+            let event = &events[*index];
+            (event.room_id, event.event_id) == protected
+        });
+    }
+    let mut remove = vec![false; events.len()];
+    let mut retained_items = events.len();
+    for index in ranked {
+        if retained_items <= CHAT_SESSION_HISTORY_MAX_EVENTS
+            && retained_bytes <= CHAT_SESSION_HISTORY_MAX_BYTES
+        {
+            break;
+        }
+        remove[index] = true;
+        retained_items = retained_items.saturating_sub(1);
+        retained_bytes = retained_bytes.saturating_sub(chat_event_retained_bytes(&events[index]));
+    }
+    let mut index = 0;
+    events.retain(|_| {
+        let keep = !remove[index];
+        index += 1;
+        keep
+    });
 }
 
 fn is_transient_local_event_id(event_id: EventId) -> bool {
@@ -406,6 +752,280 @@ mod tests {
     use crate::chat::store::SqliteChatStore;
 
     const TEST_DESTINATION: &str = "abcd1234abcd1234abcd1234abcd1234";
+
+    fn bounded_history_event(event_id: u64, body_bytes: usize) -> ChatEvent {
+        ChatEvent {
+            server_id: "server-a".into(),
+            room_id: 1,
+            event_id,
+            actor_user_id: Some(1),
+            actor_display_name: Some("Alice".into()),
+            at_unix: event_id as i64,
+            kind: ChatEventKind::Message {
+                body: "x".repeat(body_bytes),
+            },
+        }
+    }
+
+    fn bounded_history_session(
+        session_id: ChatSessionId,
+        events: Vec<ChatEvent>,
+    ) -> ChatSessionView {
+        let server = ChatServerSummary {
+            server_id: "server-a".into(),
+            destination: TEST_DESTINATION.into(),
+            display_name: "Server A".into(),
+        };
+        let room = ChatRoomSummary {
+            server_id: server.server_id.clone(),
+            room_id: 1,
+            name: "lobby".into(),
+            topic: None,
+            unread: 0,
+            joined: true,
+        };
+        ChatSessionView {
+            session_id,
+            server,
+            rooms: vec![room.clone()],
+            active_room: room,
+            users: Vec::new(),
+            events,
+            status: String::new(),
+        }
+    }
+
+    #[test]
+    fn client_session_history_is_item_bounded_and_keeps_recent_edge_on_restore() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let excess = 10_u64;
+        let events = (1..=(CHAT_SESSION_HISTORY_MAX_EVENTS as u64 + excess))
+            .map(|event_id| bounded_history_event(event_id, 1))
+            .collect();
+
+        client.push_session(bounded_history_session(session_id, events));
+
+        let session = client.session(session_id).expect("bounded session");
+        assert_eq!(session.events.len(), CHAT_SESSION_HISTORY_MAX_EVENTS);
+        assert_eq!(session.events.first().map(|event| event.event_id), Some(11));
+        assert_eq!(
+            session.events.last().map(|event| event.event_id),
+            Some(CHAT_SESSION_HISTORY_MAX_EVENTS as u64 + excess)
+        );
+    }
+
+    #[test]
+    fn client_load_older_keeps_old_edge_without_losing_persisted_pagination_floor() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let first_recent = 1_000_u64;
+        let events = (first_recent..first_recent + CHAT_SESSION_HISTORY_MAX_EVENTS as u64)
+            .map(|event_id| bounded_history_event(event_id, 1))
+            .collect();
+        client.push_session(bounded_history_session(session_id, events));
+        let older = (1..=10)
+            .map(|event_id| bounded_history_event(event_id, 1))
+            .collect();
+
+        assert_eq!(client.prepend_history_events(session_id, older), 10);
+
+        let session = client.session(session_id).expect("bounded session");
+        assert_eq!(session.events.len(), CHAT_SESSION_HISTORY_MAX_EVENTS);
+        assert!(session.events.iter().all(|event| event.event_id <= 10
+            || event.event_id < first_recent + CHAT_SESSION_HISTORY_MAX_EVENTS as u64 - 10));
+        assert_eq!(
+            session.events.iter().map(|event| event.event_id).min(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn client_session_history_is_owned_byte_bounded() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let body_bytes = CHAT_SESSION_HISTORY_MAX_BYTES / 3;
+        let events = (1..=4)
+            .map(|event_id| bounded_history_event(event_id, body_bytes))
+            .collect();
+
+        client.push_session(bounded_history_session(session_id, events));
+
+        let session = client.session(session_id).expect("bounded session");
+        assert!(session.retained_history_bytes() <= CHAT_SESSION_HISTORY_MAX_BYTES);
+        assert_eq!(session.events.last().map(|event| event.event_id), Some(4));
+        assert!(session.events.len() < 4);
+    }
+
+    #[test]
+    fn client_recent_append_retains_new_event_despite_old_remote_timestamp() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let events = (1..=CHAT_SESSION_HISTORY_MAX_EVENTS as u64)
+            .map(|event_id| bounded_history_event(event_id, 1))
+            .collect();
+        client.push_session(bounded_history_session(session_id, events));
+        let mut skewed = bounded_history_event(10_000, 1);
+        skewed.at_unix = -10_000;
+
+        assert!(client.append_event_bounded(session_id, skewed, false, HistoryWindowEdge::Newest,));
+
+        let session = client.session(session_id).expect("bounded session");
+        assert_eq!(session.events.len(), CHAT_SESSION_HISTORY_MAX_EVENTS);
+        assert!(session.events.iter().any(|event| event.event_id == 10_000));
+    }
+
+    #[test]
+    fn client_refuses_session_overload_without_evicting_open_sessions() {
+        let mut client = ChatClient::new();
+        for _ in 0..CHAT_CLIENT_MAX_SESSIONS {
+            let session_id = client.reserve_session_id();
+            assert!(client.push_session(bounded_history_session(session_id, Vec::new())));
+        }
+        let existing_ids = client
+            .sessions()
+            .iter()
+            .map(|session| session.session_id)
+            .collect::<Vec<_>>();
+        let overflow_id = client.reserve_session_id();
+
+        assert!(!client.push_session(bounded_history_session(overflow_id, Vec::new())));
+        assert_eq!(client.sessions().len(), CHAT_CLIENT_MAX_SESSIONS);
+        assert_eq!(
+            client
+                .sessions()
+                .iter()
+                .map(|session| session.session_id)
+                .collect::<Vec<_>>(),
+            existing_ids
+        );
+    }
+
+    #[test]
+    fn client_session_admission_bounds_presentation_metadata() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let mut session = bounded_history_session(session_id, Vec::new());
+        session.server.display_name = "☃".repeat(CHAT_SERVER_DISPLAY_MAX_BYTES);
+        session.active_room.topic = Some("t".repeat(CHAT_ROOM_TOPIC_MAX_BYTES + 1));
+        session.rooms.push(ChatRoomSummary {
+            server_id: "server-a".into(),
+            room_id: 2,
+            name: "r".repeat(CHAT_ROOM_NAME_MAX_BYTES + 1),
+            topic: None,
+            unread: 0,
+            joined: false,
+        });
+        session.users.push(ChatUserSummary {
+            server_id: "server-a".into(),
+            user_id: 2,
+            display_name: "u".repeat(CHAT_USER_DISPLAY_MAX_BYTES + 1),
+            role_bits: 0,
+            status_bits: 0,
+            lxmf_available: false,
+        });
+        session.status = "s".repeat(CHAT_STATUS_MAX_BYTES + 1);
+
+        assert!(client.push_session(session));
+
+        let session = client.session(session_id).expect("bounded metadata");
+        assert!(session.server.display_name.len() <= CHAT_SERVER_DISPLAY_MAX_BYTES);
+        assert!(session.server.display_name.ends_with('…'));
+        assert!(session
+            .active_room
+            .topic
+            .as_ref()
+            .is_some_and(|topic| topic.len() <= CHAT_ROOM_TOPIC_MAX_BYTES));
+        assert_eq!(session.rooms.len(), 1);
+        assert!(session.users.is_empty());
+        assert!(session.status.len() <= CHAT_STATUS_MAX_BYTES);
+        assert!(session.status.ends_with('…'));
+    }
+
+    #[test]
+    fn client_session_admission_rejects_oversized_operational_identifiers() {
+        let mut client = ChatClient::new();
+        let mut oversized_room = bounded_history_session(1, Vec::new());
+        oversized_room.active_room.name = "r".repeat(CHAT_ROOM_NAME_MAX_BYTES + 1);
+        assert!(!client.push_session(oversized_room));
+
+        let mut oversized_server = bounded_history_session(2, Vec::new());
+        oversized_server.server.server_id = "s".repeat(CHAT_SERVER_ID_MAX_BYTES + 1);
+        assert!(!client.push_session(oversized_server));
+        assert!(client.sessions().is_empty());
+    }
+
+    #[test]
+    fn client_room_and_user_catalogs_are_item_bounded() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let mut session = bounded_history_session(session_id, Vec::new());
+        session.rooms = (1..=CHAT_SESSION_MAX_ROOMS as u32 + 1)
+            .map(|room_id| ChatRoomSummary {
+                server_id: "server-a".into(),
+                room_id,
+                name: format!("room-{room_id:04}"),
+                topic: None,
+                unread: 0,
+                joined: room_id == 1,
+            })
+            .collect();
+        session.users = (1..=CHAT_SESSION_MAX_USERS as u32 + 1)
+            .map(|user_id| ChatUserSummary {
+                server_id: "server-a".into(),
+                user_id,
+                display_name: format!("user-{user_id:04}"),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+            })
+            .collect();
+
+        assert!(client.push_session(session));
+
+        let session = client.session(session_id).expect("bounded catalogs");
+        assert_eq!(session.rooms.len(), CHAT_SESSION_MAX_ROOMS);
+        assert_eq!(session.users.len(), CHAT_SESSION_MAX_USERS);
+        assert!(session
+            .rooms
+            .iter()
+            .any(|room| room.room_id == session.active_room.room_id));
+    }
+
+    #[test]
+    fn client_room_and_user_catalogs_are_owned_byte_bounded() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let mut session = bounded_history_session(session_id, Vec::new());
+        session.rooms.extend((2..=4).map(|room_id| ChatRoomSummary {
+            server_id: "server-a".into(),
+            room_id,
+            name: "r".repeat(CHAT_SESSION_MAX_ROOM_BYTES / 2),
+            topic: None,
+            unread: 0,
+            joined: false,
+        }));
+        session.users = (1..=4)
+            .map(|user_id| ChatUserSummary {
+                server_id: "server-a".into(),
+                user_id,
+                display_name: "u".repeat(CHAT_SESSION_MAX_USER_BYTES / 2),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+            })
+            .collect();
+
+        assert!(client.push_session(session));
+
+        let session = client.session(session_id).expect("bounded catalogs");
+        assert!(session.retained_room_catalog_bytes() <= CHAT_SESSION_MAX_ROOM_BYTES);
+        assert!(session.retained_user_catalog_bytes() <= CHAT_SESSION_MAX_USER_BYTES);
+        assert!(session
+            .rooms
+            .iter()
+            .any(|room| room.room_id == session.active_room.room_id));
+    }
 
     #[test]
     fn client_persists_and_restores_sessions() {

@@ -33,38 +33,8 @@ pub(in crate::desktop) fn omenchat_upload_policy_rejection(
 pub(in crate::desktop) fn apply_omenchat_link_fields(
     descriptor: &mut OmenChatDescriptor,
     fields: &[String],
-) {
-    for field in fields {
-        let Some((key, value)) = field.split_once('=') else {
-            continue;
-        };
-        match key.trim() {
-            "name" | "display_name" => {
-                if !value.trim().is_empty() {
-                    descriptor.display_name = Some(value.trim().to_owned());
-                }
-            }
-            "lxmf" => {
-                if !value.trim().is_empty() {
-                    descriptor.server_lxmf_destination = Some(value.trim().to_owned());
-                }
-            }
-            "theme" => {
-                if !value.trim().is_empty() {
-                    descriptor.theme_hint = Some(value.trim().to_owned());
-                }
-            }
-            "rooms" | "rooms_hint" => {
-                descriptor.rooms_hint = value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|room| !room.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect();
-            }
-            _ => {}
-        }
-    }
+) -> bool {
+    descriptor.apply_link_fields(fields)
 }
 
 pub(in crate::desktop) fn normalize_omenchat_manual_target(input: &str) -> Option<String> {

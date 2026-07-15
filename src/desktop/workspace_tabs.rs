@@ -21,7 +21,7 @@ impl DesktopApp {
     pub(super) fn update_close_active_browser_tab(&mut self) {
         let closing_id = self.app.active_browser_tab().id;
         self.app.close_active_browser_tab();
-        self.remove_workspace_panes_for_missing_targets(Some(closing_id), None);
+        self.reconcile_workspace_panes_after_target_mutation(Some(closing_id), None);
         self.app.flush_pending_ui_preferences();
         self.persist_workspace_panes("workspace panes");
     }
@@ -30,7 +30,7 @@ impl DesktopApp {
         if self.select_browser_tab_by_id(tab_id) {
             let closing_id = self.app.active_browser_tab().id;
             self.app.close_active_browser_tab();
-            self.remove_workspace_panes_for_missing_targets(Some(closing_id), None);
+            self.reconcile_workspace_panes_after_target_mutation(Some(closing_id), None);
             self.app.flush_pending_ui_preferences();
             self.persist_workspace_panes("workspace panes");
         }
@@ -49,7 +49,7 @@ impl DesktopApp {
             let closing_pane = self.find_workspace_pane(&DesktopPane::Conversation(closing_id));
             self.app.delete_active_conversation();
             self.close_or_replace_deleted_conversation_pane(closing_pane);
-            self.remove_workspace_panes_for_missing_targets(None, Some(closing_id));
+            self.reconcile_workspace_panes_after_target_mutation(None, Some(closing_id));
             self.conversation.body_editors.remove(&closing_id);
             self.conversation.message_counts.remove(&closing_id);
             self.conversation.scroll_offsets.remove(&closing_id);
