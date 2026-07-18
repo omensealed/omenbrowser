@@ -5426,6 +5426,7 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::AddRoomTopic);
         app.input = "Operations".into();
         app.commit_input().expect("room topic");
+        complete_room_database(&mut app);
 
         assert!(config::list_rooms(&app.config)
             .expect("rooms")

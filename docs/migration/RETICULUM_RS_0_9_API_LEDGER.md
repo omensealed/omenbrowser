@@ -4260,3 +4260,19 @@ tag pushes, so the previous equality check skipped the package smoke for actual
 releases. Manual runs may still disable it, while every non-manual `v*` run now
 executes the isolated packaged OMENchat gate. The workflow verifier preserves
 that event condition.
+
+## Release qualification unit 62: asynchronous TUI room-test completion
+
+Hosted Apple Silicon qualification exposed a race in one existing TUI test. The
+production dashboard correctly enqueues room creation on the bounded
+administrative database actor, but `dashboard_input_creates_room_and_updates_config`
+read SQLite immediately after admission. It could therefore observe the old
+state even though creation completed moments later. The test now uses the
+existing bounded two-second actor-completion helper before asserting the exact
+room name/topic. No sleep, retry in production, timeout expansion, assertion
+weakening, or runtime behavior is introduced.
+
+The focused full-server test is repeated under the same feature identity before
+the native rerun. Rollback removes the single completion wait and this ledger
+entry, restoring nondeterministic observation of an accepted asynchronous
+operation.
