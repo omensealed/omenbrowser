@@ -82,6 +82,11 @@ reproducible`, `superseded`, and `not yet inspected`.
   Resource build uses a separate old-version target namespace; sharing that
   binary with the normal restart case caused Cargo to reuse the intentional
   65,536-byte test driver where restart expected the normal 102-byte driver.
+  The final nested NomadNet smoke also resolves both release binaries from the
+  shared Cargo target; its first hosted execution built successfully but then
+  invoked hard-coded default target paths and exited before starting the
+  isolated portal. The wrapper now prints the already-redacted smoke transcript
+  on failure so a nested error is diagnosable from Actions logs.
   Isolation of identities,
   configuration, state, and reports is unchanged. Completion gate: the
   release-blocking pinned lane passes, the informational drift lane emits its

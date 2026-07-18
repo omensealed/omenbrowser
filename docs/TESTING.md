@@ -516,7 +516,9 @@ non-empty network response that decodes to the deterministic 309-byte,
 public page shape, request primitive, and validation booleans. Raw destinations,
 URLs, identities, paths, ports, logs, and state are deleted. This is
 current-product portal evidence; current-Python application evidence is covered
-by the separate drift lane below.
+by the separate drift lane below. Both the wrapper and nested smoke resolve
+browser/server release binaries from `CARGO_TARGET_DIR` when supplied; nested
+failure output is emitted only after the smoke's existing redaction boundary.
 
 Expected result:
 

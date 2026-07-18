@@ -31,11 +31,14 @@ trap 'status=$?; echo "current NomadNet page harness failed at line $LINENO (sta
 port=$(python3 -c \
   'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 smoke_output="$temporary_root/smoke-output.txt"
-OMENBROWSER_SMOKE_ROOT="$temporary_root/smoke" \
-OMENBROWSER_SMOKE_NOMADNET_TCP="127.0.0.1:$port" \
-OMENBROWSER_SMOKE_NOMADNET_PATH_WAIT=45 \
+if ! OMENBROWSER_SMOKE_ROOT="$temporary_root/smoke" \
+  OMENBROWSER_SMOKE_NOMADNET_TCP="127.0.0.1:$port" \
+  OMENBROWSER_SMOKE_NOMADNET_PATH_WAIT=45 \
   timeout 900 bash "$repo_root/scripts/smoke/08_nomadnet_page_fetch.sh" \
-  > "$smoke_output" 2>&1
+  > "$smoke_output" 2>&1; then
+  cat "$smoke_output" >&2
+  exit 1
+fi
 grep -qx 'RESULT: PASS' "$smoke_output"
 
 raw_report=$(find "$temporary_root/smoke" -type f \
