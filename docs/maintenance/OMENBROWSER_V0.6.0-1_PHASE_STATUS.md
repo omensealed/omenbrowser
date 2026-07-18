@@ -54,6 +54,13 @@ reproducible`, `superseded`, and `not yet inspected`.
 
 ## Supplemental hardening units
 
+- Windows portable package boundary: after the native matrix passes, a read-only
+  Windows 2025 MSVC job builds and identity-checks separate unsigned desktop and
+  standalone omenchatd ZIPs with SHA-256 files. The browser package neither
+  bundles nor starts the server, and the server package installs no service.
+  Publication depends on both native Linux and Windows artifacts without
+  checking out repository code in the privileged job. NSIS/MSI and native
+  install/upgrade/uninstall/GUI-launch evidence remain release gates.
 - Bounded quick-runner build storage: after dependency policy passed, the
   pull-request quick job exhausted the GitHub-hosted filesystem while the
   Actions runner wrote its own diagnostic log. The quick job now caches Cargo

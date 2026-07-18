@@ -11,10 +11,10 @@ Public release packages must use the canonical `desktop-product` feature with
 this through the browser `--version` output. Server packages must report
 `live-reticulum:on` from `omenchatd --version`.
 
-Do not cut the next public package release until the clean Reticulum 0.6 LXMF
-path has a live smoke pass for direct sends, propagation sync, tickets, and
-attachments. The packaging scripts can build local artifacts before then, but a
-GitHub release tag should wait for that LXMF parity check.
+Do not cut the next public package release until the Reticulum/LXMF 0.9.5
+migration's live, interoperability, security, and installer gates pass. The
+packaging scripts can build local artifacts before then, but a GitHub release
+tag must wait for the complete release checklist.
 
 Linux packages must be built on the oldest glibc baseline we intend to
 support. Building on a newer rolling distro can produce binaries that fail on
@@ -120,6 +120,27 @@ dist/OMENbrowser_rs-<version>-<arch>.AppImage
 The AppImage launches the desktop browser. It also includes `omenchatd` under
 `usr/bin` inside the AppDir for manual use.
 
+## Windows portable ZIPs
+
+The native Windows packaging job runs only after the full Windows/macOS compile,
+test, Clippy, lifecycle, and product-identity matrix. It builds the canonical
+MSVC desktop and standalone server profiles with locked dependencies:
+
+```powershell
+./scripts/package-windows-portable.ps1 -OutDir dist
+```
+
+It produces separate unsigned archives and SHA-256 files:
+
+```text
+dist/OMENbrowser_rs-<version>-windows-x86_64-portable.zip
+dist/omenchatd-<version>-windows-x86_64.zip
+```
+
+The browser archive does not install or auto-start omenchatd. The server archive
+contains no service installer. NSIS setup and WiX MSI packages remain separate
+release units and must not be inferred from portable ZIP success.
+
 ## GitHub Actions
 
 Two workflows are included:
@@ -131,7 +152,8 @@ Two workflows are included:
   - syntax-checks package and installer scripts.
 - `.github/workflows/package.yml`
   - runs manually or for `v*` tags;
-  - builds the release tarball, `.deb`, and AppImage;
+  - builds the Linux release tarball, `.deb`, and AppImage;
+  - builds separate Windows desktop and omenchatd portable ZIPs on Windows;
   - can run the packaged local OMENchat smoke;
   - uploads package artifacts and checksums from a read-only build job;
   - publishes tag artifacts only from a dependent `release` environment job

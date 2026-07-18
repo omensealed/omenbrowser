@@ -4224,3 +4224,25 @@ No production source, dependency, lockfile, runtime behavior, wire byte,
 configuration, schema, identity path, or storage format changed. Rollback
 removes the environment setting and cache input together, but can restore the
 observed hosted-runner disk exhaustion when both workspace targets are cached.
+
+## Release qualification unit 61: Windows portable package boundary
+
+The package workflow now builds the canonical desktop application and standalone
+omenchatd on the native Windows 2025 MSVC runner only after the reusable native
+matrix passes. A PowerShell packaging boundary verifies package-version parity
+and compiled feature/target identity before creating separate unsigned ZIPs and
+SHA-256 files. The browser archive does not include or start omenchatd; the
+server archive installs no service and remains independently configured.
+
+The read-only Windows builder uploads an intermediate artifact. The narrowly
+privileged tag publication job checks out no repository code and now depends on
+and downloads both the Linux and Windows build artifacts. Workflow policy tests
+preserve native gating, runner identity, script ownership, read-only builders,
+and both publication dependencies. NSIS, WiX MSI, install/upgrade/uninstall,
+GUI launch, and signing remain explicit release gates; portable ZIP success does
+not satisfy them.
+
+No runtime crate, production source, wire byte, configuration, schema, identity
+path, or storage format changed. Rollback removes the PowerShell script, Windows
+job/artifact dependency, verifier assertions, and packaging documentation
+together; existing Linux packaging remains independent.

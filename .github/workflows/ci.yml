@@ -67,6 +67,7 @@ jobs:
           bash -n scripts/release-package.sh
           bash -n scripts/package-deb.sh
           bash -n scripts/package-appimage.sh
+          test -f scripts/package-windows-portable.ps1
           bash -n scripts/check-glibc-floor.sh
           bash -n scripts/verify-product-features.sh
           bash -n scripts/run-pinned-python-reticulum.sh

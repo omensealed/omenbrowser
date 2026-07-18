@@ -126,10 +126,47 @@ jobs:
             dist/release-artifacts.sha256
           if-no-files-found: error
 
+  windows-portable:
+    name: Build Windows portable artifacts
+    needs: native
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-07-11
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            .
+            src/server
+
+      - name: Build and verify portable packages
+        shell: pwsh
+        run: ./scripts/package-windows-portable.ps1 -OutDir dist
+
+      - name: Upload Windows portable artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omenbrowser-rs-windows-portable-artifacts
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+
   publish:
     name: Publish release downloads
     if: startsWith(github.ref, 'refs/tags/')
-    needs: package
+    needs:
+      - package
+      - windows-portable
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release
@@ -142,6 +179,12 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: omenbrowser-rs-release-artifacts
+          path: dist
+
+      - name: Download reviewed Windows portable artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: omenbrowser-rs-windows-portable-artifacts
           path: dist
 
       - name: Publish release downloads
