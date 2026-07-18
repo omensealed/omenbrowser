@@ -7,6 +7,7 @@ readonly pinned_ref=15320e4d2cfabb143c1db20ca887e275fd521585
 readonly upstream_url=https://github.com/markqvist/Reticulum.git
 readonly pinned_lxmf_ref=727830cefda83d9c6e3982b48675425f3f988f9c
 readonly upstream_lxmf_url=https://github.com/markqvist/LXMF.git
+readonly msgpack_version=1.2.1
 
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/omen-pinned-python.XXXXXX")
 cleanup() {
@@ -57,6 +58,12 @@ esac
 
 rns_source=$(realpath -- "$rns_source")
 lxmf_source=$(realpath -- "$lxmf_source")
+
+python3 -m venv "$temporary_root/venv"
+"$temporary_root/venv/bin/python" -m pip install \
+  --disable-pip-version-check --no-input --quiet \
+  "msgpack==$msgpack_version"
+export PATH="$temporary_root/venv/bin:$PATH"
 
 lxmf_revision=$(git -C "$lxmf_source" rev-parse HEAD)
 if [[ "$lxmf_revision" != "$pinned_lxmf_ref" ]]; then

@@ -58,10 +58,22 @@ reproducible`, `superseded`, and `not yet inspected`.
   Reticulum/LXMF source paths are canonicalized before Cargo changes the test
   process working directory, so every fixture verifies the intended immutable
   commits instead of resolving a repository-relative path beneath its crate.
-  The explicitly versioned current-Python environment now installs
-  `msgpack==1.2.1`, which the propagation fixture imports directly rather than
-  relying on an incidental transitive package. Neither change alters product
-  dependencies, wire behavior, configuration, or state. Completion gate: the
+  Both isolated Python lanes now install `msgpack==1.2.1`, which the
+  propagation fixture imports directly rather than relying on an incidental
+  host or transitive package. The network stamp fixture also applies its live
+  rejection policy before publishing the acceptance synchronization record,
+  eliminating a race in which Rust could begin its under-cost control while
+  Python still used the old floor. Consecutive propagated submissions now use
+  one serialized reusable link to the selected node, bounded to exactly one
+  cached link and discarded on destination change, stale/closed state, or send
+  failure. This fixes pinned-Python back-to-back admission without a retry,
+  resend, sleep, or second link; the fixture asserts one active link at both
+  policy boundaries. The environment changes do not alter product dependencies,
+  configuration, or state; link reuse preserves LXMF wire bytes. The mixed lane
+  now shares one job-local Cargo target across its isolated source roots and
+  has a 120-minute ceiling: the former 35-minute ceiling cancelled the sixth of
+  eighteen checks after the first five passed. Isolation of identities,
+  configuration, state, and reports is unchanged. Completion gate: the
   release-blocking pinned lane passes, the informational drift lane emits its
   report, and mixed 0.6/0.9 application interoperability completes.
 - Windows portable package boundary: after the native matrix passes, a read-only

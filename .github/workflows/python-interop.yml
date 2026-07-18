@@ -121,9 +121,10 @@ jobs:
   mixed-application-lxmf:
     name: OMENbrowser 0.6.0-1 ↔ 0.9.5-1 LXMF and OMENchat compatibility
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 120
     env:
       CARGO_BUILD_JOBS: "2"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/mixed-application-cargo
 
     steps:
       - name: Checkout OMENbrowser with the hardened 0.6 parent

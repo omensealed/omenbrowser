@@ -290,6 +290,12 @@ struct CleanLocalLxmfState {
 }
 
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+struct CleanLxmfPropagationLink {
+    destination_hash: rns_transport::hash::AddressHash,
+    link: Arc<AsyncMutex<rns_transport::destination::link::Link>>,
+}
+
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
 #[derive(Clone)]
 struct CleanReticulumLxmfWireSubmitter {
     transport: Arc<reticulum_rs::runtime::Transport>,
@@ -299,6 +305,8 @@ struct CleanReticulumLxmfWireSubmitter {
     destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
     destination_app_data: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     pending_lxmf_proofs: PendingLxmfProofs,
+    propagation_link: Arc<AsyncMutex<Option<CleanLxmfPropagationLink>>>,
+    propagation_send_gate: Arc<AsyncMutex<()>>,
     timeout: Duration,
     runtime: tokio::runtime::Handle,
 }
@@ -511,6 +519,8 @@ impl CleanReticulumLxmfWireSubmitter {
             destination_identities: state.destination_identities,
             destination_app_data: state.destination_app_data,
             pending_lxmf_proofs: state.pending_lxmf_proofs,
+            propagation_link: Arc::new(AsyncMutex::new(None)),
+            propagation_send_gate: Arc::new(AsyncMutex::new(())),
             timeout,
             runtime,
         })
@@ -526,6 +536,11 @@ impl CleanReticulumLxmfWireSubmitter {
                 "clean LXMF {method} submit is not supported by the embedded Reticulum sender"
             )));
         }
+        let _propagation_send_guard = if method == "propagated" {
+            Some(self.propagation_send_gate.lock().await)
+        } else {
+            None
+        };
         let destination_hash = parse_transport_destination_hash(&delivery.destination_hash)?;
         let cancel = CancellationToken::new();
         let identity = clean_wait_for_destination_identity(
@@ -692,17 +707,57 @@ impl CleanReticulumLxmfWireSubmitter {
             None,
         )
         .await?;
-        let link = self.transport.link(destination).await;
-        rns_transport::delivery::await_link_activation(&self.transport, &link, self.timeout)
-            .await
-            .map_err(|error| {
-                AppError::Runtime(format!(
-                    "clean LXMF {method} link activation failed destination={} send_destination={} message_id={}: {error}",
-                    delivery.destination_hash,
-                    send_hash.to_hex_string(),
-                    delivery.message_id
-                ))
-            })?;
+        let link = if method == "propagated" {
+            let mut cached = self.propagation_link.lock().await;
+            let reusable = if let Some(cached_link) = cached.as_ref() {
+                let active = cached_link.link.lock().await.status()
+                    == rns_transport::destination::link::LinkStatus::Active;
+                (cached_link.destination_hash == send_hash && active)
+                    .then(|| cached_link.link.clone())
+            } else {
+                None
+            };
+            if let Some(link) = reusable {
+                link
+            } else {
+                if let Some(old_link) = cached.take() {
+                    clean_close_link(&self.transport, &old_link.link).await;
+                }
+                let link = self.transport.link(destination).await;
+                rns_transport::delivery::await_link_activation(
+                    &self.transport,
+                    &link,
+                    self.timeout,
+                )
+                .await
+                .map_err(|error| {
+                    AppError::Runtime(format!(
+                        "clean LXMF {method} link activation failed destination={} send_destination={} message_id={}: {error}",
+                        delivery.destination_hash,
+                        send_hash.to_hex_string(),
+                        delivery.message_id
+                    ))
+                })?;
+                *cached = Some(CleanLxmfPropagationLink {
+                    destination_hash: send_hash,
+                    link: link.clone(),
+                });
+                link
+            }
+        } else {
+            let link = self.transport.link(destination).await;
+            rns_transport::delivery::await_link_activation(&self.transport, &link, self.timeout)
+                .await
+                .map_err(|error| {
+                    AppError::Runtime(format!(
+                        "clean LXMF {method} link activation failed destination={} send_destination={} message_id={}: {error}",
+                        delivery.destination_hash,
+                        send_hash.to_hex_string(),
+                        delivery.message_id
+                    ))
+                })?;
+            link
+        };
         let mut receipt_hash = None;
         let mut resource_hash = None;
         let result = rns_transport::delivery::send_on_link_observed(
@@ -750,6 +805,16 @@ impl CleanReticulumLxmfWireSubmitter {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
+                if method == "propagated" {
+                    let mut cached = self.propagation_link.lock().await;
+                    if cached
+                        .as_ref()
+                        .is_some_and(|cached_link| Arc::ptr_eq(&cached_link.link, &link))
+                    {
+                        cached.take();
+                    }
+                    clean_close_link(&self.transport, &link).await;
+                }
                 if let Some(receipt_hash) = receipt_hash.as_deref() {
                     self.pending_lxmf_proofs
                         .lock()
@@ -16696,6 +16761,7 @@ enable_transport = No
         assert_eq!(accepted["validation"]["messages"], 1);
         assert_eq!(accepted["validation"]["accepted"], 1);
         assert_eq!(accepted["validation"]["target_cost"], 13);
+        assert_eq!(accepted["validation"]["active_propagation_links"], 1);
         assert!(accepted["validation"]["stamp_value"]
             .as_u64()
             .is_some_and(|value| value >= 13));
@@ -16724,6 +16790,7 @@ enable_transport = No
         assert_eq!(rejected["validation"]["messages"], 1);
         assert_eq!(rejected["validation"]["accepted"], 0);
         assert_eq!(rejected["validation"]["target_cost"], 255);
+        assert_eq!(rejected["validation"]["active_propagation_links"], 1);
         assert_eq!(rejected["delivery_count"], 1);
         assert_eq!(rejected["client_messages"], 1);
         assert_eq!(rejected["rejection_cost"], 255);
