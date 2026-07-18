@@ -4185,3 +4185,19 @@ behavior changed. Rollback removes the harness, workflow step, verifier
 assertions, and these documentation statements together. Hosted Windows MSVC
 and macOS execution remains the completion evidence; interactive application
 and installer lifecycle smokes remain separate gates.
+
+## Release qualification unit 59: exact local-crate dependency identity
+
+The first pull-request quick job correctly rejected both local
+`omen-ifac-tcp` dependency declarations as wildcard requirements when its
+pinned cargo-deny command evaluated all features. Both the root application and
+standalone server now pair their existing relative path with the private crate's
+exact `=0.9.5-1` package version. Cargo still resolves the same local source and
+package identity; the version clause prevents an accidentally mismatched local
+crate from satisfying either product manifest.
+
+The exact CI cargo-deny commands now pass for both independent manifests, as do
+locked checks for the affected native profiles and release-version consistency.
+No crate source, lockfile package, runtime behavior, wire byte, configuration,
+schema, identity path, or storage format changed. Rollback removes the two
+version constraints together, but would restore a denied wildcard requirement.

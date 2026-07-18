@@ -54,6 +54,12 @@ reproducible`, `superseded`, and `not yet inspected`.
 
 ## Supplemental hardening units
 
+- Exact local-crate dependency identity: the pull-request all-feature policy
+  gate exposed that path-only declarations count as wildcard requirements.
+  Root and standalone-server `omen-ifac-tcp` dependencies now retain their
+  existing relative paths while requiring the crate's exact `=0.9.5-1`
+  package version. Both pinned cargo-deny commands pass. Resolution, lockfiles,
+  production behavior, wire, schema, and configuration are unchanged.
 - Native release CLI identity smoke: the hosted matrix now executes the actual
   browser desktop/TUI and standalone server headless/full command-line entry
   points after compilation. State-free `--version` assertions require the
