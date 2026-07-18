@@ -66,6 +66,7 @@ git -C "$repo_root" cat-file -e "$old_commit^{commit}"
 git -C "$repo_root" archive "$old_commit" | tar -x -C "$old_source"
 
 if [[ "$resource_fixture" == true ]]; then
+  old_target="${old_target}-resource-fixture"
   current_source="$temporary_root/current-source"
   current_target="$temporary_root/current-target"
   mkdir -p -- "$current_source"

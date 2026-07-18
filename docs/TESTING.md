@@ -3463,7 +3463,9 @@ source trees to disposable roots and applies
 `fixtures/lxmf/mixed_application_resource_driver.patch`. That fixture-only
 patch changes the diagnostic message body to 65,536 ASCII bytes; it does not
 alter either manifest, runtime adapter, protocol, state, or normal CLI in the
-working tree. Both versions select Resource above their shared 431-byte
+working tree. Its old-version Cargo target is separate from the normal direct,
+restart, propagation, and OMENchat target so the fixture binary cannot be
+reused by a later case. Both versions select Resource above their shared 431-byte
 Link-packet MDU. The harness then requires one exactly 65,536-byte, peer-bound
 decoded message in each application.
 

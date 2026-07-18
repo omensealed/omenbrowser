@@ -78,7 +78,11 @@ reproducible`, `superseded`, and `not yet inspected`.
   execution. Direct and Resource cases use the restart case's deterministic
   directional topology, with one logical send per direction instead of three
   simultaneous paired attempts. Local shared-target runs preserved exact 102-
-  and 65,536-byte content and reciprocal message IDs. Isolation of identities,
+  and 65,536-byte content and reciprocal message IDs. The fixture-patched
+  Resource build uses a separate old-version target namespace; sharing that
+  binary with the normal restart case caused Cargo to reuse the intentional
+  65,536-byte test driver where restart expected the normal 102-byte driver.
+  Isolation of identities,
   configuration, state, and reports is unchanged. Completion gate: the
   release-blocking pinned lane passes, the informational drift lane emits its
   report, and mixed 0.6/0.9 application interoperability completes.
