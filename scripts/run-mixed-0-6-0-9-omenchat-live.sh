@@ -63,7 +63,7 @@ if ((reverse)); then
   cargo build --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
     --no-default-features --features server-headless --bin omenchatd
   browser_bin="$old_target/debug/omenbrowser_rs"
-  server_bin="$repo_root/src/server/target/debug/omenchatd"
+  server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
   expected_client_version="0.6.0-1"
   expected_server_version="0.9.5-1"
   direction="0.6.0-1_client_to_0.9.5-1_server"
@@ -74,7 +74,7 @@ else
     --no-default-features --features server-headless --bin omenchatd
   cargo build --locked --manifest-path "$repo_root/Cargo.toml" \
     --no-default-features --features desktop-product --bin omenbrowser_rs
-  browser_bin="$repo_root/target/debug/omenbrowser_rs"
+  browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
   server_bin="$old_target/debug/omenchatd"
   expected_client_version="0.9.5-1"
   expected_server_version="0.6.0-1"

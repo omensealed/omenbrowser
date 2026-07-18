@@ -87,7 +87,7 @@ cargo build --locked --manifest-path "$repo_root/Cargo.toml" \
   --no-default-features --features native-network --bin omenbrowser_rs
 
 old_bin="$old_target/debug/omenbrowser_rs"
-current_bin="$repo_root/target/debug/omenbrowser_rs"
+current_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
 old_version=$($old_bin --version | awk '{print $2}')
 current_version=$($current_bin --version | awk '{print $2}')
 [[ "$old_version" == "0.6.0-1" ]]

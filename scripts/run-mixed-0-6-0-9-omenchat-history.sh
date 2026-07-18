@@ -50,7 +50,7 @@ cargo build --locked --manifest-path "$repo_root/Cargo.toml" \
   --example mixed_sqlite_history_probe
 
 old_probe="$old_target/debug/examples/mixed_sqlite_history_probe"
-current_probe="$repo_root/target/debug/examples/mixed_sqlite_history_probe"
+current_probe="${CARGO_TARGET_DIR:-$repo_root/target}/debug/examples/mixed_sqlite_history_probe"
 old_version=$(python3 -c \
   'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' \
   "$old_source/Cargo.toml")

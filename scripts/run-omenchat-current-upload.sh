@@ -38,8 +38,8 @@ cargo build --locked --manifest-path "$repo_root/Cargo.toml" \
 cargo build --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
   --no-default-features --features server-headless --bin omenchatd
 
-browser_bin="$repo_root/target/debug/omenbrowser_rs"
-server_bin="$repo_root/src/server/target/debug/omenchatd"
+browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
+server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
 browser_version=$("$browser_bin" --version | awk '{print $2}')
 server_version=$("$server_bin" --version | awk '{print $2}')
 [[ "$browser_version" == "0.9.5-1" ]]

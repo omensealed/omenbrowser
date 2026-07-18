@@ -3455,9 +3455,11 @@ peer-bound message in each process, and exact 32-byte-title/102-byte-content
 shape metadata. It retains no raw application report containing paths or
 identity material.
 
-Announce/path readiness permits at most three paired attempts and reports the
-successful attempt. With `--resource`, the harness copies both source trees to
-disposable roots and applies
+Each direct and Resource case runs one direction at a time with its receive-only
+peer online before the sender opens a link. Each logical message is attempted
+exactly once; this avoids the simultaneous reciprocal link activation already
+identified by the restart case. With `--resource`, the harness copies both
+source trees to disposable roots and applies
 `fixtures/lxmf/mixed_application_resource_driver.patch`. That fixture-only
 patch changes the diagnostic message body to 65,536 ASCII bytes; it does not
 alter either manifest, runtime adapter, protocol, state, or normal CLI in the
@@ -3465,10 +3467,8 @@ working tree. Both versions select Resource above their shared 431-byte
 Link-packet MDU. The harness then requires one exactly 65,536-byte, peer-bound
 decoded message in each application.
 
-With `--restart`, each direction runs sequentially with its receive-only peer
-online before the sender opens a link. This avoids simultaneous cross-link
-activation and never retries a logical message that may already have arrived.
-After the initial two-direction exchange, both processes exit, reopen the same
+With `--restart`, after the initial two-direction exchange, both processes exit,
+reopen the same
 application/identity/configuration/Reticulum roots, and repeat. The report
 requires stable local destinations, new outbound and inbound message IDs,
 exact peer-send/inbound-ID correlation, and exactly one inbound event per

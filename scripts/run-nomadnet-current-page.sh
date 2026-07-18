@@ -42,8 +42,8 @@ raw_report=$(find "$temporary_root/smoke" -type f \
   -name nomadnet-fetch-report.json -print -quit)
 [[ -n "$raw_report" && -f "$raw_report" && ! -L "$raw_report" ]]
 
-browser_bin="$repo_root/target/release/omenbrowser_rs"
-server_bin="$repo_root/src/server/target/release/omenchatd"
+browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/release/omenbrowser_rs"
+server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/release/omenchatd"
 browser_version=$("$browser_bin" --version | awk '{print $2}')
 server_version=$("$server_bin" --version | awk '{print $2}')
 [[ "$browser_version" == "0.9.5-1" ]]

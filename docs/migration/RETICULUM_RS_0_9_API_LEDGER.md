@@ -3501,8 +3501,11 @@ After a bounded announce warmup, both real application commands send one direct
 Link-packet message and require one reciprocal peer-bound inbound message. The
 harness validates application versions, direct method, classification, inbound
 count, peer matching, and the established 32-byte title/102-byte content shape.
-It permits at most three paired announce/readiness attempts; the final rerun
-passed on attempt one in 16.055 seconds. The 0.9.5 side observed a matching RNS
+The gate now uses the unit-34 directional topology for every case: it starts a
+receive-only peer before each sender and attempts each logical message exactly
+once. This removes flaky simultaneous cross-link activation without hiding an
+ambiguous send behind a retry. The final local shared-target run passed both
+directions in 40.081 seconds. The 0.9.5 side observed a matching RNS
 packet proof and the 0.6 side did not, which remains conservative transport
 evidence rather than a delivery-state mismatch.
 
@@ -3531,8 +3534,8 @@ lockfile, protocol, identity, configuration, or storage implementation.
 
 Both versions declare a 431-byte direct Link-packet MDU and select their
 existing `send_resource` branches for larger signed wires. Across exact Python
-RNS 1.3.8 loopback transport, the final mixed run passed on bounded readiness
-attempt two in 15.930 seconds. Each process sent direct and
+RNS 1.3.8 loopback transport, the final directional shared-target run passed on
+one logical send per direction in 40.072 seconds. Each process sent direct and
 decoded exactly one peer-bound reciprocal message with a 32-byte title and all
 65,536 content bytes. Neither sender observed a packet proof, so the result is
 reported as reciprocal application admission and content-length preservation,

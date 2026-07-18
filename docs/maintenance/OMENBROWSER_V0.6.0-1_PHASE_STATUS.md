@@ -72,7 +72,13 @@ reproducible`, `superseded`, and `not yet inspected`.
   configuration, or state; link reuse preserves LXMF wire bytes. The mixed lane
   now shares one job-local Cargo target across its isolated source roots and
   has a 120-minute ceiling: the former 35-minute ceiling cancelled the sixth of
-  eighteen checks after the first five passed. Isolation of identities,
+  eighteen checks after the first five passed. Every mixed/current harness now
+  resolves its binary from `CARGO_TARGET_DIR`; the first hosted attempt built
+  successfully but exposed the former hard-coded default path before protocol
+  execution. Direct and Resource cases use the restart case's deterministic
+  directional topology, with one logical send per direction instead of three
+  simultaneous paired attempts. Local shared-target runs preserved exact 102-
+  and 65,536-byte content and reciprocal message IDs. Isolation of identities,
   configuration, state, and reports is unchanged. Completion gate: the
   release-blocking pinned lane passes, the informational drift lane emits its
   report, and mixed 0.6/0.9 application interoperability completes.
