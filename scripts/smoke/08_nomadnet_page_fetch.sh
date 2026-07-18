@@ -12,8 +12,8 @@ smoke_run "browser path retry tests" cargo test --locked --no-default-features -
 smoke_run "build browser release" cargo build --release --locked --no-default-features --features desktop-product --bin omenbrowser_rs
 smoke_run "build server release" cargo build --release --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
 
-browser_bin="$REPO_ROOT/target/release/omenbrowser_rs"
-server_bin="$REPO_ROOT/src/server/target/release/omenchatd"
+browser_bin="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/omenbrowser_rs"
+server_bin="${CARGO_TARGET_DIR:-$REPO_ROOT/src/server/target}/release/omenchatd"
 tcp_endpoint="${OMENBROWSER_SMOKE_NOMADNET_TCP:-127.0.0.1:42428}"
 server_home="$SMOKE_RUN_ROOT/nomadnet-server-home"
 browser_root="$SMOKE_RUN_ROOT/nomadnet-browser-root"

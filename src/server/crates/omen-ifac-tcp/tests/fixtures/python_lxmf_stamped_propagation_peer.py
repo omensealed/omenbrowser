@@ -112,6 +112,10 @@ def main() -> int:
                     "accepted": len(result),
                     "target_cost": target_cost,
                     "stamp_value": int(result[0][2]) if result else -1,
+                    "active_propagation_links": sum(
+                        link.status == RNS.Link.ACTIVE
+                        for link in router.active_propagation_links
+                    ),
                 }
             )
         if result:
@@ -199,6 +203,8 @@ def main() -> int:
 
         with validation_lock:
             accepted_result = validation_results[-1].copy()
+        accepted.clear()
+        router.propagation_stamp_cost = REJECTION_COST
         print(
             json.dumps(
                 {
@@ -211,8 +217,6 @@ def main() -> int:
             flush=True,
         )
 
-        accepted.clear()
-        router.propagation_stamp_cost = REJECTION_COST
         if not rejected.wait(20):
             raise TimeoutError("Python propagation handler did not reject the under-cost message")
         time.sleep(0.2)

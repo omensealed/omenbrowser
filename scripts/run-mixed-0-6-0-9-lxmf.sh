@@ -55,7 +55,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 old_source="$temporary_root/old-source"
-old_target="$temporary_root/old-target"
+old_target=${OMEN_MIXED_OLD_TARGET_DIR:-$temporary_root/old-target}
 current_source=""
 current_target=""
 old_app="$temporary_root/old-app"
@@ -66,6 +66,7 @@ git -C "$repo_root" cat-file -e "$old_commit^{commit}"
 git -C "$repo_root" archive "$old_commit" | tar -x -C "$old_source"
 
 if [[ "$resource_fixture" == true ]]; then
+  old_target="${old_target}-resource-fixture"
   current_source="$temporary_root/current-source"
   current_target="$temporary_root/current-target"
   mkdir -p -- "$current_source"
@@ -96,7 +97,7 @@ if [[ "$resource_fixture" == true ]]; then
   expected_content_bytes=65536
   transfer_fixture=resource
 else
-  current_bin="$repo_root/target/debug/omenbrowser_rs"
+  current_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
   expected_content_bytes=102
   transfer_fixture=link_packet
 fi
@@ -225,74 +226,6 @@ current_pid=""
 
 exchange_successful_attempt=0
 exchange_elapsed_ms=0
-run_exchange() {
-  local prefix=$1
-  local attempt=0
-  local started_ns
-  exchange_successful_attempt=0
-  exchange_elapsed_ms=0
-  while (( attempt < 3 )); do
-    attempt=$((attempt + 1))
-    started_ns=$(date +%s%N)
-    "$old_bin" --lxmf-interop --send-lxmf-smoke "$current_destination" \
-      --lxmf-wait 15 "${common_old[@]}" \
-      --output "$temporary_root/$prefix-old-report.json" \
-      >"$temporary_root/$prefix-old.stdout" \
-      2>"$temporary_root/$prefix-old.stderr" &
-    old_pid=$!
-    "$current_bin" --lxmf-interop --send-lxmf-smoke "$old_destination" \
-      --lxmf-wait 15 "${common_current[@]}" \
-      --output "$temporary_root/$prefix-current-report.json" \
-      >"$temporary_root/$prefix-current.stdout" \
-      2>"$temporary_root/$prefix-current.stderr" &
-    current_pid=$!
-    wait "$old_pid"
-    old_pid=""
-    wait "$current_pid"
-    current_pid=""
-    exchange_elapsed_ms=$((($(date +%s%N) - started_ns) / 1000000))
-    if "$python" - "$temporary_root/$prefix-old-report.json" \
-      "$temporary_root/$prefix-current-report.json" <<'PY'
-import json
-import pathlib
-import sys
-
-reports = [json.loads(pathlib.Path(path).read_text(encoding="utf-8")) for path in sys.argv[1:]]
-if all(report.get("classification", {}).get("outcome") == "pass" for report in reports):
-    raise SystemExit(0)
-raise SystemExit(1)
-PY
-    then
-      exchange_successful_attempt=$attempt
-      break
-    fi
-  done
-  if (( exchange_successful_attempt == 0 )); then
-    "$python" - "$prefix" "$temporary_root/$prefix-old-report.json" \
-      "$temporary_root/$prefix-current-report.json" <<'PY' >&2
-import json
-import pathlib
-import sys
-
-for version, path in zip(("0.6.0-1", "0.9.5-1"), sys.argv[2:]):
-    report = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-    classification = report.get("classification", {})
-    wait = report.get("wait", {})
-    print(json.dumps({
-        "round": sys.argv[1],
-        "version": version,
-        "outcome": classification.get("outcome"),
-        "reason": classification.get("reason"),
-        "send_ok": report.get("send", {}).get("ok"),
-        "wait_status": wait.get("status"),
-        "inbound_messages": wait.get("inbound_messages", 0),
-    }, sort_keys=True))
-PY
-    echo "mixed LXMF peers did not both pass within three bounded attempts" >&2
-    return 1
-  fi
-}
-
 run_directional_round() {
   local prefix=$1
   local started_ns
@@ -380,11 +313,7 @@ PY
   exchange_elapsed_ms=$((($(date +%s%N) - started_ns) / 1000000))
 }
 
-if [[ "$restart_fixture" == true ]]; then
-  run_directional_round initial
-else
-  run_exchange initial
-fi
+run_directional_round initial
 initial_successful_attempt=$exchange_successful_attempt
 initial_elapsed_ms=$exchange_elapsed_ms
 

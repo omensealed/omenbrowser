@@ -62,9 +62,21 @@ grep -q '^    needs: native$' <<<"$package_job" \
 grep -q 'contents: write' <<<"$package_job" \
   && fail "package build job has contents: write"
 
+windows_package_job="$(sed -n '/^  windows-portable:$/,/^  publish:$/p' .github/workflows/package.yml)"
+grep -q '^    needs: native$' <<<"$windows_package_job" \
+  || fail "Windows portable build does not depend on native checks"
+grep -q '^    runs-on: windows-2025$' <<<"$windows_package_job" \
+  || fail "Windows portable build does not use the native MSVC runner"
+grep -q 'scripts/package-windows-portable.ps1' <<<"$windows_package_job" \
+  || fail "Windows portable build does not use the reviewed package script"
+grep -q 'contents: write' <<<"$windows_package_job" \
+  && fail "Windows portable build job has contents: write"
+
 publish_job="$(sed -n '/^  publish:$/,$p' .github/workflows/package.yml)"
-grep -q '^    needs: package$' <<<"$publish_job" \
-  || fail "publish job does not depend on package"
+grep -q '^      - package$' <<<"$publish_job" \
+  || fail "publish job does not depend on Linux package"
+grep -q '^      - windows-portable$' <<<"$publish_job" \
+  || fail "publish job does not depend on Windows portable package"
 grep -q '^    environment: release$' <<<"$publish_job" \
   || fail "publish job lacks the release environment gate"
 grep -q '^      contents: write$' <<<"$publish_job" \
@@ -82,5 +94,8 @@ grep -q 'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0' .gith
   || fail "reviewed appimagetool checksum missing"
 grep -q 'sha256sum --check --strict' .github/workflows/package.yml \
   || fail "appimagetool checksum verification missing"
+grep -Fq "github.event_name != 'workflow_dispatch' || inputs.run_package_smoke == 'true'" \
+  .github/workflows/package.yml \
+  || fail "tag packaging does not require the package smoke gate"
 
 echo "workflow security verification: pass"

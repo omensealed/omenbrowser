@@ -3501,8 +3501,11 @@ After a bounded announce warmup, both real application commands send one direct
 Link-packet message and require one reciprocal peer-bound inbound message. The
 harness validates application versions, direct method, classification, inbound
 count, peer matching, and the established 32-byte title/102-byte content shape.
-It permits at most three paired announce/readiness attempts; the final rerun
-passed on attempt one in 16.055 seconds. The 0.9.5 side observed a matching RNS
+The gate now uses the unit-34 directional topology for every case: it starts a
+receive-only peer before each sender and attempts each logical message exactly
+once. This removes flaky simultaneous cross-link activation without hiding an
+ambiguous send behind a retry. The final local shared-target run passed both
+directions in 40.081 seconds. The 0.9.5 side observed a matching RNS
 packet proof and the 0.6 side did not, which remains conservative transport
 evidence rather than a delivery-state mismatch.
 
@@ -3531,8 +3534,8 @@ lockfile, protocol, identity, configuration, or storage implementation.
 
 Both versions declare a 431-byte direct Link-packet MDU and select their
 existing `send_resource` branches for larger signed wires. Across exact Python
-RNS 1.3.8 loopback transport, the final mixed run passed on bounded readiness
-attempt two in 15.930 seconds. Each process sent direct and
+RNS 1.3.8 loopback transport, the final directional shared-target run passed on
+one logical send per direction in 40.072 seconds. Each process sent direct and
 decoded exactly one peer-bound reciprocal message with a 32-byte title and all
 65,536 content bytes. Neither sender observed a packet proof, so the result is
 reported as reciprocal application admission and content-length preservation,
@@ -4224,3 +4227,55 @@ No production source, dependency, lockfile, runtime behavior, wire byte,
 configuration, schema, identity path, or storage format changed. Rollback
 removes the environment setting and cache input together, but can restore the
 observed hosted-runner disk exhaustion when both workspace targets are cached.
+
+## Release qualification unit 61: Windows portable package boundary
+
+The package workflow now builds the canonical desktop application and standalone
+omenchatd on the native Windows 2025 MSVC runner only after the reusable native
+matrix passes. A PowerShell packaging boundary verifies package-version parity
+and compiled feature/target identity before creating separate unsigned ZIPs and
+SHA-256 files. The browser archive does not include or start omenchatd; the
+server archive installs no service and remains independently configured.
+
+The read-only Windows builder uploads an intermediate artifact. The narrowly
+privileged tag publication job checks out no repository code and now depends on
+and downloads both the Linux and Windows build artifacts. Workflow policy tests
+preserve native gating, runner identity, script ownership, read-only builders,
+and both publication dependencies. NSIS, WiX MSI, install/upgrade/uninstall,
+GUI launch, and signing remain explicit release gates; portable ZIP success does
+not satisfy them.
+
+The first hosted package execution compiled both release binaries and exposed an
+invalid packaging assertion: unlike the browser, omenchatd's stable version
+output does not include a target triple. The corrected boundary verifies the
+native `rustc` host is exactly `x86_64-pc-windows-msvc`, retains the browser's
+compiled target assertion, and checks omenchatd's version and full/live feature
+identity according to its existing contract. Production output is unchanged.
+
+No runtime crate, production source, wire byte, configuration, schema, identity
+path, or storage format changed. Rollback removes the PowerShell script, Windows
+job/artifact dependency, verifier assertions, and packaging documentation
+together; existing Linux packaging remains independent.
+
+The same unit closes a tag-path qualification gap found during the manual
+artifact run. `run_package_smoke` is a workflow-dispatch input and is absent on
+tag pushes, so the previous equality check skipped the package smoke for actual
+releases. Manual runs may still disable it, while every non-manual `v*` run now
+executes the isolated packaged OMENchat gate. The workflow verifier preserves
+that event condition.
+
+## Release qualification unit 62: asynchronous TUI room-test completion
+
+Hosted Apple Silicon qualification exposed a race in one existing TUI test. The
+production dashboard correctly enqueues room creation on the bounded
+administrative database actor, but `dashboard_input_creates_room_and_updates_config`
+read SQLite immediately after admission. It could therefore observe the old
+state even though creation completed moments later. The test now uses the
+existing bounded two-second actor-completion helper before asserting the exact
+room name/topic. No sleep, retry in production, timeout expansion, assertion
+weakening, or runtime behavior is introduced.
+
+The focused full-server test is repeated under the same feature identity before
+the native rerun. Rollback removes the single completion wait and this ledger
+entry, restoring nondeterministic observation of an accepted asynchronous
+operation.

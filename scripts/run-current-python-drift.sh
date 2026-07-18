@@ -6,6 +6,7 @@ readonly repo_root
 readonly rns_version=1.3.8
 readonly lxmf_version=1.0.1
 readonly nomadnet_version=1.2.7
+readonly msgpack_version=1.2.1
 
 report_path=""
 case $# in
@@ -35,10 +36,11 @@ python="$temporary_root/venv/bin/python"
 "$python" -m pip install --disable-pip-version-check --no-input --quiet \
   "rns==$rns_version" \
   "lxmf==$lxmf_version" \
-  "nomadnet==$nomadnet_version"
+  "nomadnet==$nomadnet_version" \
+  "msgpack==$msgpack_version"
 
 site_packages=$("$python" -c 'import site; print(site.getsitepackages()[0])')
-stack_json=$("$python" -c 'import importlib.metadata as m, json, platform; resolved=sorted(f"{d.metadata.get('"'"'Name'"'"', '"'"'unknown'"'"')}=={d.version}" for d in m.distributions()); print(json.dumps({"lane":"informational","python":platform.python_version(),"pip":m.version("pip"),"rns":m.version("rns"),"lxmf":m.version("lxmf"),"nomadnet":m.version("nomadnet"),"resolved_distributions":resolved}, sort_keys=True))')
+stack_json=$("$python" -c 'import importlib.metadata as m, json, platform; resolved=sorted(f"{d.metadata.get('"'"'Name'"'"', '"'"'unknown'"'"')}=={d.version}" for d in m.distributions()); print(json.dumps({"lane":"informational","python":platform.python_version(),"pip":m.version("pip"),"rns":m.version("rns"),"lxmf":m.version("lxmf"),"nomadnet":m.version("nomadnet"),"msgpack":m.version("msgpack"),"resolved_distributions":resolved}, sort_keys=True))')
 echo "current Python stack: $stack_json"
 "$python" -c 'import RNS, LXMF, nomadnet; print("current Python stack import: pass")'
 

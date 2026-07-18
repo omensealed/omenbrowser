@@ -54,6 +54,50 @@ reproducible`, `superseded`, and `not yet inspected`.
 
 ## Supplemental hardening units
 
+- Hosted Python-interoperability environment correction: checked-out pinned
+  Reticulum/LXMF source paths are canonicalized before Cargo changes the test
+  process working directory, so every fixture verifies the intended immutable
+  commits instead of resolving a repository-relative path beneath its crate.
+  Both isolated Python lanes now install `msgpack==1.2.1`, which the
+  propagation fixture imports directly rather than relying on an incidental
+  host or transitive package. The network stamp fixture also applies its live
+  rejection policy before publishing the acceptance synchronization record,
+  eliminating a race in which Rust could begin its under-cost control while
+  Python still used the old floor. Consecutive propagated submissions now use
+  one serialized reusable link to the selected node, bounded to exactly one
+  cached link and discarded on destination change, stale/closed state, or send
+  failure. This fixes pinned-Python back-to-back admission without a retry,
+  resend, sleep, or second link; the fixture asserts one active link at both
+  policy boundaries. The environment changes do not alter product dependencies,
+  configuration, or state; link reuse preserves LXMF wire bytes. The mixed lane
+  now shares one job-local Cargo target across its isolated source roots and
+  has a 120-minute ceiling: the former 35-minute ceiling cancelled the sixth of
+  eighteen checks after the first five passed. Every mixed/current harness now
+  resolves its binary from `CARGO_TARGET_DIR`; the first hosted attempt built
+  successfully but exposed the former hard-coded default path before protocol
+  execution. Direct and Resource cases use the restart case's deterministic
+  directional topology, with one logical send per direction instead of three
+  simultaneous paired attempts. Local shared-target runs preserved exact 102-
+  and 65,536-byte content and reciprocal message IDs. The fixture-patched
+  Resource build uses a separate old-version target namespace; sharing that
+  binary with the normal restart case caused Cargo to reuse the intentional
+  65,536-byte test driver where restart expected the normal 102-byte driver.
+  The final nested NomadNet smoke also resolves both release binaries from the
+  shared Cargo target; its first hosted execution built successfully but then
+  invoked hard-coded default target paths and exited before starting the
+  isolated portal. The wrapper now prints the already-redacted smoke transcript
+  on failure so a nested error is diagnosable from Actions logs.
+  Isolation of identities,
+  configuration, state, and reports is unchanged. Completion gate: the
+  release-blocking pinned lane passes, the informational drift lane emits its
+  report, and mixed 0.6/0.9 application interoperability completes.
+- Windows portable package boundary: after the native matrix passes, a read-only
+  Windows 2025 MSVC job builds and identity-checks separate unsigned desktop and
+  standalone omenchatd ZIPs with SHA-256 files. The browser package neither
+  bundles nor starts the server, and the server package installs no service.
+  Publication depends on both native Linux and Windows artifacts without
+  checking out repository code in the privileged job. NSIS/MSI and native
+  install/upgrade/uninstall/GUI-launch evidence remain release gates.
 - Bounded quick-runner build storage: after dependency policy passed, the
   pull-request quick job exhausted the GitHub-hosted filesystem while the
   Actions runner wrote its own diagnostic log. The quick job now caches Cargo
