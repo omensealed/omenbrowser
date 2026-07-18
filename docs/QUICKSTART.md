@@ -2,14 +2,14 @@
 
 ## Build
 
-Browser with desktop UI, native networking, and OMENchat using the current
-live-tested clean Reticulum 0.6 path:
+Browser with desktop UI, native networking, and OMENchat using the canonical
+Reticulum/LXMF 0.9 path:
 
 ```bash
 cargo build --release --locked --no-default-features --features desktop-product
 ```
 
-`chat-client-reticulum` uses the `reticulum-rs`/`lxmf` 0.6 stack without
+`chat-client-reticulum` uses the `reticulum-rs`/`lxmf` 0.9 stack without
 pulling in the old `rns-net` compatibility crates. `chat-client-rns-clean`
 remains as a compatibility alias for older local commands.
 
@@ -50,6 +50,11 @@ For a new normal profile:
 That gives the browser a clean startup with the selected Reticulum interfaces
 and usually gets Directory/announce traffic moving quickly. See
 [Getting Online Fast](GETTING_ONLINE.md) for the fuller note.
+
+Keep Reticulum instance mode set to **Managed** for v0.9.5-1. External/shared
+mode is retained as a readable deferred configuration but intentionally does
+not start integrated interfaces until a real shared backend is negotiated. See
+[Network Backends](NETWORK_BACKENDS.md).
 
 ## Start omenchatd
 

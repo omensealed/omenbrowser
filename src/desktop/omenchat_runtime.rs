@@ -308,6 +308,13 @@ impl DesktopOmenChatTransport {
             .sum()
     }
 
+    pub(in crate::desktop) fn clear_pending_resource_offers(&mut self) -> usize {
+        let released = self.pending_resource_offer_count();
+        self.pending_resource_offers.clear();
+        self.pending_resource_offer_bytes = 0;
+        released
+    }
+
     fn note_incoming_frame(&mut self, bytes: &[u8]) -> Option<crate::chat::protocol::ChatOp> {
         let Ok(frame) = crate::chat::codec::decode_frame(bytes) else {
             self.last_rx_frame = Some("decode error".into());

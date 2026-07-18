@@ -126,12 +126,13 @@ pub fn direct_lxmf_timeout_transition(
     {
         return None;
     }
-    if message
-        .fields
-        .get("native_lxmf_proof_state")
-        .map(String::as_str)
-        != Some("waiting_for_packet_proof")
-    {
+    if !matches!(
+        message
+            .fields
+            .get("native_lxmf_proof_state")
+            .map(String::as_str),
+        Some("waiting_for_packet_proof" | "waiting_for_transport_receipt")
+    ) {
         return None;
     }
     let record = DirectLxmfRouterRecord::from_message(message);
@@ -158,9 +159,9 @@ fn direct_router_state_from_message(message: &MessageSummary) -> DirectLxmfRoute
         return DirectLxmfRouterState::PeerActivityObserved;
     }
     match message.fields.get("native_lxmf_state").map(String::as_str) {
-        Some("submitted_to_rns_net") | Some("submitted_to_runtime") => {
-            DirectLxmfRouterState::Submitted
-        }
+        Some("submitted_to_rns_net")
+        | Some("submitted_to_runtime")
+        | Some("submitted_to_clean_reticulum") => DirectLxmfRouterState::Submitted,
         Some("submitted_unconfirmed") => DirectLxmfRouterState::NoReceiptObserved,
         Some("propagation_retry_ready") => DirectLxmfRouterState::PropagationRetryReady,
         Some("delivered") => DirectLxmfRouterState::ProofReceived,

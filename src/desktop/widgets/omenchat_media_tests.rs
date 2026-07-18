@@ -17,8 +17,10 @@ fn omenchat_media_hints_offer_reticulum_load_without_clearweb_fetch() {
 
 #[test]
 fn omenchat_media_hints_offer_socks_load_when_remote_media_allowed() {
-    let mut settings = crate::storage::settings::ClearwebPrivacySettings::default();
-    settings.remote_media_enabled = true;
+    let settings = crate::storage::settings::ClearwebPrivacySettings {
+        remote_media_enabled: true,
+        ..Default::default()
+    };
     let hints = omenchat_media_hints(
         "pic https://example.org/cat.png",
         &settings,
@@ -35,8 +37,10 @@ fn omenchat_media_hints_offer_socks_load_when_remote_media_allowed() {
 
 #[test]
 fn omenchat_media_hints_require_trust_for_clearweb_auto_load() {
-    let mut settings = crate::storage::settings::ClearwebPrivacySettings::default();
-    settings.remote_media_enabled = true;
+    let settings = crate::storage::settings::ClearwebPrivacySettings {
+        remote_media_enabled: true,
+        ..Default::default()
+    };
     let hints = omenchat_media_hints(
         "pic https://example.org/cat.png",
         &settings,

@@ -97,6 +97,15 @@ mod tests {
     use super::*;
     use crate::identity::{hash_for_bytes, IdentityManager};
 
+    const FIXED_PRIVATE_IDENTITY: [u8; PRIVATE_KEY_LENGTH] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c,
+        0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
+        0x3c, 0x3d, 0x3e, 0x3f,
+    ];
+    const FIXED_ADDRESS_HASH: &str = "aca31af0441d81dbec71e82da0b4b5f5";
+
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "omenbrowser-rs-native-identity-{name}-{}",
@@ -142,6 +151,53 @@ mod tests {
 
         assert_eq!(error, NativeRuntimeError::IdentityInvalid);
         assert!(!format!("{error:?}").contains("not-a-reticulum"));
+    }
+
+    #[test]
+    fn fixed_private_identity_roundtrips_with_stable_public_identity() {
+        let identity = load_private_identity(&FIXED_PRIVATE_IDENTITY).expect("load fixture");
+        let transport_identity = rns_transport::identity::PrivateIdentity::from_private_key_bytes(
+            &FIXED_PRIVATE_IDENTITY,
+        )
+        .expect("load transport fixture");
+
+        assert_eq!(identity.to_private_key_bytes(), FIXED_PRIVATE_IDENTITY);
+        assert_eq!(
+            transport_identity.to_private_key_bytes(),
+            FIXED_PRIVATE_IDENTITY
+        );
+        assert_eq!(identity.address_hash().to_hex_string(), FIXED_ADDRESS_HASH);
+        assert_eq!(
+            transport_identity.address_hash().to_hex_string(),
+            FIXED_ADDRESS_HASH
+        );
+        assert_eq!(
+            identity.as_identity().public_key_bytes(),
+            transport_identity.as_identity().public_key_bytes()
+        );
+        assert_eq!(
+            identity.as_identity().verifying_key_bytes(),
+            transport_identity.as_identity().verifying_key_bytes()
+        );
+    }
+
+    #[test]
+    fn invalid_identity_file_is_rejected_without_mutation_or_regeneration() {
+        let root = temp_dir("invalid-preserved");
+        let path = root.join("identity");
+        let invalid = b"invalid-existing-identity";
+        std::fs::write(&path, invalid).expect("write invalid identity fixture");
+
+        let error = match load_native_private_identity_file(&path) {
+            Ok(_) => panic!("invalid identity unexpectedly loaded"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, NativeRuntimeError::IdentityInvalid);
+        assert_eq!(
+            std::fs::read(&path).expect("read preserved fixture"),
+            invalid
+        );
     }
 
     #[test]

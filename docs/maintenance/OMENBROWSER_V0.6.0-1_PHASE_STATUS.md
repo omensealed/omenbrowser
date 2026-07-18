@@ -50,10 +50,46 @@ reproducible`, `superseded`, and `not yet inspected`.
 | 4 Server DB/config/logging | partially addressed | Live database work plus CLI, line-console, dashboard room/moderation, and upload-ledger maintenance have bounded worker ownership; sustained contention/restart/integrity, actor saturation, cache-bound, read-only/repair/restore modes, locked-database TUI responsiveness, event/upload process-kill, typed logging, and repeated slow-writer logging gates pass. Actual Reticulum load remains. |
 | 5 Iced QOL/crate admission | partially addressed | A persisted, default-off reduced-motion preference with an explicit focusable Settings control now withholds animated GIF frame handles at the existing visibility boundary. The locked Iced-adjacent inventory and machine graph gate admit only `iced` plus bounded in-memory `iced_gif` to the animated product and only `iced` to static media; dormant adjuncts remain product-excluded and no crate was added. The same gate requires maintained `harfrust`/`skrifa` shaping in both products and rejects `rustybuzz`; an intentional `desktop-svg` product override proves the negative gate. It also rejects Iced debug beacon's test/dev-only `bincode` edge; an intentional `iced/debug` product override proves that negative gate. Active build-time `paste` is constrained to exactly the reviewed `rav1e` AVIF parent on Linux/Windows and `metal` plus `rav1e` on Apple targets, while the separate TUI gate rejects it from root/server terminal profiles. Removing unused `iced_gif/async-fs` reduced unique product tree lines 604->591 without a version change. Accessibility/settings/route regressions, both product Clippy/library matrices, graph assertion, and quick release pass. Native GPU and platform verification plus remaining keyboard/focus/high-contrast review remain. Precise security patches resolve `anyhow`, `crossbeam-epoch`, and lock-only `quinn-proto`. A checked-in cargo-deny policy now gates licenses, sources, and wildcard requirements for both lockfiles without advisory exceptions; the two constrained Linux build-time `quick-xml` advisories still block a new runtime crate. |
 | 6 Native packaging | partially addressed | Read-only native compile/test jobs are defined and gate packaging; they must execute successfully before installer work, then native build/install/launch/upgrade/uninstall gates must pass. |
-| 7 Release qualification | partially addressed | Root/server lockfiles are audited and advisory reachability is recorded. Compatible updates remove the previously recorded runtime/lock soundness findings and yanked image-stack entry. Root audit still fails on two build-time `quick-xml` advisories constrained by `wayland-scanner ^0.39`; server audit is clean. Ratatui 0.30.2 and Crossterm 0.29.0 move both TUI profiles to fixed `lru` 0.18.1, remove their `paste` edge, retain explicit layout caching, and pass Linux strict Clippy/full tests plus a machine graph gate; native TUI smoke remains. The unmaintained `rustls-pemfile` warning is runtime-reachable only through the desktop LXMF SDK RPC backend; that backend is used, no patched crate exists, and current `lxmf-sdk 0.9.0` still depends on it, so resolution requires an approved upstream SDK migration rather than feature removal, a local fork, or an advisory ignore. Font-stack triage proves canonical products already shape through maintained `harfrust`/`skrifa` and now rejects activation of lock-only `rustybuzz`; active `ttf-parser` remains constrained by `fontdb` and `ab_glyph`, including their current releases, and requires an upstream Iced/font-stack migration plus malformed-font and native rendering qualification. Unmaintained `bincode` is absent from release, normal development, TUI, and server graphs; explicit Iced debug/time-travel enables it in an unbounded local debug TCP protocol, so a machine gate rejects release activation while resolution awaits an upstream bounded protocol migration. Unmaintained compile-time `paste` remains through desktop AVIF encoding on every target and the reviewed `metal` graphics backend on Apple targets. Cargo-deny 0.20.2 policy and CI gates cover approved licenses, native target sources, and wildcard requirements for both independent graphs with no advisory ignores. No S0; S1 fixed or approved; fuzz/soak/interoperability/provenance complete. |
+| 7 Release qualification | partially addressed | Root/server lockfiles are audited and advisory reachability is recorded. Compatible updates remove the previously recorded runtime/lock soundness findings and yanked image-stack entry. Root audit still fails on two build-time `quick-xml` advisories constrained by `wayland-scanner ^0.39`; server audit is clean. Ratatui 0.30.2 and Crossterm 0.29.0 move both TUI profiles to fixed `lru` 0.18.1, remove their `paste` edge, retain explicit layout caching, and pass Linux strict Clippy/full tests plus a machine graph gate; native TUI smoke remains. The unmaintained `rustls-pemfile` warning is runtime-reachable only through the desktop LXMF SDK RPC backend; that backend is used, no patched crate exists, and current `lxmf-sdk 0.9.5` still depends on it, so resolution requires an approved upstream SDK migration rather than feature removal, a local fork, or an advisory ignore. Font-stack triage proves canonical products already shape through maintained `harfrust`/`skrifa` and now rejects activation of lock-only `rustybuzz`; active `ttf-parser` remains constrained by `fontdb` and `ab_glyph`, including their current releases, and requires an upstream Iced/font-stack migration plus malformed-font and native rendering qualification. Unmaintained `bincode` is absent from release, normal development, TUI, and server graphs; explicit Iced debug/time-travel enables it in an unbounded local debug TCP protocol, so a machine gate rejects release activation while resolution awaits an upstream bounded protocol migration. Unmaintained compile-time `paste` remains through desktop AVIF encoding on every target and the reviewed `metal` graphics backend on Apple targets. Cargo-deny 0.20.2 policy and CI gates cover approved licenses, native target sources, and wildcard requirements for both independent graphs with no advisory ignores. No S0; S1 fixed or approved; fuzz/soak/interoperability/provenance complete. |
 
 ## Supplemental hardening units
 
+- Bounded quick-runner build storage: after dependency policy passed, the
+  pull-request quick job exhausted the GitHub-hosted filesystem while the
+  Actions runner wrote its own diagnostic log. The quick job now caches Cargo
+  registries/tools without either workspace target tree and disables
+  incremental artifacts on the ephemeral runner. Commands and test scope are
+  unchanged. The exact pinned action source confirms the input; local workflow
+  syntax/security and quick gates pass before the hosted rerun. Roll back both
+  storage controls together, with recurrence of the observed disk failure as
+  the risk.
+- Exact local-crate dependency identity: the pull-request all-feature policy
+  gate exposed that path-only declarations count as wildcard requirements.
+  Root and standalone-server `omen-ifac-tcp` dependencies now retain their
+  existing relative paths while requiring the crate's exact `=0.9.5-1`
+  package version. Both pinned cargo-deny commands pass. Resolution, lockfiles,
+  production behavior, wire, schema, and configuration are unchanged.
+- Native release CLI identity smoke: the hosted matrix now executes the actual
+  browser desktop/TUI and standalone server headless/full command-line entry
+  points after compilation. State-free `--version` assertions require the
+  native Rust host target, deterministic product identity, mock/test exclusion,
+  and the expected server feature split; `--help` assertions preserve isolated
+  root and operator diagnostic controls. The workflow verifier preserves the
+  step. No GUI/TUI, Reticulum, identity, configuration, or user root is opened.
+  Local Linux execution and the quick release gate pass; hosted Windows/macOS
+  execution and interactive/installer lifecycle remain completion gates.
+- Native all-target preflight: strict Clippy in the reusable native workflow now
+  covers all declared targets for `desktop-product`, root `tui`,
+  `server-headless`, and `server-full`, and the workflow-security verifier
+  preserves that scope. Windows-GNU cross compilation/test construction and
+  strict all-target Clippy pass for bare native LXMF and all four product
+  profiles. This exposed and fixed a missing `chat-client` requirement on the
+  mixed SQLite probe example and a Linux-only server-log soak helper that was
+  otherwise dead on Windows. The strengthened Linux all-target test/Clippy
+  matrix passes as well. No production behavior, dependency, wire, schema, or
+  configuration changed. This is portability evidence, not native execution;
+  hosted Windows MSVC, both macOS jobs, interactive native smoke, and installer
+  lifecycle remain completion gates.
 - First hosted-native CI correction: the initial Windows/macOS matrix exposed
   two target assumptions hidden by Linux. The product graph gate now checks
   exact target-specific `paste` parents: `rav1e` on Linux/Windows and `metal`

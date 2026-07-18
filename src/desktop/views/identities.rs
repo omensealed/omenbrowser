@@ -168,7 +168,7 @@ pub(in crate::desktop) fn identities_view(desktop: &DesktopApp) -> Element<'_, M
                                 Message::Identity(IdentityMessage::Create),
                             ),
                             subtle_button(
-                                "Announce Now",
+                                "Announce Local LXMF",
                                 Message::Identity(IdentityMessage::AnnounceNow),
                             ),
                             subtle_button(
@@ -181,6 +181,10 @@ pub(in crate::desktop) fn identities_view(desktop: &DesktopApp) -> Element<'_, M
                             ),
                         ],
                         4,
+                    ),
+                    wrapped_text_owned(
+                        "Sends a normal local lxmf.delivery announce. It is not a targeted announce and repeated requests are rate limited.",
+                        12,
                     ),
                     identity_delete_confirmation_view(desktop),
                 ]

@@ -5,9 +5,9 @@ use crate::browser::{BrowserPage, DownloadedFile};
 use crate::directory::DirectoryKind;
 use crate::messaging::{MessageSummary, TransportMethod};
 use crate::runtime::network::{
-    AnnouncePayload, InterfaceStats, LxmfDeliveryEvidence, NetworkStatus, OmenChatLinkClosed,
-    OmenChatLinkData, OmenChatResourceData, OutboundStatus, PageFetchProbeReport,
-    PropagationStatus, ResourceLifecycleEvent, ResourceProgressEvent,
+    AnnouncePayload, InterfaceStats, LxmfDeliveryEvidence, LxmfHistoryPage, NetworkStatus,
+    OmenChatLinkClosed, OmenChatLinkData, OmenChatResourceData, OutboundStatus,
+    PageFetchProbeReport, PropagationStatus, ResourceLifecycleEvent, ResourceProgressEvent,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -27,8 +27,140 @@ pub enum RuntimeBusEvent {
     OmenChatResourceData(OmenChatResourceData),
     ResourceProgress(ResourceProgressEvent),
     ResourceLifecycle(ResourceLifecycleEvent),
+    SdkRpcEvent(RuntimeSdkRpcEvent),
+    SdkDeliveryUpdated(RuntimeLxmfDeliveryUpdate),
+    LxmfHistoryRecovered(LxmfHistoryPage),
+    StreamGap(RuntimeEventGap),
+    StreamRecovered(RuntimeEventRecovery),
     Debug(String),
     Error(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeEventSource {
+    IntegratedBroadcast,
+    SdkRpc,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeEventGapReason {
+    SourceLag,
+    DownstreamByteBudget,
+    UpstreamStreamGap,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeEventGap {
+    pub source: RuntimeEventSource,
+    pub reason: RuntimeEventGapReason,
+    pub dropped_count: u64,
+    pub last_cursor: u64,
+    pub next_cursor: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeEventRecovery {
+    pub source: RuntimeEventSource,
+    pub cursor: u64,
+    pub status_recovered: bool,
+    pub interfaces_recovered: bool,
+    pub network_snapshot_recovered: bool,
+    pub propagation_recovered: bool,
+    pub directory_entries_recovered: usize,
+    pub messages_recovered: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeSdkRpcEvent {
+    pub event_id: String,
+    pub runtime_id: String,
+    pub stream_id: String,
+    pub seq_no: u64,
+    pub contract_version: u16,
+    pub ts_ms: u64,
+    pub event_type: String,
+    pub severity: String,
+    pub source_component: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub payload: serde_json::Value,
+    pub cursor: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLxmfDeliveryState {
+    Queued,
+    Dispatching,
+    InFlight,
+    Sent,
+    Delivered,
+    Failed,
+    Cancelled,
+    Expired,
+    Rejected,
+    Unknown,
+}
+
+impl RuntimeLxmfDeliveryState {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Delivered | Self::Failed | Self::Cancelled | Self::Expired | Self::Rejected
+        )
+    }
+
+    pub fn is_failure_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Failed | Self::Cancelled | Self::Expired | Self::Rejected
+        )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Dispatching => "dispatching",
+            Self::InFlight => "in_flight",
+            Self::Sent => "sent",
+            Self::Delivered => "delivered",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+            Self::Rejected => "rejected",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeLxmfDeliveryUpdate {
+    pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_state: Option<RuntimeLxmfDeliveryState>,
+    pub state: RuntimeLxmfDeliveryState,
+    pub terminal: bool,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub last_updated_ms: u64,
+    pub event_id: String,
+    pub seq_no: u64,
+    pub cursor: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

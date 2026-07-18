@@ -174,6 +174,11 @@ pub(in crate::desktop) fn browser_view_for_tab(
     .wrap();
 
     let request_state = browser_request_state_view_for_tab(tab);
+    let transfer_state: Element<'_, Message> = tab
+        .transfer_status
+        .as_deref()
+        .map(|status| text(status).size(ui_size(13)).into())
+        .unwrap_or_else(|| text("").size(ui_size(1)).into());
     let warning = browser_live_warning_banner_for_tab(tab_id, tab);
     let active_field_cursor = (index == desktop.app.workspace.active_browser)
         .then(|| desktop.app.active_browser_field_editor())
@@ -198,10 +203,20 @@ pub(in crate::desktop) fn browser_view_for_tab(
         .width(Length::Fill)
         .height(Length::Fill);
 
-    container(column![toolbar, address, request_state, warning, browser_body].spacing(6))
-        .padding(8)
-        .height(Length::Fill)
-        .into()
+    container(
+        column![
+            toolbar,
+            address,
+            request_state,
+            transfer_state,
+            warning,
+            browser_body
+        ]
+        .spacing(6),
+    )
+    .padding(8)
+    .height(Length::Fill)
+    .into()
 }
 
 fn browser_address_row<'a>(tab_id: TabId, address_input: &'a str) -> Element<'a, Message> {

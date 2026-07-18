@@ -152,10 +152,14 @@ pub fn handle_link_frame_with_active_peers<T: OmenchatTransport>(
     let frame = decode_frame(frame_bytes).map_err(|error| {
         crate::error::ServerError::Message(format!("OMENchat frame decode failed: {error}"))
     })?;
-    for response in engine.handle_frame_with_active_peers(peer, frame, active_room_peers)? {
-        send_response_frame(engine, link_id, &response, transport)?;
+    let responses = engine.handle_frame_with_active_peers(peer, frame, active_room_peers)?;
+    let send_result = responses
+        .iter()
+        .try_for_each(|response| send_response_frame(engine, link_id, response, transport));
+    for response in &responses {
+        release_response_resource(engine, response)?;
     }
-    Ok(())
+    send_result
 }
 
 pub fn send_response_frame<T: OmenchatTransport>(
@@ -232,6 +236,29 @@ fn maybe_offer_resource<T: OmenchatTransport>(
     Ok(())
 }
 
+pub(crate) fn release_response_resource(
+    engine: &SessionEngine,
+    response: &Frame,
+) -> ServerResult<()> {
+    let resource_id = match response.op {
+        ChatOp::UploadResourceOffer => upload_resource_id_from_offer(response),
+        ChatOp::HistoryResourceOffer | ChatOp::UserListSnapshotResource => Some(
+            decode_resource_offer_body(&response.body)
+                .map_err(|error| {
+                    crate::error::ServerError::Message(format!(
+                        "OMENchat resource release decode failed: {error}"
+                    ))
+                })?
+                .resource_id,
+        ),
+        _ => None,
+    };
+    if let Some(resource_id) = resource_id {
+        let _ = engine.take_resource_payload(&resource_id)?;
+    }
+    Ok(())
+}
+
 fn upload_resource_id_from_offer(response: &Frame) -> Option<String> {
     let crate::protocol::FrameBody::Fields(values) = &response.body else {
         return None;
@@ -247,6 +274,32 @@ fn upload_resource_id_from_offer(response: &Frame) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ServerError;
+
+    mod v0_6_0_1 {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/omenchat/v0_6_0_1_wire.rs"
+        ));
+    }
+
+    #[test]
+    fn transport_labels_match_v0_6_0_1_wire_contract() {
+        assert_eq!(v0_6_0_1::PROTOCOL_VERSION, 1);
+        assert_eq!(v0_6_0_1::PROTOCOL_NAME, "omenchat-v0.1");
+        assert!(!v0_6_0_1::SESSION_OPEN.is_empty());
+        assert!(!v0_6_0_1::ROOM_MESSAGE.is_empty());
+        assert!(!v0_6_0_1::HISTORY_RESOURCE_OFFER.is_empty());
+        assert_eq!(OMENCHAT_LINK_CONTEXT, v0_6_0_1::LINK_CONTEXT);
+        assert_eq!(
+            OMENCHAT_RESOURCE_METADATA_PREFIX,
+            v0_6_0_1::RESOURCE_METADATA_PREFIX
+        );
+        assert_eq!(
+            resource_metadata("history:7:fixture"),
+            b"omenchat-resource:history:7:fixture"
+        );
+    }
     use crate::protocol::batch::decode_compressed_values_payload;
     use crate::protocol::codec::encode_frame;
     use crate::protocol::{ChatOp, Frame, FrameBody};
@@ -258,6 +311,40 @@ mod tests {
             identity_hash: b"peer-a".to_vec(),
             display_name: "Alice".into(),
             lxmf_destination: Some("lxmf-a".into()),
+        }
+    }
+
+    struct RejectingTransport;
+
+    impl OmenchatTransport for RejectingTransport {
+        fn send_frame(&mut self, _link_id: LinkId, _frame_bytes: Vec<u8>) -> ServerResult<()> {
+            Err(ServerError::Message("injected frame rejection".into()))
+        }
+
+        fn offer_resource(
+            &mut self,
+            _link_id: LinkId,
+            _resource_id: String,
+            _payload: Vec<u8>,
+            _metadata: Vec<u8>,
+        ) -> ServerResult<()> {
+            Err(ServerError::Message("injected resource rejection".into()))
+        }
+
+        fn sent_frame_count(&self) -> u64 {
+            0
+        }
+
+        fn offered_resource_count(&self) -> u64 {
+            0
+        }
+
+        fn sent_frame_bytes(&self) -> u64 {
+            0
+        }
+
+        fn offered_resource_bytes(&self) -> u64 {
+            0
         }
     }
 
@@ -320,5 +407,64 @@ mod tests {
         let decoded = decode_compressed_values_payload(&transport.resources[1].payload)
             .expect("decode resource payload");
         assert_eq!(decoded.len(), 1);
+        for resource in &transport.resources {
+            assert!(engine
+                .resource_payload(&resource.resource_id)
+                .expect("resource lookup")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn link_bridge_releases_generated_resources_when_transport_rejects() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let user = store.ensure_user(b"seed", "Seed", None).expect("user");
+        store.join_room(room.room_id, user.user_id).expect("join");
+        store
+            .append_event(
+                room.room_id,
+                Some(user.user_id),
+                ServerRoomEventKind::Message {
+                    body: "rejected resource payload".repeat(64),
+                },
+            )
+            .expect("append event");
+        let engine = SessionEngine::with_limits(
+            store,
+            SessionLimits {
+                history_batch_size: 10,
+                join_backlog_events: 10,
+                large_batch_threshold_bytes: 1,
+                ..SessionLimits::default()
+            },
+        );
+        let request = encode_frame(&Frame::new(
+            ChatOp::JoinRoom,
+            1,
+            None,
+            FrameBody::Text("lobby".into()),
+        ))
+        .expect("encode request");
+
+        let error = handle_link_frame(
+            &engine,
+            [4u8; 16],
+            &peer(),
+            &request,
+            &mut RejectingTransport,
+        )
+        .expect_err("transport rejection");
+
+        assert!(error.to_string().contains("injected frame rejection"));
+        assert_eq!(
+            engine
+                .pending_resource_metrics()
+                .expect("pending resource metrics"),
+            (0, 0, 0)
+        );
     }
 }

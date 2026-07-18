@@ -454,7 +454,7 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
 
     let mut native_runtime_body = column![
         wrapped_panel_text(
-            "First run: add or enable WNS/RMAP, add any private gateway or RNode, rename your identity, then restart so Directory announces and OMEN services start cleanly.",
+            "Interface controls write the managed Reticulum config only. Changes take effect on the next runtime start/restart; live interface mutation is not negotiated in v0.9.5-1.",
         ),
         action_grid(interface_setup_actions, 3),
         text(desktop.gateway_preset_status_line())
@@ -559,7 +559,7 @@ pub(in crate::desktop) fn interfaces_view(desktop: &DesktopApp) -> Element<'_, M
                     profile.name, profile.kind
                 ))
                 .size(ui_size(15)),
-                text("This removes the profile and reapplies the generated config. The last remaining profile cannot be deleted.")
+                text("This removes the profile and rewrites the generated config. A running runtime is unchanged until its next start/restart. The last remaining profile cannot be deleted.")
                     .size(ui_size(13)),
                 row![
                     warning_button(

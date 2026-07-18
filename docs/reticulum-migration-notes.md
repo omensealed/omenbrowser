@@ -137,9 +137,9 @@ as the code-level status checkpoint for the clean stack. It currently reports:
 
 `NetworkRuntime::probe_page_fetch()` now uses that report when built with clean
 `native-network` and without `native-rns-net`. The probe parses the destination,
-confirms the native runtime is running, and reports that reticulum-rs 0.6 link
-primitives are available. It now marks the request-send stage as available
-through the verified request-resource compatibility path. Remaining OMENchat and
+confirms the native runtime is running, and reports the reticulum-rs 0.9 link
+primitives. It marks request send available through direct request-context
+packets within packet MDU and request-resource above it. Remaining OMENchat and
 LXMF replacement work is reported as parity context instead of a failed
 browser-page diagnostic.
 
@@ -156,10 +156,9 @@ remaining verification target:
   links, but builds `PacketContext::None` packets.
 - public `Transport::send_channel_message()` can send directly on a bound link
   interface, but frames payloads as `PacketContext::Channel`.
-- public `Transport::send_request_resource()` and `resource_events()` cover and
-  have live-verified the Python request-resource path. OMENbrowser uses it as
-  the clean-stack request path for all NomadNet page requests until a direct
-  small-packet helper exists.
+- public `Transport::send_request_resource()` and `resource_events()` cover the
+  oversized request and large response paths. Current Python verifies both,
+  including the cross-primitive response cases.
 - `Packet` exposes a mutable public context field, so OMENbrowser can build an
   encrypted link data packet and mark it as `PacketContext::Request` or
   `PacketContext::LinkIdentify`.
@@ -174,30 +173,18 @@ remaining verification target:
   active link's ingress interface. This has been live-verified on an
   identify-on-connect NomadNet page.
 
-That means the clean 0.6 stack now has a live-verified page-fetch path through
-request resources and most of the public receive-side pieces for direct packet
-requests, but not the key small-packet direct send-side primitive. An
-established outbound link records an `ingress_iface`, and upstream
-resource/channel helpers correctly send packets directly on that bound
-interface. Those public helpers are not enough for small direct NomadNet page
-requests, though: link-data helpers force `PacketContext::None`, and channel
-helpers force `PacketContext::Channel`. Python Reticulum only invokes registered
-request handlers for `PacketContext::Request`. The public generic packet send
-path can carry a manually marked request packet, but routes by packet
-destination instead. For link data packets the destination is the link id, which
-is not normally in the path table, so generic dispatch falls back to broadcast
-when transport broadcast mode is enabled. Live testing showed this exact
-pattern: active link, outbound packet sent as broadcast across the three TCP
-clients, and no response events.
+The clean 0.9 adapter now composes the missing small direct send from public
+primitives: encrypted `Link::data_packet`, `PacketContext::Request`, and
+`Transport::send_direct()` on the active link's `ingress_iface`. Current Python
+RNS 1.3.8/NomadNet 1.2.7 returns exact bytes for empty and executable-form
+requests. Generic packet dispatch remains forbidden because a link id is not a
+normal path-table destination and broadcast fallback is unsafe.
 
-`NativeLinkRequestAdapter` is the local boundary for this missing piece. The
-current clean-stack implementation is `Reticulum06LinkRequestAdapter`, which
-prepares the Python-compatible request frame and sends it through
-`Transport::send_request_resource()` regardless of size. It intentionally does
-not use generic packet dispatch for small requests because that path can
-broadcast active link packets. If the transport grows a direct request-context
-link-data helper, the adapter can switch small requests to that helper while
-leaving large requests on request-resource.
+`NativeLinkRequestAdapter` remains the local boundary. The current clean-stack
+implementation is `Reticulum09LinkRequestAdapter`: it selects direct requests at
+or below packet MDU and request-resource above it. It intentionally does not
+fall back across primitives after dispatch, because retrying an executable form
+could duplicate a successful action whose response was lost.
 `MissingReticulum06LinkRequestAdapter` remains as a guard/test adapter for
 explicit unsupported cases. Future changes should keep improving this adapter
 boundary, not bypass the runtime abstraction or teach the UI about transport
@@ -329,9 +316,10 @@ propagation sync, stamps/tickets, and attachment transfer over
 
 The sender also exposes a diagnostic `probe()` call. It uses the public
 `SdkBackend::snapshot` method through `RpcBackendClient` and returns the sidecar
-runtime id, state, active contract version, and queue counts. A missing endpoint
-or missing sender fails locally before any RPC attempt. This is a reachability
-primitive only; it does not change the send path.
+runtime id, state, active contract version, event-stream position, configuration
+revision, and queue counts. A missing or rejected endpoint and a missing sender
+fail locally before any RPC attempt. This is a reachability primitive only; it
+does not negotiate capabilities or change the send path.
 
 `EmbeddedNativeLxmfSdkSender` is now available as a testable in-process
 `reticulum-rs-rpc::RpcDaemon` boundary. It submits the same SDK send plan through
@@ -353,15 +341,21 @@ validate/deliver handoff.
 
 `AppSettings::native_lxmf_sdk_rpc_endpoint` now carries the optional SDK/RPC
 endpoint through `NativeRuntimeConfig`. Blank values are treated as missing, and
-debug output redacts the configured endpoint value. Native runtime status appends
-`native_lxmf_sdk_rpc=disabled`, `missing_endpoint`, or `ready` depending on
-compiled features and endpoint configuration. In the clean LXMF feature path,
-this setting is also the dispatch endpoint for SDK/RPC sends.
+debug output redacts the configured endpoint value. The current local-trusted
+configuration accepts only an absolute Unix socket path on Unix or a literal
+IPv4/IPv6 loopback endpoint with a nonzero port. Remote, hostname, embedded
+credential, unknown-scheme, and implied-TLS endpoints are rejected before
+client construction; authenticated remote token/mTLS configuration remains
+future work. Native runtime status appends `native_lxmf_sdk_rpc=disabled`,
+`missing_endpoint`, `rejected_endpoint`, or `configured_unprobed`; only a
+successful probe establishes reachability. In the clean LXMF feature path, this
+setting is also the dispatch endpoint for SDK/RPC sends.
 Diagnostics snapshots also include `native_lxmf_sdk_rpc_probe`, which reports
-`disabled`, `missing_endpoint`, `unreachable`, or the SDK sidecar snapshot state
-without failing the rest of diagnostics export. The latest collected probe is
-shown in the desktop and TUI Diagnostics panels so sidecar reachability can be
-checked from the app without inspecting raw JSON.
+`disabled`, `missing_endpoint`, `rejected_endpoint`, `unreachable`, or the SDK
+sidecar snapshot state without failing the rest of diagnostics export. Unix
+socket paths are represented only as `unix:<local-socket>`. The latest collected
+probe is shown in the desktop and TUI Diagnostics panels so sidecar reachability
+can be checked from the app without inspecting raw JSON.
 
 Near-term cleanup path:
 
@@ -369,7 +363,9 @@ Near-term cleanup path:
 2. Keep stale legacy feature names as clear compile-time errors so old commands
    fail loudly instead of silently selecting a removed transport path.
 3. Continue live-testing the reticulum-rs 0.6 `NativeLinkRequestAdapter`
-   against real NomadNet pages, form posts, and timeout/error cases.
+   against real NomadNet pages, form posts, long-running keep-alive behavior,
+   and remaining error cases. Current 0.9.5 timeout/cancellation cases pass
+   without replay, and two repeated requests reuse one active link.
 4. Use the SDK/RPC snapshot probe and clean `send_message` branch for configured
    endpoint reachability, then add controlled sidecar launch/connect handling
    around it.

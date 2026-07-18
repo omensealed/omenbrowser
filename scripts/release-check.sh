@@ -226,12 +226,25 @@ bash -n scripts/compare-desktop-idle.sh
 bash -n scripts/measure-pane-stress.sh
 bash -n scripts/measure-omenchatd-backpressure.sh
 bash -n scripts/measure-omenchatd-db.sh
+bash -n scripts/verify-release-version.sh
+bash -n scripts/verify-reticulum-train.sh
+bash -n src/server/scripts/verify-standalone.sh
 bash -n scripts/verify-tui-dependencies.sh
 bash -n scripts/test-tui-lifecycle.sh
 bash -n scripts/test-tui-real-pty.sh
+bash -n scripts/test-native-cli-identity.sh
 
 echo "== TUI dependency check =="
 bash scripts/verify-tui-dependencies.sh
+
+echo "== Release version consistency =="
+bash scripts/verify-release-version.sh
+
+echo "== Reticulum/LXMF dependency train =="
+bash scripts/verify-reticulum-train.sh
+
+echo "== Native release CLI identity smoke =="
+bash scripts/test-native-cli-identity.sh
 
 echo "== TUI lifecycle smoke =="
 bash scripts/test-tui-lifecycle.sh
@@ -257,6 +270,11 @@ cargo test --locked --no-default-features --features "$browser_features" \
 
 echo "== omenchatd format =="
 cargo fmt --manifest-path src/server/Cargo.toml --check
+
+echo "== omenchatd standalone relocation =="
+cmp fixtures/omenchat/v0_6_0_1_wire.rs \
+  src/server/fixtures/omenchat/v0_6_0_1_wire.rs
+bash src/server/scripts/verify-standalone.sh check
 
 echo "== omenchatd feature check =="
 cargo check --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless

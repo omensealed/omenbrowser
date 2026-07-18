@@ -1,0 +1,278 @@
+name: Python interoperability
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+jobs:
+  reticulum-vectors:
+    name: Pinned Reticulum/LXMF vectors, proof, propagation, stamps, and recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+
+    steps:
+      - name: Checkout OMENbrowser
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Checkout pinned Python Reticulum
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: markqvist/Reticulum
+          ref: 15320e4d2cfabb143c1db20ca887e275fd521585
+          path: target/pinned-python/reticulum
+          persist-credentials: false
+
+      - name: Checkout pinned Python LXMF
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: markqvist/LXMF
+          ref: 727830cefda83d9c6e3982b48675425f3f988f9c
+          path: target/pinned-python/lxmf
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-07-11
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            .
+            src/server
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxi-dev \
+            libgl1-mesa-dev
+
+      - name: Verify pinned vectors, IFAC TCP, link, proof, propagation stamps, and recovery
+        run: |
+          bash scripts/run-pinned-python-reticulum.sh \
+            --rns-source target/pinned-python/reticulum \
+            --lxmf-source target/pinned-python/lxmf
+
+  current-python-drift:
+    name: Current Python drift report (informational)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: true
+    env:
+      CARGO_BUILD_JOBS: "2"
+
+    steps:
+      - name: Checkout OMENbrowser
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12.11"
+          check-latest: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-07-11
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            .
+            src/server
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxi-dev \
+            libgl1-mesa-dev
+
+      - name: Run current Python drift lane
+        run: |
+          bash scripts/run-current-python-drift.sh \
+            --report target/current-python-drift-report.json
+
+      - name: Upload current Python drift report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: current-python-drift-report
+          path: target/current-python-drift-report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  mixed-application-lxmf:
+    name: OMENbrowser 0.6.0-1 ↔ 0.9.5-1 LXMF and OMENchat compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: "2"
+
+    steps:
+      - name: Checkout OMENbrowser with the hardened 0.6 parent
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12.11"
+          check-latest: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-07-11
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            .
+            src/server
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxi-dev \
+            libgl1-mesa-dev
+
+      - name: Run mixed-application direct LXMF test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-lxmf.sh \
+            --report target/mixed-0-6-0-9-lxmf-report.json
+
+      - name: Run mixed-application Resource LXMF test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-lxmf.sh --resource \
+            --report target/mixed-0-6-0-9-lxmf-resource-report.json
+
+      - name: Run mixed-application restart/state test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-lxmf.sh --restart \
+            --report target/mixed-0-6-0-9-lxmf-restart-report.json
+
+      - name: Run current-to-old mixed-application propagation test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-propagation.sh \
+            --report target/mixed-0-6-0-9-lxmf-propagation-report.json
+
+      - name: Run old-to-current mixed-application propagation test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-propagation.sh --reverse \
+            --report target/mixed-0-6-0-9-lxmf-propagation-reverse-report.json
+
+      - name: Run mixed-application propagation-node restart test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-propagation.sh --node-restart \
+            --report target/mixed-0-6-0-9-lxmf-propagation-node-restart-report.json
+
+      - name: Run mixed-application abrupt propagation-node recovery test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-propagation.sh --node-crash \
+            --report target/mixed-0-6-0-9-lxmf-propagation-node-crash-report.json
+
+      - name: Run mixed-application propagation stamp and ticket test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-propagation.sh --stamp-ticket \
+            --report target/mixed-0-6-0-9-lxmf-propagation-stamp-ticket-report.json
+
+      - name: Run mixed-application OMENchat SQLite history reopening test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-omenchat-history.sh \
+            --report target/mixed-0-6-0-9-omenchat-history-report.json
+
+      - name: Run current-client to old-server live OMENchat test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-omenchat-live.sh \
+            --report target/mixed-0-6-0-9-omenchat-live-current-client-report.json
+
+      - name: Run old-client to current-server live OMENchat test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse \
+            --report target/mixed-0-6-0-9-omenchat-live-old-client-report.json
+
+      - name: Run current-client to old-server OMENchat restart test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --restart \
+            --report target/mixed-0-6-0-9-omenchat-live-restart-current-client-report.json
+
+      - name: Run old-client to current-server OMENchat restart test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --restart \
+            --report target/mixed-0-6-0-9-omenchat-live-restart-old-client-report.json
+
+      - name: Run current-client to old-server OMENchat history Resource test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --history-resource \
+            --report target/mixed-0-6-0-9-omenchat-live-history-resource-current-client-report.json
+
+      - name: Run old-client to current-server OMENchat history Resource test
+        run: |
+          bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --history-resource \
+            --report target/mixed-0-6-0-9-omenchat-live-history-resource-old-client-report.json
+
+      - name: Run continuous current-product OMENchat reconnect test
+        run: |
+          bash scripts/run-omenchat-continuous-reconnect.sh \
+            --report target/omenchat-continuous-reconnect-report.json
+
+      - name: Run current-product OMENchat upload Resource test
+        run: |
+          bash scripts/run-omenchat-current-upload.sh \
+            --report target/omenchat-current-upload-report.json
+
+      - name: Run current-product NomadNet page request test
+        run: |
+          bash scripts/run-nomadnet-current-page.sh \
+            --report target/nomadnet-current-page-report.json
+
+      - name: Upload mixed-application report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mixed-0-6-0-9-lxmf-report
+          path: |
+            target/mixed-0-6-0-9-lxmf-report.json
+            target/mixed-0-6-0-9-lxmf-resource-report.json
+            target/mixed-0-6-0-9-lxmf-restart-report.json
+            target/mixed-0-6-0-9-lxmf-propagation-report.json
+            target/mixed-0-6-0-9-lxmf-propagation-reverse-report.json
+            target/mixed-0-6-0-9-lxmf-propagation-node-restart-report.json
+            target/mixed-0-6-0-9-lxmf-propagation-node-crash-report.json
+            target/mixed-0-6-0-9-lxmf-propagation-stamp-ticket-report.json
+            target/mixed-0-6-0-9-omenchat-history-report.json
+            target/mixed-0-6-0-9-omenchat-live-current-client-report.json
+            target/mixed-0-6-0-9-omenchat-live-old-client-report.json
+            target/mixed-0-6-0-9-omenchat-live-restart-current-client-report.json
+            target/mixed-0-6-0-9-omenchat-live-restart-old-client-report.json
+            target/mixed-0-6-0-9-omenchat-live-history-resource-current-client-report.json
+            target/mixed-0-6-0-9-omenchat-live-history-resource-old-client-report.json
+            target/omenchat-continuous-reconnect-report.json
+            target/omenchat-current-upload-report.json
+            target/nomadnet-current-page-report.json
+          if-no-files-found: warn
+          retention-days: 14

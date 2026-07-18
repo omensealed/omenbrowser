@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use omenbrowser_rs::directory::{
-    DirectoryEntry, DirectoryKind, DirectoryService, PreferredDelivery, TrustLevel,
-    DIRECTORY_CORRUPT_BACKUP_MAX_FILES, DIRECTORY_FILE_MAX_BYTES, DIRECTORY_MAX_DISPLAY_NAME_BYTES,
-    DIRECTORY_MAX_ENTRIES,
+    DirectoryAnnounceMetadata, DirectoryEntry, DirectoryKind, DirectoryService, PreferredDelivery,
+    TrustLevel, DIRECTORY_CORRUPT_BACKUP_MAX_FILES, DIRECTORY_FILE_MAX_BYTES,
+    DIRECTORY_MAX_DISPLAY_NAME_BYTES, DIRECTORY_MAX_ENTRIES,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -109,6 +109,75 @@ fn directory_service_loads_missing_as_empty_and_persists_announces() {
             0o600
         );
     }
+}
+
+#[test]
+fn omenchat_announce_identity_is_validated_persisted_and_immutable_per_destination() {
+    let path = temp_dir("omenchat-identity").join("directory.json");
+    let mut service = DirectoryService::new(path.clone()).expect("service");
+    let destination = "00112233445566778899aabbccddeeff";
+    let identity = "ffeeddccbbaa99887766554433221100";
+
+    let entry = service
+        .ingest_announce_with_identity_metadata(
+            destination,
+            "Verified Chat",
+            DirectoryKind::OmenChat,
+            DirectoryAnnounceMetadata {
+                identity_hash: Some(identity.into()),
+                ..DirectoryAnnounceMetadata::default()
+            },
+        )
+        .expect("verified announce");
+    assert_eq!(entry.identity_hash.as_deref(), Some(identity));
+    assert!(service.flush_pending_save().expect("flush announce"));
+    let reloaded = DirectoryService::new(path).expect("reload");
+    assert_eq!(
+        reloaded
+            .find(destination)
+            .and_then(|entry| entry.identity_hash),
+        Some(identity.into())
+    );
+
+    let error = service
+        .ingest_announce_with_identity_metadata(
+            destination,
+            "Impostor",
+            DirectoryKind::OmenChat,
+            DirectoryAnnounceMetadata {
+                identity_hash: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+                ..DirectoryAnnounceMetadata::default()
+            },
+        )
+        .expect_err("identity mutation must fail closed");
+    assert!(error.to_string().contains("identity changed"));
+    assert_eq!(
+        service
+            .find(destination)
+            .and_then(|entry| entry.identity_hash),
+        Some(identity.into())
+    );
+}
+
+#[test]
+fn omenchat_announce_rejects_malformed_identity_hash_before_mutation() {
+    let path = temp_dir("omenchat-invalid-identity").join("directory.json");
+    let mut service = DirectoryService::new(path).expect("service");
+
+    let error = service
+        .ingest_announce_with_identity_metadata(
+            "00112233445566778899aabbccddeeff",
+            "Invalid Chat",
+            DirectoryKind::OmenChat,
+            DirectoryAnnounceMetadata {
+                identity_hash: Some("not-a-reticulum-identity".into()),
+                ..DirectoryAnnounceMetadata::default()
+            },
+        )
+        .expect_err("malformed identity must fail closed");
+
+    assert!(error.to_string().contains("32-character hexadecimal"));
+    assert!(service.list_entries().is_empty());
 }
 
 #[test]

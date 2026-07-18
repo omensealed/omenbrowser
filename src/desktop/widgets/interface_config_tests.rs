@@ -250,9 +250,9 @@ fn interface_restart_recommendation_only_flags_stale_runtime_samples() {
         interfaces: vec!["GatewayOne [TcpClient supported enabled]".into()],
         samples: Vec::new(),
     };
-    assert!(
-        interface_restart_recommendation_line(&[profile.clone()], Some(&stale_stats)).is_some()
-    );
+    let warning = interface_restart_recommendation_line(&[profile.clone()], Some(&stale_stats))
+        .expect("stale runtime/config warning");
+    assert!(warning.contains("restart the runtime"));
 
     profile.enabled = false;
     assert!(interface_restart_recommendation_line(&[profile], Some(&stale_stats)).is_none());

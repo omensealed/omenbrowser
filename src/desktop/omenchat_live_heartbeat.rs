@@ -78,16 +78,45 @@ impl DesktopApp {
                     .min()
             })
             .flatten();
+        let stability_deadline = self
+            .omenchat
+            .omenchat_live_stable_after
+            .iter()
+            .filter(|(session_id, _)| {
+                self.omenchat
+                    .omenchat_live_transports
+                    .contains_key(session_id)
+            })
+            .map(|(_, deadline)| *deadline)
+            .min();
 
         heartbeat_deadline
             .into_iter()
             .chain(recent_sync_deadline)
             .chain(reconnect_deadline)
+            .chain(stability_deadline)
             .min()
             .map(|deadline| (self.app.internal_event_wake().id(), deadline))
     }
 
     pub(in crate::desktop) fn maintain_omenchat_live_links(&mut self, now: u64) -> Task<Message> {
+        let stable_sessions = self
+            .omenchat
+            .omenchat_live_stable_after
+            .iter()
+            .filter_map(|(session_id, deadline)| {
+                (*deadline <= now
+                    && self
+                        .omenchat
+                        .omenchat_live_transports
+                        .contains_key(session_id))
+                .then_some(*session_id)
+            })
+            .collect::<Vec<_>>();
+        for session_id in stable_sessions {
+            self.omenchat.omenchat_live_stable_after.remove(&session_id);
+            self.omenchat.omenchat_live_retry_count.remove(&session_id);
+        }
         let mut stale_sessions = Vec::new();
         let mut outbound = Vec::new();
         let session_ids = self
@@ -147,9 +176,15 @@ impl DesktopApp {
                 session_id,
                 "OMENchat heartbeat timed out; use Reconnect to open a fresh link",
             );
-            self.omenchat
-                .omenchat_live_retry_after
-                .insert(session_id, now.saturating_add(2_000));
+            let (_, retry_after) = self.schedule_omenchat_reconnect(session_id, now);
+            self.set_omenchat_connection_state(
+                session_id,
+                if retry_after.is_some() {
+                    crate::chat::ChatConnectionState::Reconnecting
+                } else {
+                    crate::chat::ChatConnectionState::Failed { retryable: true }
+                },
+            );
         }
         for (link_id, frames) in outbound {
             self.send_omenchat_outgoing_frames(link_id, frames);
@@ -163,7 +198,10 @@ impl DesktopApp {
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::desktop::DesktopOmenChatTransport;
+    use crate::desktop::omenchat_live_reconnect::omenchat_reconnect_delay_ms;
+    use crate::desktop::{
+        DesktopOmenChatTransport, OMENCHAT_RECONNECT_MAX_ATTEMPTS, OMENCHAT_RECONNECT_MAX_DELAY_MS,
+    };
 
     fn desktop_with_temp_root(name: &str) -> DesktopApp {
         let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
@@ -201,5 +239,83 @@ mod tests {
         desktop.omenchat.omenchat_recent_sync_due_after.clear();
         desktop.omenchat.omenchat_live_transports.clear();
         assert!(desktop.omenchat_maintenance_deadline().is_none());
+    }
+
+    #[test]
+    fn omenchat_reconnect_backoff_is_deterministic_jittered_and_bounded() {
+        let first = omenchat_reconnect_delay_ms(41, 1);
+        assert_eq!(first, omenchat_reconnect_delay_ms(41, 1));
+        assert!((800..=1_200).contains(&first));
+
+        let mut prior = first;
+        for attempt in 2..OMENCHAT_RECONNECT_MAX_ATTEMPTS {
+            let delay = omenchat_reconnect_delay_ms(41, attempt);
+            assert!(delay > prior);
+            assert!(delay <= OMENCHAT_RECONNECT_MAX_DELAY_MS);
+            prior = delay;
+        }
+
+        let other_session = omenchat_reconnect_delay_ms(42, 2);
+        assert_ne!(other_session, omenchat_reconnect_delay_ms(41, 2));
+    }
+
+    #[test]
+    fn omenchat_retry_budget_resets_only_after_live_link_stability_deadline() {
+        let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-stable-retry-reset");
+        let session_id = 41;
+        desktop
+            .omenchat
+            .omenchat_live_transports
+            .insert(session_id, DesktopOmenChatTransport::new([0x41; 16], 1_000));
+        desktop
+            .omenchat
+            .omenchat_live_retry_count
+            .insert(session_id, 3);
+        desktop
+            .omenchat
+            .omenchat_live_stable_after
+            .insert(session_id, 2_000);
+
+        let _ = desktop.maintain_omenchat_live_links(1_999);
+        assert_eq!(
+            desktop.omenchat.omenchat_live_retry_count.get(&session_id),
+            Some(&3)
+        );
+        assert_eq!(
+            desktop.omenchat_maintenance_deadline().map(|(_, due)| due),
+            Some(2_000)
+        );
+
+        let _ = desktop.maintain_omenchat_live_links(2_000);
+        assert!(!desktop
+            .omenchat
+            .omenchat_live_retry_count
+            .contains_key(&session_id));
+        assert!(!desktop
+            .omenchat
+            .omenchat_live_stable_after
+            .contains_key(&session_id));
+        assert!(desktop
+            .omenchat
+            .omenchat_live_transports
+            .contains_key(&session_id));
+    }
+
+    #[test]
+    fn omenchat_retry_scheduler_stops_at_bounded_attempt_limit() {
+        let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-retry-limit");
+        let session_id = 41;
+        for expected in 1..=OMENCHAT_RECONNECT_MAX_ATTEMPTS {
+            let (attempt, due) = desktop.schedule_omenchat_reconnect(session_id, 10_000);
+            assert_eq!(attempt, expected);
+            assert!(due.is_some());
+        }
+        let (attempt, due) = desktop.schedule_omenchat_reconnect(session_id, 10_000);
+        assert_eq!(attempt, OMENCHAT_RECONNECT_MAX_ATTEMPTS);
+        assert!(due.is_none());
+        assert!(!desktop
+            .omenchat
+            .omenchat_live_retry_after
+            .contains_key(&session_id));
     }
 }

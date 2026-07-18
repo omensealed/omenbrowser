@@ -44,6 +44,28 @@ pub(crate) fn desktop_message_is_retry_candidate(message: &MessageSummary) -> bo
     )
 }
 
+pub(crate) fn desktop_message_is_cancel_candidate(message: &MessageSummary) -> bool {
+    !message.incoming
+        && !message.delivered
+        && !message.failed
+        && message.message_id.is_some()
+        && !message
+            .fields
+            .get("native_lxmf_sdk_terminal")
+            .is_some_and(|terminal| terminal == "true")
+        && !message
+            .fields
+            .get("native_lxmf_sdk_cancel_outcome")
+            .is_some_and(|outcome| outcome == "accepted")
+        && matches!(
+            message
+                .fields
+                .get("native_lxmf_sdk_state")
+                .map(String::as_str),
+            Some("queued" | "dispatching" | "in_flight")
+        )
+}
+
 fn message_has_useful_direct_transfer_evidence(message: &MessageSummary) -> bool {
     matches!(
         message
@@ -149,6 +171,27 @@ mod tests {
             fields,
             attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn cancellation_is_only_offered_for_nonterminal_cancellable_sdk_states() {
+        let queued = message_with_fields(BTreeMap::from([(
+            "native_lxmf_sdk_state".into(),
+            "queued".into(),
+        )]));
+        assert!(desktop_message_is_cancel_candidate(&queued));
+
+        let mut accepted = queued.clone();
+        accepted
+            .fields
+            .insert("native_lxmf_sdk_cancel_outcome".into(), "accepted".into());
+        assert!(!desktop_message_is_cancel_candidate(&accepted));
+
+        let mut terminal = queued;
+        terminal
+            .fields
+            .insert("native_lxmf_sdk_terminal".into(), "true".into());
+        assert!(!desktop_message_is_cancel_candidate(&terminal));
     }
 
     #[test]

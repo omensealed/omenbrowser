@@ -15,11 +15,19 @@ Standalone check:
 
 ```bash
 cd src/server
+cargo test --locked -p omen-ifac-tcp
 cargo check
 cargo check --no-default-features --features server-headless
 cargo run --no-default-features --features server-headless -- init
 cargo run --no-default-features --features server-full -- tui
+bash scripts/verify-standalone.sh check
 ```
+
+`scripts/verify-standalone.sh check` copies this directory without its build
+output to a temporary root and runs locked, offline metadata, compile, test
+compile, and IFAC tests there. The protocol-neutral `omen-ifac-tcp` crate and
+the server's compatibility wire fixture deliberately live inside this tree so
+the standalone source package never imports OMENbrowser application modules.
 
 `server-headless` is the daemon/admin CLI product and excludes Ratatui and
 Crossterm. `server-full` adds the optional interactive TUI and is used for the
@@ -41,6 +49,26 @@ omenchatd interfaces tcp-client gateway.example:42420
 omenchatd tui
 omenchatd run
 ```
+
+`omenchatd run` arms its platform signal handlers before advertising readiness,
+then handles Ctrl-C/SIGINT on all supported platforms and SIGTERM on Unix.
+Shutdown stops accepting background transport work, closes active links,
+cancels and joins the owned Reticulum event/interface workers, releases queued
+byte permits, and flushes the server log before returning. A worker join or log
+flush timeout produces a non-success exit instead of silently claiming a clean
+stop. The TUI Stop Live Server action uses the same shutdown path.
+
+Enabled interface records are validated before any interface worker is spawned.
+Missing hosts, zero/missing ports, missing types, and unsupported types fail
+startup clearly; disabled records remain inert. Runtime TCP reconnect remains
+owned by the Reticulum 0.9 interface worker, so a transient disconnect does not
+cause the TUI to create a competing second runtime.
+
+Identity creation is limited to a missing identity file or omenchatd's exact
+first-run placeholder. An existing malformed, unreadable, non-regular, or
+symlinked identity aborts startup without replacement. First-run publication is
+an owner-only same-directory atomic replacement; identity parse failures never
+silently change the server address.
 
 Useful local TCP setup for testing:
 
@@ -67,6 +95,12 @@ omenchatd interfaces tcp-client gateway.example:42420 \
   --network-name private_ret \
   --passphrase-file /tmp/omenchatd-ifac-passphrase
 ```
+
+IFAC is currently enforced only by omenchatd's project-local TCP **client**
+adapter. A `TCPServerInterface` containing `network_name` or `passphrase` is
+rejected at startup because the published reticulum-rs 0.9.5 stock TCP server
+does not apply the Python IFAC wire transform. Run the enforcing gateway as the
+server and connect omenchatd to it as shown above.
 
 Optional systemd user-service install from the packaged bundle:
 
@@ -97,6 +131,25 @@ omenchatd doctor --home ~/.omenchatd
 `doctor` checks the server-owned config, identity, database, Reticulum config
 and storage, NomadNet portal page, active rooms, interface hints, and basic
 limits without starting the live server.
+
+Service monitors can request schema-versioned JSON without exposing local
+paths or free-form configuration text:
+
+```bash
+omenchatd status --json --home ~/.omenchatd
+omenchatd doctor --json --home ~/.omenchatd
+```
+
+`status --json` reports the omenchatd/application version, pinned Reticulum
+crate train, independent runtime ownership, public destination lines, storage
+presence, interface readiness level, room count, and numeric limits. Because
+this is an offline command rather than an RPC connection to the running
+process, `runtime.live_metrics_available` is explicitly `false`; queue, link,
+resource, and event-worker counters remain available in the live TUI and
+periodic server log. `doctor --json` reports the overall outcome and typed
+check levels. Both formats omit private paths, credentials, private identity
+material, operator/MOTD text, and free-form check details that could contain a
+path. Consumers must check `schema_version` before relying on fields.
 
 With the server stopped, an operator may remove only ledger records that point
 to missing files or paths outside the owning identity directory:
@@ -211,6 +264,63 @@ and overload rejects.
 Persistent rejects indicate a slow transport, abusive peer, or reconnect burst;
 increasing limits should follow measurement rather than being the first remedy.
 
+Generated OMENchat history, user-list, and upload-fetch Resource payloads are
+also bounded before they reach the transport: at most 64 pending payloads,
+16 MiB total, and 4 MiB per payload. Admission beyond any boundary fails the
+request explicitly without evicting a payload promised by an earlier response.
+A payload remains available through all recipients of one room fan-out and is
+then released; transport send failure releases every payload generated for that
+response batch. The periodic `stats:` line reports pending resource items,
+bytes, and cumulative rejected admissions.
+
+Accepted inbound upload offers retain metadata only within a fixed admission
+budget: 256 offers globally and eight per identified peer. Filenames and
+content types are each limited to 255 encoded bytes. Excess offers receive an
+explicit rejection without displacing another peer's reservation. An unused
+offer expires after six hours and all offers owned by a link identity are
+released when that link closes, is administratively disconnected, or is
+replaced. Presenting another identity's resource ID does not consume the true
+owner's reservation. Live `stats:` output reports pending offer items,
+identities, rejected admissions, and expirations. These are fixed abuse-control
+ceilings, not operator-adjustable quota settings.
+
+Reticulum 0.9 Resource terminals are projected onto the bounded event control
+lane instead of being discarded. Outbound completion, failure, and
+cancellation remain counted even when their link has already closed. An
+inbound Resource failure releases all pending upload offers for the identified
+peer but leaves the link itself usable. Upstream failure events expose the link
+and transfer hash but not the failed Resource metadata, so omenchatd cannot
+safely claim exact upload-offer correlation; peer-scoped cleanup is the
+conservative policy. The `stats:` line reports terminal counts and released
+offer reservations. Successful Resource handling and wire fields are
+unchanged. A deterministic isolated regression feeds the public Reticulum 0.9
+terminal variants through the production Resource-event receiver and bounded
+control lane, then proves permits drain and the owned worker joins after
+shutdown. This covers the crate-to-project callback boundary but is not a
+claim of physical initiator-cancel or mixed-version wire interoperability.
+An explicit ignored loopback test supplies the next evidence layer: two real
+Reticulum 0.9 transports establish a point-to-point UDP link, the receiver
+observes both the Resource advertisement and initiator-cancel packets, the
+production bridge emits the outbound-cancel terminal, and both link ends remain
+active through bounded shutdown. Run it with the command documented in
+`docs/TESTING.md`; it uses ephemeral identities, ports, and isolated roots.
+Post-cancel Resource completion and Python/mixed-version peers remain separate
+interop gates.
+
+The separate two-process completion/cancel/reuse gate is currently red and is
+release-blocking for live Resource parity. Its receiver obtains the baseline
+advertisement and sends valid requests; its sender receives, decrypts, and
+hash-matches every request but sends no Resource parts before the receiver's
+retry budget expires. The explicit command and evidence boundary are recorded
+in `docs/TESTING.md`. The test remains ignored in fast suites but must pass
+before live OMENchat history/upload or NomadNet Resource completion is claimed.
+The failure is isolated to the published Reticulum UDP worker: its 456-byte
+layout-derived transmit buffer cannot serialize a 483-byte maximum Resource
+wire packet and silently drops the serialization error. This remains unchanged
+in upstream v0.9.1 and `main` as checked on 2026-07-16; no protocol-limit or
+application-fragmentation workaround is enabled here
+for v0.9.5-1.
+
 Persistent SQLite connections enable foreign-key checks, WAL journaling,
 NORMAL synchronization, and a five-second busy timeout. Event ID allocation and
 event insertion share one immediate transaction, so concurrent writers cannot
@@ -219,6 +329,49 @@ live Reticulum session/database calls execute through a one-in-flight blocking
 worker. Concurrent admission fails explicitly instead of accumulating blocking
 tasks; pending network events remain in the existing bounded ingress queue.
 Queue monitoring includes worker completion, rejection, and latency counters.
+Live status also reports the bounded room-mutation replay cache: exact same-link
+replay hits, sequence/content collisions, rejected cache admissions, retained
+items, and retained bytes. The cache prevents duplicate room message/action/
+notice, part, and mutating-command execution on one link and is cleared when
+that link closes. Part and kick/ban live-link side effects require a successful
+typed engine result; rate-limited or denied moderation cannot disconnect a
+target. This is not a claim of cross-link or post-restart idempotency.
+
+Only one active client link is retained for an identified peer. When a newer
+link presents the same authenticated identity, omenchatd retires the older
+link, asks the Reticulum transport to close it, and releases its room,
+response-context, replay-cache, timing, and traffic state before continuing
+with the replacement. Room traffic is forwarded only to active links joined to
+that room. This is peer-link lifecycle behavior, not server federation:
+omenchatd does not currently define a server-to-server wire protocol, cache
+repair exchange, or cross-link mutation idempotency contract.
+
+Live admission retains at most 256 links and at most 32 incomplete handshakes.
+A handshake is complete only after Reticulum reports the peer identity and the
+client sends a valid OMENchat `SessionOpen`; the two events may arrive in either
+order. Incomplete links are physically closed after 30 seconds, with a
+one-second deadline sweep. Rejected and expired links do not retain room,
+response-context, replay-cache, traffic, or upload-offer ownership. The
+`stats:` line reports pending, rejected, and expired handshakes. These fixed
+ceilings are process-safety boundaries, not operator configuration or wire
+protocol fields.
+
+Linux maintainers can run
+`scripts/measure-omenchatd-links.sh /tmp/omenchatd-link-results` from the
+repository root for the optimized 60-second admission/reconnect qualification.
+It holds 224 authenticated sessions, repeatedly fills the remaining 32
+handshake slots, verifies overload rejection and exact timeout cleanup,
+replaces identified links, then drains every link. The test fails on bound or
+accounting violations, close latency over 250 ms, RSS growth over 64 MiB, more
+than four additional file descriptors, more than two additional tasks, or any
+retained final link. It uses an in-memory database and discard/count transport;
+it does not contact the operator's Reticulum instance or claim wire interop.
+The 2026-07-16 reference run completed 4,587 saturation/recovery cycles,
+rejected 4,587 excess links, expired 146,784 slow handshakes, reached exactly
+256 active/32 pending links, drained to zero, observed 691 us maximum
+close-path latency, grew RSS by 176,128 bytes, and added no file descriptors or
+tasks.
+
 CLI room administration, line-console room/user administration, dashboard
 room/moderation work, and upload-ledger inspection/repair now use single-owner
 database actors with a bounded
@@ -338,6 +491,11 @@ NomadNet discovery is served from the server-owned Reticulum storage root:
 operator-owned: restart will not overwrite edits, and live page requests read
 the file from disk. `omenchatd status` prints the exact page file path, size,
 and modified age.
+
+The portal accepts Python-compatible direct request-context packets for normal
+small page requests and retains request-resource handling for oversized packed
+requests. Direct responses are sent only on the active inbound link's bound
+interface; portal file reads are serialized through one owned blocking worker.
 
 ## Moderation And Rooms
 

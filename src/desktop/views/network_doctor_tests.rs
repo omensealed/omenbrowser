@@ -140,11 +140,14 @@ fn network_doctor_path_rows_use_network_snapshot() {
             pending_announces: 1,
             known_destinations: 5,
             ratchet_announces: 6,
+            path_table_available: true,
             path_table_count: 7,
+            request_failure_metrics_available: true,
             request_failures: 8,
             active_propagation_node: Some("abcd".into()),
             connected_to_shared_instance: true,
             is_shared_instance: false,
+            shared_instance_status_available: true,
         }),
         ..MonitoringPanelState::default()
     };
@@ -166,6 +169,40 @@ fn network_doctor_path_rows_use_network_snapshot() {
     assert!(rows
         .iter()
         .any(|row| row.display_line().contains("lxmf.delivery=2")));
+}
+
+#[test]
+fn network_doctor_does_not_present_placeholder_path_or_shared_values_as_facts() {
+    let monitoring = MonitoringPanelState {
+        path_updates_received: 3,
+        last_network_snapshot: Some(NetworkSnapshot {
+            announce_counts: BTreeMap::new(),
+            pending_announces: 0,
+            known_destinations: 2,
+            ratchet_announces: 0,
+            path_table_available: false,
+            path_table_count: 0,
+            request_failure_metrics_available: false,
+            request_failures: 0,
+            active_propagation_node: None,
+            connected_to_shared_instance: false,
+            is_shared_instance: true,
+            shared_instance_status_available: false,
+        }),
+        ..MonitoringPanelState::default()
+    };
+
+    let rows = network_doctor_path_rows(&monitoring);
+    assert!(rows.iter().any(|row| row
+        .display_line()
+        .contains("path table | unavailable | aggregate path table is not exposed")));
+    assert!(rows
+        .iter()
+        .any(|row| row.display_line().contains("path requests | partial")
+            && row.display_line().contains("failure metric unavailable")));
+    assert!(rows.iter().any(|row| row
+        .display_line()
+        .contains("runtime instance | unavailable")));
 }
 
 #[test]

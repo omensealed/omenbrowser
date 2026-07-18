@@ -1405,7 +1405,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1629,6 +1629,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3032,25 +3042,24 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lxmf"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0707e372cb2fad87c09673124b9459c51b6cc44ad0a6ccf7f6ae2f7728e4d11d"
+checksum = "496892ebe70967a4a6a97cd131790a20b0f0129d02ce6258645481c852fd089c"
 dependencies = [
- "lxmf-sdk",
  "lxmf-wire",
 ]
 
 [[package]]
 name = "lxmf-reference"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a6aa2f1368e6797011582b803886f164253e57b4e5fde5c7d4cb908f1e85269"
+checksum = "11857f307becf0d15895335921c124d2a450e5c3b83612a6e6d64d7e23d73564"
 
 [[package]]
 name = "lxmf-sdk"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b648d22c3ea08af7791df8010fc8b771fe802f7898afc9eabc9c235f83e30319"
+checksum = "401fb72f118f02bc9ce30c0bb1d0822dc9824324ca7ee3977a888b469dee6a8c"
 dependencies = [
  "hex",
  "hmac",
@@ -3071,9 +3080,9 @@ dependencies = [
 
 [[package]]
 name = "lxmf-wire"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c73cd06fdd7754f3069437cbe5ff4c3a8114f8fff150856888047d39d4c8c98e"
+checksum = "f085711ee980f35f52571c6683060510066d55f3aac8b57f18ab48c841fb8708"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -3408,7 +3417,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3869,14 +3878,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "omen-ifac-tcp"
+version = "0.9.5-1"
+dependencies = [
+ "hkdf",
+ "reticulum-rs-transport",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "omenbrowser_rs"
-version = "0.6.0-1"
+version = "0.9.5-1"
 dependencies = [
  "anyhow",
  "async-trait",
  "bzip2 0.5.2",
  "crossterm",
  "directories",
+ "fs4",
  "hkdf",
  "iced",
  "iced_anim",
@@ -3885,6 +3907,8 @@ dependencies = [
  "iced_gif",
  "iced_table",
  "lxmf",
+ "lxmf-sdk",
+ "omen-ifac-tcp",
  "rand_core 0.6.4",
  "ratatui",
  "reqwest",
@@ -4684,9 +4708,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffede84104570528e7a65ef7b4258eb94926533a6ae63a4da906034c73f4ea8d"
+checksum = "f6f8d1b059a822763d55803fc0240e64b23a7b0d53208aa0873561938870fc84"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -4694,9 +4718,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-core"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "469a066283b39197a6b4a21a30e8a94af8ec46f590ebac212a93aba472da135b"
+checksum = "ec4f1b0d2d20a30dc35787cfff8a063086ef320f6ef0dede344a13fc1a96be56"
 dependencies = [
  "aes",
  "cbc",
@@ -4715,9 +4739,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-rpc"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24a87ccf8eb6e75d8c6764bdd83b0590276372bdd55423e83c0ec1e8a7ac9326"
+checksum = "e1ee77690c30d43ee60c9d4dbfb8a2298f024eac51e0dd4a6898077fc35140a0"
 dependencies = [
  "base64",
  "ciborium",
@@ -4734,15 +4758,16 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "shlex 2.0.1",
  "tokio",
  "zeroize",
 ]
 
 [[package]]
 name = "reticulum-rs-transport"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9577ff5dfe898d595c7af7f6be045f4d893926e1c0ed859122da73e95696db1a"
+checksum = "abc5932f474eb853508b1cee9ac2b66f8c82e70f6d4669b8aeef172514d84a2f"
 dependencies = [
  "aes",
  "base64",
@@ -4959,7 +4984,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5431,7 +5456,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5615,7 +5640,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6029,7 +6054,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6668,7 +6693,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::messaging::{DeliveryMode, MessageSummary, NativeLxmfReplyTicket};
+use crate::messaging::{
+    DeliveryMode, MessageSummary, NativeLxmfReplyTicket, OutboundOperationIdentity,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ConversationThread {
@@ -21,6 +23,26 @@ pub struct MessageSendState {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct PreparedRetryOperation {
+    pub identity: OutboundOperationIdentity,
+    pub title: String,
+    pub body: String,
+    pub attachments: Vec<PathBuf>,
+    pub delivery_mode: DeliveryMode,
+    pub include_ticket: bool,
+}
+
+impl PreparedRetryOperation {
+    pub fn matches_draft(&self, conversation: &Conversation) -> bool {
+        self.title == conversation.draft_title
+            && self.body == conversation.draft_body
+            && self.attachments == conversation.attachments
+            && self.delivery_mode == conversation.delivery_mode
+            && self.include_ticket == conversation.include_ticket
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Conversation {
     pub id: u64,
     pub peer_hash: String,
@@ -33,6 +55,7 @@ pub struct Conversation {
     pub include_ticket: bool,
     pub unread_at_open: u32,
     pub pending_send: Option<MessageSendState>,
+    pub prepared_retry_operation: Option<PreparedRetryOperation>,
     pub selected_message_key: Option<String>,
     pub dismissed_message_keys: BTreeSet<String>,
 }
@@ -61,6 +84,7 @@ impl Conversation {
             include_ticket: false,
             unread_at_open: 0,
             pending_send: None,
+            prepared_retry_operation: None,
             selected_message_key: None,
             dismissed_message_keys: BTreeSet::new(),
         }
@@ -71,5 +95,29 @@ impl Conversation {
             self.thread.unread_count += 1;
         }
         self.thread.messages.push(message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_retry_identity_applies_only_to_the_unchanged_draft() {
+        let mut conversation = Conversation::new(1, "peer", "Peer");
+        conversation.draft_title = "Title".into();
+        conversation.draft_body = "Body".into();
+        let prepared = PreparedRetryOperation {
+            identity: OutboundOperationIdentity::generate(),
+            title: conversation.draft_title.clone(),
+            body: conversation.draft_body.clone(),
+            attachments: Vec::new(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+        };
+
+        assert!(prepared.matches_draft(&conversation));
+        conversation.draft_body.push_str(" edited");
+        assert!(!prepared.matches_draft(&conversation));
     }
 }

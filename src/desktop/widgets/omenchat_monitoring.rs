@@ -60,6 +60,77 @@ pub(in crate::desktop) struct OmenChatSessionAttention<'a> {
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct OmenChatSessionResourceProgress {
+    pub(in crate::desktop) received: u64,
+    pub(in crate::desktop) total: Option<u64>,
+    pub(in crate::desktop) active_transfers: usize,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) fn omenchat_session_resource_progress(
+    desktop: &DesktopApp,
+    session_id: ChatSessionId,
+) -> Option<OmenChatSessionResourceProgress> {
+    let peer = desktop
+        .omenchat
+        .omenchat_live_transports
+        .get(&session_id)
+        .map(|transport| hex_bytes(&transport.link_id))?;
+    let mut matching = desktop
+        .app
+        .network_doctor_state
+        .active_resources
+        .values()
+        .filter(|row| {
+            row.state == "progress"
+                && row.source == "omenchat"
+                && row.direction.as_deref() == Some("inbound")
+                && row.peer.as_deref() == Some(peer.as_str())
+        });
+    let first = matching.next()?;
+    let mut latest = first;
+    let mut active_transfers = 1usize;
+    for row in matching {
+        active_transfers = active_transfers.saturating_add(1);
+        if row.epoch_ms > latest.epoch_ms {
+            latest = row;
+        }
+    }
+    Some(OmenChatSessionResourceProgress {
+        received: latest.received.unwrap_or_default(),
+        total: latest.total,
+        active_transfers,
+    })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub(in crate::desktop) fn omenchat_session_resource_progress_line(
+    progress: &OmenChatSessionResourceProgress,
+) -> String {
+    let other = progress.active_transfers.saturating_sub(1);
+    let suffix = if other == 0 {
+        String::new()
+    } else {
+        format!("; {other} other transfer(s) active")
+    };
+    match progress.total {
+        Some(total) if total > 0 => {
+            let percent = ((u128::from(progress.received) * 100) / u128::from(total)).min(100);
+            format!(
+                "Incoming OMENchat resource: {} / {} ({percent}%){suffix}; may contain history, users, or media",
+                human_bytes(progress.received),
+                human_bytes(total),
+            )
+        }
+        _ => format!(
+            "Incoming OMENchat resource: {} received{suffix}; may contain history, users, or media",
+            human_bytes(progress.received),
+        ),
+    }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub(in crate::desktop) fn omenchat_live_monitor_totals(
     desktop: &DesktopApp,
 ) -> OmenChatLiveMonitorTotals {
@@ -277,6 +348,10 @@ pub(in crate::desktop) fn omenchat_monitoring_card(desktop: &DesktopApp) -> Elem
                 .omenchat
                 .omenchat_live_state
                 .pending_upload_metrics();
+            let pending_echoes = desktop
+                .omenchat
+                .omenchat_live_state
+                .pending_local_echo_metrics();
             let inline_downloads = desktop
                 .omenchat
                 .omenchat_live_state
@@ -319,13 +394,15 @@ pub(in crate::desktop) fn omenchat_monitoring_card(desktop: &DesktopApp) -> Elem
             );
             lines = lines.push(wrapped_text_owned(
                 format!(
-                    "client transfers: upload offers {} / {} | inline downloads {} / {} reserved / {} retained / {} fragment(s) | rejected {} upload / {} inline",
+                    "client transfers: pending messages {} | upload offers {} / {} | inline downloads {} / {} reserved / {} retained / {} fragment(s) | rejected {} message / {} upload / {} inline",
+                    pending_echoes.items,
                     pending_uploads.items,
                     human_bytes(pending_uploads.bytes as u64),
                     inline_downloads.items,
                     human_bytes(inline_downloads.reserved_bytes as u64),
                     human_bytes(inline_downloads.retained_bytes as u64),
                     inline_downloads.pending_chunks,
+                    pending_echoes.rejected,
                     pending_uploads.rejected,
                     inline_downloads.rejected
                 ),
@@ -342,16 +419,19 @@ pub(in crate::desktop) fn omenchat_monitoring_card(desktop: &DesktopApp) -> Elem
             ));
             lines = lines.push(wrapped_text_owned(
                 format!(
-                    "event staging: frames {} ({}) / resources {} ({}) / closes {} ({}) | rejected {} frame / {} resource / {} close",
+                    "event staging: frames {} ({}) / resources {} ({}) / closes {} ({}) / terminals {} ({}) | rejected {} frame / {} resource / {} close / {} terminal",
                     staging.frame_items,
                     human_bytes(staging.frame_bytes as u64),
                     staging.resource_items,
                     human_bytes(staging.resource_bytes as u64),
                     staging.close_items,
                     human_bytes(staging.close_bytes as u64),
+                    staging.terminal_items,
+                    human_bytes(staging.terminal_bytes as u64),
                     staging.rejected_frames,
                     staging.rejected_resources,
-                    staging.rejected_closes
+                    staging.rejected_closes,
+                    staging.rejected_terminals
                 ),
                 13,
             ));
@@ -391,6 +471,7 @@ pub(in crate::desktop) fn omenchat_monitoring_card(desktop: &DesktopApp) -> Elem
                     .unwrap_or_default();
                 let reconnect_line =
                     desktop.omenchat_reconnect_state_label(session.session_id, now);
+                let connection_state = desktop.omenchat_connection_state(session.session_id);
                 let last_disconnect = desktop
                     .omenchat
                     .omenchat_live_last_disconnect_reason
@@ -536,9 +617,11 @@ pub(in crate::desktop) fn omenchat_monitoring_card(desktop: &DesktopApp) -> Elem
                     column![
                         wrapped_text_owned(
                             format!(
-                                "{} | {} | room #{} | users {}",
+                                "{} | {} | connection {} retryable={} | room #{} | users {}",
                                 session.server.display_name,
                                 short_destination_hash(&session.server.destination),
+                                connection_state.label(),
+                                connection_state.retryable(),
                                 session.active_room.name,
                                 session.users.len()
                             ),
@@ -677,6 +760,104 @@ mod tests {
         assert_eq!(totals.upload_resources_in, 1);
         assert_eq!(totals.upload_resource_bytes_in, 8192);
         assert_eq!(totals.awaiting_pongs, 1);
+    }
+
+    #[tokio::test]
+    async fn omenchat_session_resource_progress_is_link_scoped_and_latest() {
+        let mut desktop =
+            desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-resource-progress");
+        let session_id =
+            desktop.open_omenchat_status_session(test_descriptor(), "connected".into());
+        let link_id = [0x73; 16];
+        let peer = hex_bytes(&link_id);
+        desktop
+            .omenchat
+            .omenchat_live_transports
+            .insert(session_id, DesktopOmenChatTransport::new(link_id, 1_000));
+
+        let row = |epoch_ms, state: &str, source: &str, peer: String, received, total| {
+            crate::app::NetworkDoctorActiveResourceRow {
+                epoch_ms,
+                transfer: format!("transfer-{epoch_ms}"),
+                state: state.into(),
+                source: source.into(),
+                purpose: Some("omenchat-resource".into()),
+                direction: Some("inbound".into()),
+                peer: Some(peer),
+                detail: String::new(),
+                received,
+                total,
+            }
+        };
+        desktop.app.network_doctor_state.active_resources.insert(
+            "older".into(),
+            row(
+                10,
+                "progress",
+                "omenchat",
+                peer.clone(),
+                Some(10),
+                Some(100),
+            ),
+        );
+        desktop.app.network_doctor_state.active_resources.insert(
+            "latest".into(),
+            row(
+                20,
+                "progress",
+                "omenchat",
+                peer.clone(),
+                Some(50),
+                Some(100),
+            ),
+        );
+        desktop.app.network_doctor_state.active_resources.insert(
+            "wrong-link".into(),
+            row(
+                30,
+                "progress",
+                "omenchat",
+                "other-link".into(),
+                Some(90),
+                Some(100),
+            ),
+        );
+        desktop.app.network_doctor_state.active_resources.insert(
+            "terminal".into(),
+            row(40, "complete", "omenchat", peer, Some(100), Some(100)),
+        );
+
+        let progress = omenchat_session_resource_progress(&desktop, session_id).expect("progress");
+        assert_eq!(
+            progress,
+            OmenChatSessionResourceProgress {
+                received: 50,
+                total: Some(100),
+                active_transfers: 2,
+            }
+        );
+        let line = omenchat_session_resource_progress_line(&progress);
+        assert!(line.contains("50 B / 100 B (50%)"));
+        assert!(line.contains("1 other transfer(s) active"));
+        assert!(line.contains("may contain history, users, or media"));
+    }
+
+    #[test]
+    fn omenchat_session_resource_progress_line_handles_unknown_total() {
+        let line = omenchat_session_resource_progress_line(&OmenChatSessionResourceProgress {
+            received: 2_048,
+            total: None,
+            active_transfers: 1,
+        });
+        assert!(line.contains("2.0 KiB received"));
+        assert!(!line.contains('%'));
+
+        let maximum = omenchat_session_resource_progress_line(&OmenChatSessionResourceProgress {
+            received: u64::MAX,
+            total: Some(u64::MAX),
+            active_transfers: 1,
+        });
+        assert!(maximum.contains("(100%)"));
     }
 
     #[test]

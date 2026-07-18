@@ -67,7 +67,8 @@ fn diagnostics_live_fetch_card_extracts_success_metadata() {
             "markup_bytes": 128,
             "markup_lines": 6,
             "metadata": {
-                "native_request_backend": "reticulum_transport"
+                "native_request_backend": "reticulum_transport",
+                "native_request_primitive": "request-resource"
             }
         }
     }));
@@ -75,7 +76,7 @@ fn diagnostics_live_fetch_card_extracts_success_metadata() {
     let card = diagnostics_preview_live_fetch_card(&lines).expect("live fetch card");
     assert_eq!(card.outcome, "pass");
     assert_eq!(card.stage_hint, "response_decode");
-    assert_eq!(card.request_backend, "reticulum_transport");
+    assert_eq!(card.request_backend, "reticulum_transport/request-resource");
     assert_eq!(card.response_size, "128 bytes, 6 lines");
     assert_eq!(card.first_failed_stage, "live_fetch");
 }

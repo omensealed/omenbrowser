@@ -11,10 +11,8 @@ pub mod event;
 #[cfg(feature = "native-reticulum")]
 pub mod identity;
 #[cfg(feature = "native-reticulum")]
-pub mod ifac_tcp;
-#[cfg(feature = "native-reticulum")]
 pub mod interface;
-#[cfg(all(feature = "native-rns-net", any()))]
+#[cfg(feature = "native-reticulum")]
 pub mod lxmf_router;
 #[cfg(feature = "native-reticulum")]
 pub mod path;

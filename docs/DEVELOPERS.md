@@ -8,6 +8,12 @@
 `omenchatd` must remain movable and independent. Do not import browser modules
 from the server crate.
 
+The protocol-neutral IFAC TCP implementation is owned by
+`src/server/crates/omen-ifac-tcp`; both products depend on that one local crate,
+so a relocated `src/server` remains complete without duplicating transport
+behavior. Run `bash src/server/scripts/verify-standalone.sh check` after changing
+server path dependencies, source includes, or fixtures.
+
 ## Feature Flags
 
 Common browser build:
@@ -45,8 +51,8 @@ uses only `iced`. Run `bash scripts/verify-product-features.sh` after any UI
 feature or dependency change. Dormant widget/drop/animation/table features are
 not authorization to add them to a product alias.
 
-`chat-client-reticulum` is the current live-tested path. It uses the
-clean `reticulum-rs`/`lxmf` 0.6 stack. `chat-client-rns-clean` remains as a
+`chat-client-reticulum` is the canonical 0.9 migration path. It uses the
+clean `reticulum-rs`/`lxmf` 0.9 stack. `chat-client-rns-clean` remains as a
 compatibility alias for older local commands. The old `rns-net` compatibility
 crates are no longer part of the normal manifests.
 

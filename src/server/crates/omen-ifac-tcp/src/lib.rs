@@ -453,6 +453,33 @@ impl IfacContext {
 mod tests {
     use super::IfacContext;
 
+    fn decode_hex(value: &str) -> Vec<u8> {
+        assert_eq!(value.len() % 2, 0);
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).expect("hex fixture is ASCII");
+                u8::from_str_radix(pair, 16).expect("hex fixture is valid")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ifac_wire_matches_pinned_python_reticulum_vector() {
+        let ifac = IfacContext::new(Some("omen-ifac-vector"), Some("public-test-fixture"), 16)
+            .expect("IFAC fixture");
+        let raw =
+            decode_hex("010200112233445566778899aabbccddeeff096f6d656e2d696661632d766563746f72");
+        let expected = decode_hex(
+            "e22a38b18897fb59171f8f7ed906f0160b06ead3800df59254662fdcea8c9dcf\
+             8c27873d839b608fd30b202551e7c7781922a7",
+        );
+
+        assert_eq!(ifac.encode_outbound(&raw).expect("encode"), expected);
+        assert_eq!(ifac.decode_inbound(&expected).expect("decode"), raw);
+    }
+
     #[test]
     fn ifac_round_trip_preserves_packet_bytes() {
         let ifac = IfacContext::new(Some("private_ret"), Some("secret"), 16).unwrap();
@@ -472,5 +499,20 @@ mod tests {
             .encode_outbound(b"\x01\x02this-is-a-reticulum-packet")
             .unwrap();
         assert!(receiver.decode_inbound(&encoded).is_err());
+    }
+
+    #[test]
+    fn ifac_rejects_unmarked_and_tampered_packets() {
+        let ifac = IfacContext::new(Some("private_ret"), Some("secret"), 16).unwrap();
+        let raw = b"\x01\x02this-is-a-reticulum-packet";
+        assert_eq!(ifac.decode_inbound(raw), Err("missing ifac flag"));
+
+        let mut encoded = ifac.encode_outbound(raw).unwrap();
+        let last = encoded.len() - 1;
+        encoded[last] ^= 0x01;
+        assert_eq!(
+            ifac.decode_inbound(&encoded),
+            Err("ifac signature mismatch")
+        );
     }
 }

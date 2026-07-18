@@ -428,7 +428,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -765,7 +765,7 @@ dependencies = [
  "mio",
  "nix 0.31.3",
  "serialport",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -816,12 +816,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "omen-ifac-tcp"
+version = "0.9.5-1"
+dependencies = [
+ "hkdf",
+ "reticulum-rs-transport",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "omenchatd"
-version = "0.6.0-1"
+version = "0.9.5-1"
 dependencies = [
  "bzip2 0.5.2",
  "crossterm",
- "hkdf",
+ "log",
+ "omen-ifac-tcp",
  "rand_core",
  "ratatui",
  "reticulum-rs",
@@ -1030,9 +1043,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffede84104570528e7a65ef7b4258eb94926533a6ae63a4da906034c73f4ea8d"
+checksum = "f6f8d1b059a822763d55803fc0240e64b23a7b0d53208aa0873561938870fc84"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -1040,9 +1053,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-core"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "469a066283b39197a6b4a21a30e8a94af8ec46f590ebac212a93aba472da135b"
+checksum = "ec4f1b0d2d20a30dc35787cfff8a063086ef320f6ef0dede344a13fc1a96be56"
 dependencies = [
  "aes",
  "cbc",
@@ -1061,9 +1074,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-transport"
-version = "0.6.0"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9577ff5dfe898d595c7af7f6be045f4d893926e1c0ed859122da73e95696db1a"
+checksum = "abc5932f474eb853508b1cee9ac2b66f8c82e70f6d4669b8aeef172514d84a2f"
 dependencies = [
  "aes",
  "base64",
@@ -1176,7 +1189,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -9,7 +9,7 @@ use crate::session::SessionLimits;
 use crate::tui_format::human_bytes;
 use crate::{TcpClientOverride, TcpServerOverride};
 
-const PLACEHOLDER_IDENTITY: &[u8] =
+pub(crate) const PLACEHOLDER_IDENTITY: &[u8] =
     b"OMENCHATD_IDENTITY_PLACEHOLDER\nreplace-with-native-reticulum-identity\n";
 pub const OMENCHAT_DESTINATION_ASPECT: &str = "node";
 pub const NOMADNET_PORTAL_PATH: &str = "/page/index.mu";
@@ -494,6 +494,16 @@ where
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(feature = "live-reticulum")]
+pub(crate) fn replace_private_file(path: &std::path::Path, bytes: &[u8]) -> ServerResult<()> {
+    let mut rename = |from: &std::path::Path, to: &std::path::Path| std::fs::rename(from, to);
+    atomic_write_private(path, bytes, &mut rename)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 fn sync_directory(path: &std::path::Path) -> ServerResult<()> {
@@ -1077,7 +1087,7 @@ fn write_private_atomic(path: &std::path::Path, bytes: &[u8]) -> ServerResult<()
     Ok(())
 }
 
-fn enforce_private_file(path: &std::path::Path) -> ServerResult<()> {
+pub(crate) fn enforce_private_file(path: &std::path::Path) -> ServerResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

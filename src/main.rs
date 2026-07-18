@@ -199,6 +199,8 @@ async fn async_main() -> anyhow::Result<()> {
             upload_file,
             fetch_upload_filename,
             fetch_upload_bytes,
+            reconnect_ready_file,
+            reconnect_wait_secs,
             link_timeout_secs,
             response_wait_secs,
             warmup,
@@ -213,6 +215,8 @@ async fn async_main() -> anyhow::Result<()> {
                 upload_file,
                 fetch_upload_filename,
                 fetch_upload_bytes,
+                reconnect_ready_file,
+                reconnect_wait_secs,
                 link_timeout_secs,
                 response_wait_secs,
                 warmup,
@@ -355,6 +359,8 @@ enum CliCommand {
         upload_file: Option<PathBuf>,
         fetch_upload_filename: Option<String>,
         fetch_upload_bytes: Option<u64>,
+        reconnect_ready_file: Option<PathBuf>,
+        reconnect_wait_secs: u64,
         link_timeout_secs: u64,
         response_wait_secs: u64,
         warmup: Option<SmokePathWarmup>,
@@ -418,6 +424,8 @@ struct OmenChatSmokeCommandInput {
     upload_file: Option<PathBuf>,
     fetch_upload_filename: Option<String>,
     fetch_upload_bytes: Option<u64>,
+    reconnect_ready_file: Option<PathBuf>,
+    reconnect_wait_secs: u64,
     link_timeout_secs: u64,
     response_wait_secs: u64,
     warmup: Option<SmokePathWarmup>,
@@ -502,6 +510,8 @@ impl CliCommand {
         let mut omenchat_upload_file = None;
         let mut omenchat_fetch_upload_filename = None;
         let mut omenchat_fetch_upload_bytes = None;
+        let mut omenchat_reconnect_ready_file = None;
+        let mut omenchat_reconnect_wait_secs = 60;
         let mut omenchat_link_timeout_secs = 15;
         let mut omenchat_response_wait_secs = 10;
         let mut generate_native_identity_label = None;
@@ -602,6 +612,23 @@ impl CliCommand {
                         Some(value.parse::<u64>().with_context(|| {
                             format!("invalid OMENchat fetch upload byte count in {value}")
                         })?);
+                }
+                "--omenchat-reconnect-ready-file" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a file path"))?;
+                    omenchat_reconnect_ready_file = Some(PathBuf::from(value));
+                }
+                "--omenchat-reconnect-wait" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a seconds value"))?;
+                    omenchat_reconnect_wait_secs = value.parse::<u64>().with_context(|| {
+                        format!("invalid OMENchat reconnect wait seconds in {value}")
+                    })?;
+                    if omenchat_reconnect_wait_secs == 0 {
+                        anyhow::bail!("OMENchat reconnect wait seconds must be positive");
+                    }
                 }
                 "--omenchat-link-timeout" | "--link-timeout" => {
                     let value = args
@@ -820,6 +847,8 @@ impl CliCommand {
                 upload_file: omenchat_upload_file,
                 fetch_upload_filename: omenchat_fetch_upload_filename,
                 fetch_upload_bytes: omenchat_fetch_upload_bytes,
+                reconnect_ready_file: omenchat_reconnect_ready_file,
+                reconnect_wait_secs: omenchat_reconnect_wait_secs,
                 link_timeout_secs: omenchat_link_timeout_secs,
                 response_wait_secs: omenchat_response_wait_secs,
                 warmup,
@@ -1174,6 +1203,8 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         upload_file,
         fetch_upload_filename,
         fetch_upload_bytes,
+        reconnect_ready_file,
+        reconnect_wait_secs,
         link_timeout_secs,
         response_wait_secs,
         warmup,
@@ -1301,7 +1332,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         &mut client,
         &mut live_state,
         &mut transport,
-        ChatClientRequest::OpenServer(descriptor),
+        ChatClientRequest::OpenServer(descriptor.clone()),
     );
     let session_id = open_events.iter().find_map(|event| match event {
         ChatClientEvent::ServerOpened { session_id, .. } => Some(*session_id),
@@ -1544,6 +1575,36 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         }
     }
 
+    let mut active_link_id = opened.link_id;
+    let mut reconnect_ok = true;
+    if joined && message_seen {
+        if let Some(ready_file) = reconnect_ready_file.as_deref() {
+            let (passed, reconnected_link, reconnect_stages) =
+                run_omenchat_continuous_reconnect_smoke(OmenChatContinuousReconnectSmoke {
+                    runtime: &*app.runtime,
+                    runtime_events: &mut runtime_events,
+                    client: &mut client,
+                    live_state: &mut live_state,
+                    transport: &mut transport,
+                    descriptor,
+                    old_link_id: opened.link_id,
+                    session_id,
+                    room: &room,
+                    message: &message,
+                    ready_file,
+                    wait: Duration::from_secs(reconnect_wait_secs),
+                    link_timeout: Duration::from_secs(link_timeout_secs),
+                    response_wait: Duration::from_secs(response_wait_secs),
+                })
+                .await?;
+            reconnect_ok = passed;
+            stages.extend(reconnect_stages);
+            if let Some(link_id) = reconnected_link {
+                active_link_id = link_id;
+            }
+        }
+    }
+
     let session_summary = client.session(session_id).map(|session| {
         serde_json::json!({
             "session_id": session.session_id,
@@ -1564,13 +1625,15 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
             "status": session.status.clone(),
         })
     });
-    let outcome = joined && message_seen && upload_ok;
+    let outcome = joined && message_seen && upload_ok && reconnect_ok;
     let failed_stage = if !joined {
         "join_wait"
     } else if !message_seen {
         "message_echo_wait"
     } else if !upload_ok {
         "upload_fetch_wait"
+    } else if !reconnect_ok {
+        "continuous_reconnect"
     } else {
         "complete"
     };
@@ -1584,7 +1647,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         session_summary,
     );
     write_omenchat_smoke_report(report, output, stdout, default_output, &diagnostics_dir)?;
-    let _ = app.runtime.close_omenchat_link(opened.link_id).await;
+    let _ = app.runtime.close_omenchat_link(active_link_id).await;
     let _ = app.runtime.stop_runtime().await;
     Ok(())
 }
@@ -1726,6 +1789,209 @@ async fn wait_for_omenchat_condition(
         }
     }
     events
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+struct OmenChatContinuousReconnectSmoke<'a> {
+    runtime: &'a dyn omenbrowser_rs::runtime::NetworkRuntime,
+    runtime_events: &'a mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    client: &'a mut omenbrowser_rs::chat::ChatClient,
+    live_state: &'a mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &'a mut OmenChatSmokeTransport,
+    descriptor: omenbrowser_rs::chat::OmenChatDescriptor,
+    old_link_id: [u8; 16],
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    room: &'a str,
+    message: &'a str,
+    ready_file: &'a std::path::Path,
+    wait: Duration,
+    link_timeout: Duration,
+    response_wait: Duration,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn run_omenchat_continuous_reconnect_smoke(
+    input: OmenChatContinuousReconnectSmoke<'_>,
+) -> anyhow::Result<(bool, Option<[u8; 16]>, Vec<serde_json::Value>)> {
+    use omenbrowser_rs::chat::{ChatClientEvent, ChatClientRequest};
+
+    create_omenchat_reconnect_ready_file(input.ready_file)?;
+    let deadline = tokio::time::Instant::now() + input.wait;
+    let mut stages = Vec::new();
+    let mut close_seen = false;
+    while tokio::time::Instant::now() < deadline && !close_seen {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, input.runtime_events.recv()).await {
+            Ok(Ok(RuntimeBusEvent::OmenChatLinkClosed(closed)))
+                if closed.link_id == input.old_link_id =>
+            {
+                close_seen = true;
+                stages.push(serde_json::json!({
+                    "stage": "continuous_link_close_wait",
+                    "ok": true,
+                    "reason": closed.reason,
+                }));
+            }
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
+        }
+    }
+    if !close_seen {
+        stages.push(serde_json::json!({
+            "stage": "continuous_link_close_wait",
+            "ok": false,
+            "reason": "old link did not close before the bounded deadline",
+        }));
+        return Ok((false, None, stages));
+    }
+
+    let mut opened = None;
+    let mut attempts = 0u8;
+    while tokio::time::Instant::now() < deadline && attempts < 6 {
+        attempts = attempts.saturating_add(1);
+        let _ = input
+            .runtime
+            .request_path(
+                &input.descriptor.server_destination,
+                "omenchat_continuous_reconnect_smoke",
+                true,
+            )
+            .await;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let attempt_timeout = input.link_timeout.min(remaining);
+        if attempt_timeout.is_zero() {
+            break;
+        }
+        match input
+            .runtime
+            .open_omenchat_link(
+                &input.descriptor.server_destination,
+                attempt_timeout,
+                CancellationToken::new(),
+            )
+            .await
+        {
+            Ok(link) => {
+                stages.push(serde_json::json!({
+                    "stage": "continuous_link_reopen",
+                    "ok": true,
+                    "attempt": attempts,
+                    "link_changed": link.link_id != input.old_link_id,
+                }));
+                opened = Some(link);
+                break;
+            }
+            Err(error) => {
+                stages.push(serde_json::json!({
+                    "stage": "continuous_link_reopen_attempt",
+                    "ok": false,
+                    "attempt": attempts,
+                    "error": error.to_string(),
+                }));
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
+            }
+        }
+    }
+    let Some(opened) = opened else {
+        stages.push(serde_json::json!({
+            "stage": "continuous_link_reopen",
+            "ok": false,
+            "attempts": attempts,
+        }));
+        return Ok((false, None, stages));
+    };
+
+    *input.transport = OmenChatSmokeTransport::default();
+    let reconnect_events = omenbrowser_rs::chat::live::reconnect_live_server(
+        input.client,
+        input.live_state,
+        input.transport,
+        input.session_id,
+        input.descriptor,
+    );
+    let reconnect_started = !reconnect_events
+        .iter()
+        .any(|event| matches!(event, ChatClientEvent::Error { .. }));
+    stages.push(serde_json::json!({
+        "stage": "continuous_session_reconnect",
+        "ok": reconnect_started,
+        "events": reconnect_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+    }));
+    send_omenchat_smoke_outgoing(input.runtime, opened.link_id, input.transport).await?;
+
+    let reconnect_message = format!("{} (after continuous reconnect)", input.message);
+    let send_events = omenbrowser_rs::chat::live::handle_live_request(
+        input.client,
+        input.live_state,
+        input.transport,
+        ChatClientRequest::SendMessage {
+            session_id: input.session_id,
+            room: input.room.to_owned(),
+            body: reconnect_message.clone(),
+        },
+    );
+    let send_ok = !send_events
+        .iter()
+        .any(|event| matches!(event, ChatClientEvent::Error { .. }));
+    stages.push(serde_json::json!({
+        "stage": "continuous_message_send",
+        "ok": send_ok,
+        "events": send_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+    }));
+    send_omenchat_smoke_outgoing(input.runtime, opened.link_id, input.transport).await?;
+
+    let message_events = wait_for_omenchat_condition(
+        input.runtime,
+        input.runtime_events,
+        input.client,
+        input.live_state,
+        input.transport,
+        OmenChatWaitOptions {
+            link_id: opened.link_id,
+            session_id: input.session_id,
+            wait: input.response_wait,
+        },
+        |client| omenchat_session_contains_message(client, input.session_id, &reconnect_message),
+    )
+    .await;
+    let message_seen =
+        omenchat_session_contains_message(input.client, input.session_id, &reconnect_message);
+    stages.push(serde_json::json!({
+        "stage": "continuous_message_echo_wait",
+        "ok": message_seen,
+        "events": message_events,
+    }));
+    Ok((
+        reconnect_started && send_ok && message_seen && opened.link_id != input.old_link_id,
+        Some(opened.link_id),
+        stages,
+    ))
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn create_omenchat_reconnect_ready_file(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("OMENchat reconnect marker needs an existing parent"))?;
+    if !parent.is_dir() {
+        anyhow::bail!("OMENchat reconnect marker parent is not a directory");
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .context("failed to create OMENchat reconnect ready marker")?;
+    file.write_all(b"ready\n")
+        .context("failed to write OMENchat reconnect ready marker")?;
+    file.sync_all()
+        .context("failed to sync OMENchat reconnect ready marker")
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -3183,7 +3449,7 @@ fn write_known_destinations_fixture(
 ) -> anyhow::Result<()> {
     let _ = (path, destination);
     Err(anyhow::anyhow!(
-        "known_destinations fixture generation is not available in the clean Reticulum 0.6 build"
+        "known_destinations fixture generation is not available in the clean Reticulum 0.9 build"
     ))
 }
 
@@ -4184,7 +4450,7 @@ fn semantic_known_destinations_check(
     serde_json::json!({
         "available": false,
         "ok": true,
-        "detail": "semantic known_destinations parsing is not available in the clean Reticulum 0.6 build",
+        "detail": "semantic known_destinations parsing is not available in the clean Reticulum 0.9 build",
     })
 }
 
@@ -4727,6 +4993,8 @@ mod tests {
                 upload_file: None,
                 fetch_upload_filename: None,
                 fetch_upload_bytes: None,
+                reconnect_ready_file: None,
+                reconnect_wait_secs: 60,
                 link_timeout_secs: 15,
                 response_wait_secs: 10,
                 warmup: Some(SmokePathWarmup { wait_secs: 3 }),
@@ -4744,6 +5012,49 @@ mod tests {
                 ),
             }
         );
+    }
+
+    #[test]
+    fn cli_parses_omenchat_continuous_reconnect_control() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-reconnect-ready-file".to_string(),
+            "/tmp/omenchat-reconnect-ready".to_string(),
+            "--omenchat-reconnect-wait".to_string(),
+            "45".to_string(),
+        ])
+        .expect("parse reconnect smoke control");
+
+        let CliCommand::OmenChatSmoke {
+            reconnect_ready_file,
+            reconnect_wait_secs,
+            ..
+        } = parsed
+        else {
+            panic!("expected OMENchat smoke command");
+        };
+        assert_eq!(
+            reconnect_ready_file,
+            Some(PathBuf::from("/tmp/omenchat-reconnect-ready"))
+        );
+        assert_eq!(reconnect_wait_secs, 45);
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    #[test]
+    fn omenchat_reconnect_ready_marker_is_create_new_and_isolated() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-reconnect-marker-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).expect("create isolated marker root");
+        let marker = root.join("ready");
+        create_omenchat_reconnect_ready_file(&marker).expect("create ready marker");
+        assert_eq!(std::fs::read(&marker).expect("read marker"), b"ready\n");
+        assert!(create_omenchat_reconnect_ready_file(&marker).is_err());
+        std::fs::remove_dir_all(root).expect("remove isolated marker root");
     }
 
     #[test]

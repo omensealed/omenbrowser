@@ -2,7 +2,7 @@
 
 #[cfg(feature = "native-rns-net")]
 compile_error!(
-    "native-rns-net was removed from OMENbrowser_rs; use chat-client-rns-clean/native-network with reticulum-rs 0.6"
+    "native-rns-net was removed from OMENbrowser_rs; use chat-client-rns-clean/native-network with reticulum-rs 0.9"
 );
 
 pub mod app;

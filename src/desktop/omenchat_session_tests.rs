@@ -113,6 +113,7 @@ async fn close_omenchat_session_clears_live_transport_and_retry_state() {
             crate::app::current_epoch_ms(),
         ),
     );
+    desktop.set_omenchat_connection_state(session_id, crate::chat::ChatConnectionState::Joined);
 
     desktop.close_omenchat_session(session_id);
 
@@ -139,6 +140,86 @@ async fn close_omenchat_session_clears_live_transport_and_retry_state() {
         .omenchat_link_sessions
         .values()
         .any(|stored_session_id| *stored_session_id == session_id));
+    assert!(!desktop
+        .omenchat
+        .omenchat_connection_states
+        .contains_key(&session_id));
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[tokio::test]
+async fn omenchat_connection_state_is_bounded_by_sessions_and_join_is_event_driven() {
+    let (mut desktop, _) = desktop_with_paths("omenbrowser-rs-omenchat-typed-lifecycle");
+    let session_id = desktop.open_omenchat_status_session(
+        test_descriptor(FIXTURE_CHAT_SERVER_HASH, "Live OMENchat"),
+        "waiting".into(),
+    );
+
+    assert_eq!(
+        desktop.omenchat_connection_state(session_id),
+        crate::chat::ChatConnectionState::Disconnected
+    );
+    desktop.set_omenchat_connection_state(
+        session_id.saturating_add(1_000),
+        crate::chat::ChatConnectionState::Connecting,
+    );
+    assert_eq!(desktop.omenchat.omenchat_connection_states.len(), 1);
+
+    desktop.app.runtime_status.connected = true;
+    let _ = desktop.request_omenchat_path_task(session_id);
+    assert_eq!(
+        desktop.omenchat_connection_state(session_id),
+        crate::chat::ChatConnectionState::Resolving
+    );
+
+    let _ = desktop.register_omenchat_live_transport(
+        session_id,
+        crate::desktop::DesktopOmenChatTransport::new([0x73; 16], crate::app::current_epoch_ms()),
+    );
+    assert_eq!(
+        desktop.omenchat_connection_state(session_id),
+        crate::chat::ChatConnectionState::Authenticating
+    );
+
+    let room = desktop
+        .omenchat
+        .chat_client
+        .session(session_id)
+        .expect("session")
+        .active_room
+        .clone();
+    desktop.apply_omenchat_client_events_status(&[crate::chat::ChatClientEvent::RoomJoined {
+        session_id,
+        room,
+        users: Vec::new(),
+        latest_events: Vec::new(),
+    }]);
+    assert_eq!(
+        desktop.omenchat_connection_state(session_id),
+        crate::chat::ChatConnectionState::Joined
+    );
+
+    desktop.apply_omenchat_client_events_status(&[crate::chat::ChatClientEvent::Error {
+        session_id: Some(session_id),
+        message: "room command rejected".into(),
+    }]);
+    assert_eq!(
+        desktop.omenchat_connection_state(session_id),
+        crate::chat::ChatConnectionState::Joined
+    );
+
+    desktop.set_omenchat_connection_state(
+        session_id,
+        crate::chat::ChatConnectionState::Authenticating,
+    );
+    desktop.apply_omenchat_client_events_status(&[crate::chat::ChatClientEvent::Error {
+        session_id: Some(session_id),
+        message: "session rejected".into(),
+    }]);
+    assert_eq!(
+        desktop.omenchat_connection_state(session_id),
+        crate::chat::ChatConnectionState::Failed { retryable: true }
+    );
 }
 
 #[test]

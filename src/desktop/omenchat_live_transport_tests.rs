@@ -1,8 +1,11 @@
 use super::*;
 use crate::app::{current_epoch_ms, App};
 use crate::chat::{ChatSessionId, OmenChatDescriptor};
-use crate::desktop::DesktopOmenChatTransport;
-use crate::runtime::{OmenChatLinkClosed, RuntimeBusEvent};
+use crate::chat::rns::ChatLinkTransport;
+use crate::desktop::{hex_bytes, DesktopOmenChatTransport};
+use crate::runtime::{
+    OmenChatLinkClosed, ResourceLifecycleEvent, ResourceLifecycleState, RuntimeBusEvent,
+};
 
 const FIXTURE_CHAT_SERVER_HASH: &str = "00112233445566778899aabbccddeeff";
 
@@ -55,6 +58,29 @@ fn enqueue_close(desktop: &mut DesktopApp, link_id: [u8; 16], reason: &str) {
     assert_eq!(desktop.app.drain_internal_events(), 1);
 }
 
+fn enqueue_inbound_resource_terminal(
+    desktop: &mut DesktopApp,
+    link_id: [u8; 16],
+    state: ResourceLifecycleState,
+) {
+    assert!(desktop
+        .app
+        .enqueue_runtime_event(RuntimeBusEvent::ResourceLifecycle(
+            ResourceLifecycleEvent {
+                transfer_id: "resource-hash".into(),
+                state,
+                bytes: None,
+                reason: Some("test terminal".into()),
+                operation_id: None,
+                source: Some("omenchat".into()),
+                purpose: Some("omenchat-resource".into()),
+                direction: Some("inbound".into()),
+                peer: Some(hex_bytes(&link_id)),
+            },
+        )));
+    assert_eq!(desktop.app.drain_internal_events(), 1);
+}
+
 #[test]
 fn omenchat_timeout_close_marks_session_for_quick_reconnect() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-timeout-close");
@@ -89,6 +115,10 @@ fn omenchat_timeout_close_marks_session_for_quick_reconnect() {
         .clone();
     assert!(status.contains("link timed out"));
     assert!(status.contains("reconnecting"));
+    assert_eq!(
+        desktop.omenchat_connection_state(session_id),
+        crate::chat::ChatConnectionState::Reconnecting
+    );
 }
 
 #[test]
@@ -148,6 +178,10 @@ fn omenchat_non_retryable_close_waits_for_manual_reconnect() {
         .status
         .clone();
     assert!(status.contains("use Reconnect"));
+    assert_eq!(
+        desktop.omenchat_connection_state(session_id),
+        crate::chat::ChatConnectionState::Disconnected
+    );
 }
 
 #[test]
@@ -194,4 +228,80 @@ fn omenchat_stale_link_close_does_not_disconnect_active_link() {
             .status,
         "live userlist updated"
     );
+}
+
+#[test]
+fn omenchat_inbound_resource_failure_releases_pending_offers_but_keeps_link() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-resource-terminal");
+    let link_id = [0x81; 16];
+    let session_id = open_connected_session(&mut desktop, link_id, "waiting for resource");
+    let transport = desktop
+        .omenchat
+        .omenchat_live_transports
+        .get_mut(&session_id)
+        .expect("live transport");
+    transport
+        .defer_resource_offer("history:one", vec![0x01, 0x02])
+        .expect("pending history offer");
+    transport
+        .defer_resource_offer("userlist:two", vec![0x03])
+        .expect("pending user-list offer");
+
+    enqueue_inbound_resource_terminal(&mut desktop, link_id, ResourceLifecycleState::Failed);
+    let _ = desktop.drain_omenchat_runtime_events();
+
+    let transport = desktop
+        .omenchat
+        .omenchat_live_transports
+        .get(&session_id)
+        .expect("failure must not close a healthy link");
+    assert_eq!(transport.pending_resource_offer_count(), 0);
+    assert_eq!(transport.pending_resource_offer_bytes, 0);
+    assert_eq!(transport.link_id, link_id);
+    let status = &desktop
+        .omenchat
+        .chat_client
+        .session(session_id)
+        .expect("session")
+        .status;
+    assert!(status.contains("failed"));
+    assert!(status.contains("released 2 pending offer(s)"));
+    assert!(status.contains("retry history or reconnect"));
+}
+
+#[test]
+fn omenchat_inbound_resource_cancellation_releases_pending_offer_but_keeps_link() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-resource-cancelled");
+    let link_id = [0x82; 16];
+    let session_id = open_connected_session(&mut desktop, link_id, "waiting for resource");
+    desktop
+        .omenchat
+        .omenchat_live_transports
+        .get_mut(&session_id)
+        .expect("live transport")
+        .defer_resource_offer("history:cancelled", vec![0x01])
+        .expect("pending history offer");
+
+    enqueue_inbound_resource_terminal(
+        &mut desktop,
+        link_id,
+        ResourceLifecycleState::Cancelled,
+    );
+    let _ = desktop.drain_omenchat_runtime_events();
+
+    let transport = desktop
+        .omenchat
+        .omenchat_live_transports
+        .get(&session_id)
+        .expect("cancellation must not close a healthy link");
+    assert_eq!(transport.pending_resource_offer_count(), 0);
+    assert_eq!(transport.pending_resource_offer_bytes, 0);
+    let status = &desktop
+        .omenchat
+        .chat_client
+        .session(session_id)
+        .expect("session")
+        .status;
+    assert!(status.contains("was cancelled"));
+    assert!(status.contains("released 1 pending offer(s)"));
 }

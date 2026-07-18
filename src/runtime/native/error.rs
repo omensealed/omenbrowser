@@ -15,6 +15,11 @@ pub enum NativeRuntimeError {
         kind: String,
         reason: String,
     },
+    InvalidInterface {
+        profile: String,
+        kind: String,
+        reason: String,
+    },
     PathUnavailable(String),
     Timeout(String),
     InvalidResponse(String),
@@ -74,6 +79,13 @@ impl From<NativeRuntimeError> for AppError {
                 reason,
             } => AppError::Unsupported(format!(
                 "native Reticulum interface '{profile}' ({kind}) is unsupported: {reason}"
+            )),
+            NativeRuntimeError::InvalidInterface {
+                profile,
+                kind,
+                reason,
+            } => AppError::Runtime(format!(
+                "native Reticulum interface '{profile}' ({kind}) is invalid: {reason}"
             )),
             NativeRuntimeError::PathUnavailable(destination) => {
                 AppError::Runtime(format!("Reticulum path unavailable for {destination}"))

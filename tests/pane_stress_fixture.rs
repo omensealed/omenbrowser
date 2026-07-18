@@ -95,7 +95,7 @@ fn balanced_layout(
     }
     let midpoint = panes.len() / 2;
     DesktopWorkspaceLayoutNode::Split {
-        axis: if depth.is_multiple_of(2) {
+        axis: if depth % 2 == 0 {
             DesktopWorkspaceSplitAxis::Vertical
         } else {
             DesktopWorkspaceSplitAxis::Horizontal

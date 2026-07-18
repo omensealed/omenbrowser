@@ -337,6 +337,10 @@ pub(in crate::desktop) enum ConversationMessage {
         conversation_id: u64,
         key: String,
     },
+    CancelConversationRow {
+        conversation_id: u64,
+        key: String,
+    },
     DismissPaneRow {
         conversation_id: u64,
         key: String,
@@ -360,6 +364,7 @@ pub(in crate::desktop) enum ConversationMessage {
     SelectRow(String),
     PrepareRetryForRow(String),
     SendRetryForRow(String),
+    CancelRow(String),
     SyncPropagationForRow(String),
     SyncMessages,
     InspectPeer,
@@ -407,6 +412,8 @@ pub(in crate::desktop) enum OmenChatMessage {
         action: bool,
     },
     LoadOlderHistory(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    CopySessionDiagnostics(ChatSessionId),
     CloseSession(ChatSessionId),
     OpenCachedMedia(String),
     LoadMedia(String),
@@ -477,7 +484,7 @@ pub(in crate::desktop) enum Message {
     ExternalBrowser(ExternalBrowserMessage),
     Runtime(RuntimeMessage),
     #[cfg(test)]
-    TestUnhandledRoutingMessage,
+    TestUnhandledRouting,
 }
 
 #[cfg(all(test, feature = "desktop-ui"))]

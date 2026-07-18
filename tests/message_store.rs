@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use omenbrowser_rs::messaging::{
-    MessageStore, MessageSummary, TransportMethod, MESSAGE_STORE_CORRUPT_BACKUP_MAX_FILES,
-    MESSAGE_STORE_MAX_SCAN_ENTRIES, MESSAGE_STORE_MAX_THREADS, MESSAGE_STORE_THREAD_MAX_BYTES,
-    MESSAGE_STORE_THREAD_MAX_MESSAGES,
+    MessageStore, MessageSummary, OutboundOperationIdentity, TransportMethod,
+    MESSAGE_STORE_CORRUPT_BACKUP_MAX_FILES, MESSAGE_STORE_MAX_SCAN_ENTRIES,
+    MESSAGE_STORE_MAX_THREADS, MESSAGE_STORE_THREAD_MAX_BYTES, MESSAGE_STORE_THREAD_MAX_MESSAGES,
 };
+use omenbrowser_rs::runtime::{LxmfHistoryPage, LxmfHistoryRecord};
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -33,6 +34,155 @@ fn message(peer: &str, timestamp: f64, incoming: bool) -> MessageSummary {
         fields: BTreeMap::new(),
         attachments: Vec::new(),
     }
+}
+
+#[test]
+fn outbound_ttl_reconciliation_is_durable_and_restart_idempotent() {
+    let root = temp_dir("outbound-ttl-restart");
+    let store = MessageStore::new(root.clone()).expect("store");
+    let mut expired = message("peer-a", 1.0, false);
+    expired.message_id = Some("ttl-expired".into());
+    expired
+        .fields
+        .insert("native_lxmf_sdk_state".into(), "queued".into());
+    OutboundOperationIdentity::generate_at(1_000, 5_000)
+        .expect("expired operation")
+        .insert_fields(&mut expired.fields);
+    let mut fresh = message("peer-a", 2.0, false);
+    fresh.message_id = Some("ttl-fresh".into());
+    fresh
+        .fields
+        .insert("native_lxmf_sdk_state".into(), "dispatching".into());
+    OutboundOperationIdentity::generate_at(5_000, 5_000)
+        .expect("fresh operation")
+        .insert_fields(&mut fresh.fields);
+    store.append(expired).expect("append expired");
+    store.append(fresh).expect("append fresh");
+
+    let changed = store
+        .reconcile_expired_lxmf(6_000)
+        .expect("reconcile expiry");
+    assert_eq!(changed.len(), 1);
+    drop(store);
+
+    let restarted = MessageStore::new(root).expect("restart store");
+    let thread = restarted.get_thread("peer-a").expect("restart thread");
+    assert!(thread.messages[0].failed);
+    assert_eq!(
+        thread.messages[0]
+            .fields
+            .get("native_lxmf_sdk_state")
+            .map(String::as_str),
+        Some("expired")
+    );
+    assert!(!thread.messages[1].failed);
+    assert!(restarted
+        .reconcile_expired_lxmf(6_000)
+        .expect("idempotent restart reconciliation")
+        .is_empty());
+}
+
+#[test]
+fn sdk_history_reconciliation_preserves_local_content_and_is_restart_idempotent() {
+    let root = temp_dir("sdk-history-restart");
+    let store = MessageStore::new(root.clone()).expect("store");
+    let mut outbound = message("peer-a", 10.0, false);
+    outbound.message_id = Some("outbound-a".into());
+    outbound.title = "local title".into();
+    outbound.content = "locally authored body".into();
+    outbound
+        .fields
+        .insert("native_lxmf_sdk_state".into(), "expired".into());
+    outbound
+        .fields
+        .insert("native_lxmf_sdk_terminal".into(), "true".into());
+    outbound.failed = true;
+    store.append(outbound).expect("append outbound");
+
+    let page = LxmfHistoryPage {
+        messages: vec![
+            LxmfHistoryRecord {
+                message_id: "outbound-a".into(),
+                source: "local".into(),
+                destination: "peer-a".into(),
+                title: "remote replacement title".into(),
+                content: "remote replacement body".into(),
+                timestamp: 11,
+                direction: "out".into(),
+                receipt_status: Some("delivered:receipt".into()),
+            },
+            LxmfHistoryRecord {
+                message_id: "inbound-missed".into(),
+                source: "peer-a".into(),
+                destination: "local".into(),
+                title: "missed inbound".into(),
+                content: "recovered after restart".into(),
+                timestamp: 12,
+                direction: "in".into(),
+                receipt_status: Some("received".into()),
+            },
+            LxmfHistoryRecord {
+                message_id: "foreign-outbound".into(),
+                source: "another-client".into(),
+                destination: "peer-a".into(),
+                title: "not locally authored".into(),
+                content: "must not be imported".into(),
+                timestamp: 13,
+                direction: "out".into(),
+                receipt_status: Some("sent".into()),
+            },
+        ],
+        next_cursor: None,
+    };
+
+    let report = store
+        .reconcile_sdk_history(page.clone(), 20_000)
+        .expect("history reconciliation");
+    assert_eq!(report.matched, 1);
+    assert_eq!(report.updated_outbound, 1);
+    assert_eq!(report.imported_inbound, 1);
+    assert_eq!(report.skipped, 1);
+    drop(store);
+
+    let restarted = MessageStore::new(root).expect("restarted store");
+    let thread = restarted.get_thread("peer-a").expect("thread");
+    assert_eq!(thread.messages.len(), 2);
+    let outbound = thread
+        .messages
+        .iter()
+        .find(|message| message.message_id.as_deref() == Some("outbound-a"))
+        .expect("outbound");
+    assert_eq!(outbound.title, "local title");
+    assert_eq!(outbound.content, "locally authored body");
+    assert!(outbound.delivered);
+    assert!(!outbound.failed);
+    assert_eq!(
+        outbound
+            .fields
+            .get("native_lxmf_sdk_history_receipt_status")
+            .map(String::as_str),
+        Some("delivered:receipt")
+    );
+    let inbound = thread
+        .messages
+        .iter()
+        .find(|message| message.message_id.as_deref() == Some("inbound-missed"))
+        .expect("inbound");
+    assert!(inbound.incoming);
+    assert!(inbound.unread);
+    assert_eq!(inbound.content, "recovered after restart");
+    assert!(thread
+        .messages
+        .iter()
+        .all(|message| message.message_id.as_deref() != Some("foreign-outbound")));
+
+    let repeat = restarted
+        .reconcile_sdk_history(page, 99_000)
+        .expect("repeat reconciliation");
+    assert_eq!(repeat.matched, 2);
+    assert_eq!(repeat.imported_inbound, 0);
+    assert_eq!(repeat.updated_outbound, 0);
+    assert!(repeat.changed_messages.is_empty());
 }
 
 #[test]

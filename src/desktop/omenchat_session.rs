@@ -26,12 +26,24 @@ impl DesktopApp {
             .retain(|(stored_session_id, _), _| *stored_session_id != session_id);
         #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         {
+            self.set_omenchat_connection_state(
+                session_id,
+                crate::chat::ChatConnectionState::Draining,
+            );
             self.omenchat
                 .omenchat_live_state
-                .cancel_session_transfers(session_id);
+                .retire_session_link_state(session_id);
             self.omenchat.omenchat_live_opening.remove(&session_id);
+            if let Some(cancel) = self
+                .omenchat
+                .omenchat_live_open_cancellations
+                .remove(&session_id)
+            {
+                cancel.cancel();
+            }
             self.omenchat.omenchat_live_retry_after.remove(&session_id);
             self.omenchat.omenchat_live_retry_count.remove(&session_id);
+            self.omenchat.omenchat_live_stable_after.remove(&session_id);
             self.omenchat
                 .omenchat_live_reconnect_generation
                 .remove(&session_id);
@@ -45,6 +57,7 @@ impl DesktopApp {
             self.omenchat
                 .omenchat_link_sessions
                 .retain(|_, stored_session_id| *stored_session_id != session_id);
+            self.omenchat.omenchat_connection_states.remove(&session_id);
         }
         self.omenchat.chat_client.remove_session(session_id);
         if let (Some(store), Some(server_id)) =
@@ -77,6 +90,31 @@ impl DesktopApp {
         if let Some(session) = self.omenchat.chat_client.session_mut(session_id) {
             session.set_status(status);
         }
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) fn set_omenchat_connection_state(
+        &mut self,
+        session_id: ChatSessionId,
+        state: crate::chat::ChatConnectionState,
+    ) {
+        if self.omenchat.chat_client.session(session_id).is_some() {
+            self.omenchat
+                .omenchat_connection_states
+                .insert(session_id, state);
+        }
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) fn omenchat_connection_state(
+        &self,
+        session_id: ChatSessionId,
+    ) -> crate::chat::ChatConnectionState {
+        self.omenchat
+            .omenchat_connection_states
+            .get(&session_id)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub(in crate::desktop) fn clear_omenchat_active_room_unread(

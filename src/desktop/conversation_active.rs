@@ -42,6 +42,10 @@ impl DesktopApp {
         self.app.send_lxmf_retry_by_message_key(&key);
     }
 
+    pub(super) fn update_cancel_lxmf_for_row(&mut self, key: String) {
+        self.app.cancel_lxmf_message_by_key(&key);
+    }
+
     pub(super) fn update_sync_propagation_for_row(&mut self, key: String) {
         self.app.sync_propagation_for_message_key(&key);
     }

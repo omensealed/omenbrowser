@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 use crate::browser::{BrowserPage, DownloadedFile, PageSource};
 use crate::directory::DirectoryKind;
@@ -17,6 +17,11 @@ use crate::identity::IdentityProfile;
 use crate::interfaces::ReticulumInterfaceProfile;
 use crate::messaging::{
     AttachmentSummary, DeliveryMode, MessageEnvelope, MessageSummary, TransportMethod,
+};
+use crate::runtime::facade::{
+    RuntimeCapability, RuntimeCapabilityAvailability, RuntimeCapabilityRecord,
+    RuntimeCapabilitySnapshot, RuntimeCapabilitySource, RuntimeLifecycleSnapshot,
+    RuntimeLifecycleState,
 };
 use crate::runtime::RuntimeBusEvent;
 use crate::storage::files::{atomic_write_new_bounded, next_available_download_path};
@@ -116,21 +121,41 @@ pub type RuntimeStatus = NetworkStatus;
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
     cancelled: Arc<AtomicBool>,
+    notify: Arc<Notify>,
 }
 
 impl CancellationToken {
     pub fn new() -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
         }
     }
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+            if self.is_cancelled() {
+                return;
+            }
+        }
     }
 }
 
@@ -152,6 +177,28 @@ pub struct OutboundStatus {
     pub evidence: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtt: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LxmfCancelOutcome {
+    Accepted,
+    AlreadyTerminal,
+    NotFound,
+    TooLateToCancel,
+    Unsupported,
+}
+
+impl LxmfCancelOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::AlreadyTerminal => "already_terminal",
+            Self::NotFound => "not_found",
+            Self::TooLateToCancel => "too_late_to_cancel",
+            Self::Unsupported => "unsupported",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -195,6 +242,8 @@ pub enum OutboundDeliveryState {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AnnouncePayload {
     pub destination_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_hash: Option<String>,
     pub display_name: String,
     pub kind: DirectoryKind,
     pub associated_hash: Option<String>,
@@ -262,11 +311,17 @@ pub struct NetworkSnapshot {
     pub known_destinations: u32,
     #[serde(default)]
     pub ratchet_announces: u32,
+    #[serde(default)]
+    pub path_table_available: bool,
     pub path_table_count: u32,
+    #[serde(default)]
+    pub request_failure_metrics_available: bool,
     pub request_failures: u32,
     pub active_propagation_node: Option<String>,
     pub connected_to_shared_instance: bool,
     pub is_shared_instance: bool,
+    #[serde(default)]
+    pub shared_instance_status_available: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,6 +333,10 @@ pub struct LxmfSdkRpcProbeSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_contract_version: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_stream_position: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_messages: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_flight_messages: Option<u64>,
@@ -288,6 +347,8 @@ pub struct LxmfSdkRpcProbeSnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectoryCandidate {
     pub destination_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_hash: Option<String>,
     pub display_name: String,
     pub kind: DirectoryKind,
     pub associated_hash: Option<String>,
@@ -487,6 +548,8 @@ pub struct ResourceProgressEvent {
     pub received: u64,
     pub total: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
@@ -504,6 +567,8 @@ pub struct ResourceLifecycleEvent {
     pub bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -529,6 +594,88 @@ pub struct LxmfCorrelationRecovery {
     pub propagated_recovered: usize,
 }
 
+pub const LXMF_HISTORY_PAGE_MAX_ITEMS: usize = 128;
+pub const LXMF_HISTORY_PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const LXMF_HISTORY_CURSOR_MAX_BYTES: usize = 4 * 1024;
+pub const LXMF_HISTORY_RECOVERY_MAX_PAGES: usize = 4;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LxmfHistoryRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LxmfHistoryRecord {
+    pub message_id: String,
+    pub source: String,
+    pub destination: String,
+    pub title: String,
+    pub content: String,
+    pub timestamp: i64,
+    pub direction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_status: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LxmfHistoryPage {
+    pub messages: Vec<LxmfHistoryRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+impl LxmfHistoryRequest {
+    pub fn bounded(
+        peer_hash: Option<String>,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> AppResult<Self> {
+        if peer_hash.as_ref().is_some_and(|peer| {
+            peer.is_empty() || peer.len() > 256 || peer.chars().any(char::is_control)
+        }) || cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.len() > LXMF_HISTORY_CURSOR_MAX_BYTES)
+        {
+            return Err(crate::error::AppError::Runtime(
+                "LXMF history request exceeds its scalar safety limits".into(),
+            ));
+        }
+        Ok(Self {
+            peer_hash,
+            cursor,
+            limit: limit.clamp(1, LXMF_HISTORY_PAGE_MAX_ITEMS),
+        })
+    }
+}
+
+impl LxmfHistoryPage {
+    pub fn validate(self) -> AppResult<Self> {
+        if self.messages.len() > LXMF_HISTORY_PAGE_MAX_ITEMS
+            || self
+                .next_cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.len() > LXMF_HISTORY_CURSOR_MAX_BYTES)
+        {
+            return Err(crate::error::AppError::Runtime(
+                "LXMF history page exceeds its item or cursor limit".into(),
+            ));
+        }
+        let encoded_bytes = serde_json::to_vec(&self)
+            .map_err(|error| crate::error::AppError::Runtime(error.to_string()))?
+            .len();
+        if encoded_bytes > LXMF_HISTORY_PAGE_MAX_BYTES {
+            return Err(crate::error::AppError::Runtime(format!(
+                "LXMF history page exceeds the {LXMF_HISTORY_PAGE_MAX_BYTES} byte limit"
+            )));
+        }
+        Ok(self)
+    }
+}
+
 #[async_trait]
 pub trait NetworkRuntime: Send + Sync {
     fn subscribe_events(&self) -> Option<broadcast::Receiver<RuntimeBusEvent>> {
@@ -546,6 +693,25 @@ pub trait NetworkRuntime: Send + Sync {
 
     async fn stop_runtime(&self) -> AppResult<()> {
         Ok(())
+    }
+
+    async fn lifecycle_snapshot(&self) -> RuntimeLifecycleSnapshot {
+        let status = self.status().await;
+        RuntimeLifecycleSnapshot::new(
+            if status.connected {
+                RuntimeLifecycleState::Running
+            } else {
+                RuntimeLifecycleState::Stopped
+            },
+            status.backend,
+        )
+    }
+
+    async fn capability_snapshot(&self) -> RuntimeCapabilitySnapshot {
+        RuntimeCapabilitySnapshot {
+            backend: self.status().await.backend,
+            capabilities: Vec::new(),
+        }
     }
 
     async fn status(&self) -> NetworkStatus;
@@ -567,6 +733,17 @@ pub trait NetworkRuntime: Send + Sync {
         cancel: CancellationToken,
     ) -> AppResult<BrowserPage>;
 
+    async fn fetch_page_with_operation(
+        &self,
+        url: &str,
+        request_data: Option<BTreeMap<String, String>>,
+        cancel: CancellationToken,
+        operation_id: Option<String>,
+    ) -> AppResult<BrowserPage> {
+        let _ = operation_id;
+        self.fetch_page(url, request_data, cancel).await
+    }
+
     async fn download_file(
         &self,
         url: &str,
@@ -574,8 +751,29 @@ pub trait NetworkRuntime: Send + Sync {
         cancel: CancellationToken,
     ) -> AppResult<DownloadedFile>;
 
+    async fn download_file_with_operation(
+        &self,
+        url: &str,
+        downloads_dir: &Path,
+        cancel: CancellationToken,
+        operation_id: Option<String>,
+    ) -> AppResult<DownloadedFile> {
+        let _ = operation_id;
+        self.download_file(url, downloads_dir, cancel).await
+    }
+
     async fn list_messages(&self) -> AppResult<Vec<MessageSummary>>;
+    async fn lxmf_history_page(&self, request: LxmfHistoryRequest) -> AppResult<LxmfHistoryPage> {
+        let _ = request;
+        Err(crate::error::AppError::Unsupported(
+            "runtime does not expose typed LXMF history".into(),
+        ))
+    }
     async fn send_message(&self, envelope: MessageEnvelope) -> AppResult<MessageSummary>;
+    async fn cancel_lxmf_delivery(&self, message_id: &str) -> AppResult<LxmfCancelOutcome> {
+        let _ = message_id;
+        Ok(LxmfCancelOutcome::Unsupported)
+    }
     async fn create_contact(&self, peer_hash: &str, label: &str) -> AppResult<()>;
 
     async fn recover_lxmf_correlation(
@@ -652,6 +850,8 @@ pub trait NetworkRuntime: Send + Sync {
             state: "disabled".into(),
             runtime_id: None,
             active_contract_version: None,
+            event_stream_position: None,
+            config_revision: None,
             queued_messages: None,
             in_flight_messages: None,
             detail: Some("native LXMF SDK/RPC feature is not enabled".into()),
@@ -740,6 +940,7 @@ pub struct MockNetworkRuntime {
 
 #[derive(Clone, Debug)]
 struct MockRuntimeState {
+    lifecycle: RuntimeLifecycleState,
     active_identity: Option<IdentityProfile>,
     preferred_propagation_node_hash: Option<String>,
     messages: Vec<MessageSummary>,
@@ -749,10 +950,28 @@ impl Default for MockNetworkRuntime {
     fn default() -> Self {
         Self {
             state: Arc::new(Mutex::new(MockRuntimeState {
+                lifecycle: RuntimeLifecycleState::Running,
                 active_identity: None,
                 preferred_propagation_node_hash: None,
                 messages: vec![welcome_message()],
             })),
+        }
+    }
+}
+
+impl MockNetworkRuntime {
+    fn require_running(&self, operation: &str) -> AppResult<()> {
+        let lifecycle = self
+            .state
+            .lock()
+            .expect("mock runtime mutex poisoned")
+            .lifecycle;
+        if lifecycle.accepts_new_work() {
+            Ok(())
+        } else {
+            Err(crate::error::AppError::Runtime(format!(
+                "mock runtime cannot {operation} while lifecycle is {lifecycle:?}"
+            )))
         }
     }
 }
@@ -765,10 +984,87 @@ impl NetworkRuntime for MockNetworkRuntime {
         interfaces: Vec<ReticulumInterfaceProfile>,
     ) -> AppResult<()> {
         let _ = interfaces;
-        if let Some(identity) = identity {
-            self.attach_identity(identity).await?;
+        let mut state = self.state.lock().expect("mock runtime mutex poisoned");
+        if state.lifecycle == RuntimeLifecycleState::Running {
+            if identity.is_none() || state.active_identity.as_ref() == identity.as_ref() {
+                return Ok(());
+            }
+            if state.active_identity.is_none() {
+                state.active_identity = identity;
+                return Ok(());
+            }
+            return Err(crate::error::AppError::Runtime(
+                "mock runtime is already running with a different identity".into(),
+            ));
         }
+        if matches!(
+            state.lifecycle,
+            RuntimeLifecycleState::Starting | RuntimeLifecycleState::Draining
+        ) {
+            return Err(crate::error::AppError::Runtime(format!(
+                "mock runtime cannot start while lifecycle is {:?}",
+                state.lifecycle
+            )));
+        }
+        state.lifecycle = RuntimeLifecycleState::Starting;
+        if let Some(identity) = identity {
+            state.active_identity = Some(identity);
+        }
+        state.lifecycle = RuntimeLifecycleState::Running;
         Ok(())
+    }
+
+    async fn stop_runtime(&self) -> AppResult<()> {
+        let mut state = self.state.lock().expect("mock runtime mutex poisoned");
+        if state.lifecycle == RuntimeLifecycleState::Stopped {
+            return Ok(());
+        }
+        state.lifecycle = RuntimeLifecycleState::Draining;
+        state.lifecycle = RuntimeLifecycleState::Stopped;
+        Ok(())
+    }
+
+    async fn lifecycle_snapshot(&self) -> RuntimeLifecycleSnapshot {
+        RuntimeLifecycleSnapshot::new(
+            self.state
+                .lock()
+                .expect("mock runtime mutex poisoned")
+                .lifecycle,
+            RuntimeBackendName::Mock,
+        )
+    }
+
+    async fn capability_snapshot(&self) -> RuntimeCapabilitySnapshot {
+        let supported = [
+            RuntimeCapability::DirectDelivery,
+            RuntimeCapability::PropagatedDelivery,
+            RuntimeCapability::History,
+            RuntimeCapability::Attachments,
+        ]
+        .into_iter()
+        .map(|capability| RuntimeCapabilityRecord {
+            capability,
+            availability: RuntimeCapabilityAvailability::Supported,
+            source: RuntimeCapabilitySource::Configured,
+            detail: Some("mock simulation only".into()),
+        });
+        let unsupported = [
+            RuntimeCapability::IntegratedBackend,
+            RuntimeCapability::RpcBackend,
+            RuntimeCapability::SharedInstance,
+            RuntimeCapability::InterfaceMutation,
+        ]
+        .into_iter()
+        .map(|capability| RuntimeCapabilityRecord {
+            capability,
+            availability: RuntimeCapabilityAvailability::Unsupported,
+            source: RuntimeCapabilitySource::Configured,
+            detail: Some("not provided by the mock backend".into()),
+        });
+        RuntimeCapabilitySnapshot {
+            backend: RuntimeBackendName::Mock,
+            capabilities: supported.chain(unsupported).collect(),
+        }
     }
 
     async fn status(&self) -> NetworkStatus {
@@ -790,6 +1086,7 @@ impl NetworkRuntime for MockNetworkRuntime {
     }
 
     async fn announce_identity(&self) -> AppResult<bool> {
+        self.require_running("announce an identity")?;
         Ok(self
             .state
             .lock()
@@ -804,6 +1101,7 @@ impl NetworkRuntime for MockNetworkRuntime {
         request_data: Option<BTreeMap<String, String>>,
         cancel: CancellationToken,
     ) -> AppResult<BrowserPage> {
+        self.require_running("fetch a page")?;
         if cancel.is_cancelled() {
             return Err(crate::error::AppError::Runtime("request cancelled".into()));
         }
@@ -877,6 +1175,7 @@ impl NetworkRuntime for MockNetworkRuntime {
         downloads_dir: &Path,
         cancel: CancellationToken,
     ) -> AppResult<DownloadedFile> {
+        self.require_running("download a file")?;
         if cancel.is_cancelled() {
             return Err(crate::error::AppError::Runtime("download cancelled".into()));
         }
@@ -903,6 +1202,16 @@ impl NetworkRuntime for MockNetworkRuntime {
     }
 
     async fn send_message(&self, envelope: MessageEnvelope) -> AppResult<MessageSummary> {
+        self.require_running("send a message")?;
+        if envelope
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.remaining_ttl_ms().is_none())
+        {
+            return Err(crate::error::AppError::Runtime(
+                "LXMF send deadline expired before mock runtime admission".into(),
+            ));
+        }
         let attachments = envelope
             .attachments
             .iter()
@@ -973,6 +1282,7 @@ impl NetworkRuntime for MockNetworkRuntime {
     }
 
     async fn sync_propagation_messages(&self, _limit: Option<u32>) -> AppResult<()> {
+        self.require_running("synchronize propagation messages")?;
         Ok(())
     }
 
@@ -982,6 +1292,7 @@ impl NetworkRuntime for MockNetworkRuntime {
         _reason: &str,
         _sibling_aspects: bool,
     ) -> AppResult<bool> {
+        self.require_running("request a path")?;
         Ok(is_mock_known_destination(destination_hash))
     }
 
@@ -991,6 +1302,7 @@ impl NetworkRuntime for MockNetworkRuntime {
         max_requests: u32,
         _cooldown_secs: u64,
     ) -> AppResult<u32> {
+        self.require_running("warm paths")?;
         Ok(hashes
             .iter()
             .filter(|hash| is_mock_known_destination(hash))
@@ -1027,11 +1339,14 @@ impl NetworkRuntime for MockNetworkRuntime {
             pending_announces: 0,
             known_destinations: 2,
             ratchet_announces: 0,
+            path_table_available: false,
             path_table_count: 0,
+            request_failure_metrics_available: false,
             request_failures: 0,
             active_propagation_node,
             connected_to_shared_instance: false,
             is_shared_instance: false,
+            shared_instance_status_available: false,
         })
     }
 
@@ -1135,6 +1450,7 @@ fn mock_directory_candidates() -> Vec<DirectoryCandidate> {
     vec![
         DirectoryCandidate {
             destination_hash: "mock.node".into(),
+            identity_hash: None,
             display_name: "Mock Node".into(),
             kind: DirectoryKind::Node,
             associated_hash: Some("0123456789abcdef".into()),
@@ -1144,6 +1460,7 @@ fn mock_directory_candidates() -> Vec<DirectoryCandidate> {
         },
         DirectoryCandidate {
             destination_hash: "0123456789abcdef".into(),
+            identity_hash: None,
             display_name: "Welcome Bot".into(),
             kind: DirectoryKind::Peer,
             associated_hash: Some("mock.node".into()),
@@ -1153,6 +1470,7 @@ fn mock_directory_candidates() -> Vec<DirectoryCandidate> {
         },
         DirectoryCandidate {
             destination_hash: "fedcba9876543210".into(),
+            identity_hash: None,
             display_name: "Mock Propagation Node".into(),
             kind: DirectoryKind::Propagation,
             associated_hash: Some("0123456789abcdef".into()),
@@ -1309,6 +1627,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mock_lifecycle_tracks_start_and_orderly_stop() {
+        let runtime = MockNetworkRuntime::default();
+        assert_eq!(
+            runtime.lifecycle_snapshot().await.state,
+            RuntimeLifecycleState::Running
+        );
+
+        runtime
+            .start_runtime(Some(identity()), Vec::new())
+            .await
+            .expect("start mock runtime");
+        runtime
+            .start_runtime(Some(identity()), Vec::new())
+            .await
+            .expect("repeat identical mock start");
+        assert_eq!(
+            runtime.lifecycle_snapshot().await.state,
+            RuntimeLifecycleState::Running
+        );
+
+        runtime.stop_runtime().await.expect("stop mock runtime");
+        runtime
+            .stop_runtime()
+            .await
+            .expect("repeat mock stop is idempotent");
+        assert_eq!(
+            runtime.lifecycle_snapshot().await.state,
+            RuntimeLifecycleState::Stopped
+        );
+        assert!(runtime
+            .fetch_page("mock.node:/", None, CancellationToken::new())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_duplicate_start_rejects_conflicting_identity() {
+        let runtime = MockNetworkRuntime::default();
+        runtime
+            .start_runtime(Some(identity()), Vec::new())
+            .await
+            .expect("attach mock identity");
+        let mut other = identity();
+        other.hash_hex = "different".into();
+
+        let error = runtime
+            .start_runtime(Some(other), Vec::new())
+            .await
+            .expect_err("conflicting mock restart must fail");
+        assert!(error.to_string().contains("different identity"));
+        assert_eq!(
+            runtime.lifecycle_snapshot().await.state,
+            RuntimeLifecycleState::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_capabilities_are_explicit_and_backend_scoped() {
+        let runtime = MockNetworkRuntime::default();
+        let snapshot = runtime.capability_snapshot().await;
+
+        assert_eq!(snapshot.backend, RuntimeBackendName::Mock);
+        assert!(snapshot.supports(RuntimeCapability::DirectDelivery));
+        assert!(snapshot.supports(RuntimeCapability::History));
+        assert_eq!(
+            snapshot.availability(RuntimeCapability::RpcBackend),
+            RuntimeCapabilityAvailability::Unsupported
+        );
+        assert_eq!(
+            snapshot.availability(RuntimeCapability::EventStream),
+            RuntimeCapabilityAvailability::Unknown
+        );
+    }
+
+    #[tokio::test]
     async fn mock_fetch_page_returns_sample_pages_and_request_data() {
         let runtime = MockNetworkRuntime::default();
         let request_data = BTreeMap::from([("field_nickname".into(), "mesh friend".into())]);
@@ -1358,6 +1751,7 @@ mod tests {
                 delivery_mode: DeliveryMode::Propagated,
                 include_ticket: true,
                 native_reply_ticket: None,
+                operation: None,
                 attachments: Vec::new(),
             })
             .await
@@ -1425,5 +1819,47 @@ mod tests {
         assert_eq!(snapshot.announce_counts.get("node"), Some(&1));
         assert!(inspection.has_path);
         assert_eq!(inspection.hops, Some(1));
+    }
+
+    #[test]
+    fn lxmf_history_request_clamps_items_and_rejects_oversized_cursor() {
+        let request =
+            LxmfHistoryRequest::bounded(None, None, usize::MAX).expect("bounded history request");
+        assert_eq!(request.limit, LXMF_HISTORY_PAGE_MAX_ITEMS);
+        assert!(LxmfHistoryRequest::bounded(
+            None,
+            Some("x".repeat(LXMF_HISTORY_CURSOR_MAX_BYTES + 1)),
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn lxmf_history_page_rejects_item_and_byte_overload() {
+        let record = LxmfHistoryRecord {
+            message_id: "message".into(),
+            source: "peer".into(),
+            destination: "local".into(),
+            title: String::new(),
+            content: String::new(),
+            timestamp: 1,
+            direction: "in".into(),
+            receipt_status: None,
+        };
+        assert!(LxmfHistoryPage {
+            messages: vec![record.clone(); LXMF_HISTORY_PAGE_MAX_ITEMS + 1],
+            next_cursor: None,
+        }
+        .validate()
+        .is_err());
+        assert!(LxmfHistoryPage {
+            messages: vec![LxmfHistoryRecord {
+                content: "x".repeat(LXMF_HISTORY_PAGE_MAX_BYTES),
+                ..record
+            }],
+            next_cursor: None,
+        }
+        .validate()
+        .is_err());
     }
 }

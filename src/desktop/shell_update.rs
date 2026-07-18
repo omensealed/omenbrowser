@@ -236,6 +236,7 @@ impl DesktopApp {
         let now = current_epoch_ms();
         self.app.reconcile_due_lxmf_direct_timeouts(now);
         self.app.reconcile_due_lxmf_propagation_timeouts(now);
+        self.app.reconcile_due_lxmf_expiry(now);
         Task::none()
     }
 

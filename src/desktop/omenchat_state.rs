@@ -49,6 +49,7 @@ impl DesktopApp {
             session_id,
             format!("requesting path for OMENchat server {destination}"),
         );
+        self.set_omenchat_connection_state(session_id, crate::chat::ChatConnectionState::Resolving);
         let runtime = self.app.runtime.clone();
         let request_destination = destination.clone();
         Task::perform(
@@ -105,6 +106,10 @@ impl DesktopApp {
         self.omenchat.omenchat_live_retry_count.remove(&session_id);
         let generation = self.next_omenchat_reconnect_generation(session_id);
         self.set_omenchat_session_status(session_id, "reconnecting live OMENchat link".to_string());
+        self.set_omenchat_connection_state(
+            session_id,
+            crate::chat::ChatConnectionState::Reconnecting,
+        );
         self.open_live_omenchat_reconnect_task(session_id, generation, descriptor)
     }
 
@@ -118,7 +123,18 @@ impl DesktopApp {
             .omenchat_live_transports
             .contains_key(&session_id)
         {
-            self.clear_omenchat_reconnect_state(session_id);
+            self.clear_omenchat_pending_reconnect(session_id);
+            let state = if self
+                .omenchat
+                .chat_client
+                .session(session_id)
+                .is_some_and(|session| session.active_room.joined)
+            {
+                crate::chat::ChatConnectionState::Joined
+            } else {
+                crate::chat::ChatConnectionState::Authenticating
+            };
+            self.set_omenchat_connection_state(session_id, state);
             self.set_omenchat_session_status(
                 session_id,
                 "reconnect skipped: live OMENchat link is already active".into(),
@@ -126,6 +142,10 @@ impl DesktopApp {
             return Task::none();
         }
         if self.omenchat.omenchat_live_opening.contains(&session_id) {
+            self.set_omenchat_connection_state(
+                session_id,
+                crate::chat::ChatConnectionState::Reconnecting,
+            );
             self.set_omenchat_session_status(
                 session_id,
                 "reconnect skipped: live OMENchat reconnect is already pending".into(),
@@ -152,6 +172,10 @@ impl DesktopApp {
             let session_id = session.session_id;
             self.set_omenchat_session_status(session_id, status);
             self.omenchat.chat_drafts.entry(session_id).or_default();
+            self.omenchat
+                .omenchat_connection_states
+                .entry(session_id)
+                .or_default();
             return Some(session_id);
         }
 
@@ -199,6 +223,10 @@ impl DesktopApp {
             return None;
         }
         self.omenchat.chat_drafts.entry(session_id).or_default();
+        self.set_omenchat_connection_state(
+            session_id,
+            crate::chat::ChatConnectionState::Disconnected,
+        );
         self.persist_omenchat_session(session_id);
         Some(session_id)
     }
@@ -248,6 +276,10 @@ impl DesktopApp {
             return None;
         }
         self.omenchat.chat_drafts.entry(session_id).or_default();
+        self.set_omenchat_connection_state(
+            session_id,
+            crate::chat::ChatConnectionState::Disconnected,
+        );
         self.remember_omenchat_bottom(session_id);
         self.app.status.task = "created blank OMENchat client pane".into();
         Some(session_id)
@@ -353,6 +385,11 @@ impl DesktopApp {
         for event in events {
             match event {
                 ChatClientEvent::RoomJoined { session_id, .. } => {
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+                    self.set_omenchat_connection_state(
+                        *session_id,
+                        crate::chat::ChatConnectionState::Joined,
+                    );
                     self.restore_cached_omenchat_room_history(*session_id);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     if self
@@ -564,6 +601,19 @@ impl DesktopApp {
                     session_id: Some(session_id),
                     message,
                 } => {
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+                    if matches!(
+                        self.omenchat_connection_state(*session_id),
+                        crate::chat::ChatConnectionState::Resolving
+                            | crate::chat::ChatConnectionState::Connecting
+                            | crate::chat::ChatConnectionState::Authenticating
+                            | crate::chat::ChatConnectionState::Reconnecting
+                    ) {
+                        self.set_omenchat_connection_state(
+                            *session_id,
+                            crate::chat::ChatConnectionState::Failed { retryable: true },
+                        );
+                    }
                     self.set_omenchat_session_status(*session_id, format!("error: {message}"));
                 }
                 _ => {}

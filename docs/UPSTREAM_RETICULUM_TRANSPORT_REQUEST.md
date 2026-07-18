@@ -139,6 +139,11 @@ native-rns-net:off
 ```
 
 Page fetch should then be tested against a real NomadNet page and a form
-submission. The current clean adapter can establish the link and can try
-oversized request-resource submissions, but normal small requests still stop at
-the missing direct request-context send API.
+submission. OMEN's current adapter now composes the missing high-level operation
+from published link packet/context and bound `send_direct` primitives. Current
+Python tests pass direct requests, oversized request Resources, direct
+responses, large response Resources, response timeout, and cancellation after
+confirmed dispatch without replay. Two sequential Python handler requests also
+reuse one active link. The upstream request remains useful because a high-level
+helper would replace this project-local protocol composition and reduce
+maintenance risk.

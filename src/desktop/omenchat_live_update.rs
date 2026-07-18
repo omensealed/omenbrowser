@@ -42,17 +42,36 @@ impl DesktopApp {
                     .omenchat_live_transports
                     .contains_key(&session_id)
                 {
-                    self.clear_omenchat_reconnect_state(session_id);
+                    self.clear_omenchat_pending_reconnect(session_id);
+                    let state = if self
+                        .omenchat
+                        .chat_client
+                        .session(session_id)
+                        .is_some_and(|session| session.active_room.joined)
+                    {
+                        crate::chat::ChatConnectionState::Joined
+                    } else {
+                        crate::chat::ChatConnectionState::Authenticating
+                    };
+                    self.set_omenchat_connection_state(session_id, state);
                     self.set_omenchat_session_status(
                         session_id,
                         format!("path request queued for {destination}; live link remains active"),
                     );
                 } else if self.omenchat.omenchat_live_opening.contains(&session_id) {
+                    self.set_omenchat_connection_state(
+                        session_id,
+                        crate::chat::ChatConnectionState::Reconnecting,
+                    );
                     self.set_omenchat_session_status(
                         session_id,
                         format!("path request queued for {destination}; reconnect already pending"),
                     );
                 } else {
+                    self.set_omenchat_connection_state(
+                        session_id,
+                        crate::chat::ChatConnectionState::Reconnecting,
+                    );
                     self.set_omenchat_session_status(
                         session_id,
                         format!(
@@ -63,6 +82,10 @@ impl DesktopApp {
                 }
             }
             Ok(false) => {
+                self.set_omenchat_connection_state(
+                    session_id,
+                    crate::chat::ChatConnectionState::Failed { retryable: true },
+                );
                 self.set_omenchat_session_status(
                     session_id,
                     format!("path request not queued for {destination}"),
@@ -70,6 +93,10 @@ impl DesktopApp {
                 self.app.status.task = format!("OMENchat path request not queued: {destination}");
             }
             Err(error) => {
+                self.set_omenchat_connection_state(
+                    session_id,
+                    crate::chat::ChatConnectionState::Failed { retryable: true },
+                );
                 self.set_omenchat_session_status(
                     session_id,
                     format!("path request failed: {error}"),

@@ -136,17 +136,17 @@ path.
 
 These commands are for developers working from a source checkout.
 
-Browser with desktop UI, native network, and OMENchat client using the current
-live-tested path:
+Browser with desktop UI, native network, and OMENchat client using the canonical
+0.9 product path:
 
 ```bash
 cargo build --release --locked --no-default-features --features desktop-product
 ```
 
 `desktop-product` is the canonical release identity and includes bundled SQLite
-for installer/portable builds plus the `chat-client-reticulum` live-tested
-clean Reticulum 0.6 path. `chat-client-rns-clean` remains as a compatibility
-alias for older local commands. It builds
+for installer/portable builds plus the `chat-client-reticulum` Reticulum 0.9
+path. `chat-client-rns-clean` remains as a compatibility alias for older local
+commands. It builds
 the browser against `reticulum-rs`, `reticulum-rs-transport`, and `lxmf`
 without pulling the old `rns-net` compatibility stack into normal native
 networking builds.
@@ -280,6 +280,12 @@ For an interactive terminal, `--passphrase-prompt` reads with echo disabled;
 `--passphrase-stdin` supports a protected pipe. The legacy `--passphrase` form
 is deprecated because command arguments may be visible in process listings.
 
+IFAC enforcement is currently provided by omenchatd's project-local TCP client
+adapter. An IFAC-configured stock TCP server is rejected at startup because
+reticulum-rs 0.9.5 does not apply the Python IFAC wire transform on that path.
+Use an enforcing gateway as the TCP server and connect omenchatd to it as shown
+above.
+
 You can also set it during init/run:
 
 ```bash
@@ -296,16 +302,21 @@ Start the admin TUI:
 Inside the TUI, press `g` to start the live server, `c` for Monitoring, `l` for
 Logs, and `q` to quit.
 
-While running, `omenchatd` watches Reticulum interface health. If every
-configured interface repeatedly reports disconnected after a gateway restart,
-the server rebuilds its live runtime and announces again. Check Monitoring or
-`~/.omenchatd/omenchatd.log` for `interface watchdog` lines.
+While running, Reticulum 0.9 TCP interface workers own their reconnect loop and
+publish status to Monitoring. The TUI rebuilds the live runtime after fatal
+event-processing or announce failures; it does not start a competing runtime
+for an ordinary reconnecting interface. Check Monitoring or
+`~/.omenchatd/omenchatd.log` for the exact state.
 
 Run the live server:
 
 ```bash
 ./src/server/target/release/omenchatd run --home /tmp/omenchatd-test
 ```
+
+Ctrl-C/SIGINT, Unix SIGTERM, and the TUI Stop Live Server action use the same
+bounded drain: active links close, owned Reticulum workers stop and join, queue
+permits release, and logs flush before a successful exit.
 
 Install an optional systemd user service:
 
@@ -411,10 +422,18 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
 
 ## Known Release Gaps
 
-- Do not cut the next public package release until the clean Reticulum 0.6 LXMF
-  path has live smoke coverage for direct sends, propagation sync, tickets, and
-  attachments. OMENchat and NomadNet page fetch are live-tested on the clean
-  stack, but the release should not imply full LXMF parity before that check.
+- The crates and deterministic suites are aligned at Reticulum/LXMF 0.9.5.
+  Isolated current-product OMENchat reconnect/upload and NomadNet portal fetches
+  pass, as does the current Python NomadNet direct/Resource request-response
+  matrix and the pinned/current Python LXMF direct, propagated, ticket/stamp,
+  and Resource lanes. Current-Python NomadNet response timeout and explicit
+  cancellation also pass without automatic request replay. A bounded retained-
+  link soak also passes across an idle interval and one forced link replacement
+  without replay or concurrent link growth. The same exact one-link comparative
+  workload passes under the optimized release profile. Do not cut v0.9.5-1
+  until the remaining native-platform gates and the complete release checklist
+  pass. Historical
+  0.6 live results remain migration baselines.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when

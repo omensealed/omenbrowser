@@ -63,6 +63,46 @@ pub fn decode_compressed_values_payload(bytes: &[u8]) -> Result<Vec<FrameValue>,
     decode_compressed_values_body(&FrameBody::Fields(decode_values(bytes)?))
 }
 
+pub fn decode_resource_batch_payload(
+    offer: &ResourceOffer,
+    bytes: &[u8],
+) -> Result<Vec<FrameValue>, BatchError> {
+    validate_resource_offer_lengths(offer)?;
+    let fields = decode_values(bytes)?;
+    if fields.len() != 3 {
+        return Err(
+            ProtocolError::MalformedFrame("expected three compressed resource fields").into(),
+        );
+    }
+    let compression = Compression::try_from(field_as_u64(&fields[0], "compression")?)?;
+    let uncompressed_len = field_as_u64(&fields[1], "uncompressed_len")?;
+    let compressed_len = field_as_bytes(&fields[2], "payload")?.len() as u64;
+    if compression != offer.compression {
+        return Err(ProtocolError::MalformedFrame("resource compression mismatch").into());
+    }
+    if uncompressed_len != offer.uncompressed_len {
+        return Err(ProtocolError::MalformedFrame("resource uncompressed length mismatch").into());
+    }
+    if compressed_len != offer.compressed_len {
+        return Err(ProtocolError::MalformedFrame("resource compressed length mismatch").into());
+    }
+    decode_compressed_values_body(&FrameBody::Fields(fields))
+}
+
+pub fn validate_resource_offer_lengths(offer: &ResourceOffer) -> Result<(), BatchError> {
+    if offer.uncompressed_len > MAX_BATCH_UNCOMPRESSED_BYTES as u64 {
+        return Err(BatchError::Decode(
+            "resource offer exceeds uncompressed byte limit".into(),
+        ));
+    }
+    if offer.compressed_len > MAX_BATCH_COMPRESSED_BYTES as u64 {
+        return Err(BatchError::Decode(
+            "resource offer exceeds compressed byte limit".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn compressed_values_batch(values: &[FrameValue]) -> Result<CompressedBatch, BatchError> {
     let raw = encode_values(values)?;
     let compressed = compress_bzip2(&raw)?;
@@ -297,8 +337,32 @@ mod tests {
     }
 
     #[test]
+    fn resource_offer_lengths_accept_boundaries_and_reject_next_byte() {
+        let mut offer = ResourceOffer {
+            resource_id: "history:1:bounded".into(),
+            compression: Compression::Bzip2,
+            uncompressed_len: MAX_BATCH_UNCOMPRESSED_BYTES as u64,
+            compressed_len: MAX_BATCH_COMPRESSED_BYTES as u64,
+            purpose: "history".into(),
+        };
+        validate_resource_offer_lengths(&offer).expect("exact limits");
+
+        offer.uncompressed_len += 1;
+        assert!(validate_resource_offer_lengths(&offer)
+            .unwrap_err()
+            .to_string()
+            .contains("uncompressed byte limit"));
+        offer.uncompressed_len = 0;
+        offer.compressed_len += 1;
+        assert!(validate_resource_offer_lengths(&offer)
+            .unwrap_err()
+            .to_string()
+            .contains("compressed byte limit"));
+    }
+
+    #[test]
     fn rejects_advertised_and_actual_decompression_overflow() {
-        let compressed = compress_bzip2(&vec![0x41; 64]).expect("compress fixture");
+        let compressed = compress_bzip2(&[0x41; 64]).expect("compress fixture");
         let oversized = FrameBody::Fields(vec![
             FrameValue::U64(Compression::Bzip2 as u8 as u64),
             FrameValue::U64((MAX_BATCH_UNCOMPRESSED_BYTES + 1) as u64),

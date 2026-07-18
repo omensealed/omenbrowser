@@ -249,16 +249,20 @@ mod tests {
             f32::from(scrollbar_footprint + DESKTOP_SCROLL_GUTTER_EXTRA)
         );
         assert!(desktop_scroll_gutter_right() >= f32::from(scrollbar_footprint + 10));
-        assert!(DESKTOP_SCROLLBAR_SCROLLER_WIDTH <= DESKTOP_SCROLLBAR_WIDTH);
+        const {
+            assert!(DESKTOP_SCROLLBAR_SCROLLER_WIDTH <= DESKTOP_SCROLLBAR_WIDTH);
+        }
     }
 
     #[test]
     fn desktop_shell_spacing_keeps_scrollbars_clear_of_panel_borders() {
         let scrollbar_footprint = DESKTOP_SCROLLBAR_WIDTH + DESKTOP_SCROLLBAR_MARGIN;
 
-        assert!(DESKTOP_SCROLL_GUTTER_EXTRA >= DESKTOP_PANEL_PADDING);
-        assert!(DESKTOP_SCROLL_OUTER_INSET >= DESKTOP_SCROLLBAR_SCROLLER_WIDTH);
+        const {
+            assert!(DESKTOP_SCROLL_GUTTER_EXTRA >= DESKTOP_PANEL_PADDING);
+            assert!(DESKTOP_SCROLL_OUTER_INSET >= DESKTOP_SCROLLBAR_SCROLLER_WIDTH);
+            assert!(DESKTOP_SHELL_PADDING >= DESKTOP_PANEL_PADDING);
+        }
         assert!(desktop_scroll_gutter_right() > f32::from(scrollbar_footprint));
-        assert!(DESKTOP_SHELL_PADDING >= DESKTOP_PANEL_PADDING);
     }
 }

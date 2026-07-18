@@ -18,6 +18,7 @@ pub(in crate::desktop) struct ChatTimelineGroup {
 pub(in crate::desktop) struct ChatTimelineBody {
     pub(in crate::desktop) text: String,
     pub(in crate::desktop) is_action: bool,
+    pub(in crate::desktop) pending_acceptance: bool,
     pub(in crate::desktop) upload: Option<ChatTimelineUpload>,
     pub(in crate::desktop) resend: Option<ChatTimelineResend>,
 }
@@ -59,6 +60,7 @@ pub(in crate::desktop) fn chat_event_body(
         ChatEventKind::Action { body } => ChatTimelineBody {
             text: format!("* {} {body}", chat_event_actor_label(session, event)),
             is_action: true,
+            pending_acceptance: is_omenchat_local_echo_event(event),
             upload: None,
             resend: local_echo_resend(session, event, body, true),
         },
@@ -67,6 +69,7 @@ pub(in crate::desktop) fn chat_event_body(
         | ChatEventKind::System { body } => ChatTimelineBody {
             text: body.clone(),
             is_action: false,
+            pending_acceptance: is_omenchat_local_echo_event(event),
             upload: None,
             resend: match &event.kind {
                 ChatEventKind::Message { body } => local_echo_resend(session, event, body, false),
@@ -80,12 +83,21 @@ pub(in crate::desktop) fn chat_event_body(
         } => ChatTimelineBody {
             text: format!("uploaded {} ({})", filename, human_bytes(*bytes)),
             is_action: false,
+            pending_acceptance: false,
             upload: Some(ChatTimelineUpload {
                 session_id: session.session_id,
                 resource_id: resource_id.clone(),
             }),
             resend: None,
         },
+    }
+}
+
+pub(in crate::desktop) fn chat_timeline_body_text(body: &ChatTimelineBody) -> String {
+    if body.pending_acceptance {
+        format!("{}  [queued · awaiting server acceptance]", body.text)
+    } else {
+        body.text.clone()
     }
 }
 
@@ -235,6 +247,28 @@ mod tests {
         assert!(!groups[0].bodies[0].is_action);
         assert_eq!(groups[1].bodies[0].text, "* Alice waves");
         assert!(groups[1].bodies[0].is_action);
+    }
+
+    #[test]
+    fn omenchat_timeline_marks_only_unacknowledged_local_echoes_pending() {
+        let mut pending = message(1, u64::MAX - 1, 1_700_000_000, "awaiting ack");
+        pending.actor_user_id = None;
+        pending.actor_display_name = Some("You".into());
+        let session = timeline_session(1, vec![pending, message(1, 42, 1_700_000_001, "accepted")]);
+
+        let groups = chat_timeline_groups(&session);
+        let bodies = groups
+            .iter()
+            .flat_map(|group| group.bodies.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].pending_acceptance);
+        assert!(!bodies[1].pending_acceptance);
+        assert_eq!(
+            chat_timeline_body_text(bodies[0]),
+            "awaiting ack  [queued · awaiting server acceptance]"
+        );
+        assert_eq!(chat_timeline_body_text(bodies[1]), "accepted");
     }
 
     #[test]

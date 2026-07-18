@@ -125,6 +125,13 @@ impl DesktopApp {
                 self.update_send_lxmf_retry_for_conversation_row(conversation_id, key);
                 Ok(Task::none())
             }
+            Message::Conversation(ConversationMessage::CancelConversationRow {
+                conversation_id,
+                key,
+            }) => {
+                self.update_cancel_lxmf_for_conversation_row(conversation_id, key);
+                Ok(Task::none())
+            }
             Message::Conversation(ConversationMessage::DismissPaneRow {
                 conversation_id,
                 key,
@@ -189,6 +196,10 @@ impl DesktopApp {
             }
             Message::Conversation(ConversationMessage::SendRetryForRow(key)) => {
                 self.update_send_lxmf_retry_for_row(key);
+                Ok(Task::none())
+            }
+            Message::Conversation(ConversationMessage::CancelRow(key)) => {
+                self.update_cancel_lxmf_for_row(key);
                 Ok(Task::none())
             }
             Message::Conversation(ConversationMessage::SyncPropagationForRow(key)) => {

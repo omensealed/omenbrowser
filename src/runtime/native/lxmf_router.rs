@@ -5,8 +5,11 @@ use crate::runtime::network::{
     LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, OutboundDeliveryState, OutboundStatus,
 };
 
+pub const NATIVE_DIRECT_LXMF_CORRELATION_MAX_ITEMS: usize = 4096;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingDirectLxmf {
+    pub message_id: String,
     pub peer_hash: String,
     pub submitted_at: f64,
     pub packet_proof_observed_at: Option<f64>,
@@ -138,9 +141,43 @@ impl NativeDirectLxmfRouter {
         submitted_at: f64,
         propagation_fallback_node: Option<String>,
     ) {
-        self.pending.insert(
+        self.insert_correlated_submission(
+            message_id.clone(),
             message_id,
+            peer_hash,
+            submitted_at,
+            propagation_fallback_node,
+        );
+    }
+
+    pub fn insert_correlated_submission(
+        &mut self,
+        correlation_id: String,
+        message_id: String,
+        peer_hash: String,
+        submitted_at: f64,
+        propagation_fallback_node: Option<String>,
+    ) {
+        if !self.pending.contains_key(&correlation_id)
+            && self.pending.len() >= NATIVE_DIRECT_LXMF_CORRELATION_MAX_ITEMS
+        {
+            let oldest = self
+                .pending
+                .iter()
+                .min_by(|(left_id, left), (right_id, right)| {
+                    left.submitted_at
+                        .total_cmp(&right.submitted_at)
+                        .then_with(|| left_id.cmp(right_id))
+                })
+                .map(|(id, _)| id.clone());
+            if let Some(oldest) = oldest {
+                self.pending.remove(&oldest);
+            }
+        }
+        self.pending.insert(
+            correlation_id,
             PendingDirectLxmf {
+                message_id,
                 peer_hash,
                 submitted_at,
                 packet_proof_observed_at: None,
@@ -151,31 +188,44 @@ impl NativeDirectLxmfRouter {
         );
     }
 
+    pub fn remove_correlation(&mut self, correlation_id: &str) -> bool {
+        self.pending.remove(correlation_id).is_some()
+    }
+
+    pub fn take_correlation(&mut self, correlation_id: &str) -> Option<PendingDirectLxmf> {
+        self.pending.remove(correlation_id)
+    }
+
     pub fn recover_direct_correlations(&mut self, messages: &[MessageSummary]) -> usize {
         let mut recovered = 0usize;
         for message in messages {
             if !message_can_recover_direct(message) {
                 continue;
             }
-            let Some(message_id) = message_runtime_id(message) else {
+            let Some(correlation_id) = message_runtime_id(message) else {
                 continue;
             };
-            if self.pending.contains_key(&message_id) {
+            if self.pending.contains_key(&correlation_id) {
                 continue;
             }
-            self.pending.insert(
-                message_id,
-                PendingDirectLxmf {
-                    peer_hash: message.peer_hash.clone(),
-                    submitted_at: message_submitted_at(message).unwrap_or(message.timestamp),
-                    packet_proof_observed_at: message_packet_proof_observed(message)
-                        .then_some(message.timestamp),
-                    peer_activity_observed_at: message_peer_activity_observed(message)
-                        .then_some(message.timestamp),
-                    propagation_fallback_node: message_propagation_fallback_node(message),
-                    no_receipt_observed_at: message_no_receipt_observed_at(message),
-                },
+            let submitted_at = message_submitted_at(message).unwrap_or(message.timestamp);
+            self.insert_correlated_submission(
+                correlation_id.clone(),
+                message
+                    .message_id
+                    .clone()
+                    .unwrap_or_else(|| correlation_id.clone()),
+                message.peer_hash.clone(),
+                submitted_at,
+                message_propagation_fallback_node(message),
             );
+            if let Some(pending) = self.pending.get_mut(&correlation_id) {
+                pending.packet_proof_observed_at =
+                    message_packet_proof_observed(message).then_some(message.timestamp);
+                pending.peer_activity_observed_at =
+                    message_peer_activity_observed(message).then_some(message.timestamp);
+                pending.no_receipt_observed_at = message_no_receipt_observed_at(message);
+            }
             recovered += 1;
         }
         recovered
@@ -187,12 +237,30 @@ impl NativeDirectLxmfRouter {
         destination_hash: String,
         rtt: f64,
     ) -> (OutboundStatus, bool) {
+        let (status, matched_pending, _first_observation) =
+            self.receipt_status_for_packet(packet_hash, destination_hash, rtt);
+        (status, matched_pending)
+    }
+
+    pub fn receipt_status_for_packet(
+        &mut self,
+        packet_hash: String,
+        destination_hash: String,
+        rtt: f64,
+    ) -> (OutboundStatus, bool, bool) {
         let pending = self.pending.get_mut(&packet_hash);
         let matched_pending = pending.is_some();
+        let first_observation = pending
+            .as_ref()
+            .is_some_and(|pending| pending.packet_proof_observed_at.is_none());
         let peer_hash = pending
             .as_ref()
             .map(|pending| pending.peer_hash.clone())
             .unwrap_or(destination_hash);
+        let message_id = pending
+            .as_ref()
+            .map(|pending| pending.message_id.clone())
+            .unwrap_or_else(|| packet_hash.clone());
         if let Some(pending) = pending {
             pending.packet_proof_observed_at = Some(pending.submitted_at + rtt.max(0.0));
         }
@@ -200,7 +268,7 @@ impl NativeDirectLxmfRouter {
         (
             OutboundStatus {
                 peer_hash,
-                message_id: Some(packet_hash),
+                message_id: Some(message_id),
                 delivered: false,
                 failed: false,
                 state: OutboundDeliveryState::SubmittedToRnsNet,
@@ -208,6 +276,7 @@ impl NativeDirectLxmfRouter {
                 rtt: Some(rtt),
             },
             matched_pending,
+            first_observation,
         )
     }
 
@@ -245,15 +314,15 @@ impl NativeDirectLxmfRouter {
                     .iter()
                     .any(|peer_hash| pending.peer_hash.eq_ignore_ascii_case(peer_hash))
             })
-            .map(|(message_id, pending)| {
+            .map(|(correlation_id, pending)| {
                 pending.peer_activity_observed_at =
                     Some(pending.peer_activity_observed_at.unwrap_or(observed_at));
                 LxmfDeliveryEvidence {
                     peer_hash: pending.peer_hash.clone(),
-                    message_id: Some(message_id.clone()),
+                    message_id: Some(pending.message_id.clone()),
                     kind: LxmfDeliveryEvidenceKind::InboundPeerMessage,
                     detail: Some(format!(
-                        "{detail};packet_hash:{message_id};observed_peer_hash:{observed_peer_hash};peer_activity_observed:true;observed_at:{observed_at:.3}"
+                        "{detail};packet_hash:{correlation_id};observed_peer_hash:{observed_peer_hash};peer_activity_observed:true;observed_at:{observed_at:.3}"
                     )),
                     rtt: None,
                     observed_at: Some(observed_at),
@@ -269,7 +338,7 @@ impl NativeDirectLxmfRouter {
     ) -> Vec<DirectLxmfTimeoutEvent> {
         self.pending
             .iter_mut()
-            .filter_map(|(message_id, pending)| {
+            .filter_map(|(_correlation_id, pending)| {
                 if pending.packet_proof_observed_at.is_some()
                     || pending.peer_activity_observed_at.is_some()
                     || pending.no_receipt_observed_at.is_some()
@@ -280,7 +349,7 @@ impl NativeDirectLxmfRouter {
                 pending.no_receipt_observed_at = Some(now);
                 Some(DirectLxmfTimeoutEvent {
                     peer_hash: pending.peer_hash.clone(),
-                    message_id: message_id.clone(),
+                    message_id: pending.message_id.clone(),
                     submitted_at: pending.submitted_at,
                     observed_at: now,
                     propagation_fallback_node: pending.propagation_fallback_node.clone(),
@@ -331,7 +400,10 @@ fn message_can_recover_direct(message: &MessageSummary) -> bool {
     }
     if !matches!(
         message.fields.get("native_lxmf_state").map(String::as_str),
-        Some("submitted_to_rns_net") | Some("submitted_to_runtime") | Some("submitted_unconfirmed")
+        Some("submitted_to_rns_net")
+            | Some("submitted_to_runtime")
+            | Some("submitted_unconfirmed")
+            | Some("submitted_to_clean_reticulum")
     ) {
         return false;
     }
@@ -342,7 +414,10 @@ fn message_can_recover_direct(message: &MessageSummary) -> bool {
             .is_none_or(|value| {
                 matches!(
                     value.as_str(),
-                    "waiting_for_packet_proof" | "rns_packet_proof_peer_unconfirmed"
+                    "waiting_for_packet_proof"
+                        | "waiting_for_transport_receipt"
+                        | "waiting_for_resource_completion"
+                        | "rns_packet_proof_peer_unconfirmed"
                 )
             });
     let terminal_receipt = message
@@ -358,6 +433,13 @@ fn message_runtime_id(message: &MessageSummary) -> Option<String> {
         .get("native_lxmf_packet_hash")
         .filter(|value| !value.is_empty())
         .cloned()
+        .or_else(|| {
+            message
+                .fields
+                .get("native_lxmf_resource_hash")
+                .filter(|value| !value.is_empty())
+                .cloned()
+        })
         .or_else(|| message.message_id.clone())
 }
 
@@ -581,6 +663,94 @@ mod tests {
     }
 
     #[test]
+    fn recovers_clean_transport_receipt_hash_to_lxmf_message_id_mapping() {
+        let mut router = NativeDirectLxmfRouter::default();
+        let mut message = direct_message(BTreeMap::from([
+            (
+                "native_lxmf_state".into(),
+                "submitted_to_clean_reticulum".into(),
+            ),
+            (
+                "native_lxmf_proof_state".into(),
+                "waiting_for_transport_receipt".into(),
+            ),
+            ("native_lxmf_packet_hash".into(), "packet-clean-a".into()),
+            ("native_lxmf_submitted_at".into(), "123.5".into()),
+        ]));
+        message.message_id = Some("lxmf-clean-a".into());
+
+        assert_eq!(router.recover_direct_correlations(&[message]), 1);
+        assert_eq!(
+            router
+                .pending("packet-clean-a")
+                .map(|pending| pending.message_id.as_str()),
+            Some("lxmf-clean-a")
+        );
+        let (status, matched, first) =
+            router.receipt_status_for_packet("packet-clean-a".into(), "fallback".into(), 0.0);
+        assert!(matched);
+        assert!(first);
+        assert_eq!(status.message_id.as_deref(), Some("lxmf-clean-a"));
+        assert!(!status.delivered);
+    }
+
+    #[test]
+    fn clean_transport_receipt_wait_uses_the_durable_direct_timeout_transition() {
+        let mut message = direct_message(BTreeMap::from([
+            (
+                "native_lxmf_state".into(),
+                "submitted_to_clean_reticulum".into(),
+            ),
+            (
+                "native_lxmf_proof_state".into(),
+                "waiting_for_transport_receipt".into(),
+            ),
+            ("native_lxmf_packet_hash".into(), "packet-clean-a".into()),
+            ("native_lxmf_submitted_at".into(), "10.0".into()),
+        ]));
+        message.message_id = Some("lxmf-clean-a".into());
+
+        let transition = crate::messaging::direct_lxmf_timeout_transition(&message, 60.0, 45.0)
+            .expect("clean transport wait becomes unconfirmed");
+
+        assert_eq!(
+            transition.state,
+            crate::messaging::DirectLxmfRouterState::NoReceiptObserved
+        );
+        assert_eq!(transition.state_field, "submitted_unconfirmed");
+        assert_eq!(transition.proof_state, "proof_not_observed");
+    }
+
+    #[test]
+    fn recovers_clean_resource_hash_to_lxmf_message_id_mapping() {
+        let mut router = NativeDirectLxmfRouter::default();
+        let mut message = direct_message(BTreeMap::from([
+            (
+                "native_lxmf_state".into(),
+                "submitted_to_clean_reticulum".into(),
+            ),
+            (
+                "native_lxmf_proof_state".into(),
+                "waiting_for_resource_completion".into(),
+            ),
+            (
+                "native_lxmf_resource_hash".into(),
+                "resource-clean-a".into(),
+            ),
+            ("native_lxmf_submitted_at".into(), "123.5".into()),
+        ]));
+        message.message_id = Some("lxmf-clean-resource-a".into());
+
+        assert_eq!(router.recover_direct_correlations(&[message]), 1);
+        assert_eq!(
+            router
+                .pending("resource-clean-a")
+                .map(|pending| pending.message_id.as_str()),
+            Some("lxmf-clean-resource-a")
+        );
+    }
+
+    #[test]
     fn reconcile_timeouts_emits_once_and_keeps_pending_for_late_proof() {
         let mut router = NativeDirectLxmfRouter::default();
         router.insert_submission(
@@ -615,6 +785,74 @@ mod tests {
         let _ = router.inbound_peer_evidence(&message, "peer activity", 20.0);
 
         assert!(router.reconcile_timeouts(60.0, 45.0).is_empty());
+    }
+
+    #[test]
+    fn receipt_correlation_preserves_lxmf_message_id_and_is_idempotent() {
+        let mut router = NativeDirectLxmfRouter::default();
+        router.insert_correlated_submission(
+            "packet-hash-a".into(),
+            "lxmf-message-a".into(),
+            "00112233445566778899aabbccddeeff".into(),
+            10.0,
+            None,
+        );
+
+        let (first, matched, first_observation) =
+            router.receipt_status_for_packet("packet-hash-a".into(), "fallback".into(), 0.25);
+        let (duplicate, duplicate_matched, duplicate_first) =
+            router.receipt_status_for_packet("packet-hash-a".into(), "fallback".into(), 0.25);
+
+        assert!(matched);
+        assert!(first_observation);
+        assert!(duplicate_matched);
+        assert!(!duplicate_first);
+        assert_eq!(first.message_id.as_deref(), Some("lxmf-message-a"));
+        assert_eq!(duplicate.message_id, first.message_id);
+        assert!(!first.delivered);
+        assert_eq!(first.state, OutboundDeliveryState::SubmittedToRnsNet);
+    }
+
+    #[test]
+    fn direct_receipt_correlations_evict_oldest_at_the_item_limit() {
+        let mut router = NativeDirectLxmfRouter::default();
+        for index in 0..=NATIVE_DIRECT_LXMF_CORRELATION_MAX_ITEMS {
+            router.insert_correlated_submission(
+                format!("packet-{index:05}"),
+                format!("message-{index:05}"),
+                "00112233445566778899aabbccddeeff".into(),
+                index as f64,
+                None,
+            );
+        }
+
+        assert_eq!(
+            router.pending_len(),
+            NATIVE_DIRECT_LXMF_CORRELATION_MAX_ITEMS
+        );
+        assert!(router.pending("packet-00000").is_none());
+        assert!(router
+            .pending(&format!(
+                "packet-{:05}",
+                NATIVE_DIRECT_LXMF_CORRELATION_MAX_ITEMS
+            ))
+            .is_some());
+    }
+
+    #[test]
+    fn failed_dispatch_can_remove_pre_registered_receipt_correlation() {
+        let mut router = NativeDirectLxmfRouter::default();
+        router.insert_correlated_submission(
+            "packet-a".into(),
+            "message-a".into(),
+            "00112233445566778899aabbccddeeff".into(),
+            10.0,
+            None,
+        );
+
+        assert!(router.remove_correlation("packet-a"));
+        assert!(!router.remove_correlation("packet-a"));
+        assert_eq!(router.pending_len(), 0);
     }
 
     #[test]

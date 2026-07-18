@@ -106,7 +106,14 @@ omenchat://<destination_hash>
 ```
 
 The Directory also lists announced OMENchat servers when their announces are
-seen.
+seen. A live Reticulum announce now retains both the `omenchat.node` destination
+hash and the announcing public identity hash. The selected-server panel labels
+the latter `announce-verified`, meaning Reticulum authenticated the announce and
+the destination/identity relationship; it does not mean the operator or user
+has trusted that server. User-managed Saved/Trusted state remains separate.
+Legacy directory records without identity metadata remain readable and show
+that a fresh live announce is required. Request Path provides a deliberate,
+rate-controlled discovery refresh without periodic UI polling.
 
 In `omenchatd tui`, use **Announce Now** after the live server is running to
 send the OMENchat and NomadNet portal announces immediately. This is useful for
@@ -255,6 +262,13 @@ boundary before session dispatch. That boundary retains at most 256 frames/16
 MiB, 16 resources/32 MiB, and 256 close events/256 KiB of close reasons. Frame
 and resource payload ownership is moved into staging rather than cloned. Drain
 resets exact byte accounting; staging overload is counted separately.
+Failed or cancelled inbound resource terminals use a separate 64-item/256 KiB
+staging budget. On dispatch, the owning live link conservatively releases all
+pending history/user-list offers because Reticulum's transfer hash is not yet
+correlated to an OMENchat resource identifier. The healthy link stays open so
+the user can retry history or reconnect, and monitoring exposes terminal depth,
+bytes, and rejections. Link closure still drops the entire session transport
+and all of its bounded pending state.
 At the clean reticulum-rs bridge, explicit `omenchat-frame:` completions are
 limited to the 1 MiB frame ceiling and `omenchat-resource:` completions to
 8 MiB before an application event is created. Oversize completions produce a
@@ -291,13 +305,99 @@ trusted.
 
 ## Expected Client Behavior
 
+- Project connection state is typed as disconnected, resolving, connecting,
+  authenticating, joined, reconnecting, draining, or failed with explicit
+  retryability. The desktop updates this state at path, link, handshake/join,
+  close, retry, and session-removal ownership boundaries; UI and diagnostics do
+  not infer it from free-form status text. The state table is bounded by the
+  existing 64-session catalog and is not persisted as network truth. Restored
+  sessions begin disconnected and reconcile from new live events.
+- Offer a manual reconnect only while disconnected or after a retryable
+  failure. Resolving, connecting, authenticating, joined, reconnecting,
+  draining, and terminal-failure states do not expose a competing retry action;
+  automatic recovery remains independently bounded.
 - Reconnect when a live link drops.
+- Retry dropped links with deterministic per-session jittered exponential
+  backoff. Automatic attempts use 1, 2, 4, 8, and 16 second base delays with
+  bounded +/-20% jitter, then pause after five attempts. A successful open
+  preserves the attempt budget until the replacement link remains active for
+  30 seconds; short-lived reconnects therefore continue the existing backoff
+  instead of creating a rapid reconnect loop. Manual reconnect deliberately
+  starts a fresh user-requested budget.
 - Preserve recent history after restart.
 - Sync recent room history on join/reconnect.
 - Schedule live heartbeat, reconnect, and delayed recent-history maintenance
   from the nearest explicit deadline; idle desktops do not poll these paths.
 - Keep local echo messages and retry failed sends.
+- Label each locally queued room message or action as awaiting server
+  acceptance until its correlated `MessageAck` replaces the temporary event
+  identifier. The existing delayed resend action remains available if that
+  acknowledgement never arrives.
+- Retain at most 64 unacknowledged local-echo correlations per session and 256
+  across the client. Saturation rejects before sending a frame, keeps the draft
+  through the normal error path, and asks the user to wait for acceptance or
+  reconnect. Acknowledgement, reconnect, and session close release entries;
+  monitoring reports current and rejected counts.
+- Offer a copyable, redacted JSON diagnostics report from every OMENchat pane.
+  The report is capped at 8 KiB and contains typed connection state, the public
+  server destination and announce-verified identity, bounded queue/resource
+  counters, link identifiers, and transport counters. It deliberately omits
+  message bodies, composer drafts, user lists, room names, filenames, local
+  paths, credentials, private identity material, and all free-form status/error
+  text. Disconnect detail is reduced to a fixed non-secret category.
+- Show byte progress for the newest active inbound OMENchat Resource in the
+  matching session pane. Attribution requires the typed runtime source,
+  inbound direction, and exact active link identity to agree; another session's
+  transfer is never shown. The current Reticulum API does not expose a verified
+  mapping between its transfer hash and the OMENchat history/user-list offer
+  identifier, so the pane truthfully labels the payload as potentially history,
+  users, or media instead of claiming a more specific purpose.
 - Show unread state when chat panes are minimized.
+
+Frame `seq` values correlate live requests and responses. omenchatd treats an
+exact same-link replay of a room message, action, notice, part, or mutating
+command as the same logical operation: it returns the retained origin response
+without repeating storage, rate accounting, peer/user-list fan-out, or a
+moderation disconnect. Read-only commands remain uncached. A
+same-sequence/different-content collision is rejected. Part and kick/ban link
+effects occur only after a successful typed command result, so rejection or
+rate limiting cannot part or disconnect a peer. This protection is deliberately
+link-scoped because protocol v1 has no persisted client-session nonce;
+cross-link or server-restart mutation retry remains an explicit compatibility
+gap rather than an unsafe global identity/sequence assumption.
+
+Client sequence allocation is scoped to the live session/link. Each new link
+starts at nonzero sequence `1`; the session-open and initial-join pair is
+reserved atomically. The client never wraps on an active link because
+omenchatd's bounded replay cache may still retain an older mutation with the
+same numeric sequence. Exhaustion therefore rejects before frame construction
+and asks for reconnect. Only the existing link-retirement boundary clears the
+allocator and pending `(session, sequence)` correlations; cancelling an
+individual transfer does not reset sequence ownership. Independent links may
+use the same numeric sequence without cross-session acknowledgement or upload
+correlation.
+
+An active client session owns one registered Reticulum link. Room frames,
+heartbeats, history requests, and resource transfers reuse that link; they do
+not open a link per operation. An explicit reconnect is a new ownership
+generation. Starting a newer generation cancels the prior open task, and clean
+Reticulum opens are serialized through 32 fixed destination stripes. Before a
+new explicit open calls Reticulum 0.9 `Transport::link()`, it retires any
+tracked clean link for that destination. This is required because Reticulum
+0.9 otherwise returns the same non-closed outbound link, allowing a stale
+completion to close the newer attempt's handle. Other destination stripes stay
+parallel. Cancellation after link allocation closes and resets the pending
+upstream handle before releasing the stripe, and session close removes and
+cancels the bounded per-session owner.
+These lifecycle rules do not change OMENchat frames, resources, identity
+binding, destination names, or reconnect timing.
+
+History and user-list resource offers are bound to their eventual payloads.
+The client rejects an invalid purpose or advertised size before consuming
+pending-offer capacity, then requires the payload's compression and compressed/
+uncompressed lengths to match exactly before decoding. A failed integrity check
+cannot update room history or user state, and the consumed payload is not left
+in the session resource cache.
 
 Each open client session retains at most 1,024 history events and an estimated
 8 MiB of owned event/string storage. Initial restore and new live events keep
@@ -308,6 +408,57 @@ rows from a batch that do not fit in memory, and can be paged again later. The
 byte estimate uses owned string capacities plus event storage rather than wire
 length alone. These are local cache limits and do not change event IDs, frames,
 history page sizes, or deduplication keys.
+
+Mixed application-store compatibility is exercised independently of the live
+transport. Hardened `0.6.0-1` seeds an isolated `chat.sqlite`; `0.9.5-1`
+reopens it and appends; `0.6.0-1` reopens that current write and appends; and
+`0.9.5-1` performs the final reopen. Server metadata, room metadata, active
+room, ordered event identifiers, and event content must remain exact at every
+stage. This proves bidirectional store-format reopening only. It does not yet
+prove a history Resource transfer.
+
+Live mixed-version compatibility is gated separately in both directions. The
+current `0.9.5-1` desktop client connects to the immutable hardened `0.6.0-1`
+standalone server, and the hardened old client separately connects to the
+current standalone server. Each isolated ephemeral-loopback case opens its
+link and OMENchat session, joins a room, sends one message, and observes the
+echoed room event. The harness retains only public versions and validation
+booleans. Automatic reconnect remains pending outside this single-exchange
+matrix.
+
+A separate mixed restart case covers the current client and hardened old
+server. After one complete exchange, the old server stops within a bounded
+SIGTERM deadline, reopens the same server home with the same destination, and
+the current client reopens its original application root in a fresh process.
+The second link/session/join/message/echo exchange passes. Because the old
+server predates the owned SIGTERM drain path, this is bounded process-restart
+and state-reopen evidence, not orderly old-server drain or automatic reconnect
+inside a continuously running desktop. The reciprocal case also passes: the
+old client reopens its original root after current omenchatd performs its owned
+orderly SIGTERM drain and restarts with the same destination. Automatic
+reconnect inside a continuously running desktop remains pending.
+
+A separate current-product harness now keeps one OMENbrowser process alive
+while current omenchatd performs its owned orderly shutdown and restarts with
+the same destination. The client observes the old link close, opens a different
+link, reconnects the same in-memory session, and receives a post-restart message
+echo. This closes the headless product-process reconnect boundary. An
+interactive Iced-window restart soak remains separate evidence.
+
+Current client/server upload qualification also passes with two isolated
+clients. The first client uploads and fetches a deterministic 873-byte fixture;
+the second discovers and fetches the same server-held Resource. Both decoded
+Resource events report the exact byte count. Raw payloads and identifiers are
+discarded, and this does not change upload quotas or the OMENchat protocol.
+
+The current client also passes a live history-Resource case against the
+hardened old server. The isolated server threshold is set to one byte so a
+normal small message uses its production Resource history path. A second client
+with a distinct root receives `resource_data`, decodes `history_prepended`
+inside that Resource event, and observes the exact first-client message. This
+does not change the production threshold. The reciprocal case also passes: the
+hardened old client decodes the current server's Resource-backed history and
+observes the exact first-client message under the same isolated threshold.
 
 The client admits at most 64 simultaneously retained server sessions. Opening
 another session is refused with a visible error; an existing session is never

@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use omenbrowser_rs::messaging::{
-    DeliveryMode, MessageStore, MessageSummary, MessagingService, TransportMethod,
+    DeliveryMode, MessageStore, MessageSummary, MessagingService, OutboundComposeRequest,
+    OutboundOperationIdentity, TransportMethod,
 };
 use omenbrowser_rs::runtime::{
     LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, MockNetworkRuntime, OutboundDeliveryState,
-    OutboundStatus,
+    OutboundStatus, RuntimeLxmfDeliveryState, RuntimeLxmfDeliveryUpdate,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -65,6 +66,96 @@ fn service(name: &str) -> MessagingService {
     MessagingService::new(Arc::new(MockNetworkRuntime::default()), store)
 }
 
+fn sdk_delivery_update(
+    state: RuntimeLxmfDeliveryState,
+    terminal: bool,
+    seq_no: u64,
+) -> RuntimeLxmfDeliveryUpdate {
+    RuntimeLxmfDeliveryUpdate {
+        message_id: "packet-a".into(),
+        peer_hash: Some("peer".into()),
+        previous_state: None,
+        state,
+        terminal,
+        attempts: 2,
+        reason_code: Some("router_receipt".into()),
+        last_updated_ms: 42,
+        event_id: format!("delivery-{seq_no}"),
+        seq_no,
+        cursor: format!("cursor-{seq_no}"),
+    }
+}
+
+#[test]
+fn sdk_delivery_update_persists_typed_terminal_state_and_rejects_regression() {
+    let service = service("sdk-delivery-persistence");
+    service
+        .store()
+        .append(outbound_direct_message())
+        .expect("append message");
+
+    assert!(service
+        .apply_sdk_delivery_update(&sdk_delivery_update(
+            RuntimeLxmfDeliveryState::Delivered,
+            true,
+            2,
+        ))
+        .expect("apply delivered update"));
+    assert!(!service
+        .apply_sdk_delivery_update(&sdk_delivery_update(
+            RuntimeLxmfDeliveryState::Sent,
+            false,
+            3,
+        ))
+        .expect("reject terminal regression"));
+
+    let thread = service.conversation("peer").expect("reload thread");
+    let message = &thread.messages[0];
+    assert!(message.delivered);
+    assert!(!message.failed);
+    assert_eq!(
+        message
+            .fields
+            .get("native_lxmf_sdk_state")
+            .map(String::as_str),
+        Some("delivered")
+    );
+    assert_eq!(
+        message
+            .fields
+            .get("native_lxmf_sdk_seq_no")
+            .map(String::as_str),
+        Some("2")
+    );
+}
+
+#[tokio::test]
+async fn expired_outbound_operation_is_rejected_before_runtime_admission() {
+    let service = service("expired-operation-admission");
+    let operation = OutboundOperationIdentity::generate_at(1, 1_000).expect("expired operation");
+
+    let error = service
+        .compose_with_operation(OutboundComposeRequest {
+            peer_hash: "peer".into(),
+            title: "Expired".into(),
+            content: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            attachments: Vec::new(),
+            operation,
+        })
+        .await
+        .expect_err("expired operation must not reach the runtime");
+
+    assert!(error.to_string().contains("deadline expired"));
+    assert!(service
+        .store()
+        .get_thread("peer")
+        .expect("empty thread")
+        .messages
+        .is_empty());
+}
+
 #[tokio::test]
 async fn messaging_service_syncs_runtime_messages_and_composes_outbound() {
     let service = service("sync-compose");
@@ -87,7 +178,39 @@ async fn messaging_service_syncs_runtime_messages_and_composes_outbound() {
 
     assert!(!synced.is_empty());
     assert_eq!(sent.transport_method, TransportMethod::Propagated);
+    assert!(sent.fields.contains_key("native_lxmf_sdk_idempotency_key"));
+    assert!(sent.fields.contains_key("native_lxmf_sdk_correlation_id"));
     assert_eq!(service.threads().expect("threads").len(), 1);
+}
+
+#[tokio::test]
+async fn cancellation_outcome_is_explicit_and_does_not_claim_terminal_state() {
+    let service = service("cancel-outcome");
+    service
+        .store()
+        .append(outbound_direct_message())
+        .expect("append message");
+
+    let update = service
+        .cancel_delivery("peer", "packet-a")
+        .await
+        .expect("cancel outcome");
+
+    assert_eq!(
+        update.outcome,
+        omenbrowser_rs::runtime::LxmfCancelOutcome::Unsupported
+    );
+    let thread = service.conversation("peer").expect("reload thread");
+    let message = &thread.messages[0];
+    assert!(!message.delivered);
+    assert!(!message.failed);
+    assert_eq!(
+        message
+            .fields
+            .get("native_lxmf_sdk_cancel_outcome")
+            .map(String::as_str),
+        Some("unsupported")
+    );
 }
 
 #[test]
@@ -110,6 +233,50 @@ fn rns_packet_proof_does_not_mark_direct_lxmf_delivered() {
             observed_at: Some(12.5),
         })
         .expect("apply evidence"));
+
+    let thread = service.conversation("peer").expect("thread");
+    let message = &thread.messages[0];
+    assert!(!message.delivered);
+    assert!(!message.failed);
+    assert_eq!(
+        message
+            .fields
+            .get("native_lxmf_proof_state")
+            .map(String::as_str),
+        Some("rns_packet_proof_peer_unconfirmed")
+    );
+    assert_eq!(
+        message
+            .fields
+            .get("native_lxmf_receipt_state")
+            .map(String::as_str),
+        Some("rns_packet_proof_peer_delivery_unconfirmed")
+    );
+    assert_eq!(
+        message.fields.get("native_lxmf_state").map(String::as_str),
+        Some("transport_proof_received")
+    );
+}
+
+#[test]
+fn rns_packet_proof_status_is_conservative_without_a_second_evidence_event() {
+    let service = service("rns-proof-status-only");
+    service
+        .store()
+        .append(outbound_direct_message())
+        .expect("append message");
+
+    assert!(service
+        .update_outbound_status(&OutboundStatus {
+            peer_hash: "peer".into(),
+            message_id: Some("packet-a".into()),
+            delivered: false,
+            failed: false,
+            state: OutboundDeliveryState::SubmittedToRnsNet,
+            evidence: Some("rns_packet_proof".into()),
+            rtt: None,
+        })
+        .expect("apply proof status"));
 
     let thread = service.conversation("peer").expect("thread");
     let message = &thread.messages[0];
