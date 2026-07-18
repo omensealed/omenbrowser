@@ -278,9 +278,25 @@ function Assert-InstalledIdentity {
 function Test-GuiLaunch {
     param([string]$Binary, [string]$AppRoot)
 
-    $process = Start-Process -FilePath $Binary -ArgumentList @("--app-root", $AppRoot) -PassThru
+    $stdoutPath = Join-Path $AppRoot "installed-gui-stdout.log"
+    $stderrPath = Join-Path $AppRoot "installed-gui-stderr.log"
+    $process = Start-Process -FilePath $Binary -ArgumentList @("--app-root", $AppRoot) `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru `
+        -Environment @{
+            RUST_BACKTRACE = "1"
+            RUST_LOG = "omenbrowser_rs=debug,iced_wgpu=debug,wgpu_core=info"
+        }
     Start-Sleep -Seconds 4
     if ($process.HasExited) {
+        foreach ($logPath in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+                $label = Split-Path -Leaf $logPath
+                Write-Host "== bounded $label =="
+                Get-Content -LiteralPath $logPath -Tail 80 |
+                    ForEach-Object { $_.Replace($AppRoot, "<isolated-app-root>") } |
+                    Write-Host
+            }
+        }
         throw "installed GUI exited during launch smoke with code $($process.ExitCode)"
     }
     Stop-Process -Id $process.Id -Force

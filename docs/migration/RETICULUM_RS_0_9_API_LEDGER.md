@@ -4310,3 +4310,12 @@ non-product identity `omenbrowser-installer`; the ignored `--release` argument
 is also removed because a custom config already owns the binary directory and
 profile. Product name, version, binaries, formats, and lifecycle policy remain
 unchanged.
+
+The second hosted run built both prior/current NSIS and WiX artifacts, then
+installed and upgraded the NSIS package successfully before the installed GUI
+exited with status 1 in the runner session. `Start-Process` did not forward the
+child's error text, so the application-level cause was not observable. The
+launch gate remains fatal and now redirects stdout/stderr into the explicit
+isolated root, emits only the final 80 lines with that root redacted, and enables
+a bounded startup backtrace/log filter. This is diagnostic hardening, not an
+exception for headless runners or a relaxation of GUI launch qualification.
