@@ -94,6 +94,8 @@ grep -q 'installMode = "currentUser"' "$installer_script" \
   || fail "NSIS installer is not explicitly current-user scoped"
 grep -q 'allowDowngrades = \$false' "$installer_script" \
   || fail "Windows installers do not reject downgrades"
+grep -q 'name = "omenbrowser-installer"' "$installer_script" \
+  || fail "Windows installer config lacks an explicit package identity"
 
 publish_job="$(sed -n '/^  publish:$/,$p' .github/workflows/package.yml)"
 grep -q '^      - package$' <<<"$publish_job" \

@@ -4300,3 +4300,13 @@ individual SHA-256 files. Hosted Windows execution remains the completion gate;
 Linux can validate only script policy and workflow structure. Rollback removes
 the installer script, workflow steps/artifacts, verifier assertions, and these
 documents together without affecting portable packages.
+
+The first hosted run reached the native Windows packager and exposed a CLI
+configuration edge before creating an installer: cargo-packager 0.11.8 tries to
+discover nearby Cargo package metadata when a custom JSON config omits its
+logical `name`, passing the config file through a directory-oriented lookup and
+failing with Windows error 267. The generated config now supplies the explicit
+non-product identity `omenbrowser-installer`; the ignored `--release` argument
+is also removed because a custom config already owns the binary directory and
+profile. Product name, version, binaries, formats, and lifecycle policy remain
+unchanged.

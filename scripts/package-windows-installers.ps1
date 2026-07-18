@@ -172,6 +172,7 @@ function Write-PackagerConfig {
     )
 
     $config = [ordered]@{
+        name = "omenbrowser-installer"
         productName = $ProductName
         version = $Version
         identifier = $Identifier
@@ -201,7 +202,7 @@ function Invoke-Packager {
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     $config = Join-Path $TemporaryDirectory "packager-$($Version.Replace('.', '-')).json"
     Write-PackagerConfig $config $Version $Destination $BinariesDirectory
-    Invoke-Checked "cargo" @("packager", "--release", "--config", $config)
+    Invoke-Checked "cargo" @("packager", "--config", $config)
 
     $setup = @(Get-ChildItem -LiteralPath $Destination -Filter "*.exe" -File)
     $msi = @(Get-ChildItem -LiteralPath $Destination -Filter "*.msi" -File)
