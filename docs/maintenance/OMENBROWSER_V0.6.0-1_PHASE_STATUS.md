@@ -54,6 +54,15 @@ reproducible`, `superseded`, and `not yet inspected`.
 
 ## Supplemental hardening units
 
+- Bounded quick-runner build storage: after dependency policy passed, the
+  pull-request quick job exhausted the GitHub-hosted filesystem while the
+  Actions runner wrote its own diagnostic log. The quick job now caches Cargo
+  registries/tools without either workspace target tree and disables
+  incremental artifacts on the ephemeral runner. Commands and test scope are
+  unchanged. The exact pinned action source confirms the input; local workflow
+  syntax/security and quick gates pass before the hosted rerun. Roll back both
+  storage controls together, with recurrence of the observed disk failure as
+  the risk.
 - Exact local-crate dependency identity: the pull-request all-feature policy
   gate exposed that path-only declarations count as wildcard requirements.
   Root and standalone-server `omen-ifac-tcp` dependencies now retain their

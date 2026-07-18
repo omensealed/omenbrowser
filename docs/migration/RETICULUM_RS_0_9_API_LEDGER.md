@@ -4201,3 +4201,26 @@ locked checks for the affected native profiles and release-version consistency.
 No crate source, lockfile package, runtime behavior, wire byte, configuration,
 schema, identity path, or storage format changed. Rollback removes the two
 version constraints together, but would restore a denied wildcard requirement.
+
+## Release qualification unit 60: bounded quick-runner build storage
+
+The corrected pull-request quick job passed dependency policy and then exhausted
+its GitHub-hosted runner filesystem during the release quick gate. The hosted
+annotation reports `No space left on device` while the Actions runner attempted
+to write its own diagnostic log; no test assertion or compiler diagnostic
+failed. The quick job previously restored workspace target caches for both the
+root application and standalone server before compiling their overlapping
+product profiles.
+
+The quick job now retains registry and installed-tool caching but sets the
+pinned rust-cache action's `cache-targets` input to `false`. It also disables
+incremental compilation for that ephemeral runner. Every release command,
+feature identity, test, and package-script assertion is unchanged; only retained
+build artifacts are reduced. The action input was verified against the exact
+pinned action source. Workflow syntax/security checks and the local quick gate
+remain the focused regression gates, followed by a fresh hosted run.
+
+No production source, dependency, lockfile, runtime behavior, wire byte,
+configuration, schema, identity path, or storage format changed. Rollback
+removes the environment setting and cache input together, but can restore the
+observed hosted-runner disk exhaustion when both workspace targets are cached.
