@@ -4279,3 +4279,24 @@ The focused full-server test is repeated under the same feature identity before
 the native rerun. Rollback removes the single completion wait and this ledger
 entry, restoring nondeterministic observation of an accepted asynchronous
 operation.
+
+## Release qualification unit 63: native Windows installer boundary
+
+The Windows package job now pins cargo-packager 0.11.8 and produces browser-only
+unsigned NSIS setup and WiX MSI artifacts in addition to the separate browser
+and omenchatd portable ZIPs. The installer configuration explicitly retains
+omenchatd as a separately deployed package and never installs or starts it as a
+service. NSIS is current-user scoped; both formats reject downgrades. Cargo
+numeric revision `0.9.5-1` maps deterministically to MSI `0.9.5.1`.
+
+The reviewed script pre-seeds every downloaded NSIS/WiX executable archive and
+plugin from an immutable release URL after checking a repository-pinned SHA-256,
+including the ApplicationID plugin that cargo-packager 0.11.8 otherwise fetches
+without a strong hash. It creates a bounded prior-revision fixture from the same
+reviewed binary, installs it, upgrades to the current package, launches the GUI
+with an explicit temporary app root, uninstalls, and requires a user-data
+sentinel to survive for each format. Final artifacts must be unsigned and have
+individual SHA-256 files. Hosted Windows execution remains the completion gate;
+Linux can validate only script policy and workflow structure. Rollback removes
+the installer script, workflow steps/artifacts, verifier assertions, and these
+documents together without affecting portable packages.

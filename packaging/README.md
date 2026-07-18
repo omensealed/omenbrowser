@@ -142,8 +142,30 @@ dist/omenchatd-<version>-windows-x86_64.zip
 ```
 
 The browser archive does not install or auto-start omenchatd. The server archive
-contains no service installer. NSIS setup and WiX MSI packages remain separate
-release units and must not be inferred from portable ZIP success.
+contains no service installer.
+
+## Windows installers
+
+The native Windows job pins `cargo-packager` 0.11.8 and creates two additional
+unsigned browser packages after the portable build:
+
+```text
+dist/OMENbrowser_rs-<version>-windows-x86_64-setup-unsigned.exe
+dist/OMENbrowser_rs-<version>-windows-x86_64-unsigned.msi
+```
+
+The setup executable uses current-user NSIS installation. The MSI uses WiX and
+maps the Cargo numeric revision deterministically: `0.9.5-1` becomes MSI
+`0.9.5.1`. Both reject downgrades. Neither package contains, installs, or starts
+omenchatd; the standalone server remains the separate ZIP above.
+
+Before artifact upload, the job creates a prior-revision installer fixture from
+the same reviewed binary, installs it, upgrades to the current package, launches
+the installed GUI against an explicit temporary `--app-root`, uninstalls, and
+proves that a sentinel in the isolated user-data root remains. The NSIS and WiX
+tool archives and plugins come from immutable release URLs and are verified
+against repository-pinned SHA-256 values before extraction. The final artifacts
+are explicitly checked as unsigned and receive separate SHA-256 files.
 
 ## GitHub Actions
 
@@ -158,6 +180,7 @@ Two workflows are included:
   - runs manually or for `v*` tags;
   - builds the Linux release tarball, `.deb`, and AppImage;
   - builds separate Windows desktop and omenchatd portable ZIPs on Windows;
+  - builds and lifecycle-tests unsigned browser NSIS and WiX installers;
   - can run the packaged local OMENchat smoke;
   - uploads package artifacts and checksums from a read-only build job;
   - publishes tag artifacts only from a dependent `release` environment job
