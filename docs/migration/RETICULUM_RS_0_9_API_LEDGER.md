@@ -4242,6 +4242,13 @@ and both publication dependencies. NSIS, WiX MSI, install/upgrade/uninstall,
 GUI launch, and signing remain explicit release gates; portable ZIP success does
 not satisfy them.
 
+The first hosted package execution compiled both release binaries and exposed an
+invalid packaging assertion: unlike the browser, omenchatd's stable version
+output does not include a target triple. The corrected boundary verifies the
+native `rustc` host is exactly `x86_64-pc-windows-msvc`, retains the browser's
+compiled target assertion, and checks omenchatd's version and full/live feature
+identity according to its existing contract. Production output is unchanged.
+
 No runtime crate, production source, wire byte, configuration, schema, identity
 path, or storage format changed. Rollback removes the PowerShell script, Windows
 job/artifact dependency, verifier assertions, and packaging documentation

@@ -17,15 +17,21 @@ function Invoke-Cargo {
 function Read-PackageVersion {
     param([string]$ManifestPath)
 
-    $manifest = Get-Content -Raw -LiteralPath $ManifestPath
-    $package = [regex]::Match(
-        $manifest,
-        '(?ms)^\[package\]\s*.*?^version\s*=\s*"([^"]+)"'
-    )
-    if (-not $package.Success) {
-        throw "package version not found in $ManifestPath"
+    $inPackage = $false
+    foreach ($line in Get-Content -LiteralPath $ManifestPath) {
+        $trimmed = $line.Trim()
+        if ($trimmed -eq "[package]") {
+            $inPackage = $true
+            continue
+        }
+        if ($inPackage -and $trimmed.StartsWith("[")) {
+            break
+        }
+        if ($inPackage -and $trimmed -match '^version\s*=\s*"([^"]+)"') {
+            return $Matches[1]
+        }
     }
-    return $package.Groups[1].Value
+    throw "package version not found in $ManifestPath"
 }
 
 function Write-Sha256 {
@@ -43,6 +49,19 @@ $version = Read-PackageVersion "Cargo.toml"
 $serverVersion = Read-PackageVersion "src/server/Cargo.toml"
 if ($serverVersion -ne $version) {
     throw "package version mismatch: browser=$version server=$serverVersion"
+}
+
+$rustcIdentity = (& rustc -vV | Out-String)
+if ($LASTEXITCODE -ne 0) {
+    throw "rustc identity command failed with exit code $LASTEXITCODE"
+}
+$hostLine = @($rustcIdentity -split "\r?\n" | Where-Object { $_.StartsWith("host: ") })
+if ($hostLine.Count -ne 1) {
+    throw "rustc identity did not report exactly one host target"
+}
+$hostTarget = $hostLine[0].Substring("host: ".Length).Trim()
+if ($hostTarget -ne "x86_64-pc-windows-msvc") {
+    throw "unsupported Windows package host: $hostTarget"
 }
 
 Write-Host "== Building Windows desktop product =="
@@ -88,7 +107,6 @@ foreach ($required in @(
 }
 foreach ($required in @(
     "omenchatd $version",
-    "target=x86_64-pc-windows-msvc",
     "server-full:on",
     "live-reticulum:on"
 )) {
