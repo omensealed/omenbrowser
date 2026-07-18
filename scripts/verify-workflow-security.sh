@@ -94,5 +94,8 @@ grep -q 'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0' .gith
   || fail "reviewed appimagetool checksum missing"
 grep -q 'sha256sum --check --strict' .github/workflows/package.yml \
   || fail "appimagetool checksum verification missing"
+grep -Fq "github.event_name != 'workflow_dispatch' || inputs.run_package_smoke == 'true'" \
+  .github/workflows/package.yml \
+  || fail "tag packaging does not require the package smoke gate"
 
 echo "workflow security verification: pass"

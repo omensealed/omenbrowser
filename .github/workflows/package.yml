@@ -94,7 +94,7 @@ jobs:
             src/server/target/release/omenchatd
 
       - name: Package release gate
-        if: ${{ inputs.run_package_smoke == 'true' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_package_smoke == 'true' }}
         run: bash scripts/release-check.sh package dist/OMENbrowser_rs-latest.tar.gz
 
       - name: Build Debian package

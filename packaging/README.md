@@ -27,6 +27,10 @@ compatibility floor for systems in the Ubuntu 20.04 / Debian 11 / Linux Mint 20
 era and newer, without changing the OMENbrowser_rs source code or statically
 linking glibc.
 
+Tag-triggered package runs always execute the isolated packaged OMENchat smoke.
+Manual workflow runs may disable that expensive smoke while iterating on package
+construction, but that option cannot weaken a `v*` release run.
+
 Before publishing Linux artifacts, run:
 
 ```sh

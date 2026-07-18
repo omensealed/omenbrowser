@@ -4253,3 +4253,10 @@ No runtime crate, production source, wire byte, configuration, schema, identity
 path, or storage format changed. Rollback removes the PowerShell script, Windows
 job/artifact dependency, verifier assertions, and packaging documentation
 together; existing Linux packaging remains independent.
+
+The same unit closes a tag-path qualification gap found during the manual
+artifact run. `run_package_smoke` is a workflow-dispatch input and is absent on
+tag pushes, so the previous equality check skipped the package smoke for actual
+releases. Manual runs may still disable it, while every non-manual `v*` run now
+executes the isolated packaged OMENchat gate. The workflow verifier preserves
+that event condition.
