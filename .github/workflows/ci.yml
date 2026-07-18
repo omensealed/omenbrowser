@@ -67,6 +67,9 @@ jobs:
           bash -n scripts/package-appimage.sh
           bash -n scripts/check-glibc-floor.sh
           bash -n scripts/verify-product-features.sh
+          bash -n scripts/run-pinned-python-reticulum.sh
+          bash -n scripts/run-mixed-0-6-0-9-lxmf.sh
+          bash -n scripts/run-mixed-0-6-0-9-propagation.sh
           bash -n scripts/verify-tui-dependencies.sh
           bash -n scripts/test-tui-lifecycle.sh
           bash -n scripts/test-tui-real-pty.sh

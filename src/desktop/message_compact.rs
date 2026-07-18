@@ -8,6 +8,32 @@ pub(crate) fn lxmf_message_compact_status(message: &MessageSummary) -> Option<St
             "Incoming LXMF".into()
         });
     }
+    if let Some(state) = message
+        .fields
+        .get("native_lxmf_sdk_state")
+        .map(String::as_str)
+    {
+        return Some(match state {
+            "queued" => "Queued by LXMF".into(),
+            "dispatching" => "LXMF dispatching".into(),
+            "in_flight" => "LXMF delivery in flight".into(),
+            "sent" => "Sent; peer delivery unconfirmed".into(),
+            "delivered" => "LXMF delivered to peer".into(),
+            "failed" => message
+                .fields
+                .get("native_lxmf_sdk_reason_code")
+                .map(|reason| format!("LXMF failed: {reason}"))
+                .unwrap_or_else(|| "LXMF delivery failed".into()),
+            "cancelled" => "LXMF delivery cancelled".into(),
+            "expired" => "LXMF delivery expired".into(),
+            "rejected" => message
+                .fields
+                .get("native_lxmf_sdk_reason_code")
+                .map(|reason| format!("LXMF rejected: {reason}"))
+                .unwrap_or_else(|| "LXMF delivery rejected".into()),
+            _ => "LXMF delivery state unknown".into(),
+        });
+    }
     if message.failed {
         return Some(
             message
@@ -193,6 +219,24 @@ mod tests {
         assert_eq!(
             lxmf_message_compact_status(&message).as_deref(),
             Some("LXMF router delivered; no retry needed")
+        );
+    }
+
+    #[test]
+    fn lxmf_message_compact_status_preserves_typed_terminal_reason() {
+        let mut message = message_with_fields(BTreeMap::from([
+            ("native_lxmf_sdk_state".into(), "rejected".into()),
+            (
+                "native_lxmf_sdk_reason_code".into(),
+                "stamp_required".into(),
+            ),
+            ("native_lxmf_sdk_terminal".into(), "true".into()),
+        ]));
+        message.failed = true;
+
+        assert_eq!(
+            lxmf_message_compact_status(&message).as_deref(),
+            Some("LXMF rejected: stamp_required")
         );
     }
 }

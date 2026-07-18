@@ -40,21 +40,25 @@ impl DesktopApp {
     }
 
     pub(in crate::desktop) fn open_live_omenchat_reconnect_task(
-        &self,
+        &mut self,
         session_id: ChatSessionId,
         generation: u64,
         descriptor: OmenChatDescriptor,
     ) -> Task<Message> {
         let runtime = self.app.runtime.clone();
         let destination_hash = descriptor.server_destination.clone();
+        let cancel = crate::runtime::CancellationToken::new();
+        if let Some(previous) = self
+            .omenchat
+            .omenchat_live_open_cancellations
+            .insert(session_id, cancel.clone())
+        {
+            previous.cancel();
+        }
         Task::perform(
             async move {
                 let result = runtime
-                    .open_omenchat_link(
-                        &destination_hash,
-                        Duration::from_secs(30),
-                        crate::runtime::CancellationToken::new(),
-                    )
+                    .open_omenchat_link(&destination_hash, Duration::from_secs(30), cancel)
                     .await
                     .map_err(|error| error.to_string());
                 (session_id, generation, descriptor, result)
@@ -82,7 +86,7 @@ impl DesktopApp {
         }
         let mut tasks = Vec::new();
         let now = current_epoch_ms();
-        let max_auto_attempts = 5u8;
+        let max_auto_attempts = super::OMENCHAT_RECONNECT_MAX_ATTEMPTS;
         let candidates = self
             .omenchat
             .chat_client
@@ -133,6 +137,10 @@ impl DesktopApp {
                 session_id,
                 "reconnecting live OMENchat link".to_string(),
             );
+            self.set_omenchat_connection_state(
+                session_id,
+                crate::chat::ChatConnectionState::Reconnecting,
+            );
             tasks.push(self.open_live_omenchat_reconnect_task(session_id, generation, descriptor));
         }
 
@@ -161,6 +169,10 @@ impl DesktopApp {
                     return Task::none();
                 };
                 self.place_omenchat_session_preferring_active_blank(session_id);
+                self.set_omenchat_connection_state(
+                    session_id,
+                    crate::chat::ChatConnectionState::Failed { retryable: true },
+                );
                 self.persist_workspace_panes("workspace panes");
                 self.app.status.task = format!("OMENchat live link failed: {error}");
                 return Task::none();
@@ -181,6 +193,10 @@ impl DesktopApp {
             self.app.status.task = "OMENchat live session failed to initialize".into();
             return Task::none();
         };
+        self.set_omenchat_connection_state(
+            session_id,
+            crate::chat::ChatConnectionState::Authenticating,
+        );
         self.send_omenchat_outgoing_frames(opened.link_id, transport.take_outgoing_frames());
         self.omenchat.chat_drafts.entry(session_id).or_default();
         self.remember_omenchat_bottom(session_id);
@@ -209,30 +225,35 @@ impl DesktopApp {
             return Task::none();
         }
         self.omenchat.omenchat_live_opening.remove(&session_id);
+        self.omenchat
+            .omenchat_live_open_cancellations
+            .remove(&session_id);
         let opened = match result {
             Ok(opened) => opened,
             Err(error) => {
-                let attempts = self
-                    .omenchat
-                    .omenchat_live_retry_count
-                    .entry(session_id)
-                    .and_modify(|count| *count = count.saturating_add(1))
-                    .or_insert(1);
-                self.omenchat
-                    .omenchat_live_retry_after
-                    .insert(session_id, current_epoch_ms().saturating_add(15_000));
-                let status = if *attempts >= 5 {
+                let (attempts, retry_after) =
+                    self.schedule_omenchat_reconnect(session_id, current_epoch_ms());
+                let status = if retry_after.is_none() {
                     format!(
                         "{}; automatic reconnect paused after {attempts} attempts, use Reconnect to try again",
                         omenchat_live_open_error_status(&error)
                     )
                 } else {
                     format!(
-                        "{}; automatic reconnect attempt {attempts}/5",
-                        omenchat_live_open_error_status(&error)
+                        "{}; automatic reconnect attempt {attempts}/{} scheduled with backoff",
+                        omenchat_live_open_error_status(&error),
+                        super::OMENCHAT_RECONNECT_MAX_ATTEMPTS,
                     )
                 };
                 self.set_omenchat_session_status(session_id, status);
+                self.set_omenchat_connection_state(
+                    session_id,
+                    if retry_after.is_none() {
+                        crate::chat::ChatConnectionState::Failed { retryable: true }
+                    } else {
+                        crate::chat::ChatConnectionState::Reconnecting
+                    },
+                );
                 self.app.status.task = format!("OMENchat live reconnect failed: {error}");
                 return Task::none();
             }
@@ -246,12 +267,20 @@ impl DesktopApp {
             descriptor,
         );
         self.apply_omenchat_client_events_status(&events);
+        self.set_omenchat_connection_state(
+            session_id,
+            if self
+                .omenchat
+                .chat_client
+                .session(session_id)
+                .is_some_and(|session| session.active_room.joined)
+            {
+                crate::chat::ChatConnectionState::Joined
+            } else {
+                crate::chat::ChatConnectionState::Authenticating
+            },
+        );
         self.send_omenchat_outgoing_frames(opened.link_id, transport.take_outgoing_frames());
-        self.omenchat.omenchat_live_retry_after.remove(&session_id);
-        self.omenchat.omenchat_live_retry_count.remove(&session_id);
-        self.omenchat
-            .omenchat_live_reconnect_generation
-            .remove(&session_id);
         self.omenchat.chat_drafts.entry(session_id).or_default();
         self.remember_omenchat_bottom(session_id);
         self.persist_omenchat_session(session_id);
@@ -328,7 +357,7 @@ mod tests {
         assert!(omenchat_live_open_error_status("has no known identity key")
             .contains("path/key missing"));
         assert!(omenchat_live_open_error_status(
-            "timed out waiting for Reticulum 0.6 link establishment"
+            "timed out waiting for Reticulum 0.9 link establishment"
         )
         .contains("Link handshake"));
         assert!(
@@ -346,6 +375,11 @@ mod tests {
         let stale_generation = desktop.next_omenchat_reconnect_generation(session_id);
         let current_generation = desktop.next_omenchat_reconnect_generation(session_id);
         desktop.omenchat.omenchat_live_opening.insert(session_id);
+        let current_cancel = crate::runtime::CancellationToken::new();
+        desktop
+            .omenchat
+            .omenchat_live_open_cancellations
+            .insert(session_id, current_cancel.clone());
 
         let _ = desktop.handle_omenchat_live_reconnect_result(
             session_id,
@@ -355,6 +389,11 @@ mod tests {
         );
 
         assert!(desktop.omenchat.omenchat_live_opening.contains(&session_id));
+        assert!(!current_cancel.is_cancelled());
+        assert!(desktop
+            .omenchat
+            .omenchat_live_open_cancellations
+            .contains_key(&session_id));
         assert_eq!(
             desktop
                 .omenchat
@@ -373,6 +412,10 @@ mod tests {
         );
 
         assert!(!desktop.omenchat.omenchat_live_opening.contains(&session_id));
+        assert!(!desktop
+            .omenchat
+            .omenchat_live_open_cancellations
+            .contains_key(&session_id));
         assert_eq!(
             desktop
                 .omenchat
@@ -381,6 +424,63 @@ mod tests {
                 .copied()
                 .unwrap_or(0),
             1
+        );
+    }
+
+    #[test]
+    fn newer_omenchat_reconnect_cancels_prior_open_generation() {
+        let mut desktop =
+            desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-reconnect-cancellation");
+        let descriptor = test_descriptor();
+        let session_id = desktop.open_omenchat_status_session(descriptor.clone(), "waiting".into());
+        let prior_cancel = crate::runtime::CancellationToken::new();
+        desktop
+            .omenchat
+            .omenchat_live_open_cancellations
+            .insert(session_id, prior_cancel.clone());
+
+        let task = desktop.open_live_omenchat_reconnect_task(session_id, 2, descriptor);
+
+        assert!(prior_cancel.is_cancelled());
+        assert!(desktop
+            .omenchat
+            .omenchat_live_open_cancellations
+            .get(&session_id)
+            .is_some_and(|cancel| !cancel.is_cancelled()));
+        drop(task);
+    }
+
+    #[test]
+    fn omenchat_reconnect_limit_projects_retryable_failed_state() {
+        let mut desktop =
+            desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-reconnect-failed-state");
+        let descriptor = test_descriptor();
+        let session_id = desktop.open_omenchat_status_session(descriptor.clone(), "waiting".into());
+        desktop
+            .omenchat
+            .omenchat_live_retry_count
+            .insert(session_id, 5);
+        let generation = desktop.next_omenchat_reconnect_generation(session_id);
+        desktop.omenchat.omenchat_live_opening.insert(session_id);
+
+        let _ = desktop.handle_omenchat_live_reconnect_result(
+            session_id,
+            generation,
+            descriptor,
+            Err("link unavailable".into()),
+        );
+
+        assert_eq!(
+            desktop.omenchat_connection_state(session_id),
+            crate::chat::ChatConnectionState::Failed { retryable: true }
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_retry_count
+                .get(&session_id)
+                .copied(),
+            Some(5)
         );
     }
 
@@ -450,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn omenchat_delayed_reconnect_clears_stale_retry_state_when_link_is_active() {
+    fn omenchat_delayed_reconnect_clears_pending_work_but_preserves_active_retry_budget() {
         let mut desktop =
             desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-active-reconnect-clear");
         let session_id =
@@ -486,10 +586,10 @@ mod tests {
             .omenchat
             .omenchat_live_retry_after
             .contains_key(&session_id));
-        assert!(!desktop
-            .omenchat
-            .omenchat_live_retry_count
-            .contains_key(&session_id));
+        assert_eq!(
+            desktop.omenchat.omenchat_live_retry_count.get(&session_id),
+            Some(&3)
+        );
         assert!(!desktop
             .omenchat
             .omenchat_live_reconnect_generation

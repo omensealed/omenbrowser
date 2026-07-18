@@ -7,13 +7,13 @@ use crate::micron::parse_micron;
 use crate::micron::render::render_document;
 
 use super::super::{
-    desktop_message_is_retry_candidate, desktop_message_propagation_sync_label,
-    desktop_message_retry_labels, failed_message_container_style, format_epoch_secs,
-    incoming_message_container_style, lxmf_message_compact_stamp_status,
-    lxmf_message_compact_status, lxmf_message_status_lines, outgoing_message_container_style,
-    selected_message_container_style, status_container_style, ui_size, ConversationMessage,
-    Message, CONVERSATION_MICRON_PREVIEW_WIDTH, CONVERSATION_PREVIEW_CHARS,
-    CONVERSATION_PREVIEW_LINES,
+    desktop_message_is_cancel_candidate, desktop_message_is_retry_candidate,
+    desktop_message_propagation_sync_label, desktop_message_retry_labels,
+    failed_message_container_style, format_epoch_secs, incoming_message_container_style,
+    lxmf_message_compact_stamp_status, lxmf_message_compact_status, lxmf_message_status_lines,
+    outgoing_message_container_style, selected_message_container_style, status_container_style,
+    ui_size, ConversationMessage, Message, CONVERSATION_MICRON_PREVIEW_WIDTH,
+    CONVERSATION_PREVIEW_CHARS, CONVERSATION_PREVIEW_LINES,
 };
 use super::{
     action_grid, conversation_message_attachment_rows, omen_button_owned, section_card,
@@ -113,6 +113,15 @@ pub(in crate::desktop) fn message_bubble<'a>(
                 }),
             ));
         }
+        if desktop_message_is_cancel_candidate(message) {
+            actions.push(subtle_button_owned(
+                "Cancel delivery".into(),
+                Message::Conversation(ConversationMessage::CancelConversationRow {
+                    conversation_id,
+                    key: message_summary_key(message),
+                }),
+            ));
+        }
         if let Some(sync_label) = desktop_message_propagation_sync_label(message) {
             actions.push(omen_button_owned(
                 sync_label.into(),
@@ -206,6 +215,15 @@ pub(in crate::desktop) fn selected_message_details_card(
             Message::Conversation(ConversationMessage::SendRetryForConversationRow {
                 conversation_id,
                 key: retry_key,
+            }),
+        ));
+    }
+    if desktop_message_is_cancel_candidate(message) {
+        header_actions.push(subtle_button_owned(
+            "Cancel delivery".into(),
+            Message::Conversation(ConversationMessage::CancelConversationRow {
+                conversation_id,
+                key: message_summary_key(message),
             }),
         ));
     }

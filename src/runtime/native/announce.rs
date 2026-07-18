@@ -35,11 +35,14 @@ impl NativeAnnounceState {
             pending_announces: self.recent.len() as u32,
             known_destinations: self.recent.len() as u32,
             ratchet_announces: self.ratchet_announces,
+            path_table_available: false,
             path_table_count: 0,
+            request_failure_metrics_available: false,
             request_failures: 0,
             active_propagation_node: None,
             connected_to_shared_instance: false,
             is_shared_instance: false,
+            shared_instance_status_available: false,
         }
     }
 
@@ -50,6 +53,7 @@ impl NativeAnnounceState {
             .rev()
             .map(|announce| DirectoryCandidate {
                 destination_hash: announce.destination_hash.clone(),
+                identity_hash: announce.identity_hash.clone(),
                 display_name: announce.display_name.clone(),
                 kind: announce.kind.clone(),
                 associated_hash: announce.associated_hash.clone(),
@@ -92,6 +96,7 @@ pub async fn payload_from_announce_event(
 
     AnnouncePayload {
         destination_hash,
+        identity_hash: Some(identity.address_hash.to_hex_string()),
         display_name,
         kind,
         associated_hash,
@@ -212,11 +217,38 @@ mod tests {
 
     use super::*;
 
+    fn hex_bytes(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    const FIXED_PRIVATE_IDENTITY: [u8; 64] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c,
+        0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
+        0x3c, 0x3d, 0x3e, 0x3f,
+    ];
+
+    fn fixed_input_destination_hash(app_name: &str, aspect: &str) -> String {
+        let private_identity = rns_transport::identity::PrivateIdentity::from_private_key_bytes(
+            &FIXED_PRIVATE_IDENTITY,
+        )
+        .expect("load fixed input identity");
+        rns_transport::destination::SingleInputDestination::new(
+            private_identity,
+            rns_transport::destination::DestinationName::new(app_name, aspect),
+        )
+        .desc
+        .address_hash
+        .to_hex_string()
+    }
+
     #[test]
     fn maps_known_announce_name_hashes_to_directory_kinds() {
         let node = rns_transport::destination::DestinationName::new("nomadnetwork", "node");
         let peer = rns_transport::destination::DestinationName::new("lxmf", "delivery");
         let propagation = rns_transport::destination::DestinationName::new("lxmf", "propagation");
+        let omenchat = rns_transport::destination::DestinationName::new("omenchat", "node");
         let unknown = rns_transport::destination::DestinationName::new("other", "aspect");
 
         assert_eq!(
@@ -232,9 +264,64 @@ mod tests {
             DirectoryKind::Propagation
         );
         assert_eq!(
+            kind_from_name_hash(omenchat.as_name_hash_slice().try_into().unwrap()),
+            DirectoryKind::OmenChat
+        );
+        assert_eq!(
             kind_from_name_hash(unknown.as_name_hash_slice().try_into().unwrap()),
             DirectoryKind::Unknown
         );
+    }
+
+    #[test]
+    fn fixed_identity_preserves_python_compatible_destination_hashes() {
+        let private_identity = rns_transport::identity::PrivateIdentity::from_private_key_bytes(
+            &FIXED_PRIVATE_IDENTITY,
+        )
+        .expect("load fixed identity");
+        let identity = *private_identity.as_identity();
+        assert_eq!(
+            identity.address_hash.to_hex_string(),
+            "aca31af0441d81dbec71e82da0b4b5f5"
+        );
+
+        for (app_name, aspect, expected_name_hash, expected_destination_hash) in [
+            (
+                "nomadnetwork",
+                "node",
+                "213e6311bcec54ab4fde",
+                "8e484af42dd1c865a87fb2d16a5d8e63",
+            ),
+            (
+                "lxmf",
+                "delivery",
+                "6ec60bc318e2c0f0d908",
+                "fae321c442e3c9bdcd7a3e79d850e03c",
+            ),
+            (
+                "lxmf",
+                "propagation",
+                "e03a09b77ac21b22258e",
+                "809879e19dd239c50bf8cbf6a6bd4bae",
+            ),
+            (
+                "omenchat",
+                "node",
+                "6962d95d0bb3bd5596ff",
+                "f24dd05da9d491e038fdfb3ee26a4959",
+            ),
+        ] {
+            let name = rns_transport::destination::DestinationName::new(app_name, aspect);
+            assert_eq!(hex_bytes(name.as_name_hash_slice()), expected_name_hash);
+            assert_eq!(
+                associated_hash(identity, app_name, aspect),
+                expected_destination_hash
+            );
+            assert_eq!(
+                fixed_input_destination_hash(app_name, aspect),
+                expected_destination_hash
+            );
+        }
     }
 
     #[test]
@@ -284,6 +371,7 @@ mod tests {
         let mut state = NativeAnnounceState::default();
         let first = AnnouncePayload {
             destination_hash: "abc".into(),
+            identity_hash: Some("00112233445566778899aabbccddeeff".into()),
             display_name: "Node A".into(),
             kind: DirectoryKind::Node,
             associated_hash: Some("peer".into()),
@@ -305,6 +393,10 @@ mod tests {
         assert_eq!(snapshot.pending_announces, 1);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].display_name, "Node A Updated");
+        assert_eq!(
+            candidates[0].identity_hash.as_deref(),
+            Some("00112233445566778899aabbccddeeff")
+        );
     }
 
     #[test]
@@ -312,6 +404,7 @@ mod tests {
         let mut state = NativeAnnounceState::default();
         state.ingest(AnnouncePayload {
             destination_hash: "peer".into(),
+            identity_hash: None,
             display_name: "Peer".into(),
             kind: DirectoryKind::Peer,
             associated_hash: None,
@@ -344,6 +437,7 @@ mod tests {
         let mut state = NativeAnnounceState::default();
         state.ingest(AnnouncePayload {
             destination_hash: "prop".into(),
+            identity_hash: None,
             display_name: "Propagation".into(),
             kind: DirectoryKind::Propagation,
             associated_hash: Some("peer".into()),

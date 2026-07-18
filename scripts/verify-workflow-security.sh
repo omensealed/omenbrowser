@@ -32,6 +32,8 @@ done
 for feature in desktop-product tui server-headless server-full; do
   grep -q -- "--features $feature" "$native_workflow" \
     || fail "native workflow lacks feature profile $feature"
+  grep -q -- "--features $feature --all-targets -- -D warnings" "$native_workflow" \
+    || fail "native workflow lacks all-target strict Clippy for $feature"
 done
 grep -q '^      - name: Check and test root terminal UI$' "$native_workflow" \
   || fail "native workflow lacks the root terminal UI gate"
@@ -41,6 +43,12 @@ grep -q '^      - name: Run isolated terminal lifecycle smoke$' "$native_workflo
   || fail "native workflow lacks the isolated terminal lifecycle smoke"
 grep -q 'bash scripts/test-tui-lifecycle.sh' "$native_workflow" \
   || fail "native workflow does not execute the terminal lifecycle harness"
+grep -q '^      - name: Run native release CLI identity smoke$' "$native_workflow" \
+  || fail "native workflow lacks the release CLI identity smoke"
+grep -q 'bash scripts/test-native-cli-identity.sh' "$native_workflow" \
+  || fail "native workflow does not execute the release CLI identity smoke"
+grep -q 'bash scripts/test-native-cli-identity.sh' scripts/release-check.sh \
+  || fail "Linux release checks do not execute the release CLI identity smoke"
 grep -q 'bash scripts/test-tui-real-pty.sh' scripts/release-check.sh \
   || fail "Linux release checks do not execute the real PTY TUI smoke"
 grep -q 'uses: \./\.github/workflows/native-checks\.yml' .github/workflows/ci.yml \

@@ -775,7 +775,7 @@ mod tests {
                     admission_ns.push(admission_started.elapsed().as_nanos() as u64);
                     submitted = submitted.saturating_add(1);
                 }
-                if burst_index.is_multiple_of(10) {
+                if burst_index % 10 == 0 {
                     let admission_started = Instant::now();
                     writer.enqueue(
                         &path,
@@ -867,6 +867,7 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove isolated log soak root");
     }
 
+    #[cfg(target_os = "linux")]
     fn writer_snapshot(writer: &ServerLogWriter) -> ServerLogMetrics {
         let normal = writer.budget.snapshot();
         let priority = writer.priority_budget.snapshot();

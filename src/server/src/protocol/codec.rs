@@ -314,7 +314,67 @@ fn value_as_u64(value: &Value, field: &'static str) -> Result<u64, CodecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::batch::{resource_offer_body, ResourceOffer};
     use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue};
+
+    mod v0_6_0_1 {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/omenchat/v0_6_0_1_wire.rs"
+        ));
+    }
+
+    #[test]
+    fn v0_6_0_1_frame_fixtures_remain_bidirectionally_exact() {
+        let fixtures = [
+            (
+                Frame::new(ChatOp::SessionOpen, 1, None, FrameBody::Empty),
+                v0_6_0_1::SESSION_OPEN,
+            ),
+            (
+                Frame::new(
+                    ChatOp::RoomMessage,
+                    7,
+                    Some(42),
+                    FrameBody::Fields(vec![
+                        FrameValue::U64(100),
+                        FrameValue::String("hello room".into()),
+                    ]),
+                ),
+                v0_6_0_1::ROOM_MESSAGE,
+            ),
+            (
+                Frame::new(
+                    ChatOp::HistoryResourceOffer,
+                    11,
+                    Some(7),
+                    resource_offer_body(&ResourceOffer {
+                        resource_id: "history:7:fixture".into(),
+                        compression: crate::protocol::Compression::Bzip2,
+                        uncompressed_len: 4096,
+                        compressed_len: 128,
+                        purpose: "history".into(),
+                    }),
+                ),
+                v0_6_0_1::HISTORY_RESOURCE_OFFER,
+            ),
+        ];
+
+        assert_eq!(
+            crate::protocol::PROTOCOL_VERSION,
+            v0_6_0_1::PROTOCOL_VERSION
+        );
+        assert_eq!(crate::protocol::PROTOCOL_NAME, v0_6_0_1::PROTOCOL_NAME);
+        assert_eq!(v0_6_0_1::LINK_CONTEXT, 0x4f);
+        assert_eq!(v0_6_0_1::RESOURCE_METADATA_PREFIX, b"omenchat-resource:");
+        for (frame, expected) in fixtures {
+            assert_eq!(
+                encode_frame(&frame).expect("encode current frame"),
+                expected
+            );
+            assert_eq!(decode_frame(expected).expect("decode v0.6 fixture"), frame);
+        }
+    }
 
     #[test]
     fn round_trips_compact_frame() {

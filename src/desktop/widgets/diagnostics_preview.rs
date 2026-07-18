@@ -147,7 +147,15 @@ pub(in crate::desktop) fn diagnostics_preview_live_fetch_card(
         .unwrap_or_else(|| "unknown".into());
     let request_backend = live_fetch
         .get("metadata")
-        .and_then(|metadata| string_field(metadata, &["native_request_backend"]))
+        .and_then(|metadata| {
+            let backend = string_field(metadata, &["native_request_backend"])?;
+            Some(
+                match string_field(metadata, &["native_request_primitive"]) {
+                    Some(primitive) => format!("{backend}/{primitive}"),
+                    None => backend,
+                },
+            )
+        })
         .unwrap_or_else(|| {
             if ok {
                 "missing metadata".into()

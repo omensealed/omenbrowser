@@ -174,6 +174,16 @@ impl DesktopApp {
         }
     }
 
+    pub(super) fn update_cancel_lxmf_for_conversation_row(
+        &mut self,
+        conversation_id: u64,
+        key: String,
+    ) {
+        if self.select_conversation_by_id(conversation_id) {
+            self.app.cancel_lxmf_message_by_key(&key);
+        }
+    }
+
     pub(super) fn update_dismiss_conversation_pane_row(
         &mut self,
         conversation_id: u64,

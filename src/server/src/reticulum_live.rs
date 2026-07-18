@@ -16,10 +16,15 @@ use rns_transport::transport::{ReceivedPayloadMode, Transport, TransportConfig};
 use rns_transport::PacketContext;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::ServerConfig;
 use crate::error::{ServerError, ServerResult};
-use crate::live::{LiveServerStats, OmenchatLinkEvent, OmenchatLiveServer};
+use crate::live::{
+    LiveResourceDirection, LiveResourceOutcome, LiveServerStats, OmenchatLinkEvent,
+    OmenchatLiveServer,
+};
 use crate::protocol::codec::decode_frame;
 use crate::session::{ServerPeer, SessionEngine};
 use crate::store::OmenchatStore;
@@ -27,8 +32,7 @@ use crate::transport::{
     LinkId, OmenchatTransport, OMENCHAT_LINK_CONTEXT, OMENCHAT_RESOURCE_METADATA_PREFIX,
 };
 
-#[path = "../../runtime/native/ifac_tcp.rs"]
-mod ifac_tcp;
+use omen_ifac_tcp as ifac_tcp;
 
 pub const OMENCHAT_RNS_APP_NAME: &str = "omenchat";
 pub const NOMADNET_RNS_APP_NAME: &str = "nomadnetwork";
@@ -275,6 +279,51 @@ pub struct ReticulumLiveRuntime {
     transport_queue_budget: Arc<QueueBudget>,
     pub live_server: LiveServerWorker<ReticulumOmenchatTransport>,
     interface_statuses: Vec<ReticulumInterfaceStatus>,
+    shutdown: CancellationToken,
+    owned_tasks: Vec<OwnedTask>,
+    shutdown_complete: bool,
+}
+
+struct OwnedTask {
+    handle: JoinHandle<()>,
+    abort_on_shutdown: bool,
+}
+
+#[derive(Default)]
+struct StartupTaskGuard(Vec<JoinHandle<()>>);
+
+impl StartupTaskGuard {
+    fn push(&mut self, task: JoinHandle<()>) {
+        self.0.push(task);
+    }
+
+    fn finish(mut self) -> Vec<JoinHandle<()>> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for StartupTaskGuard {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+impl OwnedTask {
+    fn cancellable(handle: JoinHandle<()>) -> Self {
+        Self {
+            handle,
+            abort_on_shutdown: false,
+        }
+    }
+
+    fn interface(handle: JoinHandle<()>) -> Self {
+        Self {
+            handle,
+            abort_on_shutdown: true,
+        }
+    }
 }
 
 pub struct LiveServerWorker<T> {
@@ -365,11 +414,24 @@ where
     }
 
     pub fn stats(&self) -> LiveServerStats {
-        self.server
-            .lock()
-            .expect("live-server worker lock")
-            .stats()
-            .clone()
+        self.server.lock().expect("live-server worker lock").stats()
+    }
+
+    pub async fn expire_pending_handshakes(&self, now_unix: i64) -> ServerResult<usize> {
+        let permit = self.permit.clone().try_acquire_owned().map_err(|_| {
+            self.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+            ServerError::Message("live-server worker is busy".into())
+        })?;
+        let server = self.server.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            server
+                .lock()
+                .map_err(|_| ServerError::Message("live-server worker lock poisoned".into()))
+                .map(|mut server| server.expire_pending_handshakes(now_unix))
+        })
+        .await
+        .map_err(|error| ServerError::Message(format!("live-server worker failed: {error}")))?
     }
 
     pub fn recent_closed_link_summaries(&self) -> Vec<crate::live::ClosedLinkSummary> {
@@ -556,7 +618,11 @@ impl ResourceOffer {
 }
 
 impl ReticulumOmenchatTransport {
-    fn new(transport: Arc<Transport>, log_path: std::path::PathBuf) -> Self {
+    fn new(
+        transport: Arc<Transport>,
+        log_path: std::path::PathBuf,
+        shutdown: CancellationToken,
+    ) -> (Self, JoinHandle<()>) {
         let (tx, mut rx) = mpsc::channel::<Queued<TransportCommand>>(TRANSPORT_QUEUE_ITEMS);
         let (control_tx, mut control_rx) =
             mpsc::channel::<Queued<TransportCommand>>(TRANSPORT_CONTROL_ITEMS);
@@ -565,12 +631,13 @@ impl ReticulumOmenchatTransport {
         let offered_resources = Arc::new(AtomicU64::new(0));
         let sent_frame_bytes = Arc::new(AtomicU64::new(0));
         let offered_resource_bytes = Arc::new(AtomicU64::new(0));
-        tokio::spawn(async move {
+        let worker = tokio::spawn(async move {
             let mut control_open = true;
             let mut payload_open = true;
             while control_open || payload_open {
                 let selected = tokio::select! {
                     biased;
+                    _ = shutdown.cancelled() => break,
                     queued = control_rx.recv(), if control_open => match queued {
                         Some(queued) => {
                             let Queued { value, _permit } = queued;
@@ -687,15 +754,18 @@ impl ReticulumOmenchatTransport {
             }
         });
 
-        Self {
-            tx,
-            control_tx,
-            queue_budget,
-            sent_frames,
-            offered_resources,
-            sent_frame_bytes,
-            offered_resource_bytes,
-        }
+        (
+            Self {
+                tx,
+                control_tx,
+                queue_budget,
+                sent_frames,
+                offered_resources,
+                sent_frame_bytes,
+                offered_resource_bytes,
+            },
+            worker,
+        )
     }
 }
 
@@ -810,8 +880,10 @@ fn transport_overload_error(kind: &str, bytes: usize) -> ServerError {
 fn event_link_id(event: &OmenchatLinkEvent) -> LinkId {
     match event {
         OmenchatLinkEvent::LinkOpened { link_id, .. }
+        | OmenchatLinkEvent::PeerIdentified { link_id, .. }
         | OmenchatLinkEvent::LinkData { link_id, .. }
         | OmenchatLinkEvent::ResourceReceived { link_id, .. }
+        | OmenchatLinkEvent::ResourceTerminal { link_id, .. }
         | OmenchatLinkEvent::LinkClosed { link_id, .. } => *link_id,
     }
 }
@@ -857,30 +929,52 @@ async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
     let mut runtime = start_live_server(&config).await?;
     let announce_interval = Duration::from_secs(config.announce_interval_minutes.max(1) * 60);
     let stats_interval = Duration::from_secs(30);
+    let handshake_sweep_interval = Duration::from_secs(1);
     let mut next_announce = Instant::now() + announce_interval;
     let mut next_stats = Instant::now() + stats_interval;
+    let mut next_handshake_sweep = Instant::now() + handshake_sweep_interval;
+    let shutdown_signal = wait_for_shutdown_signal();
+    tokio::pin!(shutdown_signal);
 
-    println!("omenchatd reticulum-rs live server ready");
-    println!(
-        "destination: {} ({})",
-        runtime.destination_name,
-        hex_lower(&runtime.destination_hash)
-    );
-    println!(
-        "client uri: omenchat://{}",
-        hex_lower(&runtime.destination_hash)
-    );
-    println!(
-        "nomadnet portal: {} ({}) {}",
-        runtime.nomadnet_destination_name,
-        hex_lower(&runtime.nomadnet_destination_hash),
-        crate::config::NOMADNET_PORTAL_PATH
-    );
-    println!("database: {}", config.database_path.display());
-    println!("reticulum: {}", config.reticulum_config_path.display());
+    // Poll the signal future once before advertising readiness. This registers
+    // the platform handlers and closes the startup window where an immediate
+    // service-manager stop could otherwise bypass the orderly drain path.
+    let mut pending_shutdown = None;
+    tokio::select! {
+        biased;
+        reason = &mut shutdown_signal => pending_shutdown = Some(reason),
+        _ = tokio::task::yield_now() => {}
+    }
 
-    loop {
-        while let Some(event) = runtime.try_recv_event() {
+    if pending_shutdown.is_none() {
+        println!("omenchatd reticulum-rs live server ready");
+        println!(
+            "destination: {} ({})",
+            runtime.destination_name,
+            hex_lower(&runtime.destination_hash)
+        );
+        println!(
+            "client uri: omenchat://{}",
+            hex_lower(&runtime.destination_hash)
+        );
+        println!(
+            "nomadnet portal: {} ({}) {}",
+            runtime.nomadnet_destination_name,
+            hex_lower(&runtime.nomadnet_destination_hash),
+            crate::config::NOMADNET_PORTAL_PATH
+        );
+        println!("database: {}", config.database_path.display());
+        println!("reticulum: {}", config.reticulum_config_path.display());
+    }
+
+    let run_result: ServerResult<&'static str> = loop {
+        if let Some(reason) = pending_shutdown.take() {
+            break reason;
+        }
+        for _ in 0..EVENT_QUEUE_ITEMS.saturating_add(EVENT_CONTROL_ITEMS) {
+            let Some(event) = runtime.try_recv_event() else {
+                break;
+            };
             if let Err(error) = runtime.live_server.handle_event(event).await {
                 append_server_log_error(
                     &config,
@@ -890,14 +984,35 @@ async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
         }
 
         if Instant::now() >= next_announce {
-            announce_destinations(
+            if let Err(error) = announce_destinations(
                 &runtime.transport,
                 &runtime.destination,
                 &runtime.nomadnet_destination,
                 &config,
             )
-            .await?;
+            .await
+            {
+                append_server_log_error(
+                    &config,
+                    format!("reticulum-rs periodic announce failed: {error}"),
+                );
+                break Err(error);
+            }
             next_announce = Instant::now() + announce_interval;
+        }
+        if Instant::now() >= next_handshake_sweep {
+            let now_unix = (current_epoch_ms() / 1_000).try_into().unwrap_or(i64::MAX);
+            if let Err(error) = runtime
+                .live_server
+                .expire_pending_handshakes(now_unix)
+                .await
+            {
+                append_server_log_warning_path(
+                    &config.log_path(),
+                    format!("reticulum-rs handshake expiry sweep failed: {error}"),
+                );
+            }
+            next_handshake_sweep = Instant::now() + handshake_sweep_interval;
         }
         if Instant::now() >= next_stats {
             let stats = runtime.live_server.stats();
@@ -916,8 +1031,53 @@ async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
             next_stats = Instant::now() + stats_interval;
         }
 
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::select! {
+            reason = &mut shutdown_signal => break reason,
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        }
+    };
+
+    match &run_result {
+        Ok(reason) => append_server_log(
+            &config,
+            format!("reticulum-rs live server shutdown requested reason={reason}"),
+        ),
+        Err(error) => append_server_log_error(
+            &config,
+            format!("reticulum-rs live server draining after fatal runtime error: {error}"),
+        ),
     }
+    let shutdown_result = runtime.shutdown(&config).await;
+    let logs_flushed = crate::server_log::flush(Duration::from_secs(2));
+    if !logs_flushed {
+        return Err(ServerError::Message(
+            "reticulum-rs shutdown completed but server log flush timed out".into(),
+        ));
+    }
+    run_result?;
+    shutdown_result
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> ServerResult<&'static str> {
+    let mut terminate =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|error| ServerError::Message(format!("SIGTERM handler failed: {error}")))?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result.map_err(|error| ServerError::Message(format!("SIGINT handler failed: {error}")))?;
+            Ok("sigint")
+        }
+        _ = terminate.recv() => Ok("sigterm"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> ServerResult<&'static str> {
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|error| ServerError::Message(format!("interrupt handler failed: {error}")))?;
+    Ok("interrupt")
 }
 
 pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumLiveRuntime> {
@@ -939,7 +1099,8 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
         )
         .await;
     let transport = Arc::new(transport);
-    let attached = attach_configured_interfaces(&transport, config).await?;
+    let (attached, interface_tasks) = attach_configured_interfaces(&transport, config).await?;
+    let interface_tasks = StartupTaskGuard(interface_tasks);
     tokio::time::sleep(Duration::from_millis(100)).await;
     append_server_log(
         config,
@@ -963,6 +1124,10 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
     crate::config::ensure_nomadnet_portal(config, &destination_hash.to_hex_string())?;
     announce_destinations(&transport, &destination, &nomadnet_destination, config).await?;
 
+    let store = OmenchatStore::open(&config.database_path)?;
+    let engine =
+        SessionEngine::with_limits_and_motd(store, config.into(), Some(config.motd.clone()));
+
     let (event_payload_tx, event_rx) = mpsc::channel(EVENT_QUEUE_ITEMS);
     let (event_control_tx, event_control_rx) = mpsc::channel(EVENT_CONTROL_ITEMS);
     let event_queue_budget = QueueBudget::new(EVENT_QUEUE_BYTES, EVENT_PER_LINK_BYTES);
@@ -972,14 +1137,35 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
         budget: event_queue_budget.clone(),
         log_path: config.log_path(),
     };
-    spawn_link_event_bridge(transport.clone(), event_tx.clone());
-    spawn_received_data_bridge(transport.clone(), event_tx.clone());
-    spawn_resource_event_bridge(transport.clone(), event_tx, config.clone());
-
-    let store = OmenchatStore::open(&config.database_path)?;
-    let engine =
-        SessionEngine::with_limits_and_motd(store, config.into(), Some(config.motd.clone()));
-    let transport_impl = ReticulumOmenchatTransport::new(transport.clone(), config.log_path());
+    let shutdown = CancellationToken::new();
+    let mut owned_tasks = vec![
+        OwnedTask::cancellable(spawn_link_event_bridge(
+            transport.clone(),
+            event_tx.clone(),
+            config.clone(),
+            shutdown.clone(),
+        )),
+        OwnedTask::cancellable(spawn_received_data_bridge(
+            transport.clone(),
+            event_tx.clone(),
+            shutdown.clone(),
+        )),
+        OwnedTask::cancellable(spawn_resource_event_bridge(
+            transport.clone(),
+            event_tx,
+            config.clone(),
+            shutdown.clone(),
+        )),
+    ];
+    owned_tasks.extend(
+        interface_tasks
+            .finish()
+            .into_iter()
+            .map(OwnedTask::interface),
+    );
+    let (transport_impl, transport_worker) =
+        ReticulumOmenchatTransport::new(transport.clone(), config.log_path(), shutdown.clone());
+    owned_tasks.push(OwnedTask::cancellable(transport_worker));
     let transport_queue_budget = transport_impl.queue_budget.clone();
 
     append_server_log(
@@ -1007,10 +1193,17 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
         transport_queue_budget,
         live_server: LiveServerWorker::new(OmenchatLiveServer::new(engine, transport_impl)),
         interface_statuses: attached,
+        shutdown,
+        owned_tasks,
+        shutdown_complete: false,
     })
 }
 
 impl ReticulumLiveRuntime {
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown_complete
+    }
+
     pub async fn announce(&mut self, config: &ServerConfig) -> ServerResult<()> {
         announce_destinations(
             &self.transport,
@@ -1058,6 +1251,60 @@ impl ReticulumLiveRuntime {
         )
     }
 
+    pub async fn shutdown(&mut self, config: &ServerConfig) -> ServerResult<()> {
+        if self.shutdown_complete {
+            return Ok(());
+        }
+
+        let active_links = self.live_server.active_link_summaries();
+        for active in &active_links {
+            let channel = self.transport.channel(AddressHash::new(active.link_id));
+            if let Err(error) = channel.close().await {
+                append_server_log_warning_path(
+                    &config.log_path(),
+                    format!(
+                        "reticulum-rs shutdown link close failed link={} error={error:?}",
+                        hex_lower(&active.link_id)
+                    ),
+                );
+            }
+        }
+
+        self.shutdown.cancel();
+        let tasks = std::mem::take(&mut self.owned_tasks);
+        let mut join_timeouts = 0usize;
+        let mut join_failures = 0usize;
+        for task in tasks {
+            if task.abort_on_shutdown {
+                task.handle.abort();
+            }
+            match tokio::time::timeout(Duration::from_secs(2), task.handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.is_cancelled() && task.abort_on_shutdown => {}
+                Ok(Err(_)) => join_failures += 1,
+                Err(_) => join_timeouts += 1,
+            }
+        }
+        self.shutdown_complete = true;
+        append_server_log(
+            config,
+            format!(
+                "reticulum-rs live server drained active_links={} worker_join_timeouts={} worker_join_failures={} {}",
+                active_links.len(),
+                join_timeouts,
+                join_failures,
+                self.queue_summary_line()
+            ),
+        );
+
+        if join_timeouts > 0 || join_failures > 0 {
+            return Err(ServerError::Message(format!(
+                "reticulum-rs shutdown incomplete: worker_join_timeouts={join_timeouts} worker_join_failures={join_failures}"
+            )));
+        }
+        Ok(())
+    }
+
     fn try_recv_event(&mut self) -> Option<OmenchatLinkEvent> {
         match self.event_control_rx.try_recv() {
             Ok(queued) => return Some(queued.value),
@@ -1065,6 +1312,12 @@ impl ReticulumLiveRuntime {
             | Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
         }
         self.event_rx.try_recv().ok().map(|queued| queued.value)
+    }
+}
+
+impl Drop for ReticulumLiveRuntime {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
     }
 }
 
@@ -1144,12 +1397,22 @@ async fn send_announce_broadcast(
     Ok((destination_hash, trace))
 }
 
-fn spawn_link_event_bridge(transport: Arc<Transport>, event_tx: EventQueueSender) {
+fn spawn_link_event_bridge(
+    transport: Arc<Transport>,
+    event_tx: EventQueueSender,
+    config: ServerConfig,
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
     let log_path = event_tx.log_path.clone();
     let mut events = transport.in_link_events();
     tokio::spawn(async move {
         loop {
-            match events.recv().await {
+            let next = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                next = events.recv() => next,
+            };
+            match next {
                 Ok(event) => match event.event {
                     LinkEvent::Activated => {
                         let link_id = address_hash_bytes(event.id);
@@ -1171,6 +1434,18 @@ fn spawn_link_event_bridge(transport: Arc<Transport>, event_tx: EventQueueSender
                             .await;
                     }
                     LinkEvent::Data(payload) => {
+                        if payload.context() == PacketContext::Request {
+                            send_direct_nomadnet_response(
+                                &transport,
+                                &config,
+                                &log_path,
+                                event.id,
+                                payload.request_id(),
+                                payload.as_slice(),
+                            )
+                            .await;
+                            continue;
+                        }
                         let link_id = address_hash_bytes(event.id);
                         let decodes_as_omenchat = decode_frame(payload.as_slice()).is_ok();
                         if payload.context() as u8 != OMENCHAT_LINK_CONTEXT && !decodes_as_omenchat
@@ -1211,7 +1486,24 @@ fn spawn_link_event_bridge(transport: Arc<Transport>, event_tx: EventQueueSender
                             })
                             .await;
                     }
-                    LinkEvent::PeerIdentified(_) => {}
+                    LinkEvent::PeerIdentified(identity) => {
+                        let link_id = address_hash_bytes(event.id);
+                        let identity_hash = address_hash_bytes(identity.address_hash);
+                        append_server_log_path(
+                            &log_path,
+                            format!(
+                                "reticulum-rs in-link identified link={} identity={}",
+                                hex_lower(&link_id),
+                                hex_lower(&identity_hash)
+                            ),
+                        );
+                        event_tx
+                            .send_control(OmenchatLinkEvent::PeerIdentified {
+                                link_id,
+                                identity_hash,
+                            })
+                            .await;
+                    }
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     append_server_log_warning_path(
@@ -1222,15 +1514,137 @@ fn spawn_link_event_bridge(transport: Arc<Transport>, event_tx: EventQueueSender
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    })
 }
 
-fn spawn_received_data_bridge(transport: Arc<Transport>, event_tx: EventQueueSender) {
+async fn send_direct_nomadnet_response(
+    transport: &Transport,
+    config: &ServerConfig,
+    log_path: &Path,
+    link_id: AddressHash,
+    request_id: Option<[u8; 16]>,
+    request_payload: &[u8],
+) {
+    let Some(request_id) = request_id else {
+        append_server_log_warning_path(
+            log_path,
+            "reticulum-rs direct NomadNet request ignored: missing request id",
+        );
+        return;
+    };
+    let Some(request_path) = nomadnet_request_path_for_payload(config, request_payload) else {
+        append_server_log_warning_path(
+            log_path,
+            format!(
+                "reticulum-rs direct NomadNet request ignored link={} unknown path hash bytes={}",
+                link_id,
+                request_payload.len()
+            ),
+        );
+        return;
+    };
+
+    // The link-event bridge processes one request at a time, bounding blocking
+    // portal reads to one owned job instead of growing a task per request.
+    let response_config = config.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        nomadnet_response_resource_payload(&response_config, &request_id)
+    })
+    .await;
+    let payload = match response {
+        Ok(Ok(payload)) => payload,
+        Ok(Err(error)) => {
+            append_server_log_error_path(
+                log_path,
+                format!(
+                    "reticulum-rs direct NomadNet response payload failed request_path={} error={error}",
+                    request_path
+                ),
+            );
+            return;
+        }
+        Err(error) => {
+            append_server_log_error_path(
+                log_path,
+                format!(
+                    "reticulum-rs direct NomadNet response worker failed request_path={} error={error}",
+                    request_path
+                ),
+            );
+            return;
+        }
+    };
+    let Some(link) = transport.find_in_link(&link_id).await else {
+        append_server_log_warning_path(
+            log_path,
+            format!(
+                "reticulum-rs direct NomadNet response ignored link={} request_path={} missing inbound link",
+                link_id, request_path
+            ),
+        );
+        return;
+    };
+    let response_packet = {
+        let link = link.lock().await;
+        let Some(ingress_iface) = link.ingress_iface() else {
+            append_server_log_warning_path(
+                log_path,
+                format!(
+                    "reticulum-rs direct NomadNet response ignored link={} request_path={} missing ingress interface",
+                    link_id, request_path
+                ),
+            );
+            return;
+        };
+        match link.data_packet(&payload) {
+            Ok(mut packet) => {
+                packet.context = PacketContext::Response;
+                Some((ingress_iface, packet))
+            }
+            Err(error) => {
+                append_server_log_error_path(
+                    log_path,
+                    format!(
+                        "reticulum-rs direct NomadNet response packet failed link={} request_path={} bytes={} error={error:?}",
+                        link_id,
+                        request_path,
+                        payload.len()
+                    ),
+                );
+                None
+            }
+        }
+    };
+    let Some((ingress_iface, packet)) = response_packet else {
+        return;
+    };
+    transport.send_direct(ingress_iface, packet).await;
+    append_server_log_path(
+        log_path,
+        format!(
+            "reticulum-rs direct NomadNet response sent link={} request_path={} bytes={}",
+            link_id,
+            request_path,
+            payload.len()
+        ),
+    );
+}
+
+fn spawn_received_data_bridge(
+    transport: Arc<Transport>,
+    event_tx: EventQueueSender,
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
     let log_path = event_tx.log_path.clone();
     let mut events = transport.received_data_events();
     tokio::spawn(async move {
         loop {
-            match events.recv().await {
+            let next = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                next = events.recv() => next,
+            };
+            match next {
                 Ok(event) => {
                     if event.payload_mode == ReceivedPayloadMode::FullWire {
                         continue;
@@ -1270,22 +1684,107 @@ fn spawn_received_data_bridge(transport: Arc<Transport>, event_tx: EventQueueSen
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    })
 }
 
 fn spawn_resource_event_bridge(
     transport: Arc<Transport>,
     event_tx: EventQueueSender,
     config: ServerConfig,
-) {
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
+    spawn_resource_event_receiver(
+        transport.clone(),
+        transport.resource_events(),
+        event_tx,
+        config,
+        shutdown,
+    )
+}
+
+fn spawn_resource_event_receiver(
+    transport: Arc<Transport>,
+    mut events: tokio::sync::broadcast::Receiver<rns_transport::resource::ResourceEvent>,
+    event_tx: EventQueueSender,
+    config: ServerConfig,
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
     let log_path = config.log_path();
-    let mut events = transport.resource_events();
     tokio::spawn(async move {
         loop {
-            match events.recv().await {
+            let next = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                next = events.recv() => next,
+            };
+            match next {
                 Ok(event) => {
-                    let ResourceEventKind::Complete(complete) = event.kind else {
-                        continue;
+                    let complete = match event.kind {
+                        ResourceEventKind::Complete(complete) => complete,
+                        ResourceEventKind::InboundFailed(failure) => {
+                            let link_id = address_hash_bytes(event.link_id);
+                            let reason = failure
+                                .reason
+                                .chars()
+                                .filter(|character| !character.is_control())
+                                .take(128)
+                                .collect::<String>();
+                            append_server_log_warning_path(
+                                &log_path,
+                                format!(
+                                    "reticulum-rs inbound resource failed link={} hash={} received_bytes={} total_bytes={} reason={}",
+                                    hex_lower(&link_id),
+                                    event.hash,
+                                    failure.progress.received_bytes,
+                                    failure.progress.total_bytes,
+                                    reason
+                                ),
+                            );
+                            event_tx
+                                .send_control(OmenchatLinkEvent::ResourceTerminal {
+                                    link_id,
+                                    direction: LiveResourceDirection::Inbound,
+                                    outcome: LiveResourceOutcome::Failed,
+                                })
+                                .await;
+                            continue;
+                        }
+                        ResourceEventKind::OutboundComplete => {
+                            send_resource_terminal(
+                                &event_tx,
+                                &log_path,
+                                event.link_id,
+                                event.hash,
+                                LiveResourceOutcome::Complete,
+                            )
+                            .await;
+                            continue;
+                        }
+                        ResourceEventKind::OutboundFailed => {
+                            send_resource_terminal(
+                                &event_tx,
+                                &log_path,
+                                event.link_id,
+                                event.hash,
+                                LiveResourceOutcome::Failed,
+                            )
+                            .await;
+                            continue;
+                        }
+                        ResourceEventKind::OutboundCancelled => {
+                            send_resource_terminal(
+                                &event_tx,
+                                &log_path,
+                                event.link_id,
+                                event.hash,
+                                LiveResourceOutcome::Cancelled,
+                            )
+                            .await;
+                            continue;
+                        }
+                        ResourceEventKind::Progress(_) | ResourceEventKind::SegmentComplete(_) => {
+                            continue;
+                        }
                     };
                     if complete.is_request {
                         let Some(request_id) = complete.request_id.clone() else {
@@ -1390,27 +1889,67 @@ fn spawn_resource_event_bridge(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    })
+}
+
+async fn send_resource_terminal(
+    event_tx: &EventQueueSender,
+    log_path: &Path,
+    link_hash: AddressHash,
+    resource_hash: rns_transport::hash::Hash,
+    outcome: LiveResourceOutcome,
+) {
+    let link_id = address_hash_bytes(link_hash);
+    append_server_log_path(
+        log_path,
+        format!(
+            "reticulum-rs outbound resource terminal link={} hash={} outcome={outcome:?}",
+            hex_lower(&link_id),
+            resource_hash
+        ),
+    );
+    event_tx
+        .send_control(OmenchatLinkEvent::ResourceTerminal {
+            link_id,
+            direction: LiveResourceDirection::Outbound,
+            outcome,
+        })
+        .await;
 }
 
 async fn attach_configured_interfaces(
     transport: &Arc<Transport>,
     config: &ServerConfig,
-) -> ServerResult<Vec<ReticulumInterfaceStatus>> {
+) -> ServerResult<(Vec<ReticulumInterfaceStatus>, Vec<JoinHandle<()>>)> {
     let interfaces = parse_reticulum_interfaces(&config.reticulum_config_file())?;
+    validate_reticulum_interfaces(&interfaces)?;
     let mut attached = Vec::new();
+    let mut tasks = StartupTaskGuard::default();
     for interface in interfaces {
         if !interface.enabled {
             continue;
         }
         match interface.kind.as_deref() {
             Some("TCPClientInterface") | Some("tcp_client") => {
-                let Some(host) = interface.target_host.as_deref() else {
-                    continue;
-                };
-                let Some(port) = interface.target_port else {
-                    continue;
-                };
+                let host = interface
+                    .target_host
+                    .as_deref()
+                    .filter(|host| !host.trim().is_empty())
+                    .ok_or_else(|| {
+                        ServerError::Message(format!(
+                            "enabled interface {} is missing target_host",
+                            interface.name
+                        ))
+                    })?;
+                let port = interface
+                    .target_port
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| {
+                        ServerError::Message(format!(
+                            "enabled interface {} requires a nonzero target_port",
+                            interface.name
+                        ))
+                    })?;
                 let address = format!("{host}:{port}");
                 let manager = transport.iface_manager();
                 let mut manager = manager.lock().await;
@@ -1428,7 +1967,7 @@ async fn attach_configured_interfaces(
                     let status = client.runtime_status_handle();
                     let context = manager.new_context(client);
                     let iface_address = *context.channel.address();
-                    tokio::spawn(ifac_tcp::IfacTcpClient::spawn(context));
+                    tasks.push(tokio::spawn(ifac_tcp::IfacTcpClient::spawn(context)));
                     attached.push(ReticulumInterfaceStatus {
                         label: format!(
                             "{} tcp_client {address} ifac=configured iface={}",
@@ -1442,7 +1981,9 @@ async fn attach_configured_interfaces(
                     let status = client.runtime_status_handle();
                     let context = manager.new_context(client);
                     let iface_address = *context.channel.address();
-                    tokio::spawn(rns_transport::iface::tcp_client::TcpClient::spawn(context));
+                    tasks.push(tokio::spawn(
+                        rns_transport::iface::tcp_client::TcpClient::spawn(context),
+                    ));
                     attached.push(ReticulumInterfaceStatus {
                         label: format!(
                             "{} tcp_client {address} ifac=none iface={}",
@@ -1455,9 +1996,15 @@ async fn attach_configured_interfaces(
             }
             Some("TCPServerInterface") | Some("tcp_server") => {
                 let listen_ip = interface.listen_ip.as_deref().unwrap_or("127.0.0.1");
-                let Some(port) = interface.listen_port else {
-                    continue;
-                };
+                let port = interface
+                    .listen_port
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| {
+                        ServerError::Message(format!(
+                            "enabled interface {} requires a nonzero listen_port",
+                            interface.name
+                        ))
+                    })?;
                 let address = format!("{listen_ip}:{port}");
                 let manager = transport.iface_manager();
                 let server = rns_transport::iface::tcp_server::TcpServer::new(
@@ -1468,44 +2015,85 @@ async fn attach_configured_interfaces(
                 let mut manager = manager.lock().await;
                 let context = manager.new_context(server);
                 let iface_address = *context.channel.address();
-                let ifac_status = apply_ifac(&mut manager, iface_address, &interface);
-                tokio::spawn(rns_transport::iface::tcp_server::TcpServer::spawn(context));
+                tasks.push(tokio::spawn(
+                    rns_transport::iface::tcp_server::TcpServer::spawn(context),
+                ));
                 attached.push(ReticulumInterfaceStatus {
                     label: format!(
-                        "{} tcp_server {address} ifac={ifac_status} iface={}",
+                        "{} tcp_server {address} ifac=none iface={}",
                         interface.name,
                         iface_address.to_hex_string()
                     ),
                     kind: ReticulumInterfaceStatusKind::TcpServer(status),
                 });
             }
-            _ => {}
+            Some(kind) => {
+                return Err(ServerError::Message(format!(
+                    "enabled interface {} has unsupported type {kind}",
+                    interface.name
+                )));
+            }
+            None => {
+                return Err(ServerError::Message(format!(
+                    "enabled interface {} is missing type",
+                    interface.name
+                )));
+            }
         }
     }
-    Ok(attached)
+    Ok((attached, tasks.finish()))
 }
 
-fn apply_ifac(
-    manager: &mut rns_transport::iface::InterfaceManager,
-    iface: AddressHash,
-    interface: &ReticulumInterface,
-) -> &'static str {
-    let network_name = interface.network_name.clone();
-    let passphrase = interface.passphrase.clone();
-    if network_name.is_none() && passphrase.is_none() {
-        return "none";
+fn validate_reticulum_interfaces(interfaces: &[ReticulumInterface]) -> ServerResult<()> {
+    for interface in interfaces.iter().filter(|interface| interface.enabled) {
+        match interface.kind.as_deref() {
+            Some("TCPClientInterface") | Some("tcp_client") => {
+                if interface
+                    .target_host
+                    .as_deref()
+                    .is_none_or(|host| host.trim().is_empty())
+                {
+                    return Err(ServerError::Message(format!(
+                        "enabled interface {} is missing target_host",
+                        interface.name
+                    )));
+                }
+                if interface.target_port.is_none_or(|port| port == 0) {
+                    return Err(ServerError::Message(format!(
+                        "enabled interface {} requires a nonzero target_port",
+                        interface.name
+                    )));
+                }
+            }
+            Some("TCPServerInterface") | Some("tcp_server") => {
+                if interface.network_name.is_some() || interface.passphrase.is_some() {
+                    return Err(ServerError::Message(format!(
+                        "enabled TCP server interface {} configures IFAC, but the published reticulum-rs 0.9.5 TCP server does not enforce the Python IFAC wire transform; use an IFAC TCP client or disable this interface",
+                        interface.name
+                    )));
+                }
+                if interface.listen_port.is_none_or(|port| port == 0) {
+                    return Err(ServerError::Message(format!(
+                        "enabled interface {} requires a nonzero listen_port",
+                        interface.name
+                    )));
+                }
+            }
+            Some(kind) => {
+                return Err(ServerError::Message(format!(
+                    "enabled interface {} has unsupported type {kind}",
+                    interface.name
+                )));
+            }
+            None => {
+                return Err(ServerError::Message(format!(
+                    "enabled interface {} is missing type",
+                    interface.name
+                )));
+            }
+        }
     }
-    let shared = rns_transport::iface::InterfaceSharedConfig {
-        ifac_size: Some(16),
-        network_name,
-        passphrase,
-        ..rns_transport::iface::InterfaceSharedConfig::default()
-    };
-    if manager.set_shared_config(iface, shared) {
-        "configured"
-    } else {
-        "configure-failed"
-    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -1586,14 +2174,34 @@ fn parse_assignment(line: &str) -> Option<(&str, String)> {
 }
 
 fn load_or_create_identity(config: &ServerConfig) -> ServerResult<PrivateIdentity> {
-    if let Ok(raw) = std::fs::read(&config.identity_path) {
-        if !raw.is_empty()
-            && !raw.starts_with(b"OMENCHATD_IDENTITY_PLACEHOLDER")
-            && !raw.starts_with(b"OMENCHATD_IDENTITY_PLACEHOLDER\n")
-        {
-            if let Ok(identity) = PrivateIdentity::from_private_key_bytes(&raw) {
-                return Ok(identity);
+    let existing = match std::fs::symlink_metadata(&config.identity_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ServerError::Message(
+                    "omenchatd identity must be a regular non-symlink file".into(),
+                ));
             }
+            Some(std::fs::read(&config.identity_path).map_err(|error| {
+                ServerError::Message(format!("omenchatd identity could not be read: {error}"))
+            })?)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(ServerError::Message(format!(
+                "omenchatd identity metadata could not be read: {error}"
+            )));
+        }
+    };
+
+    if let Some(raw) = existing.as_deref() {
+        if raw != crate::config::PLACEHOLDER_IDENTITY {
+            let identity = PrivateIdentity::from_private_key_bytes(raw).map_err(|_| {
+                ServerError::Message(
+                    "existing omenchatd identity is invalid; file was preserved".into(),
+                )
+            })?;
+            crate::config::enforce_private_file(&config.identity_path)?;
+            return Ok(identity);
         }
     }
 
@@ -1601,7 +2209,7 @@ fn load_or_create_identity(config: &ServerConfig) -> ServerResult<PrivateIdentit
     if let Some(parent) = config.identity_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&config.identity_path, identity.to_private_key_bytes())?;
+    crate::config::replace_private_file(&config.identity_path, &identity.to_private_key_bytes())?;
     Ok(identity)
 }
 
@@ -1704,6 +2312,14 @@ fn describe_live_event(event: &OmenchatLinkEvent) -> String {
             hex_lower(link_id),
             peer.display_name
         ),
+        OmenchatLinkEvent::PeerIdentified {
+            link_id,
+            identity_hash,
+        } => format!(
+            "reticulum-rs link identified link={} identity={}",
+            hex_lower(link_id),
+            hex_lower(identity_hash)
+        ),
         OmenchatLinkEvent::LinkData {
             link_id,
             context,
@@ -1723,6 +2339,14 @@ fn describe_live_event(event: &OmenchatLinkEvent) -> String {
             hex_lower(link_id),
             data.len(),
             metadata.as_ref().map(Vec::len).unwrap_or(0)
+        ),
+        OmenchatLinkEvent::ResourceTerminal {
+            link_id,
+            direction,
+            outcome,
+        } => format!(
+            "reticulum-rs resource terminal link={} direction={direction:?} outcome={outcome:?}",
+            hex_lower(link_id)
         ),
         OmenchatLinkEvent::LinkClosed { link_id, reason } => format!(
             "reticulum-rs link closed link={} reason={}",
@@ -1877,6 +2501,120 @@ mod tests {
             engine,
             CapturedTransport::default(),
         ))
+    }
+
+    #[tokio::test]
+    async fn live_runtime_shutdown_is_idempotent_and_joins_owned_workers() {
+        let config = test_config("owned-shutdown");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        let mut runtime = start_live_server(&config)
+            .await
+            .expect("start live runtime");
+
+        assert_eq!(runtime.owned_tasks.len(), 4);
+        tokio::time::timeout(Duration::from_secs(5), runtime.shutdown(&config))
+            .await
+            .expect("shutdown must be bounded")
+            .expect("shutdown");
+        assert!(runtime.shutdown_complete);
+        assert!(runtime.owned_tasks.is_empty());
+        assert_eq!(runtime.queue_metrics().0.queued_items, 0);
+        assert_eq!(runtime.queue_metrics().1.queued_items, 0);
+
+        runtime
+            .shutdown(&config)
+            .await
+            .expect("idempotent shutdown");
+        drop(runtime);
+        assert!(crate::server_log::flush(Duration::from_secs(1)));
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
+    #[tokio::test]
+    async fn live_startup_rejects_invalid_enabled_interface_before_spawning_workers() {
+        let config = test_config("invalid-interface-startup");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("init isolated config");
+        std::fs::write(
+            config.reticulum_config_file(),
+            "[reticulum]\n  panic_on_interface_error = No\n\n[[Broken Client]]\n  type = TCPClientInterface\n  interface_enabled = true\n  target_port = 4242\n",
+        )
+        .expect("write invalid isolated interface config");
+
+        let error = match start_live_server(&config).await {
+            Ok(_) => panic!("invalid enabled interface must fail startup"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("missing target_host"));
+        assert!(!error
+            .to_string()
+            .contains(config.root_dir().to_string_lossy().as_ref()));
+
+        assert!(crate::server_log::flush(Duration::from_secs(1)));
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
+    #[test]
+    fn configured_ifac_tcp_server_is_rejected_instead_of_claiming_enforcement() {
+        let interfaces = vec![ReticulumInterface {
+            name: "Private Gateway".into(),
+            kind: Some("TCPServerInterface".into()),
+            enabled: true,
+            listen_port: Some(4242),
+            network_name: Some("private_ret".into()),
+            passphrase: Some("public-test-fixture".into()),
+            ..ReticulumInterface::default()
+        }];
+
+        let error = validate_reticulum_interfaces(&interfaces)
+            .expect_err("stock TCP server must not claim IFAC enforcement");
+        assert!(error.to_string().contains("does not enforce"));
+        assert!(!error.to_string().contains("public-test-fixture"));
+    }
+
+    #[test]
+    fn invalid_existing_identity_is_preserved_and_never_regenerated() {
+        let config = test_config("invalid-identity-preserved");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("init isolated config");
+        let invalid = b"existing-invalid-private-identity";
+        std::fs::write(&config.identity_path, invalid).expect("write invalid identity fixture");
+
+        let error = match load_or_create_identity(&config) {
+            Ok(_) => panic!("invalid identity must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("file was preserved"));
+        assert_eq!(
+            std::fs::read(&config.identity_path).expect("read preserved identity"),
+            invalid
+        );
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_symlink_is_rejected_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let config = test_config("identity-symlink-rejected");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("init isolated config");
+        let target = config.root_dir().join("identity-target");
+        let target_bytes = [0x42; 64];
+        std::fs::write(&target, target_bytes).expect("write identity target");
+        std::fs::remove_file(&config.identity_path).expect("remove placeholder");
+        symlink(&target, &config.identity_path).expect("create identity symlink");
+
+        let error = match load_or_create_identity(&config) {
+            Ok(_) => panic!("symlink must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("non-symlink"));
+        assert_eq!(std::fs::read(&target).expect("read target"), target_bytes);
+        let _ = std::fs::remove_dir_all(config.root_dir());
     }
 
     #[tokio::test]
@@ -2253,6 +2991,307 @@ mod tests {
         assert_eq!(budget.snapshot().queued_items, 0);
         assert_eq!(budget.snapshot().queued_bytes, 0);
     }
+
+    #[tokio::test]
+    async fn reticulum_resource_terminals_cross_production_bridge_and_shutdown_cleanly() {
+        use rns_transport::hash::Hash;
+        use rns_transport::resource::{ResourceEvent, ResourceFailure, ResourceProgress};
+        use tokio::sync::broadcast;
+
+        let config = test_config("resource-terminal-bridge");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("init isolated config");
+
+        let budget = QueueBudget::new(EVENT_QUEUE_BYTES, EVENT_PER_LINK_BYTES);
+        let (payload_tx, _payload_rx) = mpsc::channel(EVENT_QUEUE_ITEMS);
+        let (control_tx, mut control_rx) = mpsc::channel(EVENT_CONTROL_ITEMS);
+        let event_tx = EventQueueSender {
+            payload_tx,
+            control_tx,
+            budget: budget.clone(),
+            log_path: config.log_path(),
+        };
+        let (resource_tx, resource_rx) = broadcast::channel(8);
+        let shutdown = CancellationToken::new();
+        let identity = PrivateIdentity::new_from_name("omenchatd-resource-terminal-bridge");
+        let transport = Arc::new(Transport::new(TransportConfig::new(
+            "omenchatd-resource-terminal-bridge",
+            &identity,
+            true,
+        )));
+        let bridge = spawn_resource_event_receiver(
+            transport,
+            resource_rx,
+            event_tx,
+            config.clone(),
+            shutdown.clone(),
+        );
+        let link_id = AddressHash::new([0x42; 16]);
+
+        let cases = [
+            (
+                ResourceEventKind::InboundFailed(ResourceFailure {
+                    reason: "forced\nbridge\tfailure".into(),
+                    progress: ResourceProgress {
+                        received_bytes: 7,
+                        total_bytes: 99,
+                        received_parts: 1,
+                        total_parts: 3,
+                    },
+                }),
+                LiveResourceDirection::Inbound,
+                LiveResourceOutcome::Failed,
+            ),
+            (
+                ResourceEventKind::OutboundComplete,
+                LiveResourceDirection::Outbound,
+                LiveResourceOutcome::Complete,
+            ),
+            (
+                ResourceEventKind::OutboundFailed,
+                LiveResourceDirection::Outbound,
+                LiveResourceOutcome::Failed,
+            ),
+            (
+                ResourceEventKind::OutboundCancelled,
+                LiveResourceDirection::Outbound,
+                LiveResourceOutcome::Cancelled,
+            ),
+        ];
+
+        for (sequence, (kind, _, _)) in cases.iter().enumerate() {
+            resource_tx
+                .send(ResourceEvent {
+                    hash: Hash::new([sequence as u8 + 1; 32]),
+                    link_id,
+                    kind: kind.clone(),
+                })
+                .expect("production bridge owns resource receiver");
+        }
+
+        for (_, expected_direction, expected_outcome) in cases {
+            let queued = tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
+                .await
+                .expect("terminal must cross bridge promptly")
+                .expect("control lane remains open");
+            assert_eq!(
+                queued.value,
+                OmenchatLinkEvent::ResourceTerminal {
+                    link_id: [0x42; 16],
+                    direction: expected_direction,
+                    outcome: expected_outcome,
+                }
+            );
+            drop(queued);
+        }
+        assert_eq!(budget.snapshot().queued_items, 0);
+        assert_eq!(budget.snapshot().queued_bytes, 0);
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), bridge)
+            .await
+            .expect("resource bridge shutdown must be bounded")
+            .expect("resource bridge task must join");
+        assert!(crate::server_log::flush(Duration::from_secs(1)));
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "explicit loopback Reticulum Resource initiator-cancellation interoperability test"]
+    async fn reticulum_loopback_resource_cancel_crosses_wire_and_production_bridge() {
+        use rns_transport::delivery::await_link_activation;
+        use rns_transport::destination::link::LinkStatus;
+        use rns_transport::iface::udp::UdpInterface;
+
+        fn reserve_udp_ports() -> (u16, u16) {
+            let first = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve first UDP port");
+            let second = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve second UDP port");
+            let first_port = first.local_addr().expect("first UDP address").port();
+            let second_port = second.local_addr().expect("second UDP address").port();
+            assert_ne!(first_port, second_port);
+            (first_port, second_port)
+        }
+
+        fn event_queue(
+            config: &ServerConfig,
+        ) -> (
+            EventQueueSender,
+            mpsc::Receiver<Queued<OmenchatLinkEvent>>,
+            Arc<QueueBudget>,
+        ) {
+            let budget = QueueBudget::new(EVENT_QUEUE_BYTES, EVENT_PER_LINK_BYTES);
+            let (payload_tx, _payload_rx) = mpsc::channel(EVENT_QUEUE_ITEMS);
+            let (control_tx, control_rx) = mpsc::channel(EVENT_CONTROL_ITEMS);
+            (
+                EventQueueSender {
+                    payload_tx,
+                    control_tx,
+                    budget: budget.clone(),
+                    log_path: config.log_path(),
+                },
+                control_rx,
+                budget,
+            )
+        }
+
+        let nonce = current_epoch_ms();
+        let server_config = test_config(&format!("resource-loopback-server-{nonce}"));
+        let client_config = test_config(&format!("resource-loopback-client-{nonce}"));
+        for config in [&server_config, &client_config] {
+            let _ = std::fs::remove_dir_all(config.root_dir());
+            crate::config::init_files(config).expect("init isolated loopback config");
+        }
+
+        let server_identity =
+            PrivateIdentity::new_from_name(&format!("omenchatd-loopback-server-{nonce}"));
+        let client_identity =
+            PrivateIdentity::new_from_name(&format!("omenchatd-loopback-client-{nonce}"));
+        let mut server_transport_config =
+            TransportConfig::new("omenchatd-resource-loopback-server", &server_identity, true);
+        server_transport_config.set_resource_retry_interval_secs(1);
+        server_transport_config.set_resource_retry_limit(10);
+        let mut server_transport = Transport::new(server_transport_config);
+        let server_destination = server_transport
+            .add_destination(
+                server_identity,
+                DestinationName::new(OMENCHAT_RNS_APP_NAME, "resource-test"),
+            )
+            .await;
+        let server_transport = Arc::new(server_transport);
+        let mut client_transport_config =
+            TransportConfig::new("omenchatd-resource-loopback-client", &client_identity, true);
+        client_transport_config.set_resource_retry_interval_secs(1);
+        client_transport_config.set_resource_retry_limit(10);
+        let client_transport = Arc::new(Transport::new(client_transport_config));
+
+        let (server_port, client_port) = reserve_udp_ports();
+        server_transport.iface_manager().lock().await.spawn(
+            UdpInterface::new(
+                format!("127.0.0.1:{server_port}"),
+                Some(format!("127.0.0.1:{client_port}")),
+            ),
+            UdpInterface::spawn,
+        );
+        client_transport.iface_manager().lock().await.spawn(
+            UdpInterface::new(
+                format!("127.0.0.1:{client_port}"),
+                Some(format!("127.0.0.1:{server_port}")),
+            ),
+            UdpInterface::spawn,
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (client_events, mut client_control_rx, client_budget) = event_queue(&client_config);
+        let shutdown = CancellationToken::new();
+        let client_bridge = spawn_resource_event_receiver(
+            client_transport.clone(),
+            client_transport.resource_events(),
+            client_events,
+            client_config.clone(),
+            shutdown.clone(),
+        );
+
+        let destination = server_destination.lock().await.desc;
+        server_transport
+            .send_announce(&server_destination, None)
+            .await;
+        assert!(
+            client_transport
+                .await_path(&destination.address_hash, Duration::from_secs(5), None)
+                .await,
+            "client must learn the server path over loopback UDP"
+        );
+        let link = client_transport.link(destination).await;
+        await_link_activation(&client_transport, &link, Duration::from_secs(5))
+            .await
+            .expect("loopback link activation");
+        let link_id = *link.lock().await.id();
+        let mut server_wire_rx = server_transport.iface_rx();
+
+        let cancelled_hash = client_transport
+            .send_resource(
+                &link_id,
+                vec![0x51; 4 * 1024],
+                Some(OMENCHAT_RESOURCE_METADATA_PREFIX.to_vec()),
+            )
+            .await
+            .expect("advertise cancellable Resource");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = server_wire_rx
+                    .recv()
+                    .await
+                    .expect("server interface event stream remains open");
+                if message.packet.context == PacketContext::ResourceAdvrtisement {
+                    assert_eq!(
+                        message.packet.header.destination_type,
+                        rns_transport::packet::DestinationType::Link
+                    );
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("server must physically receive the Resource advertisement");
+        assert!(
+            client_transport
+                .cancel_resource(&link_id, cancelled_hash)
+                .await
+                .expect("send initiator cancellation"),
+            "active outbound Resource must be cancellable"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = server_wire_rx
+                    .recv()
+                    .await
+                    .expect("server interface event stream remains open");
+                if message.packet.context == PacketContext::ResourceInitiatorCancel {
+                    assert_eq!(
+                        message.packet.header.destination_type,
+                        rns_transport::packet::DestinationType::Link
+                    );
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("server must physically receive initiator cancellation");
+        let cancelled = tokio::time::timeout(Duration::from_secs(2), client_control_rx.recv())
+            .await
+            .expect("cancel terminal timeout")
+            .expect("client control bridge remains open");
+        assert_eq!(
+            cancelled.value,
+            OmenchatLinkEvent::ResourceTerminal {
+                link_id: address_hash_bytes(link_id),
+                direction: LiveResourceDirection::Outbound,
+                outcome: LiveResourceOutcome::Cancelled,
+            }
+        );
+        drop(cancelled);
+        assert_eq!(link.lock().await.status(), LinkStatus::Active);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let server_link = server_transport
+            .find_in_link(&link_id)
+            .await
+            .expect("server retains inbound link after initiator cancellation");
+        assert_eq!(server_link.lock().await.status(), LinkStatus::Active);
+
+        assert_eq!(client_budget.snapshot().queued_items, 0);
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), client_bridge)
+            .await
+            .expect("loopback Resource bridge shutdown must be bounded")
+            .expect("loopback Resource bridge task must join");
+        assert!(server_transport.detach_interfaces().await >= 1);
+        assert!(client_transport.detach_interfaces().await >= 1);
+        assert!(crate::server_log::flush(Duration::from_secs(1)));
+        for config in [&server_config, &client_config] {
+            let _ = std::fs::remove_dir_all(config.root_dir());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2262,3 +3301,7 @@ mod soak_tests;
 #[cfg(test)]
 #[path = "reticulum_live_db_soak_tests.rs"]
 mod db_soak_tests;
+
+#[cfg(test)]
+#[path = "reticulum_live_multiprocess_tests.rs"]
+mod multiprocess_tests;

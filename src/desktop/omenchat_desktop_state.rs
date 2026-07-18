@@ -220,6 +220,9 @@ impl OmenChatGifCache {
 }
 
 #[cfg(test)]
+// The cache tests sit beside the private cache types they exercise; the state
+// type follows so production ownership fields remain grouped with its impls.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -402,15 +405,23 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_opening: HashSet<ChatSessionId>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_live_open_cancellations:
+        HashMap<ChatSessionId, CancellationToken>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_retry_after: HashMap<ChatSessionId, u64>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_retry_count: HashMap<ChatSessionId, u8>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_live_stable_after: HashMap<ChatSessionId, u64>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_connect_count: HashMap<ChatSessionId, u64>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_disconnect_count: HashMap<ChatSessionId, u64>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_last_disconnect_reason: HashMap<ChatSessionId, String>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_connection_states:
+        HashMap<ChatSessionId, crate::chat::ChatConnectionState>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_recent_sync_pending: HashSet<ChatSessionId>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -445,6 +456,19 @@ impl OmenChatDesktopState {
             .collect::<HashMap<_, _>>();
         let chat_scroll_bottom_locks = chat_scroll_offsets.keys().copied().collect::<HashSet<_>>();
 
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        let omenchat_connection_states = startup
+            .chat_client
+            .sessions()
+            .iter()
+            .map(|session| {
+                (
+                    session.session_id,
+                    crate::chat::ChatConnectionState::Disconnected,
+                )
+            })
+            .collect();
+
         Self {
             chat_client: startup.chat_client,
             chat_store: startup.chat_store,
@@ -473,15 +497,21 @@ impl OmenChatDesktopState {
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_opening: HashSet::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_live_open_cancellations: HashMap::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_retry_after: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_retry_count: HashMap::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_live_stable_after: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_connect_count: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_disconnect_count: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_last_disconnect_reason: HashMap::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_connection_states,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_recent_sync_pending: HashSet::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]

@@ -83,6 +83,26 @@ pub(crate) fn append_lxmf_message_detail_status_lines(
     if let Some(next_action) = message.fields.get("native_lxmf_next_action") {
         lines.push(format!("next action: {next_action}"));
     }
+    if let Some(outcome) = message.fields.get("native_lxmf_sdk_cancel_outcome") {
+        lines.push(format!("cancellation: {outcome}"));
+    }
+    if let Some(ttl_ms) = message
+        .fields
+        .get(crate::messaging::OUTBOUND_TTL_FIELD)
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        lines.push(format!("send TTL: {}s", ttl_ms / 1_000));
+    }
+    if let Some(expires_at_ms) = message
+        .fields
+        .get(crate::messaging::OUTBOUND_EXPIRES_AT_FIELD)
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        lines.push(format!(
+            "send expires: {}",
+            format_epoch_secs(expires_at_ms as f64 / 1_000.0)
+        ));
+    }
     if let Some(attempt) = message.fields.get("native_lxmf_retry_attempt") {
         lines.push(format!("retry attempt: {attempt}"));
     }
@@ -152,6 +172,22 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "next: wait for packet proof"));
+    }
+
+    #[test]
+    fn lxmf_message_detail_status_lines_show_fixed_ttl_without_a_redraw_timer() {
+        let message = message_with_fields(BTreeMap::from([
+            (crate::messaging::OUTBOUND_TTL_FIELD.into(), "42000".into()),
+            (
+                crate::messaging::OUTBOUND_EXPIRES_AT_FIELD.into(),
+                "1700000042000".into(),
+            ),
+        ]));
+
+        let lines = detail_lines(&message);
+
+        assert!(lines.iter().any(|line| line == "send TTL: 42s"));
+        assert!(lines.iter().any(|line| line.starts_with("send expires: ")));
     }
 
     #[test]

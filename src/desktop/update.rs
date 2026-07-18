@@ -64,7 +64,7 @@ impl Message {
             Message::WorkspacePane(_) => MessageRoute::WorkspacePane,
 
             #[cfg(test)]
-            Message::TestUnhandledRoutingMessage => MessageRoute::TestUnhandled,
+            Message::TestUnhandledRouting => MessageRoute::TestUnhandled,
         }
     }
 }
@@ -248,6 +248,8 @@ mod tests {
                 action: false,
             },
             OmenChatMessage::LoadOlderHistory(session_id),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            OmenChatMessage::CopySessionDiagnostics(session_id),
             OmenChatMessage::CloseSession(session_id),
             OmenChatMessage::OpenCachedMedia("cached.png".into()),
             OmenChatMessage::LoadMedia("https://example.invalid/media.png".into()),
@@ -274,6 +276,7 @@ mod tests {
         let (select_id, select_key) = row();
         let (prepare_id, prepare_key) = row();
         let (send_id, send_key) = row();
+        let (cancel_id, cancel_key) = row();
         let (dismiss_id, dismiss_key) = row();
         let (sync_id, sync_key) = row();
         for message in [
@@ -324,6 +327,10 @@ mod tests {
                 conversation_id: send_id,
                 key: send_key,
             },
+            ConversationMessage::CancelConversationRow {
+                conversation_id: cancel_id,
+                key: cancel_key,
+            },
             ConversationMessage::DismissPaneRow {
                 conversation_id: dismiss_id,
                 key: dismiss_key,
@@ -345,6 +352,7 @@ mod tests {
             ConversationMessage::SelectRow("message-key".into()),
             ConversationMessage::PrepareRetryForRow("message-key".into()),
             ConversationMessage::SendRetryForRow("message-key".into()),
+            ConversationMessage::CancelRow("message-key".into()),
             ConversationMessage::SyncPropagationForRow("message-key".into()),
             ConversationMessage::SyncMessages,
             ConversationMessage::InspectPeer,
@@ -769,7 +777,7 @@ mod tests {
             settings: crate::storage::settings::AppSettings::default(),
         }));
 
-        let _ = desktop.update(Message::TestUnhandledRoutingMessage);
+        let _ = desktop.update(Message::TestUnhandledRouting);
 
         assert!(desktop
             .app
@@ -788,7 +796,7 @@ mod tests {
         let persisted = std::fs::read_to_string(root.join("logs/omenbrowser_rs.jsonl"))
             .expect("persisted routing log");
         assert!(persisted.contains("unhandled desktop message discriminant"));
-        assert!(!persisted.contains("TestUnhandledRoutingMessage"));
+        assert!(!persisted.contains("TestUnhandledRouting"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -120,7 +120,10 @@ async fn production_queues_bound_slow_resource_consumers_and_keep_control_respon
                 };
                 let Some(queued) = queued else { break };
                 match queued.value {
-                    OmenchatLinkEvent::LinkClosed { .. } | OmenchatLinkEvent::LinkOpened { .. } => {
+                    OmenchatLinkEvent::LinkClosed { .. }
+                    | OmenchatLinkEvent::LinkOpened { .. }
+                    | OmenchatLinkEvent::PeerIdentified { .. }
+                    | OmenchatLinkEvent::ResourceTerminal { .. } => {
                         control_acks.fetch_add(1, Ordering::Relaxed);
                     }
                     OmenchatLinkEvent::LinkData { .. }
@@ -154,7 +157,7 @@ async fn production_queues_bound_slow_resource_consumers_and_keep_control_respon
                     b"omenchat-resource:queue-soak".to_vec(),
                 );
                 sequence += 1;
-                if sequence.is_multiple_of(100) {
+                if sequence % 100 == 0 {
                     let acks_before = control_acks.load(Ordering::Relaxed);
                     let started = Instant::now();
                     transport
@@ -195,7 +198,7 @@ async fn production_queues_bound_slow_resource_consumers_and_keep_control_respon
                     },
                 );
                 sequence += 1;
-                if sequence.is_multiple_of(100) {
+                if sequence % 100 == 0 {
                     let acks_before = control_acks.load(Ordering::Relaxed);
                     let started = Instant::now();
                     sender

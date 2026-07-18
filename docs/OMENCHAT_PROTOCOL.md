@@ -9,8 +9,35 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-The standalone server's quiet NomadNet portal is a separate request-resource
-surface. Its established path request is limited before MessagePack allocation
+### v0.6.0-1 / v0.9.5-1 compatibility boundary
+
+The application release number does not version the OMENchat wire protocol.
+The v0.9.5-1 migration retains protocol version `1`, protocol name
+`omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
+legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
+
+reticulum-rs 0.9's high-level link delivery helper emits generic link data
+with context `0x00`, and its `PacketContext` conversion maps unknown
+application contexts such as `0x4f` to generic data. The clean adapter
+therefore accepts only generic link data at the Reticulum boundary and then
+requires a valid bounded OMENchat frame before protocol dispatch. omenchatd
+accepts a valid frame received as either generic context `0x00` or the legacy
+`0x4f` context, ignores context-zero non-frames, and keeps legacy `0x4f`
+responses for compatibility. This is transport adaptation; it does not change
+the OMENchat frame protocol.
+
+`fixtures/omenchat/v0_6_0_1_wire.rs` records public v0.6.0-1 session-open,
+room-message, and history-resource-offer bytes plus the protocol and transport
+labels. Both the browser and independently built server must encode those
+fixtures byte-for-byte and decode them to the same typed frames. These tests
+prove deterministic codec compatibility in both directions, but do not replace
+the pending multi-process v0.6/v0.9 link, resource, restart, and reconnect
+matrix.
+
+The standalone server's quiet NomadNet portal is a separate Reticulum request
+surface. It accepts direct request-context packets for requests within packet
+MDU and request Resources for oversized requests. Its established path request
+is limited before MessagePack allocation
 to 4 KiB input, 1 KiB scalar values, 32 container items, 64 total values, and
 four nested levels, with no trailing data. This does not change the portal path
 hash or response encoding.
@@ -57,6 +84,13 @@ per item/8 KiB total. Micron OMENchat link metadata is limited to 32 fields and
 session creation; display names remain UTF-8-safely shortened. Accepted
 descriptor keys and lowered link syntax are unchanged.
 
+The browser's Directory may persist the public identity hash authenticated by a
+Reticulum `omenchat.node` announce. This is local discovery metadata, not an
+OMENchat frame or descriptor field. Identity hashes must be exactly 32
+hexadecimal characters, and a different identity cannot replace the identity
+already bound to the same destination record. `announce-verified` describes
+transport evidence only; it does not grant application trust.
+
 Compressed history and user-list batches additionally have 4 MiB compressed and
 4 MiB uncompressed ceilings. The advertised uncompressed length is checked
 before decoding, and bzip2 output is streamed only through that length plus one
@@ -68,6 +102,23 @@ scalar, 16,384 items per container, 65,536 total values, 16 nested levels, and
 exact consumption of one MessagePack object. These wider batch-shape limits
 accommodate configured history and live user-list collections without weakening
 the smaller live-frame limits.
+
+For resource-backed history and user lists, the client validates the offer
+before retaining it: the resource identifier must be non-empty and at most
+4 KiB, advertised compressed/uncompressed sizes must fit the 4 MiB ceilings,
+and the purpose must match the operation (`history` or `userlist`). Once the
+resource arrives, its embedded compression, uncompressed length, and compressed
+payload length must exactly match the offer before decompression or application
+state mutation. A mismatch consumes/removes the received resource and reports a
+protocol error; it is not silently reinterpreted as another batch type.
+
+An inbound Reticulum resource failure or cancellation is a local transport
+lifecycle event, not a new OMENchat frame. The desktop releases pending
+history/user-list offers owned by that live link and leaves the link connected
+for retry. Cleanup is deliberately link-scoped: the Reticulum terminal exposes
+a transfer hash but not the OMENchat resource ID needed for safe per-offer
+selection. This changes no operation number, field, metadata prefix, protocol
+version, destination, or mixed-version wire behavior.
 
 ## Client URI
 
@@ -86,6 +137,39 @@ The destination hash identifies the chat server.
 5. Client joins a room.
 6. Server replies with room state, userlist, topic, and recent history.
 7. Client and server exchange room events.
+
+## Operation correlation and same-link replay
+
+The existing 32-bit frame `seq` is the request/response correlation identifier.
+The browser allocates it monotonically from its live client state and retains
+that state across an in-process reconnect. Protocol v1 does not include a
+persisted client-session nonce, so `seq` is not globally unique across process
+restart and must not be treated as a durable `(identity, seq)` key.
+
+omenchatd suppresses exact same-link replays of `RoomMessage`, `RoomAction`,
+`RoomNotice`, `PartRoom`, and mutating commands (`topic`, `create`, `kick`,
+`ban`, `mute`, `unmute`, `role`, and `unban`). It retains the canonical request
+bytes and origin response before delivery. An exact `(link, seq, request)`
+replay receives the same acknowledgment or response without another database
+mutation, rate-limit charge, room fan-out, user-list fan-out, or moderation
+disconnect. Read-only `rooms` commands are not retained. Reusing `(link, seq)`
+with different content returns `MalformedFrame`. Closing or replacing the link
+removes its replay entries.
+
+Part and kick/ban transport side effects are response-gated: a part changes the
+live link's room only after a successful `part` result, and a moderation target
+is disconnected only after a successful `kick` or `ban` result. Denied,
+malformed, missing-target, and rate-limited operations therefore cannot change
+live transport ownership.
+
+The cache is limited to 1,024 entries/4 MiB globally, 64 entries/256 KiB per
+link, and 64 KiB per entry. Monitoring reports hits, collisions, rejected cache
+admissions, retained items, and retained owned-capacity bytes. This is a server execution
+guard, not a frame change: operation numbers, body fields, sequence encoding,
+and acknowledgments remain byte-compatible. Cross-link and post-restart retry
+idempotency require a separately negotiated/versioned session identifier and
+remain unsupported; the current client does not silently resend an unacknowledged
+room mutation across those boundaries.
 
 ## Rooms
 

@@ -247,43 +247,68 @@ pub(super) fn network_doctor_path_rows(monitoring: &MonitoringPanelState) -> Vec
         ),
         NetworkDoctorRow::new(
             "path table",
-            if snapshot.path_table_count > 0 {
+            if !snapshot.path_table_available {
+                "unavailable"
+            } else if snapshot.path_table_count > 0 {
                 "available"
             } else {
                 "empty"
             },
-            format!(
-                "{} cached path(s) / {} path update event(s)",
-                snapshot.path_table_count, monitoring.path_updates_received
-            ),
+            if snapshot.path_table_available {
+                format!(
+                    "{} cached path(s) / {} path update event(s)",
+                    snapshot.path_table_count, monitoring.path_updates_received
+                )
+            } else {
+                format!(
+                    "aggregate path table is not exposed / {} path update event(s) observed",
+                    monitoring.path_updates_received
+                )
+            },
         ),
         NetworkDoctorRow::new(
             "path requests",
-            if snapshot.request_failures > 0 {
+            if !snapshot.request_failure_metrics_available {
+                "partial"
+            } else if snapshot.request_failures > 0 {
                 "attention"
             } else {
                 "ok"
             },
-            format!(
-                "{} request(s) / {} warmup(s) / {} failure(s)",
-                monitoring.outbound_path_requests,
-                monitoring.outbound_path_warmups,
-                snapshot.request_failures
-            ),
+            if snapshot.request_failure_metrics_available {
+                format!(
+                    "{} request(s) / {} warmup(s) / {} failure(s)",
+                    monitoring.outbound_path_requests,
+                    monitoring.outbound_path_warmups,
+                    snapshot.request_failures
+                )
+            } else {
+                format!(
+                    "{} request(s) / {} warmup(s) / failure metric unavailable",
+                    monitoring.outbound_path_requests, monitoring.outbound_path_warmups
+                )
+            },
         ),
         NetworkDoctorRow::new(
             "runtime instance",
-            if snapshot.connected_to_shared_instance {
+            if !snapshot.shared_instance_status_available {
+                "unavailable"
+            } else if snapshot.connected_to_shared_instance {
                 "shared"
             } else if snapshot.is_shared_instance {
                 "serving"
             } else {
                 "managed"
             },
-            format!(
-                "connected_to_shared={} / is_shared={}",
-                snapshot.connected_to_shared_instance, snapshot.is_shared_instance
-            ),
+            if snapshot.shared_instance_status_available {
+                format!(
+                    "connected_to_shared={} / is_shared={}",
+                    snapshot.connected_to_shared_instance, snapshot.is_shared_instance
+                )
+            } else {
+                "runtime ownership is configured but live shared-instance status is not negotiated"
+                    .into()
+            },
         ),
     ];
 

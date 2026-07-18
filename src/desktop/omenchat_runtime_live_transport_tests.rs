@@ -120,6 +120,26 @@ fn omenchat_transport_consumes_and_bounds_resource_payloads_and_offers() {
         Some(vec![0x41])
     );
     assert_eq!(transport.incoming_frame_bytes, 0);
+
+    assert_eq!(
+        transport.clear_pending_resource_offers(),
+        crate::desktop::OMENCHAT_PENDING_RESOURCE_OFFER_MAX_ITEMS - 1
+    );
+    transport
+        .defer_resource_offer("pending:cleanup-a", vec![0x61, 0x62])
+        .expect("first cleanup offer");
+    transport
+        .defer_resource_offer("pending:cleanup-b", vec![0x63])
+        .expect("second cleanup offer");
+    let pending_before_cleanup = transport.pending_resource_offer_count();
+    assert_eq!(pending_before_cleanup, 2);
+    assert!(transport.pending_resource_offer_bytes > 0);
+    assert_eq!(
+        transport.clear_pending_resource_offers(),
+        pending_before_cleanup
+    );
+    assert_eq!(transport.pending_resource_offer_count(), 0);
+    assert_eq!(transport.pending_resource_offer_bytes, 0);
 }
 
 #[test]

@@ -1,0 +1,10 @@
+diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1531,5 +1531,5 @@
+             let envelope = crate::messaging::MessageEnvelope {
+                 peer_hash: peer.to_string(),
+                 title: "OMENbrowser_rs LXMF interop test".into(),
+-                body: "OMENbrowser_rs native LXMF live interop test. This message was explicitly requested by the local user.".into(),
++                body: "R".repeat(65_536),
+                 delivery_mode: delivery_mode.clone(),

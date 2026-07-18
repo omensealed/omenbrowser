@@ -130,6 +130,10 @@ impl DesktopApp {
                     session_id,
                     "opening live OMENchat link".to_string(),
                 );
+                self.set_omenchat_connection_state(
+                    session_id,
+                    crate::chat::ChatConnectionState::Connecting,
+                );
                 self.app.status.task = format!(
                     "reconnecting OMENchat session: {}",
                     descriptor.server_destination

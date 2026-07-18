@@ -7,6 +7,7 @@ use crate::chat::{ChatClientEvent, ChatClientRequest, ChatSessionId};
 use super::{
     compact_elapsed_ms, hex_bytes, scroll_offset_is_at_bottom, DesktopApp,
     DesktopOmenChatTransport, Message, OMENCHAT_RECENT_SYNC_MAX_ATTEMPTS,
+    OMENCHAT_RECONNECT_STABLE_MS,
 };
 
 pub(in crate::desktop) fn omenchat_recent_sync_wants_bottom_restore(
@@ -40,11 +41,38 @@ impl DesktopApp {
             .entry(session_id)
             .and_modify(|count| *count = count.saturating_add(1))
             .or_insert(1);
+        self.set_omenchat_connection_state(
+            session_id,
+            if self
+                .omenchat
+                .chat_client
+                .session(session_id)
+                .is_some_and(|session| session.active_room.joined)
+            {
+                crate::chat::ChatConnectionState::Joined
+            } else {
+                crate::chat::ChatConnectionState::Authenticating
+            },
+        );
         self.omenchat.omenchat_recent_sync_links.remove(&session_id);
         self.omenchat
             .omenchat_recent_sync_attempts
             .remove(&session_id);
-        self.clear_omenchat_reconnect_state(session_id);
+        self.omenchat.omenchat_live_opening.remove(&session_id);
+        self.omenchat.omenchat_live_retry_after.remove(&session_id);
+        self.omenchat
+            .omenchat_live_reconnect_generation
+            .remove(&session_id);
+        if self
+            .omenchat
+            .omenchat_live_retry_count
+            .contains_key(&session_id)
+        {
+            self.omenchat.omenchat_live_stable_after.insert(
+                session_id,
+                current_epoch_ms().saturating_add(OMENCHAT_RECONNECT_STABLE_MS),
+            );
+        }
         if self
             .omenchat
             .omenchat_recent_sync_pending

@@ -13,7 +13,7 @@ use crate::messaging::MessageStore;
 use crate::plugins::PluginManifest;
 use crate::runtime::{
     InterfaceStats, LxmfSdkRpcProbeSnapshot, NetworkRuntime, NetworkSnapshot, PropagationStatus,
-    RuntimeStatus,
+    RuntimeCapabilitySnapshot, RuntimeLifecycleSnapshot, RuntimeStatus,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -21,6 +21,8 @@ pub struct DiagnosticsSnapshot {
     pub app_version: String,
     pub platform: PlatformInfo,
     pub runtime: RuntimeDiagnostics,
+    pub runtime_lifecycle: RuntimeLifecycleSnapshot,
+    pub runtime_capabilities: RuntimeCapabilitySnapshot,
     pub paths: PathDiagnostics,
     pub active_identity: Option<IdentityDiagnostics>,
     pub reticulum: ReticulumPathDiagnostics,
@@ -106,6 +108,8 @@ impl DiagnosticsService {
         conversation_tabs: usize,
     ) -> AppResult<DiagnosticsSnapshot> {
         let runtime_status = self.runtime.status().await;
+        let runtime_lifecycle = self.runtime.lifecycle_snapshot().await;
+        let runtime_capabilities = self.runtime.capability_snapshot().await;
         let interface_stats = self.runtime.interface_stats().await?;
         let network = self.runtime.network_snapshot().await?;
         let propagation_status = self.runtime.propagation_status().await?;
@@ -118,6 +122,8 @@ impl DiagnosticsService {
                 state: "error".into(),
                 runtime_id: None,
                 active_contract_version: None,
+                event_stream_position: None,
+                config_revision: None,
                 queued_messages: None,
                 in_flight_messages: None,
                 detail: Some(error.to_string()),
@@ -130,6 +136,8 @@ impl DiagnosticsService {
                 family: std::env::consts::FAMILY.into(),
             },
             runtime: runtime_diagnostics(&runtime_status),
+            runtime_lifecycle,
+            runtime_capabilities,
             paths: PathDiagnostics::from(&self.paths),
             active_identity: runtime_status
                 .active_identity
@@ -180,6 +188,13 @@ impl DiagnosticsService {
                 "path_hint".into(),
                 serde_json::Value::String("<redacted>".into()),
             );
+        }
+        if let Some(technical_detail) = value
+            .get_mut("runtime_lifecycle")
+            .and_then(|lifecycle| lifecycle.get_mut("failure"))
+            .and_then(|failure| failure.get_mut("technical_detail"))
+        {
+            *technical_detail = serde_json::Value::String("<redacted>".into());
         }
         value.into_iter().collect()
     }
@@ -287,10 +302,43 @@ mod tests {
         assert_eq!(snapshot.counts.cache_files, 1);
         assert_eq!(snapshot.counts.browser_tabs, 2);
         assert_eq!(
+            snapshot.runtime_lifecycle.state,
+            crate::runtime::RuntimeLifecycleState::Running
+        );
+        assert!(snapshot
+            .runtime_capabilities
+            .supports(crate::runtime::RuntimeCapability::DirectDelivery));
+        assert_eq!(
+            snapshot
+                .runtime_capabilities
+                .availability(crate::runtime::RuntimeCapability::SharedInstance),
+            crate::runtime::RuntimeCapabilityAvailability::Unsupported
+        );
+        assert_eq!(
             redacted
                 .get("active_identity")
                 .and_then(|value| value.get("path_hint"))
                 .and_then(|value| value.as_str()),
+            Some("<redacted>")
+        );
+
+        let mut failed_snapshot = snapshot;
+        failed_snapshot.runtime_lifecycle = RuntimeLifecycleSnapshot::failed(
+            crate::runtime::RuntimeBackendName::Reticulum,
+            crate::runtime::RuntimeFailure {
+                category: crate::runtime::RuntimeFailureCategory::Configuration,
+                summary: "configuration rejected".into(),
+                technical_detail: Some("/private/path/identity".into()),
+                retryable: false,
+            },
+        );
+        let redacted = DiagnosticsService::redacted_export(&failed_snapshot);
+        assert_eq!(
+            redacted
+                .get("runtime_lifecycle")
+                .and_then(|value| value.get("failure"))
+                .and_then(|value| value.get("technical_detail"))
+                .and_then(serde_json::Value::as_str),
             Some("<redacted>")
         );
     }

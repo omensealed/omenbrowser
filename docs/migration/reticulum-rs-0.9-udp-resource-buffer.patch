@@ -1,0 +1,45 @@
+diff --git a/crates/libs/rns-transport/src/iface/udp.rs b/crates/libs/rns-transport/src/iface/udp.rs
+--- a/crates/libs/rns-transport/src/iface/udp.rs
++++ b/crates/libs/rns-transport/src/iface/udp.rs
+@@ -172,2 +172,4 @@
+     UdpSocket::from_std(std_socket)
+ }
++const UDP_INTERFACE_MTU: usize = 2048;
++
+@@ -369 +371 @@
+-            const BUFFER_SIZE: usize = core::mem::size_of::<Packet>() * 3;
++            const BUFFER_SIZE: usize = UDP_INTERFACE_MTU;
+@@ -559,8 +561,8 @@
+                                             );
+                                         }
+                                         let mut output = OutputBuffer::new(&mut tx_buffer);
+-                                        if packet.serialize(&mut output).is_ok() {
+-                                            match socket.send_to(output.as_slice(), &dest).await {
++                                        match packet.serialize(&mut output) {
++                                            Ok(_) => match socket.send_to(output.as_slice(), &dest).await {
+                                                 Ok(n) => {
+                                                     runtime_status.update(|status| {
+                                                         status.link_state = "bound".to_string();
+@@ -575,6 +577,19 @@
+                                                         status.last_error = Some(err.to_string());
+                                                     });
+                                                 }
++                                            },
++                                            Err(err) => {
++                                                log::warn!(
++                                                    "udp packet serialization failed on iface {}: {:?}",
++                                                    iface_address,
++                                                    err,
++                                                );
++                                                runtime_status.update(|status| {
++                                                    status.tx_errors = status.tx_errors.saturating_add(1);
++                                                    status.last_error = Some(format!(
++                                                        "packet serialization failed: {err:?}"
++                                                    ));
++                                                });
+                                             }
+                                         }
+                                     }
+@@ -601 +616 @@
+-        2048
++        UDP_INTERFACE_MTU

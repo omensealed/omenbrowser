@@ -5,6 +5,10 @@ pub struct NativeLxmfClientState {
 
 #[cfg(feature = "native-lxmf-sdk")]
 use crate::error::{AppError, AppResult};
+#[cfg(feature = "native-lxmf-sdk")]
+use crate::runtime::LxmfCancelOutcome;
+#[cfg(feature = "native-lxmf-sdk")]
+use crate::runtime::{LxmfHistoryPage, LxmfHistoryRecord, LxmfHistoryRequest};
 
 #[cfg(feature = "native-lxmf-sdk")]
 use std::collections::{HashMap, VecDeque};
@@ -31,7 +35,7 @@ const LXMF_TICKET_EXPIRY_SECONDS: f64 = 21.0 * 24.0 * 60.0 * 60.0;
 #[cfg(feature = "native-lxmf-sdk")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeLxmfSdkSendPlan {
-    pub send_request: lxmf::sdk::SendRequest,
+    pub send_request: lxmf_sdk::SendRequest,
     pub rpc_delivery: rns_rpc::OutboundDeliveryOptions,
 }
 
@@ -39,7 +43,9 @@ pub struct NativeLxmfSdkSendPlan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeLxmfSdkSenderState {
     Ready,
+    Configured,
     MissingEndpoint,
+    RejectedEndpoint,
     NotWired,
 }
 
@@ -68,6 +74,15 @@ pub struct NativeLxmfSdkWireDelivery {
     pub method: Option<String>,
     pub include_ticket: bool,
     pub reply_ticket_used: bool,
+    pub direct_stamp: Option<NativeLxmfSdkDirectStamp>,
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeLxmfSdkDirectStamp {
+    pub target_cost: u8,
+    pub stamp_value: u32,
+    pub attempts: u64,
 }
 
 #[cfg(feature = "native-lxmf-sdk")]
@@ -77,6 +92,8 @@ pub struct NativeLxmfSdkProbe {
     pub runtime_id: String,
     pub state: String,
     pub active_contract_version: u16,
+    pub event_stream_position: u64,
+    pub config_revision: u64,
     pub queued_messages: u64,
     pub in_flight_messages: u64,
 }
@@ -138,9 +155,123 @@ impl RpcNativeLxmfSdkSender {
         self.endpoint.as_str()
     }
 
-    fn endpoint_is_configured(&self) -> bool {
-        !self.endpoint.trim().is_empty()
+    pub fn diagnostic_endpoint(&self) -> Option<String> {
+        validate_local_rpc_endpoint(self.endpoint.as_str())
+            .ok()
+            .map(|endpoint| endpoint.diagnostic_label)
     }
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValidatedLocalRpcEndpoint {
+    diagnostic_label: String,
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn validate_local_rpc_endpoint(endpoint: &str) -> AppResult<ValidatedLocalRpcEndpoint> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(AppError::Unsupported(
+            "native LXMF SDK/RPC endpoint is not configured".into(),
+        ));
+    }
+    if endpoint.chars().any(char::is_control) {
+        return Err(AppError::Unsupported(
+            "native LXMF SDK/RPC endpoint contains control characters".into(),
+        ));
+    }
+    if let Some(path) = endpoint
+        .strip_prefix("unix://")
+        .or_else(|| endpoint.strip_prefix("unix:"))
+        .map(str::trim)
+    {
+        if path.is_empty() || !std::path::Path::new(path).is_absolute() {
+            return Err(AppError::Unsupported(
+                "native LXMF SDK/RPC Unix endpoint must use an absolute socket path".into(),
+            ));
+        }
+        #[cfg(not(unix))]
+        return Err(AppError::Unsupported(
+            "native LXMF SDK/RPC Unix endpoints are unavailable on this platform".into(),
+        ));
+        #[cfg(unix)]
+        return Ok(ValidatedLocalRpcEndpoint {
+            diagnostic_label: "unix:<local-socket>".into(),
+        });
+    }
+
+    let authority_and_path = endpoint
+        .strip_prefix("tcp://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+        .unwrap_or(endpoint);
+    if (endpoint.contains("://") && authority_and_path == endpoint)
+        || endpoint.starts_with("https://")
+        || endpoint.starts_with("tls://")
+    {
+        return Err(AppError::Unsupported(
+            "native LXMF SDK/RPC endpoint requires a supported local transport; remote or implied-TLS endpoints need an explicit authenticated configuration"
+                .into(),
+        ));
+    }
+    let (authority, path) = authority_and_path
+        .split_once('/')
+        .map_or((authority_and_path, ""), |(authority, path)| {
+            (authority, path)
+        });
+    if !path.is_empty() && path != "rpc" {
+        return Err(AppError::Unsupported(
+            "native LXMF SDK/RPC endpoint path must be /rpc".into(),
+        ));
+    }
+    if authority.contains('@') || authority.contains('?') || authority.contains('#') {
+        return Err(AppError::Unsupported(
+            "native LXMF SDK/RPC endpoint must not contain credentials or query data".into(),
+        ));
+    }
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some(end) = bracketed.find(']') else {
+            return Err(AppError::Unsupported(
+                "native LXMF SDK/RPC endpoint has an invalid bracketed host".into(),
+            ));
+        };
+        let host = &bracketed[..end];
+        let suffix = &bracketed[end + 1..];
+        let Some(port) = suffix.strip_prefix(':') else {
+            return Err(AppError::Unsupported(
+                "native LXMF SDK/RPC endpoint must include a port".into(),
+            ));
+        };
+        (host, port)
+    } else {
+        authority.rsplit_once(':').ok_or_else(|| {
+            AppError::Unsupported(
+                "native LXMF SDK/RPC endpoint must include a host and port".into(),
+            )
+        })?
+    };
+    let address = host.parse::<std::net::IpAddr>().map_err(|_| {
+        AppError::Unsupported(
+            "native LXMF SDK/RPC local-trusted endpoint must use a literal loopback address".into(),
+        )
+    })?;
+    if !address.is_loopback() {
+        return Err(AppError::Unsupported(
+            "native LXMF SDK/RPC remote endpoints require explicit authenticated configuration"
+                .into(),
+        ));
+    }
+    let port = port.parse::<u16>().map_err(|_| {
+        AppError::Unsupported("native LXMF SDK/RPC endpoint port is invalid".into())
+    })?;
+    if port == 0 {
+        return Err(AppError::Unsupported(
+            "native LXMF SDK/RPC endpoint port must be nonzero".into(),
+        ));
+    }
+    Ok(ValidatedLocalRpcEndpoint {
+        diagnostic_label: format!("loopback:{port}"),
+    })
 }
 
 #[cfg(feature = "native-lxmf-sdk")]
@@ -288,6 +419,44 @@ pub fn build_sdk_wire_delivery(
     identity_bytes: &[u8],
     reply_ticket_hex: Option<&str>,
 ) -> AppResult<NativeLxmfSdkWireDelivery> {
+    build_sdk_wire_delivery_with_issued_ticket(
+        record,
+        options,
+        identity_bytes,
+        reply_ticket_hex,
+        None,
+    )
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn build_sdk_wire_delivery_with_issued_ticket(
+    record: &rns_rpc::MessageRecord,
+    options: &rns_rpc::OutboundDeliveryOptions,
+    identity_bytes: &[u8],
+    reply_ticket_hex: Option<&str>,
+    issued_ticket: Option<&crate::messaging::NativeLxmfReplyTicket>,
+) -> AppResult<NativeLxmfSdkWireDelivery> {
+    build_sdk_wire_delivery_with_policy(
+        record,
+        options,
+        identity_bytes,
+        reply_ticket_hex,
+        issued_ticket,
+        None,
+        || false,
+    )
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn build_sdk_wire_delivery_with_policy(
+    record: &rns_rpc::MessageRecord,
+    options: &rns_rpc::OutboundDeliveryOptions,
+    identity_bytes: &[u8],
+    reply_ticket_hex: Option<&str>,
+    issued_ticket: Option<&crate::messaging::NativeLxmfReplyTicket>,
+    direct_stamp_cost: Option<u8>,
+    cancelled: impl FnMut() -> bool,
+) -> AppResult<NativeLxmfSdkWireDelivery> {
     let destination = parse_lxmf_hash_hex(record.destination.as_str())?;
     let source = parse_lxmf_hash_hex(record.source.as_str())?;
     let signer =
@@ -296,7 +465,10 @@ pub fn build_sdk_wire_delivery(
 
     let mut fields = sdk_record_fields_to_rmpv(record.fields.as_ref())?;
     if options.include_ticket {
-        insert_lxmf_ticket_field(&mut fields);
+        match issued_ticket {
+            Some(ticket) => insert_issued_lxmf_ticket_field(&mut fields, ticket)?,
+            None => insert_lxmf_ticket_field(&mut fields),
+        }
     }
 
     let mut message = lxmf::Message::new();
@@ -309,12 +481,28 @@ pub fn build_sdk_wire_delivery(
     message.fields = fields;
 
     let mut reply_ticket_used = false;
+    let mut direct_stamp = None;
     if let Some(ticket_hex) = reply_ticket_hex {
         let ticket = parse_lxmf_ticket_hex(ticket_hex)?;
         let message_id = sdk_message_id(&message)?;
         let stamp = sdk_ticket_stamp(ticket.as_slice(), &message_id)?;
         message.set_stamp_from_bytes(&stamp);
         reply_ticket_used = true;
+    } else if let Some(target_cost) = direct_stamp_cost {
+        let message_id = sdk_message_id(&message)?;
+        let generated =
+            crate::runtime::native_lxmf::codec::generate_direct_stamp_for_message_cancellable(
+                message_id,
+                target_cost,
+                crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_ATTEMPTS,
+                cancelled,
+            )?;
+        message.set_stamp_from_bytes(&generated.stamp);
+        direct_stamp = Some(NativeLxmfSdkDirectStamp {
+            target_cost: generated.target_cost,
+            stamp_value: generated.stamp_value,
+            attempts: generated.attempts,
+        });
     }
 
     let wire_bytes = message.to_wire(Some(&signer)).map_err(|error| {
@@ -333,6 +521,7 @@ pub fn build_sdk_wire_delivery(
         method: options.method.clone(),
         include_ticket: options.include_ticket,
         reply_ticket_used,
+        direct_stamp,
     })
 }
 
@@ -343,7 +532,46 @@ pub fn build_sdk_wire_delivery_from_envelope(
     identity_bytes: &[u8],
     stamp_cost: Option<u32>,
 ) -> AppResult<NativeLxmfSdkWireDelivery> {
+    build_sdk_wire_delivery_from_envelope_with_issued_ticket(
+        envelope,
+        source_hash,
+        identity_bytes,
+        stamp_cost,
+        None,
+    )
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+pub fn build_sdk_wire_delivery_from_envelope_with_issued_ticket(
+    envelope: &crate::messaging::MessageEnvelope,
+    source_hash: &str,
+    identity_bytes: &[u8],
+    stamp_cost: Option<u32>,
+    issued_ticket: Option<&crate::messaging::NativeLxmfReplyTicket>,
+) -> AppResult<NativeLxmfSdkWireDelivery> {
+    build_sdk_wire_delivery_from_envelope_with_policy(
+        envelope,
+        source_hash,
+        identity_bytes,
+        stamp_cost,
+        issued_ticket,
+        None,
+        || false,
+    )
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+pub fn build_sdk_wire_delivery_from_envelope_with_policy(
+    envelope: &crate::messaging::MessageEnvelope,
+    source_hash: &str,
+    identity_bytes: &[u8],
+    stamp_cost: Option<u32>,
+    issued_ticket: Option<&crate::messaging::NativeLxmfReplyTicket>,
+    direct_stamp_cost: Option<u8>,
+    cancelled: impl FnMut() -> bool,
+) -> AppResult<NativeLxmfSdkWireDelivery> {
     let plan = build_sdk_send_plan(envelope, source_hash, stamp_cost);
+    validate_sdk_send_plan_ttl(&plan)?;
     let params = embedded_sdk_send_params(plan.send_request, plan.rpc_delivery.clone(), 1);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -380,16 +608,39 @@ pub fn build_sdk_wire_delivery_from_envelope(
         fields: params.get("fields").cloned(),
         receipt_status: None,
     };
-    let reply_ticket_hex = envelope
-        .native_reply_ticket
-        .as_ref()
-        .map(|ticket| hex_bytes(&ticket.ticket));
-    build_sdk_wire_delivery(
+    let reply_ticket_hex = match envelope.native_reply_ticket.as_ref() {
+        Some(ticket) => {
+            validate_outbound_reply_ticket(ticket)?;
+            Some(hex_bytes(&ticket.ticket))
+        }
+        None => None,
+    };
+    build_sdk_wire_delivery_with_policy(
         &record,
         &plan.rpc_delivery,
         identity_bytes,
         reply_ticket_hex.as_deref(),
+        issued_ticket,
+        direct_stamp_cost,
+        cancelled,
     )
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn validate_outbound_reply_ticket(
+    ticket: &crate::messaging::NativeLxmfReplyTicket,
+) -> AppResult<()> {
+    if ticket.ticket.len() != LXMF_TICKET_LENGTH {
+        return Err(AppError::Runtime(format!(
+            "LXMF reply ticket must be {LXMF_TICKET_LENGTH} bytes"
+        )));
+    }
+    if !ticket.expires.is_finite() || ticket.expires <= current_unix_secs_f64() {
+        return Err(AppError::Runtime(
+            "LXMF reply ticket is expired or invalid".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "native-lxmf-sdk")]
@@ -497,9 +748,43 @@ fn insert_lxmf_ticket_field(fields: &mut Option<rmpv::Value>) {
     let mut ticket = vec![0u8; LXMF_TICKET_LENGTH];
     rand_core::OsRng.fill_bytes(&mut ticket);
     let value = rmpv::Value::Array(vec![rmpv::Value::F64(expires), rmpv::Value::Binary(ticket)]);
+    insert_lxmf_ticket_value(fields, value);
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn insert_issued_lxmf_ticket_field(
+    fields: &mut Option<rmpv::Value>,
+    ticket: &crate::messaging::NativeLxmfReplyTicket,
+) -> AppResult<()> {
+    if ticket.ticket.len() != LXMF_TICKET_LENGTH {
+        return Err(AppError::Runtime(format!(
+            "issued LXMF ticket must be {LXMF_TICKET_LENGTH} bytes"
+        )));
+    }
+    if !ticket.expires.is_finite() || ticket.expires <= current_unix_secs_f64() {
+        return Err(AppError::Runtime(
+            "issued LXMF ticket expiry must be in the future".into(),
+        ));
+    }
+    let value = rmpv::Value::Array(vec![
+        rmpv::Value::F64(ticket.expires),
+        rmpv::Value::Binary(ticket.ticket.clone()),
+    ]);
+    insert_lxmf_ticket_value(fields, value);
+    Ok(())
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn insert_lxmf_ticket_value(fields: &mut Option<rmpv::Value>, value: rmpv::Value) {
     match fields {
         Some(rmpv::Value::Map(entries)) => {
-            entries.push((rmpv::Value::Integer(LXMF_TICKET_FIELD.into()), value));
+            if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| {
+                matches!(key, rmpv::Value::Integer(value) if value.as_i64() == Some(LXMF_TICKET_FIELD))
+            }) {
+                *existing = value;
+            } else {
+                entries.push((rmpv::Value::Integer(LXMF_TICKET_FIELD.into()), value));
+            }
         }
         _ => {
             *fields = Some(rmpv::Value::Map(vec![(
@@ -575,7 +860,7 @@ pub struct NativeLxmfSdkRuntimeBoundaryDecision {
 
 #[cfg(feature = "native-lxmf-sdk")]
 pub fn native_lxmf_sdk_runtime_boundary_decision() -> NativeLxmfSdkRuntimeBoundaryDecision {
-    let _rpc_client = lxmf::sdk::RpcBackendClient::new("tcp://127.0.0.1:0/rpc");
+    let _rpc_client = lxmf_sdk::RpcBackendClient::new("tcp://127.0.0.1:0/rpc");
     let _embedded_daemon_type = std::any::type_name::<rns_rpc::RpcDaemon>();
     let _outbound_bridge_type = std::any::type_name::<dyn rns_rpc::OutboundBridge>();
 
@@ -596,6 +881,70 @@ pub trait NativeLxmfSdkSender: Send + Sync {
     async fn probe(&self) -> AppResult<NativeLxmfSdkProbe>;
 
     async fn send_plan(&self, plan: NativeLxmfSdkSendPlan) -> AppResult<NativeLxmfSdkSendReceipt>;
+
+    async fn cancel_delivery(&self, message_id: &str) -> AppResult<LxmfCancelOutcome>;
+
+    async fn history_page(&self, request: LxmfHistoryRequest) -> AppResult<LxmfHistoryPage>;
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn map_sdk_history_page(page: lxmf_sdk::MessageHistoryPage) -> AppResult<LxmfHistoryPage> {
+    LxmfHistoryPage {
+        messages: page
+            .messages
+            .into_iter()
+            .map(|record| LxmfHistoryRecord {
+                message_id: record.id,
+                source: record.source,
+                destination: record.destination,
+                title: record.title,
+                content: record.content,
+                timestamp: record.timestamp,
+                direction: record.direction,
+                receipt_status: record.receipt_status,
+            })
+            .collect(),
+        next_cursor: page.next_cursor,
+    }
+    .validate()
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn sdk_history_request(request: LxmfHistoryRequest) -> lxmf_sdk::MessageHistoryListRequest {
+    lxmf_sdk::MessageHistoryListRequest {
+        peer_id: request.peer_hash,
+        conversation_id: None,
+        include_receipts: Some(true),
+        limit: Some(request.limit),
+        before_ts: None,
+        cursor: request.cursor,
+    }
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn map_sdk_cancel_result(result: lxmf_sdk::CancelResult) -> LxmfCancelOutcome {
+    match result {
+        lxmf_sdk::CancelResult::Accepted => LxmfCancelOutcome::Accepted,
+        lxmf_sdk::CancelResult::AlreadyTerminal => LxmfCancelOutcome::AlreadyTerminal,
+        lxmf_sdk::CancelResult::NotFound => LxmfCancelOutcome::NotFound,
+        lxmf_sdk::CancelResult::TooLateToCancel => LxmfCancelOutcome::TooLateToCancel,
+        lxmf_sdk::CancelResult::Unsupported => LxmfCancelOutcome::Unsupported,
+        _ => LxmfCancelOutcome::Unsupported,
+    }
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn parse_sdk_cancel_outcome(value: &str) -> AppResult<LxmfCancelOutcome> {
+    match value {
+        "Accepted" => Ok(LxmfCancelOutcome::Accepted),
+        "AlreadyTerminal" => Ok(LxmfCancelOutcome::AlreadyTerminal),
+        "NotFound" => Ok(LxmfCancelOutcome::NotFound),
+        "TooLateToCancel" => Ok(LxmfCancelOutcome::TooLateToCancel),
+        "Unsupported" => Ok(LxmfCancelOutcome::Unsupported),
+        _ => Err(AppError::Runtime(
+            "native LXMF SDK cancellation returned an unknown outcome".into(),
+        )),
+    }
 }
 
 #[cfg(feature = "native-lxmf-sdk")]
@@ -620,6 +969,16 @@ impl NativeLxmfSdkSender for MissingNativeLxmfSdkSender {
         ))
     }
 
+    async fn cancel_delivery(&self, _message_id: &str) -> AppResult<LxmfCancelOutcome> {
+        Ok(LxmfCancelOutcome::Unsupported)
+    }
+
+    async fn history_page(&self, _request: LxmfHistoryRequest) -> AppResult<LxmfHistoryPage> {
+        Err(AppError::Unsupported(
+            "native LXMF SDK history is not wired".into(),
+        ))
+    }
+
     async fn probe(&self) -> AppResult<NativeLxmfSdkProbe> {
         Err(AppError::Unsupported(
             "native LXMF SDK/RPC sender is not wired; no endpoint can be probed".into(),
@@ -631,36 +990,40 @@ impl NativeLxmfSdkSender for MissingNativeLxmfSdkSender {
 #[async_trait::async_trait]
 impl NativeLxmfSdkSender for RpcNativeLxmfSdkSender {
     fn status(&self) -> NativeLxmfSdkSenderStatus {
-        if self.endpoint_is_configured() {
-            NativeLxmfSdkSenderStatus {
-                name: "rpc-native-lxmf-sdk-sender",
-                state: NativeLxmfSdkSenderState::Ready,
-                note: "lxmf-sdk RPC sender has a configured endpoint; delivery still requires a compatible local sidecar",
-            }
-        } else {
-            NativeLxmfSdkSenderStatus {
+        let endpoint = self.endpoint.trim();
+        if endpoint.is_empty() {
+            return NativeLxmfSdkSenderStatus {
                 name: "rpc-native-lxmf-sdk-sender",
                 state: NativeLxmfSdkSenderState::MissingEndpoint,
                 note:
                     "lxmf-sdk RPC sender needs a configured local endpoint before it can dispatch",
-            }
+            };
+        }
+        match validate_local_rpc_endpoint(endpoint) {
+            Ok(_) => NativeLxmfSdkSenderStatus {
+                name: "rpc-native-lxmf-sdk-sender",
+                state: NativeLxmfSdkSenderState::Configured,
+                note: "lxmf-sdk RPC sender has a validated local endpoint; readiness requires a successful capability probe",
+            },
+            Err(_) => NativeLxmfSdkSenderStatus {
+                name: "rpc-native-lxmf-sdk-sender",
+                state: NativeLxmfSdkSenderState::RejectedEndpoint,
+                note: "lxmf-sdk RPC endpoint was rejected before connection because it is not an approved local-trusted transport",
+            },
         }
     }
 
     async fn probe(&self) -> AppResult<NativeLxmfSdkProbe> {
-        if !self.endpoint_is_configured() {
-            return Err(AppError::Unsupported(
-                "native LXMF SDK/RPC probe has no configured endpoint".into(),
-            ));
-        }
+        let validated = validate_local_rpc_endpoint(self.endpoint.as_str())?;
 
         let endpoint = self.endpoint.clone();
+        let diagnostic_endpoint = validated.diagnostic_label;
         let snapshot = tokio::task::spawn_blocking({
             let endpoint = endpoint.clone();
             move || {
-                use lxmf::sdk::SdkBackend;
+                use lxmf_sdk::SdkBackend;
 
-                let client = lxmf::sdk::RpcBackendClient::new(endpoint);
+                let client = lxmf_sdk::RpcBackendClient::new(endpoint);
                 client.snapshot().map_err(|error| error.to_string())
             }
         })
@@ -669,28 +1032,27 @@ impl NativeLxmfSdkSender for RpcNativeLxmfSdkSender {
         .map_err(|err| AppError::Runtime(format!("native LXMF SDK probe failed: {err}")))?;
 
         Ok(NativeLxmfSdkProbe {
-            endpoint,
+            endpoint: diagnostic_endpoint,
             runtime_id: snapshot.runtime_id,
             state: format!("{:?}", snapshot.state),
             active_contract_version: snapshot.active_contract_version,
+            event_stream_position: snapshot.event_stream_position,
+            config_revision: snapshot.config_revision,
             queued_messages: snapshot.queued_messages,
             in_flight_messages: snapshot.in_flight_messages,
         })
     }
 
     async fn send_plan(&self, plan: NativeLxmfSdkSendPlan) -> AppResult<NativeLxmfSdkSendReceipt> {
-        if !self.endpoint_is_configured() {
-            return Err(AppError::Unsupported(
-                "native LXMF SDK/RPC sender has no configured endpoint".into(),
-            ));
-        }
+        validate_local_rpc_endpoint(self.endpoint.as_str())?;
+        validate_sdk_send_plan_ttl(&plan)?;
 
         let endpoint = self.endpoint.clone();
         let send_request = plan.send_request;
         let message_id = tokio::task::spawn_blocking(move || {
-            use lxmf::sdk::SdkBackend;
+            use lxmf_sdk::SdkBackend;
 
-            let client = lxmf::sdk::RpcBackendClient::new(endpoint);
+            let client = lxmf_sdk::RpcBackendClient::new(endpoint);
             client.send(send_request).map_err(|error| error.to_string())
         })
         .await
@@ -702,6 +1064,46 @@ impl NativeLxmfSdkSender for RpcNativeLxmfSdkSender {
             accepted: true,
             state: "submitted_to_sdk_rpc".into(),
         })
+    }
+
+    async fn cancel_delivery(&self, message_id: &str) -> AppResult<LxmfCancelOutcome> {
+        validate_local_rpc_endpoint(self.endpoint.as_str())?;
+        let endpoint = self.endpoint.clone();
+        let message_id = message_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            use lxmf_sdk::SdkBackend;
+
+            let client = lxmf_sdk::RpcBackendClient::new(endpoint);
+            client
+                .cancel(lxmf_sdk::MessageId(message_id))
+                .map(map_sdk_cancel_result)
+                .map_err(|error| format!("{error:?}"))
+        })
+        .await
+        .map_err(|error| {
+            AppError::Runtime(format!("native LXMF SDK cancellation task failed: {error}"))
+        })?
+        .map_err(|error| AppError::Runtime(format!("native LXMF SDK cancellation failed: {error}")))
+    }
+
+    async fn history_page(&self, request: LxmfHistoryRequest) -> AppResult<LxmfHistoryPage> {
+        validate_local_rpc_endpoint(self.endpoint.as_str())?;
+        let request =
+            LxmfHistoryRequest::bounded(request.peer_hash, request.cursor, request.limit)?;
+        let endpoint = self.endpoint.clone();
+        tokio::task::spawn_blocking(move || {
+            let client = lxmf_sdk::app::Client::rpc(endpoint);
+            client
+                .messages()
+                .history(sdk_history_request(request))
+                .map_err(|error| format!("{error:?}"))
+        })
+        .await
+        .map_err(|error| {
+            AppError::Runtime(format!("native LXMF SDK history task failed: {error}"))
+        })?
+        .map_err(|error| AppError::Runtime(format!("native LXMF SDK history failed: {error}")))
+        .and_then(map_sdk_history_page)
     }
 }
 
@@ -759,6 +1161,14 @@ impl NativeLxmfSdkSender for EmbeddedNativeLxmfSdkSender {
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|value| u16::try_from(value).ok())
                 .unwrap_or(0),
+            event_stream_position: result
+                .get("event_stream_position")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            config_revision: result
+                .get("config_revision")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
             queued_messages: result
                 .get("queued_messages")
                 .and_then(serde_json::Value::as_u64)
@@ -771,6 +1181,7 @@ impl NativeLxmfSdkSender for EmbeddedNativeLxmfSdkSender {
     }
 
     async fn send_plan(&self, plan: NativeLxmfSdkSendPlan) -> AppResult<NativeLxmfSdkSendReceipt> {
+        validate_sdk_send_plan_ttl(&plan)?;
         let daemon = Arc::clone(&self.daemon);
         let request_id = self.next_request_id();
         let params = embedded_sdk_send_params(plan.send_request, plan.rpc_delivery, request_id);
@@ -811,11 +1222,99 @@ impl NativeLxmfSdkSender for EmbeddedNativeLxmfSdkSender {
             state: "submitted_to_embedded_rpc".into(),
         })
     }
+
+    async fn cancel_delivery(&self, message_id: &str) -> AppResult<LxmfCancelOutcome> {
+        let daemon = Arc::clone(&self.daemon);
+        let request_id = self.next_request_id();
+        let message_id = message_id.to_owned();
+        let response = tokio::task::spawn_blocking(move || {
+            daemon.handle_rpc(rns_rpc::RpcRequest {
+                id: request_id,
+                method: "sdk_cancel_message_v2".into(),
+                params: Some(serde_json::json!({ "message_id": message_id })),
+            })
+        })
+        .await
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "embedded native LXMF SDK cancellation task failed: {error}"
+            ))
+        })?
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "embedded native LXMF SDK cancellation failed: {error}"
+            ))
+        })?;
+        if let Some(error) = response.error {
+            return Err(AppError::Runtime(format!(
+                "embedded native LXMF SDK cancellation failed: {}: {}",
+                error.code, error.message
+            )));
+        }
+        let outcome = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("result"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                AppError::Runtime(
+                    "embedded native LXMF SDK cancellation omitted its outcome".into(),
+                )
+            })?;
+        parse_sdk_cancel_outcome(outcome)
+    }
+
+    async fn history_page(&self, request: LxmfHistoryRequest) -> AppResult<LxmfHistoryPage> {
+        let request =
+            LxmfHistoryRequest::bounded(request.peer_hash, request.cursor, request.limit)?;
+        let daemon = Arc::clone(&self.daemon);
+        let request_id = self.next_request_id();
+        let params = serde_json::to_value(lxmf_sdk::app::Envelope::query(
+            "app.message.history.list",
+            serde_json::to_value(sdk_history_request(request))
+                .map_err(|error| AppError::Runtime(error.to_string()))?,
+        ))
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+        let response = tokio::task::spawn_blocking(move || {
+            daemon.handle_rpc(rns_rpc::RpcRequest {
+                id: request_id,
+                method: "sdk_envelope_execute_v2".into(),
+                params: Some(params),
+            })
+        })
+        .await
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "embedded native LXMF SDK history task failed: {error}"
+            ))
+        })?
+        .map_err(|error| {
+            AppError::Runtime(format!("embedded native LXMF SDK history failed: {error}"))
+        })?;
+        if let Some(error) = response.error {
+            return Err(AppError::Runtime(format!(
+                "embedded native LXMF SDK history failed: {}: {}",
+                error.code, error.message
+            )));
+        }
+        let payload = response
+            .result
+            .and_then(|result| result.get("response").cloned())
+            .and_then(|response| response.get("payload").cloned())
+            .ok_or_else(|| {
+                AppError::Runtime(
+                    "embedded native LXMF SDK history returned no response payload".into(),
+                )
+            })?;
+        let page = serde_json::from_value::<lxmf_sdk::MessageHistoryPage>(payload)
+            .map_err(|error| AppError::Runtime(format!("invalid SDK history page: {error}")))?;
+        map_sdk_history_page(page)
+    }
 }
 
 #[cfg(feature = "native-lxmf-sdk")]
 fn embedded_sdk_send_params(
-    request: lxmf::sdk::SendRequest,
+    request: lxmf_sdk::SendRequest,
     options: rns_rpc::OutboundDeliveryOptions,
     request_id: u64,
 ) -> serde_json::Value {
@@ -874,7 +1373,20 @@ fn embedded_sdk_send_params(
         "include_ticket": include_ticket,
         "try_propagation_on_fail": try_propagation_on_fail,
         "ticket": options.ticket,
+        "idempotency_key": request.idempotency_key,
+        "ttl_ms": request.ttl_ms,
+        "correlation_id": request.correlation_id,
     })
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn validate_sdk_send_plan_ttl(plan: &NativeLxmfSdkSendPlan) -> AppResult<()> {
+    if plan.send_request.ttl_ms == Some(0) {
+        return Err(AppError::Runtime(
+            "LXMF send deadline expired before SDK dispatch".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "native-lxmf-sdk")]
@@ -907,10 +1419,16 @@ pub fn build_sdk_send_plan(
         }).collect::<Vec<_>>(),
     });
     let mut send_request =
-        lxmf::sdk::SendRequest::new(source_hash, envelope.peer_hash.as_str(), payload)
+        lxmf_sdk::SendRequest::new(source_hash, envelope.peer_hash.as_str(), payload)
             .with_delivery_method(delivery_method)
             .with_include_ticket(envelope.include_ticket)
             .with_try_propagation_on_fail(try_propagation_on_fail);
+    if let Some(operation) = envelope.operation.as_ref() {
+        send_request = send_request
+            .with_idempotency_key(operation.idempotency_key.clone())
+            .with_correlation_id(operation.correlation_id.clone())
+            .with_ttl_ms(operation.remaining_ttl_ms().unwrap_or(0));
+    }
     if let Some(stamp_cost) = stamp_cost {
         send_request = send_request.with_stamp_cost(stamp_cost);
     }
@@ -941,19 +1459,25 @@ mod tests {
     use std::time::Duration;
 
     use crate::identity::IdentityMaterialProvider;
-    use crate::messaging::{DeliveryMode, MessageEnvelope, NativeLxmfReplyTicket};
+    use crate::messaging::{
+        DeliveryMode, MessageEnvelope, NativeLxmfReplyTicket, OutboundOperationIdentity,
+    };
     use crate::runtime::native::identity::{
         load_private_identity_bytes, NativeReticulumIdentityProvider,
     };
+    use crate::runtime::{LxmfCancelOutcome, LxmfHistoryRequest};
     use rns_rpc::OutboundBridge;
 
     use super::{
-        build_sdk_send_plan, build_sdk_wire_delivery, hex_bytes, native_lxmf_sdk_record_ticket,
-        native_lxmf_sdk_runtime_boundary_decision, EmbeddedNativeLxmfSdkSender,
-        MissingNativeLxmfSdkSender, NativeLxmfSdkOutboundBridge, NativeLxmfSdkRuntimeBoundaryKind,
-        NativeLxmfSdkSender, NativeLxmfSdkSenderState, NativeLxmfSdkTicketCache,
-        NativeLxmfSdkWireDelivery, NativeLxmfSdkWireSubmitter, RpcNativeLxmfSdkSender,
-        NATIVE_LXMF_SDK_TICKET_CACHE_MAX_ITEMS, NATIVE_LXMF_SDK_TICKET_MAX_BYTES,
+        build_sdk_send_plan, build_sdk_wire_delivery, build_sdk_wire_delivery_with_issued_ticket,
+        build_sdk_wire_delivery_with_policy, current_unix_secs_f64, hex_bytes,
+        map_sdk_cancel_result, native_lxmf_sdk_record_ticket,
+        native_lxmf_sdk_runtime_boundary_decision, validate_sdk_send_plan_ttl,
+        EmbeddedNativeLxmfSdkSender, MissingNativeLxmfSdkSender, NativeLxmfSdkOutboundBridge,
+        NativeLxmfSdkRuntimeBoundaryKind, NativeLxmfSdkSender, NativeLxmfSdkSenderState,
+        NativeLxmfSdkTicketCache, NativeLxmfSdkWireDelivery, NativeLxmfSdkWireSubmitter,
+        RpcNativeLxmfSdkSender, NATIVE_LXMF_SDK_TICKET_CACHE_MAX_ITEMS,
+        NATIVE_LXMF_SDK_TICKET_MAX_BYTES,
     };
 
     struct RecordedDelivery {
@@ -1021,6 +1545,10 @@ mod tests {
                 ticket: vec![0x10, 0x20, 0x30],
                 expires: 10.0,
             }),
+            operation: Some(
+                OutboundOperationIdentity::validated("idem-fixed".into(), "corr-fixed".into())
+                    .expect("valid operation"),
+            ),
             attachments: vec![PathBuf::from("/tmp/report.txt")],
         };
 
@@ -1032,6 +1560,18 @@ mod tests {
         assert_eq!(plan.send_request.stamp_cost, Some(7));
         assert_eq!(plan.send_request.include_ticket, Some(true));
         assert_eq!(plan.send_request.try_propagation_on_fail, Some(false));
+        assert_eq!(
+            plan.send_request.idempotency_key.as_deref(),
+            Some("idem-fixed")
+        );
+        assert_eq!(
+            plan.send_request.correlation_id.as_deref(),
+            Some("corr-fixed")
+        );
+        assert!(matches!(
+            plan.send_request.ttl_ms,
+            Some(1..=crate::messaging::OUTBOUND_DEFAULT_TTL_MS)
+        ));
         assert_eq!(plan.rpc_delivery.method.as_deref(), Some("direct"));
         assert_eq!(plan.rpc_delivery.stamp_cost, Some(7));
         assert!(plan.rpc_delivery.include_ticket);
@@ -1055,6 +1595,7 @@ mod tests {
             delivery_mode: DeliveryMode::Propagated,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
 
@@ -1075,6 +1616,28 @@ mod tests {
     }
 
     #[test]
+    fn sdk_send_plan_rejects_a_deadline_that_expires_before_dispatch() {
+        let envelope = MessageEnvelope {
+            peer_hash: "peer".into(),
+            title: String::new(),
+            body: "body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: Some(
+                OutboundOperationIdentity::generate_at(1, 1_000)
+                    .expect("bounded expired operation"),
+            ),
+            attachments: Vec::new(),
+        };
+
+        let error = validate_sdk_send_plan_ttl(&build_sdk_send_plan(&envelope, "source", None))
+            .expect_err("expired SDK plan");
+
+        assert!(error.to_string().contains("deadline expired"));
+    }
+
+    #[test]
     fn sdk_send_plan_covers_direct_and_propagated_ticket_matrix() {
         for (delivery_mode, expected_method, include_ticket, expected_retry) in [
             (DeliveryMode::Direct, "direct", false, false),
@@ -1089,6 +1652,7 @@ mod tests {
                 delivery_mode,
                 include_ticket,
                 native_reply_ticket: None,
+                operation: None,
                 attachments: Vec::new(),
             };
 
@@ -1118,6 +1682,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
         let plan = build_sdk_send_plan(&envelope, "source", None);
@@ -1157,6 +1722,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embedded_rpc_probe_maps_v09_snapshot_cursor_and_revision() {
+        let store = rns_rpc::MessagesStore::in_memory().expect("in-memory RPC store");
+        let sender = EmbeddedNativeLxmfSdkSender::new(rns_rpc::RpcDaemon::with_store(
+            store,
+            "test-identity".into(),
+        ));
+
+        let probe = sender.probe().await.expect("embedded RPC probe");
+
+        assert_eq!(probe.endpoint, "embedded");
+        assert_eq!(probe.active_contract_version, 2);
+        assert_eq!(probe.event_stream_position, 0);
+        assert_eq!(probe.config_revision, 0);
+        assert_eq!(probe.queued_messages, 0);
+        assert_eq!(probe.in_flight_messages, 0);
+    }
+
+    #[tokio::test]
+    async fn embedded_sdk_history_is_typed_filtered_and_bounded() {
+        let store = rns_rpc::MessagesStore::in_memory().expect("in-memory RPC store");
+        store
+            .insert_message(&rns_rpc::MessageRecord {
+                id: "history-a".into(),
+                source: "peer-a".into(),
+                destination: "local".into(),
+                title: "Recovered".into(),
+                content: "bounded history".into(),
+                timestamp: 1_700_000_000,
+                direction: "in".into(),
+                fields: None,
+                receipt_status: Some("received".into()),
+            })
+            .expect("insert history");
+        store
+            .insert_message(&rns_rpc::MessageRecord {
+                id: "history-a-older".into(),
+                source: "peer-a".into(),
+                destination: "local".into(),
+                title: "Recovered older".into(),
+                content: "cursor continuation".into(),
+                timestamp: 1_699_999_999,
+                direction: "in".into(),
+                fields: None,
+                receipt_status: Some("received".into()),
+            })
+            .expect("insert older history");
+        store
+            .insert_message(&rns_rpc::MessageRecord {
+                id: "history-other".into(),
+                source: "peer-b".into(),
+                destination: "local".into(),
+                title: "Other".into(),
+                content: "not selected".into(),
+                timestamp: 1_700_000_001,
+                direction: "in".into(),
+                fields: None,
+                receipt_status: Some("received".into()),
+            })
+            .expect("insert other history");
+        let sender = EmbeddedNativeLxmfSdkSender::new(rns_rpc::RpcDaemon::with_store(
+            store,
+            "test-identity".into(),
+        ));
+
+        let page = sender
+            .history_page(
+                LxmfHistoryRequest::bounded(Some("peer-a".into()), None, 1)
+                    .expect("bounded request"),
+            )
+            .await
+            .expect("typed history");
+
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].message_id, "history-a");
+        assert_eq!(page.messages[0].receipt_status.as_deref(), Some("received"));
+        let next = sender
+            .history_page(
+                LxmfHistoryRequest::bounded(Some("peer-a".into()), page.next_cursor, 1)
+                    .expect("bounded cursor request"),
+            )
+            .await
+            .expect("typed cursor history");
+        assert_eq!(next.messages.len(), 1);
+        assert_eq!(next.messages[0].message_id, "history-a-older");
+    }
+
+    #[tokio::test]
+    async fn embedded_sdk_cancellation_preserves_typed_not_found_outcome() {
+        let store = rns_rpc::MessagesStore::in_memory().expect("in-memory RPC store");
+        let sender = EmbeddedNativeLxmfSdkSender::new(rns_rpc::RpcDaemon::with_store(
+            store,
+            "test-identity".into(),
+        ));
+
+        let outcome = sender
+            .cancel_delivery("missing-message")
+            .await
+            .expect("typed cancellation outcome");
+
+        assert_eq!(outcome, LxmfCancelOutcome::NotFound);
+    }
+
+    #[test]
+    fn sdk_cancellation_preserves_every_v09_typed_outcome() {
+        for (upstream, expected) in [
+            (
+                lxmf_sdk::CancelResult::Accepted,
+                LxmfCancelOutcome::Accepted,
+            ),
+            (
+                lxmf_sdk::CancelResult::AlreadyTerminal,
+                LxmfCancelOutcome::AlreadyTerminal,
+            ),
+            (
+                lxmf_sdk::CancelResult::NotFound,
+                LxmfCancelOutcome::NotFound,
+            ),
+            (
+                lxmf_sdk::CancelResult::TooLateToCancel,
+                LxmfCancelOutcome::TooLateToCancel,
+            ),
+            (
+                lxmf_sdk::CancelResult::Unsupported,
+                LxmfCancelOutcome::Unsupported,
+            ),
+        ] {
+            assert_eq!(map_sdk_cancel_result(upstream), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn embedded_sdk_sender_routes_delivery_options_to_rpc_bridge() {
         let (tx, rx) = std_mpsc::channel();
         let store = rns_rpc::MessagesStore::in_memory().expect("in-memory RPC store");
@@ -1181,6 +1877,7 @@ mod tests {
                 ticket: vec![0xaa, 0xbb],
                 expires: 99.0,
             }),
+            operation: None,
             attachments: Vec::new(),
         };
         let receipt = sender
@@ -1353,6 +2050,188 @@ mod tests {
     }
 
     #[test]
+    fn sdk_wire_delivery_uses_validated_issuer_ticket_exactly() {
+        let provider = NativeReticulumIdentityProvider;
+        let source_identity = provider
+            .create_identity_material("sdk-issued-ticket-source")
+            .expect("source identity");
+        let destination_identity = provider
+            .create_identity_material("sdk-issued-ticket-destination")
+            .expect("destination identity");
+        let source_hash = load_private_identity_bytes(&source_identity)
+            .expect("source summary")
+            .address_hash_hex;
+        let destination_hash = load_private_identity_bytes(&destination_identity)
+            .expect("destination summary")
+            .address_hash_hex;
+        let record = rns_rpc::MessageRecord {
+            id: "issued-ticket-message".into(),
+            source: source_hash,
+            destination: destination_hash,
+            title: "subject".into(),
+            content: "body".into(),
+            timestamp: 1_700_000_000,
+            direction: "outbound".into(),
+            fields: None,
+            receipt_status: None,
+        };
+        let options = rns_rpc::OutboundDeliveryOptions {
+            method: Some("direct".into()),
+            stamp_cost: None,
+            include_ticket: true,
+            try_propagation_on_fail: false,
+            ticket: None,
+            source_private_key: None,
+        };
+        let issued = NativeLxmfReplyTicket {
+            ticket: (0_u8..16).collect(),
+            expires: current_unix_secs_f64() + 3_600.0,
+        };
+
+        let delivery = build_sdk_wire_delivery_with_issued_ticket(
+            &record,
+            &options,
+            source_identity.as_slice(),
+            None,
+            Some(&issued),
+        )
+        .expect("issued ticket wire delivery");
+        let message = lxmf::Message::from_wire(delivery.wire_bytes.as_slice()).expect("message");
+        let rmpv::Value::Map(fields) = message.fields.expect("fields") else {
+            panic!("fields should be a map");
+        };
+        let (_, rmpv::Value::Array(ticket)) = fields
+            .iter()
+            .find(|(key, _)| {
+                matches!(key, rmpv::Value::Integer(value) if value.as_i64() == Some(0x0C))
+            })
+            .expect("ticket field")
+        else {
+            panic!("ticket field should be an array");
+        };
+        assert_eq!(
+            ticket.first().and_then(rmpv::Value::as_f64),
+            Some(issued.expires)
+        );
+        assert_eq!(
+            ticket.get(1),
+            Some(&rmpv::Value::Binary(issued.ticket.clone()))
+        );
+
+        let expired = NativeLxmfReplyTicket {
+            ticket: vec![0; 16],
+            expires: current_unix_secs_f64() - 1.0,
+        };
+        assert!(build_sdk_wire_delivery_with_issued_ticket(
+            &record,
+            &options,
+            source_identity.as_slice(),
+            None,
+            Some(&expired),
+        )
+        .is_err());
+        let wrong_size = NativeLxmfReplyTicket {
+            ticket: vec![0; 15],
+            expires: current_unix_secs_f64() + 3_600.0,
+        };
+        assert!(build_sdk_wire_delivery_with_issued_ticket(
+            &record,
+            &options,
+            source_identity.as_slice(),
+            None,
+            Some(&wrong_size),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sdk_wire_delivery_applies_bounded_direct_stamp_with_ticket_precedence() {
+        let provider = NativeReticulumIdentityProvider;
+        let source_identity = provider
+            .create_identity_material("sdk-direct-stamp-source")
+            .expect("source identity");
+        let destination_identity = provider
+            .create_identity_material("sdk-direct-stamp-destination")
+            .expect("destination identity");
+        let source_hash = load_private_identity_bytes(&source_identity)
+            .expect("source summary")
+            .address_hash_hex;
+        let destination_hash = load_private_identity_bytes(&destination_identity)
+            .expect("destination summary")
+            .address_hash_hex;
+        let record = rns_rpc::MessageRecord {
+            id: "direct-stamp-message".into(),
+            source: source_hash,
+            destination: destination_hash,
+            title: "subject".into(),
+            content: "body".into(),
+            timestamp: 1_700_000_000,
+            direction: "outbound".into(),
+            fields: None,
+            receipt_status: None,
+        };
+        let options = rns_rpc::OutboundDeliveryOptions {
+            method: Some("direct".into()),
+            stamp_cost: Some(1),
+            include_ticket: false,
+            try_propagation_on_fail: false,
+            ticket: None,
+            source_private_key: None,
+        };
+
+        let stamped = build_sdk_wire_delivery_with_policy(
+            &record,
+            &options,
+            source_identity.as_slice(),
+            None,
+            None,
+            Some(1),
+            || false,
+        )
+        .expect("direct stamp delivery");
+        let metadata = stamped
+            .direct_stamp
+            .as_ref()
+            .expect("direct stamp metadata");
+        let wire = lxmf::WireMessage::unpack(stamped.wire_bytes.as_slice()).expect("wire");
+        let message = lxmf::Message::from_wire(stamped.wire_bytes.as_slice()).expect("message");
+        assert_eq!(metadata.target_cost, 1);
+        assert_eq!(
+            crate::runtime::native_lxmf::codec::validate_direct_stamp(
+                &wire.message_id(),
+                &message.stamp_bytes().expect("stamp"),
+                metadata.target_cost,
+            ),
+            Some(metadata.stamp_value)
+        );
+
+        let ticketed = build_sdk_wire_delivery_with_policy(
+            &record,
+            &options,
+            source_identity.as_slice(),
+            Some("00112233445566778899aabbccddeeff"),
+            None,
+            Some(1),
+            || false,
+        )
+        .expect("ticket precedence delivery");
+        assert!(ticketed.reply_ticket_used);
+        assert!(ticketed.direct_stamp.is_none());
+
+        let cancelled = build_sdk_wire_delivery_with_policy(
+            &record,
+            &options,
+            source_identity.as_slice(),
+            None,
+            None,
+            Some(1),
+            || true,
+        )
+        .expect_err("cancelled direct stamp");
+        assert!(cancelled.to_string().contains("cancelled before work"));
+    }
+
+    #[test]
     fn sdk_outbound_bridge_encodes_and_submits_signed_wire_delivery() {
         let provider = NativeReticulumIdentityProvider;
         let source_identity = provider
@@ -1441,6 +2320,7 @@ mod tests {
                 delivery_mode,
                 include_ticket,
                 native_reply_ticket: None,
+                operation: None,
                 attachments: Vec::new(),
             };
             sender
@@ -1468,13 +2348,64 @@ mod tests {
     }
 
     #[test]
-    fn rpc_sdk_sender_reports_ready_when_endpoint_is_configured() {
-        let sender = RpcNativeLxmfSdkSender::new("tcp://127.0.0.1:0/rpc");
+    fn rpc_sdk_sender_reports_configured_but_unprobed_for_local_endpoint() {
+        let sender = RpcNativeLxmfSdkSender::new("tcp://127.0.0.1:37428/rpc");
         let status = sender.status();
 
-        assert_eq!(sender.endpoint(), "tcp://127.0.0.1:0/rpc");
-        assert_eq!(status.state, NativeLxmfSdkSenderState::Ready);
-        assert!(status.note.contains("compatible local sidecar"));
+        assert_eq!(sender.endpoint(), "tcp://127.0.0.1:37428/rpc");
+        assert_eq!(status.state, NativeLxmfSdkSenderState::Configured);
+        assert!(status.note.contains("readiness requires"));
+        assert_eq!(
+            sender.diagnostic_endpoint().as_deref(),
+            Some("loopback:37428")
+        );
+    }
+
+    #[test]
+    fn rpc_sdk_sender_rejects_remote_ambiguous_and_implied_tls_endpoints() {
+        for endpoint in [
+            "tcp://192.168.1.20:37428/rpc",
+            "tcp://localhost:37428/rpc",
+            "tcp://example.com:37428/rpc",
+            "https://127.0.0.1:37428/rpc",
+            "tls://127.0.0.1:37428/rpc",
+            "tcp://127.0.0.1:0/rpc",
+            "tcp://user@127.0.0.1:37428/rpc",
+            "udp://127.0.0.1:37428/rpc",
+        ] {
+            let sender = RpcNativeLxmfSdkSender::new(endpoint);
+            assert_eq!(
+                sender.status().state,
+                NativeLxmfSdkSenderState::RejectedEndpoint,
+                "endpoint must be rejected: {endpoint}"
+            );
+            assert_eq!(sender.diagnostic_endpoint(), None);
+        }
+    }
+
+    #[test]
+    fn rpc_sdk_sender_accepts_literal_ipv4_and_ipv6_loopback() {
+        for (endpoint, label) in [
+            ("127.0.0.1:37428", "loopback:37428"),
+            ("http://127.0.0.2:42/rpc", "loopback:42"),
+            ("tcp://[::1]:37428/rpc", "loopback:37428"),
+        ] {
+            let sender = RpcNativeLxmfSdkSender::new(endpoint);
+            assert_eq!(sender.status().state, NativeLxmfSdkSenderState::Configured);
+            assert_eq!(sender.diagnostic_endpoint().as_deref(), Some(label));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rpc_sdk_sender_accepts_absolute_unix_socket_without_exposing_path() {
+        let sender = RpcNativeLxmfSdkSender::new("unix:/tmp/private/reticulum.sock");
+
+        assert_eq!(sender.status().state, NativeLxmfSdkSenderState::Configured);
+        assert_eq!(
+            sender.diagnostic_endpoint().as_deref(),
+            Some("unix:<local-socket>")
+        );
     }
 
     #[tokio::test]
@@ -1486,6 +2417,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
         let sender = RpcNativeLxmfSdkSender::new("");
@@ -1495,7 +2427,7 @@ mod tests {
             .send_plan(plan)
             .await
             .expect_err("missing endpoint should fail locally");
-        assert!(format!("{error}").contains("no configured endpoint"));
+        assert!(format!("{error}").contains("not configured"));
     }
 
     #[tokio::test]
@@ -1506,7 +2438,33 @@ mod tests {
             .probe()
             .await
             .expect_err("missing endpoint should fail before RPC dispatch");
-        assert!(format!("{error}").contains("no configured endpoint"));
+        assert!(format!("{error}").contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn rpc_sdk_sender_rejects_remote_endpoint_before_probe_or_send() {
+        let sender = RpcNativeLxmfSdkSender::new("tcp://203.0.113.8:37428/rpc");
+        let probe_error = sender
+            .probe()
+            .await
+            .expect_err("remote endpoint must fail before probe I/O");
+        assert!(format!("{probe_error}").contains("authenticated configuration"));
+
+        let envelope = MessageEnvelope {
+            peer_hash: "peer".into(),
+            title: String::new(),
+            body: "body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: None,
+            attachments: Vec::new(),
+        };
+        let send_error = sender
+            .send_plan(build_sdk_send_plan(&envelope, "source", None))
+            .await
+            .expect_err("remote endpoint must fail before send I/O");
+        assert!(format!("{send_error}").contains("authenticated configuration"));
     }
 
     #[tokio::test]

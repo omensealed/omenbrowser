@@ -53,7 +53,7 @@ jobs:
           cargo clippy --locked --lib --no-default-features --features native-lxmf -- -D warnings
           cargo check --locked --no-default-features --features desktop-product
           cargo test --locked --no-default-features --features desktop-product
-          cargo clippy --locked --no-default-features --features desktop-product -- -D warnings
+          cargo clippy --locked --no-default-features --features desktop-product --all-targets -- -D warnings
 
       - name: Validate native atomic cache replacement
         shell: bash
@@ -78,11 +78,15 @@ jobs:
         run: |
           cargo check --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
           cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
-          cargo clippy --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless -- -D warnings
+          cargo clippy --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless --all-targets -- -D warnings
 
       - name: Check and test full omenchatd
         shell: bash
         run: |
           cargo check --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full
           cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full
-          cargo clippy --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full -- -D warnings
+          cargo clippy --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full --all-targets -- -D warnings
+
+      - name: Run native release CLI identity smoke
+        shell: bash
+        run: bash scripts/test-native-cli-identity.sh

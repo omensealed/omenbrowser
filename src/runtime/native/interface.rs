@@ -72,19 +72,46 @@ pub fn plan_interfaces(profiles: &[ReticulumInterfaceProfile]) -> Vec<NativeInte
 }
 
 pub fn validate_startup_plans(plans: &[NativeInterfacePlan]) -> Result<(), NativeRuntimeError> {
-    let unsupported = plans.iter().find(|plan| plan.enabled && !plan.supported);
-
-    match unsupported {
-        Some(plan) => Err(NativeRuntimeError::UnsupportedInterface {
+    if let Some(plan) = plans.iter().find(|plan| plan.enabled && !plan.supported) {
+        return Err(NativeRuntimeError::UnsupportedInterface {
             profile: plan.name.clone(),
             kind: plan.kind.clone(),
             reason: plan
                 .reason
                 .clone()
                 .unwrap_or_else(|| "native interface unsupported".into()),
-        }),
-        None => Ok(()),
+        });
     }
+
+    for plan in plans
+        .iter()
+        .filter(|plan| plan.enabled && plan.kind == "tcp_client")
+    {
+        let endpoint =
+            plan.endpoint
+                .as_ref()
+                .ok_or_else(|| NativeRuntimeError::InvalidInterface {
+                    profile: plan.name.clone(),
+                    kind: plan.kind.clone(),
+                    reason: "TCP client endpoint is missing".into(),
+                })?;
+        if endpoint.host.trim().is_empty() {
+            return Err(NativeRuntimeError::InvalidInterface {
+                profile: plan.name.clone(),
+                kind: plan.kind.clone(),
+                reason: "TCP client host is empty".into(),
+            });
+        }
+        if endpoint.port == 0 {
+            return Err(NativeRuntimeError::InvalidInterface {
+                profile: plan.name.clone(),
+                kind: plan.kind.clone(),
+                reason: "TCP client port must be between 1 and 65535".into(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn kind_label(kind: &InterfaceKind) -> String {

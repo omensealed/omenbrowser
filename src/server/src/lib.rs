@@ -32,7 +32,9 @@ pub enum CliCommand {
     Run(ServerOptions),
     Tui(ServerOptions),
     Status(ServerOptions),
+    StatusJson(ServerOptions),
     Doctor(ServerOptions),
+    DoctorJson(ServerOptions),
     UploadsRepairLedger(ServerOptions),
     DatabaseRestoreMigrationBackup(ServerOptions, DatabaseRestoreOptions),
     ConfigShow(ServerOptions),
@@ -136,8 +138,22 @@ impl CliCommand {
             "init" => Self::Init(parse_options(args)),
             "run" => Self::Run(parse_options(args)),
             "tui" => Self::Tui(parse_options(args)),
-            "status" => Self::Status(parse_options(args)),
-            "doctor" => Self::Doctor(parse_options(args)),
+            "status" => {
+                let (options, json) = parse_machine_output_options(args);
+                if json {
+                    Self::StatusJson(options)
+                } else {
+                    Self::Status(options)
+                }
+            }
+            "doctor" => {
+                let (options, json) = parse_machine_output_options(args);
+                if json {
+                    Self::DoctorJson(options)
+                } else {
+                    Self::Doctor(options)
+                }
+            }
             "uploads" => parse_uploads_command(args),
             "database" => parse_database_command(args),
             "config" => parse_config_command(args),
@@ -221,9 +237,20 @@ impl Omenchatd {
                 print!("{}", config::render_status(&config));
                 Ok(())
             }
+            CliCommand::StatusJson(options) => {
+                let config = config_from_options(&options)?;
+                config::init_files(&config)?;
+                println!("{}", render_status_json(&config)?);
+                Ok(())
+            }
             CliCommand::Doctor(options) => {
                 let config = config_from_options(&options)?;
                 print!("{}", render_doctor_report(&config));
+                Ok(())
+            }
+            CliCommand::DoctorJson(options) => {
+                let config = config_from_options(&options)?;
+                println!("{}", render_doctor_json(&config)?);
                 Ok(())
             }
             CliCommand::UploadsRepairLedger(options) => {
@@ -515,6 +542,12 @@ fn apply_config_limit_patch(config: &mut config::ServerConfig, patch: &ConfigSet
 
 fn parse_options(args: impl IntoIterator<Item = String>) -> ServerOptions {
     parse_options_with_ifac(args).0
+}
+
+fn parse_machine_output_options(args: impl IntoIterator<Item = String>) -> (ServerOptions, bool) {
+    let args = args.into_iter().collect::<Vec<_>>();
+    let json = args.iter().any(|arg| arg == "--json");
+    (parse_options(args), json)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -831,8 +864,8 @@ fn print_help() {
     println!("  --version");
     println!("  init [--home <path>] [--tcp-server <listen_ip:port>] [--tcp-client <host:port>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]");
     println!("  run [--home <path>] [--tcp-server <listen_ip:port>] [--tcp-client <host:port>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]");
-    println!("  status [--home <path>]");
-    println!("  doctor [--home <path>]");
+    println!("  status [--home <path>] [--json]");
+    println!("  doctor [--home <path>] [--json]");
     println!("  uploads repair-ledger --confirm [--home <path>]  # server must be stopped");
     println!("  database restore-migration-backup --from <path> --confirm [--home <path>]  # server must be stopped");
     println!("  config show [--home <path>]");
@@ -891,6 +924,14 @@ impl DoctorLevel {
             Self::Fail => "FAIL",
         }
     }
+
+    fn machine_label(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -898,6 +939,128 @@ struct DoctorCheck {
     level: DoctorLevel,
     name: &'static str,
     detail: String,
+}
+
+fn json_string(value: &serde_json::Value) -> ServerResult<String> {
+    serde_json::to_string_pretty(value)
+        .map_err(|error| crate::error::ServerError::Message(format!("JSON output failed: {error}")))
+}
+
+fn runtime_mode_label() -> &'static str {
+    if cfg!(feature = "live-reticulum") {
+        "independent-in-process-reticulum"
+    } else {
+        "transport-disabled"
+    }
+}
+
+fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
+    let room_result = config::list_rooms(config);
+    let room_count = room_result.as_ref().map(Vec::len).ok();
+    let public_addresses = config::render_public_addresses(config)
+        .lines()
+        .filter(|line| {
+            [
+                "identity hash: ",
+                "destination: ",
+                "client uri: ",
+                "nomadnet portal: ",
+                "portal url: ",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+                && !line.contains("unavailable")
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let interface = interface_check(&config.reticulum_config_file());
+    json_string(&serde_json::json!({
+        "schema_version": 1,
+        "application": {
+            "name": "omenchatd",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "dependency_train": {
+            "reticulum_rs": "0.9.5",
+            "lxmf": null,
+        },
+        "runtime": {
+            "mode": runtime_mode_label(),
+            "shared_instance": false,
+            "live_metrics_available": false,
+        },
+        "services": {
+            "chat": "omenchat.node",
+            "portal": "nomadnetwork.node:/page/index.mu",
+            "public_addresses": public_addresses,
+        },
+        "storage": {
+            "config_present": config.config_path.is_file(),
+            "identity_present": config.identity_path.is_file(),
+            "database_present": config.database_path.is_file(),
+            "reticulum_config_present": config.reticulum_config_file().is_file(),
+            "reticulum_storage_present": config.reticulum_storage_path().is_dir(),
+            "portal_present": config.nomadnet_index_page_path().is_file(),
+        },
+        "interfaces": {
+            "level": interface.level.machine_label(),
+        },
+        "rooms": {
+            "catalog": if room_result.is_ok() { "ok" } else { "error" },
+            "count": room_count,
+        },
+        "limits": {
+            "max_message_bytes": config.limits.max_message_bytes,
+            "history_batch_size": config.limits.history_batch_size,
+            "join_backlog_events": config.limits.join_backlog_events,
+            "large_batch_threshold_bytes": config.limits.large_batch_threshold_bytes,
+            "rate_messages_per_minute": config.limits.rate_messages_per_minute,
+            "rate_commands_per_minute": config.limits.rate_commands_per_minute,
+            "upload_quota_bytes": config.upload_quota_bytes,
+            "upload_max_file_bytes": config.upload_max_file_bytes,
+        },
+        "redaction": "private paths, credentials, private identity material, operator label, MOTD, and free-form errors omitted",
+    }))
+}
+
+fn render_doctor_json(config: &config::ServerConfig) -> ServerResult<String> {
+    let checks = doctor_checks(config);
+    let fail_count = checks
+        .iter()
+        .filter(|check| check.level == DoctorLevel::Fail)
+        .count();
+    let warn_count = checks
+        .iter()
+        .filter(|check| check.level == DoctorLevel::Warn)
+        .count();
+    let outcome = if fail_count > 0 {
+        "fail"
+    } else if warn_count > 0 {
+        "warn"
+    } else {
+        "pass"
+    };
+    let checks = checks
+        .into_iter()
+        .map(|check| {
+            serde_json::json!({
+                "name": check.name,
+                "level": check.level.machine_label(),
+            })
+        })
+        .collect::<Vec<_>>();
+    json_string(&serde_json::json!({
+        "schema_version": 1,
+        "application": {
+            "name": "omenchatd",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "outcome": outcome,
+        "fail_count": fail_count,
+        "warn_count": warn_count,
+        "checks": checks,
+        "redaction": "check details and private paths omitted",
+    }))
 }
 
 fn render_doctor_report(config: &config::ServerConfig) -> String {
@@ -1250,6 +1413,75 @@ mod tests {
                 tcp_client: None,
             })
         );
+    }
+
+    #[test]
+    fn cli_parses_machine_readable_status_and_doctor_modes() {
+        let home = PathBuf::from("/tmp/omenchatd-machine-status");
+        assert_eq!(
+            CliCommand::parse([
+                "status".to_string(),
+                "--json".to_string(),
+                "--home".to_string(),
+                home.display().to_string(),
+            ]),
+            CliCommand::StatusJson(ServerOptions {
+                home: Some(home.clone()),
+                ..ServerOptions::default()
+            })
+        );
+        assert_eq!(
+            CliCommand::parse([
+                "doctor".to_string(),
+                "--home".to_string(),
+                home.display().to_string(),
+                "--json".to_string(),
+            ]),
+            CliCommand::DoctorJson(ServerOptions {
+                home: Some(home),
+                ..ServerOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn machine_readable_status_and_doctor_are_valid_and_redacted() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-machine-report-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut config = config::ServerConfig::for_root(root.clone());
+        config.operator_label = "operator-secret".into();
+        config.motd = "motd-secret".into();
+        config::init_files(&config).expect("isolated server root");
+
+        let status = render_status_json(&config).expect("status json");
+        let status_value: serde_json::Value = serde_json::from_str(&status).expect("valid status");
+        assert_eq!(status_value["schema_version"], 1);
+        assert_eq!(
+            status_value["application"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.5");
+        assert_eq!(status_value["runtime"]["mode"], runtime_mode_label());
+
+        let doctor = render_doctor_json(&config).expect("doctor json");
+        let doctor_value: serde_json::Value = serde_json::from_str(&doctor).expect("valid doctor");
+        assert!(doctor_value["checks"]
+            .as_array()
+            .is_some_and(|checks| !checks.is_empty()));
+        for report in [&status, &doctor] {
+            assert!(!report.contains(root.to_string_lossy().as_ref()));
+            assert!(!report.contains("operator-secret"));
+            assert!(!report.contains("motd-secret"));
+            assert!(!report.contains("passphrase"));
+        }
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

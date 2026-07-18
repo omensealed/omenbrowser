@@ -19,6 +19,108 @@ pub const CHAT_SESSION_HISTORY_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub type ChatSessionId = u64;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChatConnectionState {
+    #[default]
+    Disconnected,
+    Resolving,
+    Connecting,
+    Authenticating,
+    Joined,
+    Reconnecting,
+    Draining,
+    Failed {
+        retryable: bool,
+    },
+}
+
+impl ChatConnectionState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disconnected => "disconnected",
+            Self::Resolving => "resolving",
+            Self::Connecting => "connecting",
+            Self::Authenticating => "authenticating",
+            Self::Joined => "joined",
+            Self::Reconnecting => "reconnecting",
+            Self::Draining => "draining",
+            Self::Failed { retryable: true } => "failed (retryable)",
+            Self::Failed { retryable: false } => "failed (terminal)",
+        }
+    }
+
+    pub fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Resolving
+                | Self::Connecting
+                | Self::Authenticating
+                | Self::Reconnecting
+                | Self::Disconnected
+                | Self::Failed { retryable: true }
+        )
+    }
+
+    /// Whether a user-initiated reconnect is currently a valid action.
+    ///
+    /// Transitional states remain retryable for automatic recovery, but must
+    /// not expose a second manual reconnect that would compete with work that
+    /// is already in flight.
+    pub fn manual_reconnect_allowed(self) -> bool {
+        matches!(self, Self::Disconnected | Self::Failed { retryable: true })
+    }
+}
+
+#[cfg(test)]
+mod connection_state_tests {
+    use super::ChatConnectionState;
+
+    #[test]
+    fn connection_state_labels_and_retryability_are_typed() {
+        let cases = [
+            (
+                ChatConnectionState::Disconnected,
+                "disconnected",
+                true,
+                true,
+            ),
+            (ChatConnectionState::Resolving, "resolving", true, false),
+            (ChatConnectionState::Connecting, "connecting", true, false),
+            (
+                ChatConnectionState::Authenticating,
+                "authenticating",
+                true,
+                false,
+            ),
+            (ChatConnectionState::Joined, "joined", false, false),
+            (
+                ChatConnectionState::Reconnecting,
+                "reconnecting",
+                true,
+                false,
+            ),
+            (ChatConnectionState::Draining, "draining", false, false),
+            (
+                ChatConnectionState::Failed { retryable: true },
+                "failed (retryable)",
+                true,
+                true,
+            ),
+            (
+                ChatConnectionState::Failed { retryable: false },
+                "failed (terminal)",
+                false,
+                false,
+            ),
+        ];
+        for (state, label, retryable, manual_reconnect_allowed) in cases {
+            assert_eq!(state.label(), label);
+            assert_eq!(state.retryable(), retryable);
+            assert_eq!(state.manual_reconnect_allowed(), manual_reconnect_allowed);
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatClientRequest {
     OpenServer(OmenChatDescriptor),

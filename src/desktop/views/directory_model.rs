@@ -118,6 +118,14 @@ pub(in crate::desktop) fn directory_selected_state_lines(entry: &DirectoryEntry)
         }
         DirectoryKind::OmenChat => {
             lines.push(format!("OMENchat server rank: {sort_rank}"));
+            lines.push(format!(
+                "server identity: {}",
+                entry
+                    .identity_hash
+                    .as_deref()
+                    .map(|hash| format!("{hash} (announce-verified)"))
+                    .unwrap_or_else(|| "unavailable; use a fresh live announce".into())
+            ));
         }
         DirectoryKind::Unknown => {
             lines.push(format!("announce sort rank: {sort_rank}"));
@@ -179,6 +187,10 @@ fn directory_entry_matches_filter(entry: &DirectoryEntry, filter: &str) -> bool 
     )
     .to_lowercase();
     if let Some(hash) = &entry.associated_hash {
+        haystack.push(' ');
+        haystack.push_str(&hash.to_lowercase());
+    }
+    if let Some(hash) = &entry.identity_hash {
         haystack.push(' ');
         haystack.push_str(&hash.to_lowercase());
     }

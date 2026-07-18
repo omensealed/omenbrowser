@@ -573,6 +573,27 @@ fn announce_admin_live_runtime(
     live.tokio.block_on(live.runtime.announce(config))
 }
 
+#[cfg(feature = "live-reticulum")]
+fn shutdown_admin_live_runtime(
+    live: &mut TuiLiveRuntime,
+    config: &ServerConfig,
+) -> ServerResult<()> {
+    live.tokio.block_on(live.runtime.shutdown(config))
+}
+
+#[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
+fn shutdown_admin_live_runtime(
+    _live: &mut TuiLiveRuntime,
+    _config: &ServerConfig,
+) -> ServerResult<()> {
+    Ok(())
+}
+
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+fn stop_admin_live_server(mut live: TuiLiveRuntime, config: &ServerConfig) -> ServerResult<()> {
+    shutdown_admin_live_runtime(&mut live, config)
+}
+
 #[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
 fn announce_admin_live_runtime(
     live: &mut TuiLiveRuntime,
@@ -1107,14 +1128,27 @@ impl AdminTui {
 
     #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn stop_live_runtime(&mut self) {
-        if self.live.take().is_some() {
-            self.live_status = "live server stopped".into();
-            self.status = if crate::server_log::flush(Duration::from_secs(1)) {
-                "live server stopped: active links closed; logs flushed; config was not changed"
-                    .into()
+        if let Some(live) = self.live.take() {
+            let shutdown = stop_admin_live_server(live, &self.config);
+            let flushed = crate::server_log::flush(Duration::from_secs(1));
+            self.live_status = if shutdown.is_ok() {
+                "live server stopped".into()
             } else {
-                "live server stopped: active links closed; log flush timed out; config was not changed"
-                    .into()
+                "live server shutdown incomplete".into()
+            };
+            self.status = match (shutdown, flushed) {
+                (Ok(()), true) => {
+                    "live server stopped: active links closed; workers joined; logs flushed; config was not changed".into()
+                }
+                (Ok(()), false) => {
+                    "live server stopped: workers joined; log flush timed out; config was not changed".into()
+                }
+                (Err(error), true) => {
+                    format!("live server shutdown incomplete: {error}; logs flushed; config was not changed")
+                }
+                (Err(error), false) => {
+                    format!("live server shutdown incomplete: {error}; log flush timed out; config was not changed")
+                }
             };
         } else {
             self.status = "live server is not running; press g or Start Live Server".into();
@@ -1163,6 +1197,12 @@ impl AdminTui {
         let Some(live) = self.live.as_mut() else {
             return;
         };
+        if live.runtime.is_shutdown() {
+            self.live_status =
+                "live runtime is stopped after failed recovery; stop and start it explicitly"
+                    .into();
+            return;
+        }
         match drain_admin_live_events_logged(live, 64, &self.config) {
             Ok(drained) if drained > 0 => {
                 self.live_status = format!(
@@ -1178,6 +1218,12 @@ impl AdminTui {
                 );
                 self.status = self.live_status.clone();
                 std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
+                if let Err(shutdown_error) = shutdown_admin_live_runtime(live, &self.config) {
+                    self.live_status =
+                        format!("live runtime shutdown failed before restart: {shutdown_error}");
+                    self.status = self.live_status.clone();
+                    return;
+                }
                 match start_admin_live_server(&self.config) {
                     Ok(next_live) => {
                         let destination = hex_lower_local(&next_live.runtime.destination_hash);
@@ -1229,6 +1275,13 @@ impl AdminTui {
                     );
                     self.status = self.live_status.clone();
                     std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
+                    if let Err(shutdown_error) = shutdown_admin_live_runtime(live, &self.config) {
+                        self.live_status = format!(
+                            "live runtime shutdown failed before announce recovery: {shutdown_error}"
+                        );
+                        self.status = self.live_status.clone();
+                        return;
+                    }
                     match start_admin_live_server(&self.config) {
                         Ok(next_live) => {
                             let destination = hex_lower_local(&next_live.runtime.destination_hash);
@@ -1292,6 +1345,13 @@ impl AdminTui {
                         interface_health.label()
                     );
                     std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
+                    if let Err(shutdown_error) = shutdown_admin_live_runtime(live, &self.config) {
+                        self.live_status = format!(
+                            "live runtime shutdown failed before interface recovery: {shutdown_error}"
+                        );
+                        self.status = self.live_status.clone();
+                        return;
+                    }
                     match start_admin_live_server(&self.config) {
                         Ok(next_live) => {
                             let destination = hex_lower_local(&next_live.runtime.destination_hash);

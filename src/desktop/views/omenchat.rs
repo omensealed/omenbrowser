@@ -87,7 +87,8 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 ) == crate::directory::TrustLevel::Trusted,
                 &desktop.omenchat.omenchat_media_cache,
             );
-            let mut line = safe_timeline_text(body.text.clone(), 14);
+            let line_text = chat_timeline_body_text(&body);
+            let mut line = safe_timeline_text(line_text, 14);
             if body.is_action {
                 line = line.font(Font {
                     style: FontStyle::Italic,
@@ -219,6 +220,15 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     {
         timeline_panel = timeline_panel.push(
             container(text(motd).size(ui_size(13)))
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(status_container_style),
+        );
+    }
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    if let Some(progress) = omenchat_session_resource_progress(desktop, session.session_id) {
+        timeline_panel = timeline_panel.push(
+            container(text(omenchat_session_resource_progress_line(&progress)).size(ui_size(12)))
                 .padding([6, 8])
                 .width(Length::Fill)
                 .style(status_container_style),

@@ -38,6 +38,7 @@ pub struct BrowserSession {
     cache: Option<Arc<PageCache>>,
     runtime: Option<Arc<dyn NetworkRuntime>>,
     downloads_dir: Option<PathBuf>,
+    operation_id: Option<String>,
 }
 
 impl std::fmt::Debug for BrowserSession {
@@ -73,6 +74,7 @@ impl BrowserSession {
             cache: None,
             runtime: None,
             downloads_dir: None,
+            operation_id: None,
         };
         session
             .update_page_state(page)
@@ -95,6 +97,10 @@ impl BrowserSession {
 
     pub fn current_page(&self) -> Option<&BrowserPage> {
         self.current_page.as_ref()
+    }
+
+    pub(crate) fn set_operation_id(&mut self, operation_id: Option<String>) {
+        self.operation_id = operation_id;
     }
 
     pub fn current_url(&self) -> Option<&str> {
@@ -266,7 +272,12 @@ impl BrowserSession {
         }
         let request_data = (!merged_request_data.is_empty()).then_some(merged_request_data);
         let page = runtime
-            .fetch_page(&resolved, request_data.clone(), cancel)
+            .fetch_page_with_operation(
+                &resolved,
+                request_data.clone(),
+                cancel,
+                self.operation_id.clone(),
+            )
             .await?;
         page.validate_retained().map_err(AppError::Browser)?;
         if !has_explicit_request_data {
@@ -304,7 +315,9 @@ impl BrowserSession {
             .runtime
             .as_ref()
             .ok_or_else(|| AppError::Browser("browser session has no runtime".into()))?;
-        let page = runtime.fetch_page(&resolved, request_data, cancel).await?;
+        let page = runtime
+            .fetch_page_with_operation(&resolved, request_data, cancel, self.operation_id.clone())
+            .await?;
         page.validate_retained().map_err(AppError::Browser)?;
         Ok(page)
     }
@@ -493,7 +506,12 @@ impl BrowserSession {
             AppError::Browser("browser session has no downloads directory".into())
         })?;
         runtime
-            .download_file(&resolved, downloads_dir, cancel)
+            .download_file_with_operation(
+                &resolved,
+                downloads_dir,
+                cancel,
+                self.operation_id.clone(),
+            )
             .await
     }
 

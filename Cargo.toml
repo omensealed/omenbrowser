@@ -1,7 +1,8 @@
 [package]
 name = "omenbrowser_rs"
-version = "0.6.0-1"
+version = "0.9.5-1"
 edition = "2021"
+rust-version = "1.85"
 description = "OMENbrowser Rust Desktop/TUI"
 license = "AGPL-3.0-or-later"
 homepage = "https://github.com/omensealed/omenbrowser"
@@ -21,7 +22,7 @@ desktop-dnd = ["desktop-widgets", "dep:iced_drop"]
 desktop-animations = ["desktop-ui", "dep:iced_anim"]
 desktop-tables = ["desktop-ui", "dep:iced_table"]
 tui = ["dep:crossterm", "dep:ratatui", "tokio/signal"]
-native-reticulum = ["dep:reticulum-rs", "dep:rns_transport", "dep:rand_core", "dep:rmpv", "dep:hkdf", "dep:tokio-util"]
+native-reticulum = ["dep:reticulum-rs", "dep:rns_transport", "dep:rand_core", "dep:rmpv", "dep:hkdf", "dep:omen-ifac-tcp", "dep:tokio-util"]
 # Removed legacy rns-net compatibility feature names are retained only so stale
 # local commands fail with an explicit compile-time message instead of looking
 # like a valid networking path.
@@ -29,7 +30,7 @@ native-rns-net = []
 experimental-rns-net-stack = ["native-rns-net"]
 native-lxmf = ["native-reticulum", "dep:lxmf"]
 native-rpc = ["dep:rns_rpc"]
-native-lxmf-sdk = ["native-lxmf", "native-rpc", "lxmf/sdk"]
+native-lxmf-sdk = ["native-lxmf", "native-rpc", "dep:lxmf_sdk"]
 native-network = ["native-reticulum", "native-lxmf-sdk"]
 live-reticulum = ["native-reticulum"]
 live-lxmf = ["native-lxmf"]
@@ -59,6 +60,7 @@ async-trait = "0.1"
 bzip2 = { version = "0.5.2", optional = true }
 crossterm = { version = "0.29", optional = true }
 directories = "5.0"
+fs4 = { version = "=1.1.0", default-features = false, features = ["sync"] }
 iced = { version = "0.14", optional = true, default-features = false, features = ["canvas", "image", "tokio", "wgpu"] }
 iced_anim = { version = "0.3.1", optional = true, default-features = false, features = ["widgets"] }
 iced_aw = { version = "0.14.1", optional = true, default-features = false, features = ["badge", "card", "menu", "tabs", "tab_bar", "sidebar", "selection_list", "number_input", "labeled_frame"] }
@@ -66,12 +68,14 @@ iced_drop = { version = "0.2.37", optional = true, default-features = false, fea
 iced_gif = { version = "0.14", optional = true, default-features = false, features = ["tokio"] }
 iced_table = { version = "0.14.0", optional = true, default-features = false }
 hkdf = { version = "0.12", optional = true }
-lxmf = { version = "0.6.0", optional = true, default-features = false, features = ["wire"] }
+lxmf = { version = "=0.9.5", optional = true, default-features = false, features = ["wire"] }
+lxmf_sdk = { package = "lxmf-sdk", version = "=0.9.5", optional = true, default-features = false, features = ["std", "sdk-async", "rpc-backend"] }
+omen-ifac-tcp = { path = "src/server/crates/omen-ifac-tcp", optional = true }
 ratatui = { version = "0.30.2", optional = true, default-features = false, features = ["crossterm_0_29", "layout-cache"] }
 rand_core = { version = "0.6.4", optional = true, features = ["getrandom"] }
-reticulum-rs = { version = "0.6.0", optional = true, default-features = false, features = ["core", "transport"] }
-rns_transport = { package = "reticulum-rs-transport", version = "0.6.0", optional = true }
-rns_rpc = { package = "reticulum-rs-rpc", version = "0.6.0", optional = true }
+reticulum-rs = { version = "=0.9.5", optional = true, default-features = false, features = ["core", "transport"] }
+rns_transport = { package = "reticulum-rs-transport", version = "=0.9.5", optional = true }
+rns_rpc = { package = "reticulum-rs-rpc", version = "=0.9.5", optional = true }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "socks"] }
 rfd = { version = "0.15", optional = true, default-features = false }
 rmpv = { version = "1.3", optional = true }
@@ -92,6 +96,10 @@ unicode-width = "0.1"
 iced = { version = "0.14", optional = true, default-features = false, features = ["x11", "wayland"] }
 rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
 
+[[example]]
+name = "mixed_sqlite_history_probe"
+path = "examples/mixed_sqlite_history_probe.rs"
+required-features = ["chat-client"]
 
 [[bin]]
 name = "omen-reticulum-gateway"

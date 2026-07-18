@@ -41,16 +41,28 @@ impl DesktopApp {
                     let row = row![].spacing(6);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     let row = if let DesktopPane::OmenChat(session_id) = kind {
-                        row.push(tooltip_icon_button(
+                        let row = row.push(tooltip_icon_button(
                             ICON_OMENCHAT_PATH,
                             "Request path",
                             Message::OmenChat(OmenChatMessage::RequestPath(*session_id)),
-                        ))
-                        .push(tooltip_omen_icon_button(
-                            ICON_OMENCHAT_RECONNECT,
-                            "Reconnect",
-                            Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
-                        ))
+                        ));
+                        let row = row.push(tooltip_icon_button(
+                            ICON_DIAGNOSTICS,
+                            "Copy redacted session diagnostics",
+                            Message::OmenChat(OmenChatMessage::CopySessionDiagnostics(*session_id)),
+                        ));
+                        if self
+                            .omenchat_connection_state(*session_id)
+                            .manual_reconnect_allowed()
+                        {
+                            row.push(tooltip_omen_icon_button(
+                                ICON_OMENCHAT_RECONNECT,
+                                "Reconnect",
+                                Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
+                            ))
+                        } else {
+                            row
+                        }
                     } else {
                         row
                     };
@@ -64,16 +76,28 @@ impl DesktopApp {
                     let row = row![].spacing(6);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     let row = if let DesktopPane::OmenChat(session_id) = kind {
-                        row.push(tooltip_icon_button(
+                        let row = row.push(tooltip_icon_button(
                             ICON_OMENCHAT_PATH,
                             "Request path",
                             Message::OmenChat(OmenChatMessage::RequestPath(*session_id)),
-                        ))
-                        .push(tooltip_omen_icon_button(
-                            ICON_OMENCHAT_RECONNECT,
-                            "Reconnect",
-                            Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
-                        ))
+                        ));
+                        let row = row.push(tooltip_icon_button(
+                            ICON_DIAGNOSTICS,
+                            "Copy redacted session diagnostics",
+                            Message::OmenChat(OmenChatMessage::CopySessionDiagnostics(*session_id)),
+                        ));
+                        if self
+                            .omenchat_connection_state(*session_id)
+                            .manual_reconnect_allowed()
+                        {
+                            row.push(tooltip_omen_icon_button(
+                                ICON_OMENCHAT_RECONNECT,
+                                "Reconnect",
+                                Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
+                            ))
+                        } else {
+                            row
+                        }
                     } else {
                         row
                     };
@@ -116,16 +140,28 @@ impl DesktopApp {
                     let row = row![].spacing(6);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     let row = if let DesktopPane::OmenChat(session_id) = kind {
-                        row.push(tooltip_icon_button(
+                        let row = row.push(tooltip_icon_button(
                             ICON_OMENCHAT_PATH,
                             "Request path",
                             Message::OmenChat(OmenChatMessage::RequestPath(*session_id)),
-                        ))
-                        .push(tooltip_omen_icon_button(
-                            ICON_OMENCHAT_RECONNECT,
-                            "Reconnect",
-                            Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
-                        ))
+                        ));
+                        let row = row.push(tooltip_icon_button(
+                            ICON_DIAGNOSTICS,
+                            "Copy redacted session diagnostics",
+                            Message::OmenChat(OmenChatMessage::CopySessionDiagnostics(*session_id)),
+                        ));
+                        if self
+                            .omenchat_connection_state(*session_id)
+                            .manual_reconnect_allowed()
+                        {
+                            row.push(tooltip_omen_icon_button(
+                                ICON_OMENCHAT_RECONNECT,
+                                "Reconnect",
+                                Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
+                            ))
+                        } else {
+                            row
+                        }
                     } else {
                         row
                     };
@@ -139,16 +175,28 @@ impl DesktopApp {
                     let row = row![].spacing(6);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     let row = if let DesktopPane::OmenChat(session_id) = kind {
-                        row.push(tooltip_icon_button(
+                        let row = row.push(tooltip_icon_button(
                             ICON_OMENCHAT_PATH,
                             "Request path",
                             Message::OmenChat(OmenChatMessage::RequestPath(*session_id)),
-                        ))
-                        .push(tooltip_omen_icon_button(
-                            ICON_OMENCHAT_RECONNECT,
-                            "Reconnect",
-                            Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
-                        ))
+                        ));
+                        let row = row.push(tooltip_icon_button(
+                            ICON_DIAGNOSTICS,
+                            "Copy redacted session diagnostics",
+                            Message::OmenChat(OmenChatMessage::CopySessionDiagnostics(*session_id)),
+                        ));
+                        if self
+                            .omenchat_connection_state(*session_id)
+                            .manual_reconnect_allowed()
+                        {
+                            row.push(tooltip_omen_icon_button(
+                                ICON_OMENCHAT_RECONNECT,
+                                "Reconnect",
+                                Message::OmenChat(OmenChatMessage::ReconnectSession(*session_id)),
+                            ))
+                        } else {
+                            row
+                        }
                     } else {
                         row
                     };
@@ -403,8 +451,16 @@ impl DesktopApp {
                 .map(|session| {
                     let room = compact_label(&session.active_room.name, 18);
                     let status = compact_label(&session.status, 42);
+                    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+                    let connection = self.omenchat_connection_state(*session_id).label();
+                    #[cfg(not(any(
+                        feature = "chat-client-rns",
+                        feature = "chat-client-rns-clean"
+                    )))]
+                    let connection = "offline";
                     format!(
-                        "room: #{} | {} users | {}",
+                        "{} | room: #{} | {} users | {}",
+                        connection,
                         room,
                         unique_chat_users(&session.users).len(),
                         status

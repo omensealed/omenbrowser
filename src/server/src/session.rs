@@ -25,6 +25,14 @@ const ROLE_ADMIN: u64 = 1 << 2;
 const LINK_INLINE_HISTORY_TARGET_BYTES: usize = 384;
 const UPLOAD_INLINE_CHUNK_BYTES: usize = 256;
 const UPLOAD_INLINE_MAX_BYTES: usize = 16 * 1024;
+const PENDING_RESOURCE_MAX_ITEMS: usize = 64;
+const PENDING_RESOURCE_MAX_BYTES: usize = 16 * 1024 * 1024;
+const PENDING_RESOURCE_MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
+const PENDING_UPLOAD_MAX_ITEMS: usize = 256;
+const PENDING_UPLOAD_MAX_ITEMS_PER_IDENTITY: usize = 8;
+const PENDING_UPLOAD_TTL_SECONDS: u64 = 6 * 60 * 60;
+const UPLOAD_FILENAME_MAX_BYTES: usize = 255;
+const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -79,12 +87,54 @@ struct RateBucket {
 type RateKey = (Vec<u8>, RateKind);
 type RateBuckets = Arc<Mutex<BTreeMap<RateKey, RateBucket>>>;
 
+#[derive(Debug, Default)]
+struct PendingResourceStore {
+    entries: BTreeMap<String, Vec<u8>>,
+    retained_bytes: usize,
+    rejected: u64,
+}
+
+impl PendingResourceStore {
+    fn insert(&mut self, resource_id: String, payload: Vec<u8>) -> ServerResult<()> {
+        let payload_bytes = payload.len();
+        let existing = self.entries.get(&resource_id);
+        let replaced_bytes = existing.map(Vec::len).unwrap_or_default();
+        let projected_items = self.entries.len() + usize::from(existing.is_none());
+        let projected_bytes = self
+            .retained_bytes
+            .saturating_sub(replaced_bytes)
+            .saturating_add(payload_bytes);
+        if payload_bytes > PENDING_RESOURCE_MAX_ENTRY_BYTES
+            || projected_items > PENDING_RESOURCE_MAX_ITEMS
+            || projected_bytes > PENDING_RESOURCE_MAX_BYTES
+        {
+            self.rejected = self.rejected.saturating_add(1);
+            return Err(ServerError::Message(format!(
+                "pending resource admission rejected: items={projected_items}/{PENDING_RESOURCE_MAX_ITEMS} bytes={projected_bytes}/{PENDING_RESOURCE_MAX_BYTES} entry_bytes={payload_bytes}/{PENDING_RESOURCE_MAX_ENTRY_BYTES}"
+            )));
+        }
+        self.entries.insert(resource_id, payload);
+        self.retained_bytes = projected_bytes;
+        Ok(())
+    }
+
+    fn get(&self, resource_id: &str) -> Option<Vec<u8>> {
+        self.entries.get(resource_id).cloned()
+    }
+
+    fn take(&mut self, resource_id: &str) -> Option<Vec<u8>> {
+        let payload = self.entries.remove(resource_id)?;
+        self.retained_bytes = self.retained_bytes.saturating_sub(payload.len());
+        Some(payload)
+    }
+}
+
 pub struct SessionEngine {
     store: OmenchatStore,
     limits: SessionLimits,
     server_motd: Option<String>,
-    pending_resources: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
-    pending_uploads: Arc<Mutex<BTreeMap<String, PendingUpload>>>,
+    pending_resources: Arc<Mutex<PendingResourceStore>>,
+    pending_uploads: Arc<Mutex<PendingUploadStore>>,
     rate_buckets: RateBuckets,
 }
 
@@ -96,6 +146,98 @@ struct PendingUpload {
     filename: String,
     content_type: Option<String>,
     incoming_bytes: u64,
+    accepted_at: u64,
+}
+
+#[derive(Debug, Default)]
+struct PendingUploadStore {
+    entries: BTreeMap<String, PendingUpload>,
+    rejected: u64,
+    expired: u64,
+}
+
+enum PendingUploadTake {
+    Found(PendingUpload),
+    NotFound,
+    IdentityMismatch,
+}
+
+impl PendingUploadStore {
+    fn insert(&mut self, resource_id: String, upload: PendingUpload, now: u64) -> bool {
+        self.purge_expired(now);
+        if let Some(existing) = self.entries.get(&resource_id) {
+            if existing.identity_hash != upload.identity_hash {
+                self.rejected = self.rejected.saturating_add(1);
+                return false;
+            }
+            self.entries.insert(resource_id, upload);
+            return true;
+        }
+        let identity_items = self
+            .entries
+            .values()
+            .filter(|entry| entry.identity_hash == upload.identity_hash)
+            .count();
+        if self.entries.len() >= PENDING_UPLOAD_MAX_ITEMS
+            || identity_items >= PENDING_UPLOAD_MAX_ITEMS_PER_IDENTITY
+        {
+            self.rejected = self.rejected.saturating_add(1);
+            return false;
+        }
+        self.entries.insert(resource_id, upload);
+        true
+    }
+
+    fn take_for_identity(
+        &mut self,
+        resource_id: &str,
+        identity_hash: &[u8],
+        now: u64,
+    ) -> PendingUploadTake {
+        self.purge_expired(now);
+        let Some(upload) = self.entries.get(resource_id) else {
+            return PendingUploadTake::NotFound;
+        };
+        if upload.identity_hash.as_slice() != identity_hash {
+            return PendingUploadTake::IdentityMismatch;
+        }
+        match self.entries.remove(resource_id) {
+            Some(upload) => PendingUploadTake::Found(upload),
+            None => PendingUploadTake::NotFound,
+        }
+    }
+
+    fn remove_identity(&mut self, identity_hash: &[u8], now: u64) -> usize {
+        self.purge_expired(now);
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, upload| upload.identity_hash.as_slice() != identity_hash);
+        before.saturating_sub(self.entries.len())
+    }
+
+    fn metrics(&mut self, now: u64) -> (usize, usize, u64, u64) {
+        self.purge_expired(now);
+        let mut identities = BTreeMap::new();
+        for upload in self.entries.values() {
+            identities.insert(upload.identity_hash.as_slice(), ());
+        }
+        (
+            self.entries.len(),
+            identities.len(),
+            self.rejected,
+            self.expired,
+        )
+    }
+
+    fn purge_expired(&mut self, now: u64) {
+        let before = self.entries.len();
+        self.entries.retain(|_, upload| {
+            now.saturating_sub(upload.accepted_at) < PENDING_UPLOAD_TTL_SECONDS
+        });
+        self.expired = self
+            .expired
+            .saturating_add(before.saturating_sub(self.entries.len()) as u64);
+    }
 }
 
 impl SessionEngine {
@@ -104,8 +246,8 @@ impl SessionEngine {
             store,
             limits: SessionLimits::default(),
             server_motd: Some("Welcome to OMENchat".into()),
-            pending_resources: Arc::new(Mutex::new(BTreeMap::new())),
-            pending_uploads: Arc::new(Mutex::new(BTreeMap::new())),
+            pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
+            pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -115,8 +257,8 @@ impl SessionEngine {
             store,
             limits,
             server_motd: Some("Welcome to OMENchat".into()),
-            pending_resources: Arc::new(Mutex::new(BTreeMap::new())),
-            pending_uploads: Arc::new(Mutex::new(BTreeMap::new())),
+            pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
+            pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -133,8 +275,8 @@ impl SessionEngine {
                 let motd = motd.trim().to_owned();
                 (!motd.is_empty()).then_some(motd)
             }),
-            pending_resources: Arc::new(Mutex::new(BTreeMap::new())),
-            pending_uploads: Arc::new(Mutex::new(BTreeMap::new())),
+            pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
+            pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -1241,6 +1383,20 @@ impl SessionEngine {
                 0,
             )]);
         };
+        if offer.filename.len() > UPLOAD_FILENAME_MAX_BYTES
+            || offer
+                .content_type
+                .as_ref()
+                .is_some_and(|value| value.len() > UPLOAD_CONTENT_TYPE_MAX_BYTES)
+        {
+            return Ok(vec![self.upload_reject_frame(
+                seq,
+                Some(room_id),
+                "upload metadata exceeds server limit",
+                self.limits.upload_quota_bytes,
+                offer.incoming_bytes,
+            )]);
+        }
         if offer.incoming_bytes == 0 {
             return Ok(vec![self.upload_reject_frame(
                 seq,
@@ -1300,7 +1456,9 @@ impl SessionEngine {
             )]),
             UploadQuotaDecision::Accepted(plan) => {
                 let resource_id = upload_resource_id(room_id, user.user_id, seq, &offer);
-                self.pending_uploads
+                let accepted_at = unix_seconds();
+                let accepted = self
+                    .pending_uploads
                     .lock()
                     .map_err(|_| ServerError::Message("pending upload lock poisoned".into()))?
                     .insert(
@@ -1312,8 +1470,19 @@ impl SessionEngine {
                             filename: offer.filename,
                             content_type: offer.content_type,
                             incoming_bytes: plan.incoming_bytes,
+                            accepted_at,
                         },
+                        accepted_at,
                     );
+                if !accepted {
+                    return Ok(vec![self.upload_reject_frame(
+                        seq,
+                        Some(room_id),
+                        "too many pending upload offers",
+                        plan.quota_bytes,
+                        plan.incoming_bytes,
+                    )]);
+                }
                 Ok(vec![Frame::new(
                     ChatOp::UploadAccept,
                     seq,
@@ -1335,29 +1504,32 @@ impl SessionEngine {
         resource_id: &str,
         data: Vec<u8>,
     ) -> ServerResult<Vec<Frame>> {
-        let Some(upload) = self
+        let pending = self
             .pending_uploads
             .lock()
             .map_err(|_| ServerError::Message("pending upload lock poisoned".into()))?
-            .remove(resource_id)
-        else {
-            return Ok(vec![self.upload_reject_frame(
-                0,
-                None,
-                "unknown upload resource",
-                self.limits.upload_quota_bytes,
-                data.len() as u64,
-            )]);
+            .take_for_identity(resource_id, &peer.identity_hash, unix_seconds());
+        let upload = match pending {
+            PendingUploadTake::Found(upload) => upload,
+            PendingUploadTake::NotFound => {
+                return Ok(vec![self.upload_reject_frame(
+                    0,
+                    None,
+                    "unknown or expired upload resource",
+                    self.limits.upload_quota_bytes,
+                    data.len() as u64,
+                )]);
+            }
+            PendingUploadTake::IdentityMismatch => {
+                return Ok(vec![self.upload_reject_frame(
+                    0,
+                    None,
+                    "upload resource identity mismatch",
+                    self.limits.upload_quota_bytes,
+                    data.len() as u64,
+                )]);
+            }
         };
-        if upload.identity_hash != peer.identity_hash {
-            return Ok(vec![self.upload_reject_frame(
-                0,
-                Some(upload.room_id),
-                "upload resource identity mismatch",
-                self.limits.upload_quota_bytes,
-                data.len() as u64,
-            )]);
-        }
         if data.len() as u64 != upload.incoming_bytes {
             return Ok(vec![self.upload_reject_frame(
                 0,
@@ -1537,10 +1709,7 @@ impl SessionEngine {
                 bytes,
             ));
         }
-        self.pending_resources
-            .lock()
-            .map_err(|_| ServerError::Message("pending resource lock poisoned".into()))?
-            .insert(resource_id.clone(), bytes);
+        self.store_pending_resource(resource_id.clone(), bytes)?;
         Ok(vec![Frame::new(
             ChatOp::UploadResourceOffer,
             seq,
@@ -1710,10 +1879,7 @@ impl SessionEngine {
             let resource_id = format!("{purpose}:{room_id}:{uncompressed_len}:{compressed_len}");
             let payload = compressed_values_payload(values)
                 .map_err(|error| ServerError::Message(format!("batch encode failed: {error}")))?;
-            self.pending_resources
-                .lock()
-                .map_err(|_| ServerError::Message("pending resource lock poisoned".into()))?
-                .insert(resource_id.clone(), payload);
+            self.store_pending_resource(resource_id.clone(), payload)?;
             Ok(resource_offer_body(&ResourceOffer {
                 resource_id,
                 compression: Compression::Bzip2,
@@ -1738,10 +1904,7 @@ impl SessionEngine {
         let resource_id = format!("{purpose}:{room_id}:{uncompressed_len}:{compressed_len}");
         let payload = compressed_values_payload(values)
             .map_err(|error| ServerError::Message(format!("batch encode failed: {error}")))?;
-        self.pending_resources
-            .lock()
-            .map_err(|_| ServerError::Message("pending resource lock poisoned".into()))?
-            .insert(resource_id.clone(), payload);
+        self.store_pending_resource(resource_id.clone(), payload)?;
         Ok(resource_offer_body(&ResourceOffer {
             resource_id,
             compression: Compression::Bzip2,
@@ -1833,8 +1996,7 @@ impl SessionEngine {
             .pending_resources
             .lock()
             .map_err(|_| ServerError::Message("pending resource lock poisoned".into()))?
-            .get(resource_id)
-            .cloned())
+            .get(resource_id))
     }
 
     pub fn take_resource_payload(&self, resource_id: &str) -> ServerResult<Option<Vec<u8>>> {
@@ -1842,7 +2004,45 @@ impl SessionEngine {
             .pending_resources
             .lock()
             .map_err(|_| ServerError::Message("pending resource lock poisoned".into()))?
-            .remove(resource_id))
+            .take(resource_id))
+    }
+
+    pub(crate) fn pending_resource_metrics(&self) -> ServerResult<(usize, usize, u64)> {
+        let pending = self
+            .pending_resources
+            .lock()
+            .map_err(|_| ServerError::Message("pending resource lock poisoned".into()))?;
+        Ok((
+            pending.entries.len(),
+            pending.retained_bytes,
+            pending.rejected,
+        ))
+    }
+
+    pub(crate) fn pending_upload_metrics(&self) -> ServerResult<(usize, usize, u64, u64)> {
+        Ok(self
+            .pending_uploads
+            .lock()
+            .map_err(|_| ServerError::Message("pending upload lock poisoned".into()))?
+            .metrics(unix_seconds()))
+    }
+
+    pub(crate) fn discard_pending_uploads_for_identity(
+        &self,
+        identity_hash: &[u8],
+    ) -> ServerResult<usize> {
+        Ok(self
+            .pending_uploads
+            .lock()
+            .map_err(|_| ServerError::Message("pending upload lock poisoned".into()))?
+            .remove_identity(identity_hash, unix_seconds()))
+    }
+
+    fn store_pending_resource(&self, resource_id: String, payload: Vec<u8>) -> ServerResult<()> {
+        self.pending_resources
+            .lock()
+            .map_err(|_| ServerError::Message("pending resource lock poisoned".into()))?
+            .insert(resource_id, payload)
     }
 }
 
@@ -2279,6 +2479,226 @@ mod tests {
     }
 
     #[test]
+    fn pending_resource_store_enforces_item_and_entry_budgets() {
+        let mut store = PendingResourceStore::default();
+        for index in 0..PENDING_RESOURCE_MAX_ITEMS {
+            store
+                .insert(format!("resource-{index}"), vec![index as u8])
+                .expect("bounded item admission");
+        }
+        let item_error = store
+            .insert("one-too-many".into(), vec![1])
+            .expect_err("item overflow must fail");
+        assert!(item_error.to_string().contains("admission rejected"));
+        assert_eq!(store.entries.len(), PENDING_RESOURCE_MAX_ITEMS);
+        assert_eq!(store.retained_bytes, PENDING_RESOURCE_MAX_ITEMS);
+
+        let removed = store.take("resource-0").expect("remove retained payload");
+        assert_eq!(removed, vec![0]);
+        store
+            .insert("replacement-slot".into(), vec![2])
+            .expect("released item capacity");
+        assert_eq!(store.entries.len(), PENDING_RESOURCE_MAX_ITEMS);
+
+        let mut entry_store = PendingResourceStore::default();
+        let entry_error = entry_store
+            .insert(
+                "oversized".into(),
+                vec![0; PENDING_RESOURCE_MAX_ENTRY_BYTES + 1],
+            )
+            .expect_err("oversized entry must fail");
+        assert!(entry_error.to_string().contains("admission rejected"));
+        assert!(entry_store.entries.is_empty());
+        assert_eq!(entry_store.retained_bytes, 0);
+        assert_eq!(entry_store.rejected, 1);
+    }
+
+    #[test]
+    fn pending_resource_store_enforces_global_bytes_and_replacement_accounting() {
+        let mut store = PendingResourceStore::default();
+        for index in 0..4 {
+            store
+                .insert(
+                    format!("full-{index}"),
+                    vec![index as u8; PENDING_RESOURCE_MAX_ENTRY_BYTES],
+                )
+                .expect("exact global byte budget");
+        }
+        assert_eq!(store.retained_bytes, PENDING_RESOURCE_MAX_BYTES);
+        store
+            .insert("full-0".into(), vec![9; PENDING_RESOURCE_MAX_ENTRY_BYTES])
+            .expect("same-sized replacement");
+        assert_eq!(store.retained_bytes, PENDING_RESOURCE_MAX_BYTES);
+        store
+            .insert("full-0".into(), vec![9])
+            .expect("smaller replacement");
+        assert_eq!(
+            store.retained_bytes,
+            PENDING_RESOURCE_MAX_BYTES - PENDING_RESOURCE_MAX_ENTRY_BYTES + 1
+        );
+        store
+            .insert(
+                "refill".into(),
+                vec![8; PENDING_RESOURCE_MAX_ENTRY_BYTES - 1],
+            )
+            .expect("released byte capacity");
+        assert_eq!(store.retained_bytes, PENDING_RESOURCE_MAX_BYTES);
+        store
+            .insert("overflow".into(), vec![1])
+            .expect_err("global byte overflow must fail");
+        assert_eq!(store.retained_bytes, PENDING_RESOURCE_MAX_BYTES);
+        assert!(!store.entries.contains_key("overflow"));
+        assert_eq!(store.rejected, 1);
+    }
+
+    fn pending_upload(identity: &[u8], accepted_at: u64) -> PendingUpload {
+        PendingUpload {
+            identity_hash: identity.to_vec(),
+            room_id: 1,
+            user_id: 1,
+            filename: "upload.bin".into(),
+            content_type: Some("application/octet-stream".into()),
+            incoming_bytes: 1,
+            accepted_at,
+        }
+    }
+
+    #[test]
+    fn pending_upload_store_enforces_global_and_per_identity_fairness() {
+        let now = 100_000;
+        let mut per_identity = PendingUploadStore::default();
+        for index in 0..PENDING_UPLOAD_MAX_ITEMS_PER_IDENTITY {
+            assert!(per_identity.insert(
+                format!("alice-{index}"),
+                pending_upload(b"alice", now),
+                now,
+            ));
+        }
+        assert!(!per_identity.insert("alice-overflow".into(), pending_upload(b"alice", now), now,));
+        assert!(per_identity.insert("bob".into(), pending_upload(b"bob", now), now,));
+        assert!(per_identity.insert("alice-0".into(), pending_upload(b"alice", now + 1), now + 1,));
+        assert_eq!(
+            per_identity.metrics(now + 1),
+            (PENDING_UPLOAD_MAX_ITEMS_PER_IDENTITY + 1, 2, 1, 0)
+        );
+
+        let mut global = PendingUploadStore::default();
+        for index in 0..PENDING_UPLOAD_MAX_ITEMS {
+            assert!(global.insert(
+                format!("global-{index}"),
+                pending_upload(format!("identity-{index}").as_bytes(), now),
+                now,
+            ));
+        }
+        assert!(!global.insert(
+            "global-overflow".into(),
+            pending_upload(b"another-identity", now),
+            now,
+        ));
+        assert_eq!(global.metrics(now), (PENDING_UPLOAD_MAX_ITEMS, 256, 1, 0));
+    }
+
+    #[test]
+    fn pending_upload_store_preserves_owner_on_mismatch_and_expires_stale_offers() {
+        let now = 200_000;
+        let mut store = PendingUploadStore::default();
+        assert!(store.insert("owned".into(), pending_upload(b"alice", now), now,));
+        assert!(matches!(
+            store.take_for_identity("owned", b"mallory", now),
+            PendingUploadTake::IdentityMismatch
+        ));
+        assert_eq!(store.metrics(now), (1, 1, 0, 0));
+        assert!(matches!(
+            store.take_for_identity("owned", b"alice", now),
+            PendingUploadTake::Found(_)
+        ));
+        assert_eq!(store.metrics(now), (0, 0, 0, 0));
+
+        assert!(store.insert("expired".into(), pending_upload(b"alice", now), now,));
+        assert_eq!(
+            store.metrics(now + PENDING_UPLOAD_TTL_SECONDS),
+            (0, 0, 0, 1)
+        );
+        assert!(matches!(
+            store.take_for_identity("expired", b"alice", now + PENDING_UPLOAD_TTL_SECONDS),
+            PendingUploadTake::NotFound
+        ));
+    }
+
+    #[test]
+    fn upload_offer_rejects_metadata_and_pending_identity_overload() {
+        let root = temp_upload_root("pending-admission");
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                rate_commands_per_minute: 0,
+                upload_quota_bytes: 1024,
+                upload_cache_root: Some(root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        let peer = peer();
+        join_lobby(&engine, &peer);
+
+        let oversized = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    10,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("x".repeat(UPLOAD_FILENAME_MAX_BYTES + 1)),
+                        FrameValue::U64(1),
+                    ]),
+                ),
+            )
+            .expect("oversized metadata response");
+        assert_eq!(oversized[0].op, ChatOp::UploadReject);
+
+        for index in 0..PENDING_UPLOAD_MAX_ITEMS_PER_IDENTITY {
+            let response = engine
+                .handle_frame(
+                    &peer,
+                    Frame::new(
+                        ChatOp::UploadOffer,
+                        20 + index as u32,
+                        Some(1),
+                        FrameBody::Fields(vec![
+                            FrameValue::String(format!("upload-{index}.bin")),
+                            FrameValue::U64(1),
+                        ]),
+                    ),
+                )
+                .expect("pending upload offer");
+            assert_eq!(response[0].op, ChatOp::UploadAccept);
+        }
+        let rejected = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    99,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("one-too-many.bin".into()),
+                        FrameValue::U64(1),
+                    ]),
+                ),
+            )
+            .expect("overload response");
+        assert_eq!(rejected[0].op, ChatOp::UploadReject);
+        assert_eq!(
+            engine
+                .pending_upload_metrics()
+                .expect("pending upload metrics"),
+            (PENDING_UPLOAD_MAX_ITEMS_PER_IDENTITY, 1, 1, 0)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn upload_offer_accepts_when_quota_policy_allows_it() {
         let root = temp_upload_root("accept");
         let _ = std::fs::remove_dir_all(&root);
@@ -2359,6 +2779,25 @@ mod tests {
         let FrameValue::String(resource_id) = &fields[0] else {
             panic!("resource id");
         };
+
+        let mismatched = engine
+            .handle_upload_resource(
+                &ServerPeer {
+                    identity_hash: b"other-peer".to_vec(),
+                    display_name: "Mallory".into(),
+                    lxmf_destination: None,
+                },
+                resource_id,
+                b"data".to_vec(),
+            )
+            .expect("identity mismatch response");
+        assert_eq!(mismatched[0].op, ChatOp::UploadReject);
+        assert_eq!(
+            engine
+                .pending_upload_metrics()
+                .expect("pending upload metrics"),
+            (1, 1, 0, 0)
+        );
 
         let complete = engine
             .handle_upload_resource(&peer, resource_id, b"data".to_vec())

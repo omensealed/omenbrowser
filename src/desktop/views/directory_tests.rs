@@ -174,9 +174,27 @@ fn directory_selected_state_lines_are_kind_specific() {
     assert!(peer_lines.contains("preferred LXMF delivery: Propagated"));
     assert!(!peer_lines.contains("identify on connect"));
 
-    let omenchat = DirectoryEntry::new("chat.hash", "Chat", DirectoryKind::OmenChat);
+    let mut omenchat = DirectoryEntry::new("chat.hash", "Chat", DirectoryKind::OmenChat);
+    omenchat.identity_hash = Some("00112233445566778899aabbccddeeff".into());
     let omenchat_lines = directory_selected_state_lines(&omenchat).join("\n");
     assert!(omenchat_lines.contains("OMENchat server rank"));
+    assert!(omenchat_lines
+        .contains("server identity: 00112233445566778899aabbccddeeff (announce-verified)"));
     assert!(!omenchat_lines.contains("preferred LXMF delivery"));
     assert!(!omenchat_lines.contains("identify on connect"));
+}
+
+#[test]
+fn directory_view_filter_matches_verified_identity_hash() {
+    let now_secs = crate::app::current_epoch_ms() as f64 / 1_000.0;
+    let mut entry = DirectoryEntry::new("chat.hash", "Chat", DirectoryKind::OmenChat);
+    entry.last_seen = now_secs;
+    entry.identity_hash = Some("00112233445566778899aabbccddeeff".into());
+
+    assert!(directory_entry_matches_view(
+        &entry,
+        &DirectoryKind::OmenChat,
+        &DirectoryScope::Live,
+        "aabbccdd"
+    ));
 }

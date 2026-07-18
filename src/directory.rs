@@ -24,6 +24,7 @@ pub const DIRECTORY_MAX_ENTRIES: usize = 4096;
 pub const DIRECTORY_MAX_DESTINATION_BYTES: usize = 1024;
 pub const DIRECTORY_MAX_DISPLAY_NAME_BYTES: usize = 16 * 1024;
 pub const DIRECTORY_MAX_ASSOCIATED_HASH_BYTES: usize = 1024;
+pub const DIRECTORY_IDENTITY_HASH_BYTES: usize = 32;
 static DIRECTORY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -81,6 +82,8 @@ pub enum PreferredDelivery {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DirectoryEntry {
     pub destination_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_hash: Option<String>,
     pub display_name: String,
     pub kind: DirectoryKind,
     pub trusted: bool,
@@ -106,6 +109,7 @@ impl DirectoryEntry {
         let hosts_node = kind == DirectoryKind::Node;
         Self {
             destination_hash: destination_hash.into(),
+            identity_hash: None,
             display_name: display_name.into(),
             kind,
             trusted: false,
@@ -126,6 +130,14 @@ impl DirectoryEntry {
         self.trusted = trust_level == TrustLevel::Trusted;
         self.trust_level = trust_level;
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirectoryAnnounceMetadata {
+    pub identity_hash: Option<String>,
+    pub associated_hash: Option<String>,
+    pub node_associated_hash: Option<String>,
+    pub lxmf_stamp_cost: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -206,15 +218,54 @@ impl DirectoryService {
         node_associated_hash: Option<String>,
         lxmf_stamp_cost: Option<u8>,
     ) -> crate::error::AppResult<DirectoryEntry> {
+        self.ingest_announce_with_identity_metadata(
+            destination_hash,
+            display_name,
+            kind,
+            DirectoryAnnounceMetadata {
+                identity_hash: None,
+                associated_hash,
+                node_associated_hash,
+                lxmf_stamp_cost,
+            },
+        )
+    }
+
+    pub fn ingest_announce_with_identity_metadata(
+        &mut self,
+        destination_hash: impl Into<String>,
+        display_name: impl Into<String>,
+        kind: DirectoryKind,
+        metadata: DirectoryAnnounceMetadata,
+    ) -> crate::error::AppResult<DirectoryEntry> {
+        let DirectoryAnnounceMetadata {
+            identity_hash,
+            associated_hash,
+            node_associated_hash,
+            lxmf_stamp_cost,
+        } = metadata;
         let destination_hash = destination_hash.into();
         let display_name = display_name.into();
         validate_directory_strings(
             &destination_hash,
+            identity_hash.as_deref(),
             &display_name,
             associated_hash.as_deref(),
             node_associated_hash.as_deref(),
         )?;
         let existing = self.entries.get(&destination_hash).cloned();
+        if let (Some(existing_identity), Some(announced_identity)) = (
+            existing
+                .as_ref()
+                .and_then(|entry| entry.identity_hash.as_deref()),
+            identity_hash.as_deref(),
+        ) {
+            if !existing_identity.eq_ignore_ascii_case(announced_identity) {
+                return Err(AppError::Settings(
+                    "directory announce identity changed for an existing destination".into(),
+                ));
+            }
+        }
         let now = timestamp_secs();
         let mut entry = DirectoryEntry::new(
             destination_hash.clone(),
@@ -226,6 +277,7 @@ impl DirectoryService {
             kind.clone(),
         );
         if let Some(existing) = existing.as_ref() {
+            entry.identity_hash = identity_hash.or_else(|| existing.identity_hash.clone());
             entry.trust_level = existing.trust_level;
             entry.trusted = existing.trusted;
             entry.saved = existing.saved;
@@ -238,6 +290,7 @@ impl DirectoryService {
                 node_associated_hash.or_else(|| existing.node_associated_hash.clone());
             entry.lxmf_stamp_cost = lxmf_stamp_cost.or(existing.lxmf_stamp_cost);
         } else {
+            entry.identity_hash = identity_hash;
             entry.associated_hash = associated_hash;
             entry.node_associated_hash = node_associated_hash;
             entry.lxmf_stamp_cost = lxmf_stamp_cost;
@@ -269,13 +322,16 @@ impl DirectoryService {
         let mut changed = Vec::new();
         for payload in payloads {
             let before = self.find(&payload.destination_hash);
-            let entry = self.ingest_announce_with_metadata(
+            let entry = self.ingest_announce_with_identity_metadata(
                 payload.destination_hash.clone(),
                 payload.display_name.clone(),
                 payload.kind.clone(),
-                payload.associated_hash.clone(),
-                payload.node_associated_hash.clone(),
-                payload.lxmf_stamp_cost,
+                DirectoryAnnounceMetadata {
+                    identity_hash: payload.identity_hash.clone(),
+                    associated_hash: payload.associated_hash.clone(),
+                    node_associated_hash: payload.node_associated_hash.clone(),
+                    lxmf_stamp_cost: payload.lxmf_stamp_cost,
+                },
             )?;
             if before.as_ref() != Some(&entry) {
                 changed.push(entry);
@@ -713,6 +769,7 @@ fn directory_entries_match_ignoring_last_seen(
 ) -> bool {
     left.destination_hash == right.destination_hash
         && left.display_name == right.display_name
+        && left.identity_hash == right.identity_hash
         && left.kind == right.kind
         && left.trusted == right.trusted
         && left.trust_level == right.trust_level
@@ -736,6 +793,10 @@ fn merged_entry(primary: Option<&DirectoryEntry>, secondary: &DirectoryEntry) ->
         Some(&secondary.display_name),
         &primary.destination_hash,
     );
+    entry.identity_hash = primary
+        .identity_hash
+        .clone()
+        .or_else(|| secondary.identity_hash.clone());
     entry.trusted = primary.trusted || secondary.trusted;
     entry.trust_level = if secondary.trust_level == TrustLevel::Trusted
         || primary.trust_level != TrustLevel::Trusted
@@ -829,6 +890,7 @@ fn validate_directory_file(file: &DirectoryFile) -> AppResult<()> {
 fn validate_directory_entry(entry: &DirectoryEntry) -> AppResult<()> {
     validate_directory_strings(
         &entry.destination_hash,
+        entry.identity_hash.as_deref(),
         &entry.display_name,
         entry.associated_hash.as_deref(),
         entry.node_associated_hash.as_deref(),
@@ -843,6 +905,7 @@ fn validate_directory_entry(entry: &DirectoryEntry) -> AppResult<()> {
 
 fn validate_directory_strings(
     destination_hash: &str,
+    identity_hash: Option<&str>,
     display_name: &str,
     associated_hash: Option<&str>,
     node_associated_hash: Option<&str>,
@@ -855,6 +918,14 @@ fn validate_directory_strings(
     if display_name.len() > DIRECTORY_MAX_DISPLAY_NAME_BYTES {
         return Err(AppError::Settings(
             "directory display name exceeds its byte limit".into(),
+        ));
+    }
+    if identity_hash.is_some_and(|hash| {
+        hash.len() != DIRECTORY_IDENTITY_HASH_BYTES
+            || !hash.as_bytes().iter().all(u8::is_ascii_hexdigit)
+    }) {
+        return Err(AppError::Settings(
+            "directory identity hash must be a 32-character hexadecimal Reticulum hash".into(),
         ));
     }
     if associated_hash

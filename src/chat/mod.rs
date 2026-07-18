@@ -22,6 +22,9 @@ pub mod live;
 #[cfg(feature = "chat-client-lxmf")]
 pub mod lxmf;
 
-pub use client::{ChatClient, ChatClientEvent, ChatClientRequest, ChatSessionId, ChatSessionView};
+pub use client::{
+    ChatClient, ChatClientEvent, ChatClientRequest, ChatConnectionState, ChatSessionId,
+    ChatSessionView,
+};
 pub use descriptor::OmenChatDescriptor;
 pub use model::*;

@@ -2844,7 +2844,7 @@ dependencies = [
 
 [[package]]
 name = "omenbrowser_rs"
-version = "0.6.0-1"
+version = "0.9.5-1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2869,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "omenchatd"
-version = "0.6.0-1"
+version = "0.9.5-1"
 dependencies = [
  "bzip2",
  "rmpv",

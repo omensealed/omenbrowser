@@ -462,6 +462,62 @@ Two-client recent-history smoke:
 bash scripts/release-omenchat-smoke.sh --multi-client
 ```
 
+Server-process restart with the same isolated server and browser roots:
+
+```bash
+bash scripts/release-omenchat-smoke.sh --restart-server
+```
+
+This runs the client as a fresh process after the server restart. It proves
+state-root reopening and a second full exchange, not automatic reconnect by a
+desktop process that remained alive.
+
+One continuously running product process across an orderly server restart:
+
+```bash
+bash scripts/run-omenchat-continuous-reconnect.sh \
+  --report target/omenchat-continuous-reconnect-report.json
+```
+
+The first exchange creates a marker only inside the harness's temporary root.
+The wrapper then drains and restarts current omenchatd without stopping the
+client process. The client must observe the old link close, open a different
+link, reconnect the same in-memory session, and receive a second echoed message.
+The retained report contains only versions and booleans. This exercises the
+headless product smoke path; an interactive Iced-window restart soak remains a
+separate presentation/lifecycle check.
+
+Current-product two-client upload/Resource qualification:
+
+```bash
+bash scripts/run-omenchat-current-upload.sh \
+  --report target/omenchat-current-upload-report.json
+```
+
+The sender uploads the existing deterministic 873-byte public OMENchat wire
+fixture and fetches it through the server. A second client with a separate
+identity/root discovers and fetches the same Resource. The harness requires
+typed upload completion and Resource-available events with the exact byte count
+for both clients. Reticulum Resource integrity remains enforced; raw payloads,
+resource IDs, identities, destinations, paths, and reports are deleted.
+
+Current-product NomadNet page request qualification:
+
+```bash
+bash scripts/run-nomadnet-current-page.sh \
+  --report target/nomadnet-current-page-report.json
+```
+
+The harness starts the standalone server's fixed `nomadnetwork.node` portal and
+the canonical browser under separate temporary roots on an ephemeral loopback
+interface. It requires link setup, the production direct-request send, and a
+non-empty network response that decodes to the deterministic 309-byte,
+17-line `text/x-micron` page. The retained report contains only versions,
+public page shape, request primitive, and validation booleans. Raw destinations,
+URLs, identities, paths, ports, logs, and state are deleted. This is
+current-product portal evidence; current-Python application evidence is covered
+by the separate drift lane below.
+
 Expected result:
 
 ```text
@@ -815,6 +871,29 @@ cargo test --locked --no-default-features --features desktop-product \
   omenchat_maintenance_deadline
 ```
 
+The desktop also projects those owned sets, transports, and protocol events
+into a typed per-session connection lifecycle. Focused regressions prove every
+state label/retryability decision, fixed session-bounded ownership,
+authenticating-to-joined transition on `RoomJoined`, quick reconnect after a
+timeout, manual disconnected state after a non-retryable close, retry-limit
+failure, and cleanup on session close:
+
+```sh
+cargo test --locked --no-default-features --features desktop-product \
+  connection_state_labels_and_retryability_are_typed --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_connection_state_is_bounded_by_sessions_and_join_is_event_driven --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_reconnect_limit_projects_retryable_failed_state --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_timeout_close_marks_session_for_quick_reconnect --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_non_retryable_close_waits_for_manual_reconnect --lib
+```
+
+These tests do not claim live Reticulum handshake, server restart, or
+mixed-version interoperability.
+
 There is no unconditional desktop timer. Conversation and OMENchat
 follow-bottom state is reconciled at handled-message and internal-event
 boundaries, including after live OMENchat frames are drained:
@@ -904,6 +983,50 @@ context-switch samples plus median/p95 summaries. It also captures an ignored
 release-mode production-decoder latency test and writes exact vendor GPU
 observation commands. Missing GPU tooling remains pending, never zero by
 assumption. Shortened sampling is only a harness smoke, not a release baseline.
+
+## OMENchat v0.6.0-1 wire compatibility
+
+The browser and independently built server consume the same public fixture
+file at `fixtures/omenchat/v0_6_0_1_wire.rs`. Focused checks require both codecs
+to emit and accept the tagged v0.6.0-1 session-open, room-message, and
+history-resource-offer bytes, and require the legacy context/resource labels to
+remain exact:
+
+```sh
+cargo test --locked --lib --no-default-features --features desktop-product \
+  v0_6_0_1
+cargo test --locked --lib --no-default-features --features desktop-product \
+  clean_omenchat_accepts_generic_data_and_collapsed_legacy_context_only
+
+(cd src/server && \
+  cargo test --locked --no-default-features --features server-headless \
+    v0_6_0_1)
+(cd src/server && \
+  cargo test --locked --no-default-features --features server-headless \
+    live_server_routes_known_link_data_and_columba_context_zero_frames)
+```
+
+These are deterministic codec and admission checks. They do not claim that
+separate v0.6/v0.9 processes completed link establishment, resource transfer,
+restart, or reconnect; those isolated live combinations remain release gates.
+
+## omenchatd machine-readable status
+
+The standalone server regressions parse `status --json` and `doctor --json`,
+require schema version 1, application/dependency/runtime ownership fields, and
+typed doctor checks, then seed adversarial operator/MOTD text and an isolated
+private root. Neither JSON document may contain those values, a private path,
+credentials, or private identity material.
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless machine_readable --lib
+```
+
+An isolated CLI smoke should additionally validate both emitted documents with
+`jq` when available. These offline reports intentionally set
+`runtime.live_metrics_available` to false and do not claim connectivity to a
+running omenchatd process.
 
 ## OMENchat frame decode budgets
 
@@ -1539,6 +1662,20 @@ single-consumer handoff, crosses the 1,024-entry/256 KiB ceilings, verifies
 oldest unmatched validation eviction, and requires a ticket above 256 bytes to
 fail validation rather than being silently downgraded.
 
+The integrated issuer regressions use only generated temporary Reticulum roots.
+They require one serialized inclusion under concurrent same-peer requests,
+case-normalized peer identity, one-day attempted-inclusion throttling, restart
+reuse, near-expiry renewal, exact issuer bytes/expiry in the signed LXMF field,
+and rejection of expired or wrong-sized overrides. Corrupt and symlinked state
+must fail without replacing the file or referent.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  'runtime::native_lxmf::tickets::tests' --lib
+cargo test --locked --no-default-features --features desktop-product \
+  sdk_wire_delivery_uses_validated_issuer_ticket_exactly --lib
+```
+
 ## Cache index latency
 
 Run the ignored optimized cache measurement with isolated generated fixtures:
@@ -1788,6 +1925,58 @@ The workflow is a compile/unit-test prerequisite, not an installer or GUI-launch
 claim. Installer lifecycle and interactive file-dialog/window smoke tests remain
 separate native release gates.
 
+All four product profiles run strict Clippy across every declared target. This
+includes examples and test-only helpers, which caught two cross-target defects
+before the hosted matrix: the mixed-version SQLite probe lacked its
+`chat-client` feature requirement, and a Linux-only server log soak helper was
+compiled as dead test code on Windows. The workflow-security verifier requires
+these all-target Clippy commands so later edits cannot silently narrow them.
+
+A Linux host with the GNU Windows target and MinGW can run a useful compile-only
+preflight:
+
+```bash
+cargo test --locked --target x86_64-pc-windows-gnu \
+  --no-default-features --features desktop-product --all-targets --no-run
+cargo clippy --locked --target x86_64-pc-windows-gnu \
+  --no-default-features --features desktop-product --all-targets -- -D warnings
+cargo test --locked --target x86_64-pc-windows-gnu \
+  --no-default-features --features tui --all-targets --no-run
+cargo clippy --locked --target x86_64-pc-windows-gnu \
+  --no-default-features --features tui --all-targets -- -D warnings
+cargo test --locked --target x86_64-pc-windows-gnu \
+  --manifest-path src/server/Cargo.toml --no-default-features \
+  --features server-headless --all-targets --no-run
+cargo clippy --locked --target x86_64-pc-windows-gnu \
+  --manifest-path src/server/Cargo.toml --no-default-features \
+  --features server-headless --all-targets -- -D warnings
+cargo test --locked --target x86_64-pc-windows-gnu \
+  --manifest-path src/server/Cargo.toml --no-default-features \
+  --features server-full --all-targets --no-run
+cargo clippy --locked --target x86_64-pc-windows-gnu \
+  --manifest-path src/server/Cargo.toml --no-default-features \
+  --features server-full --all-targets -- -D warnings
+```
+
+This proves Windows conditional compilation and linkage only. It does not
+execute Windows binaries, exercise MSVC, or substitute for the hosted Windows
+and macOS jobs.
+
+The hosted matrix additionally executes the actual release-profile command-line
+entry points without creating application state:
+
+```bash
+bash scripts/test-native-cli-identity.sh
+```
+
+The smoke runs `--version` for desktop-product, root TUI, headless omenchatd,
+and full omenchatd. It requires the native Rust host target, canonical product
+feature identity, mock/test exclusion, and the expected server headless/TUI
+split. It also executes the browser and server `--help` entry points and checks
+that isolated-root and operator-diagnostics options remain present. It does not
+launch a GUI/TUI, start Reticulum, create an identity, or read a default user
+root.
+
 `scripts/test-tui-lifecycle.sh` runs a deterministic terminal lifecycle harness
 under the root `tui` feature. An injected lifecycle records raw-mode,
 alternate-screen, and mouse-capture transitions, proving normal drop restoration
@@ -2014,6 +2203,288 @@ cargo test --locked --no-default-features --features desktop-product \
 
 The suite never opens the maintainer's real message or identity roots.
 
+## LXMF outbound TTL and restart reconciliation
+
+Outbound TTL tests use only generated operation identifiers and isolated
+message roots. They cover the exact one-second and 24-hour policy boundaries,
+absolute-deadline round-trip, malformed/partial retained fields, rejection
+before runtime admission, remaining-TTL SDK mapping, dispatch-boundary expiry,
+new identity after an expired retry, visible scheduled expiry, and durable
+idempotent reconciliation after reopening the message store. The UI assertion
+checks fixed TTL/expiry text and does not introduce a countdown subscription.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product ttl --lib
+cargo test --locked --no-default-features --features desktop-product \
+  --test message_store outbound_ttl_reconciliation_is_durable_and_restart_idempotent
+cargo test --locked --no-default-features --features desktop-product \
+  --test messaging_delivery_status expired_outbound_operation_is_rejected_before_runtime_admission
+```
+
+These tests do not start a Reticulum/LXMF daemon. External-daemon enforcement
+and late authoritative delivery correction remain live interoperability gates.
+
+## LXMF SDK history ownership and restart recovery
+
+Typed history tests use an in-memory upstream RPC store and explicit temporary
+OMEN message roots. They cover request/page bounds, peer-filtered typed mapping,
+content-preserving receipt reconciliation, correction of a locally expired row,
+missed-inbound import, refusal to invent SDK-only outbound history,
+deleted-conversation tombstones, and restart/replay idempotency.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product sdk_history
+cargo test --locked --no-default-features --features desktop-product lxmf_history
+```
+
+These tests do not claim a live external `reticulumd`, Python LXMF, history
+beyond the bounded four-page recovery ceiling, or mixed-version history
+interoperability.
+
+## Reticulum 0.9 direct NomadNet request candidate
+
+The Phase 4 candidate test uses generated identities, a synthetic interface
+hash, and an in-memory pair of Reticulum 0.9 links. It proves that the existing
+bounded NomadNet frame can be encrypted as `PacketContext::Request`, that its
+direct request ID is the first 16 bytes of the final packet hash, that the peer
+observes the same ID and plaintext, and that a correlated `Response` packet is
+accepted. A separate assertion rejects inactive links before construction.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  reticulum09_direct_request_candidate -- --nocapture
+```
+
+Production page fetch uses this direct primitive when the packed request fits
+the packet MDU and retains request-resource above that boundary. This isolated
+test alone does not claim Python handler dispatch, real interface delivery,
+timeout/cancellation, link-close/reuse, or response byte equality.
+
+The oversized request-resource ownership regressions use an isolated in-memory
+0.9 transport, synthetic active link, and temporary event channels. They wait
+for the outbound advertisement and require browser cancellation and response
+timeout to emit an actual initiator-cancel packet plus an outbound NomadNet
+resource lifecycle event. Metadata regressions separately prove successful
+small pages identify `reticulum-transport/direct-request`; Resource ownership
+tests continue to exercise the oversized compatibility primitive.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  nomadnet_request_releases_outbound_resource --lib
+cargo test --locked --no-default-features --features desktop-product \
+  native_request_backend_metadata_is_visible_in_status_and_trace --lib
+cargo test --locked --no-default-features --features desktop-product \
+  diagnostics_live_fetch_card_extracts_success_metadata --lib
+cargo test --locked --no-default-features --features tui \
+  live_fetch_summary_names_request_resource_compatibility_primitive --lib
+```
+
+Current-Python NomadNet interoperability is explicit and ignored by default:
+
+```bash
+bash scripts/run-current-python-drift.sh \
+  --report target/current-python-drift-report.json
+```
+
+That lane installs exact RNS 1.3.8/NomadNet 1.2.7 packages in a disposable
+environment and requires exact bytes for four combinations: empty direct
+request/direct response, executable form direct request/direct response,
+oversized request Resource/direct response, and direct request/large response
+Resource. It also requires typed outbound and inbound Resource completion. A
+second fault scenario runs delayed Python handlers: one must reach the exact
+two-second response timeout, and one is cancelled only after the production
+runtime reports that its request was dispatched. Python must observe exactly
+two requests after both delayed handlers drain, proving neither exit silently
+replays an executable action. A third scenario fetches the same executable page
+twice and requires Python to observe both requests on one link; it records the
+first and reused-request latency without imposing a timing threshold. The lane
+then runs two warmups plus eight alternated measured samples per request
+primitive on one link. In the complete drift lane, direct requests measured
+34,339 us median and 39,979 us p95; request Resources measured 80,474 us median
+and 87,872 us p95.
+The complete lane repeats that exact workload under `cargo test --release`,
+sets `OMEN_REQUIRE_OPTIMIZED_NOMADNET_MEASUREMENT=1`, and fails if debug
+assertions remain enabled. Its 2026-07-18 release-profile run measured direct
+requests at 35,138 us median/40,998 us p95 and request Resources at 78,756 us
+median/86,923 us p95. The machine-readable drift report retains only those
+aggregates, the `release` profile label, sample count, and same-link boolean.
+Finally, a bounded retained-link soak alternates 16 direct/Resource requests on
+one link, includes a two-second idle interval, has Python explicitly close that
+link, then alternates 16 more requests on exactly one replacement. It requires
+32 exact responses, two generations of 16 requests, at most one Python-side
+active link, and no replay or third link generation. The 2026-07-18 focused
+reference run completed the exchange in 4,411 ms and recovered the second
+16-request generation in 1,004 ms; the complete lane passed.
+These observations have no timing pass threshold. The lane does not establish a
+pinned NomadNet reference.
+
+The NomadNet presentation regressions prove that the existing typed resource
+direction survives the application boundary and that an empty native response
+is reported as a successful, valid empty page:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  nomadnet_resource_status_distinguishes_request_and_response_transfer_direction --lib
+cargo test --locked --no-default-features --features desktop-product \
+  native_page_response_marks_valid_empty_body_without_treating_it_as_failure --lib
+cargo test --locked --no-default-features --features desktop-product \
+  browser_page_loaded_status_calls_out_valid_empty_native_response --lib
+```
+
+Per-tab correlation is covered separately. The first regression creates two
+tab operations, verifies progress changes only the exact tab, replaces one
+operation, rejects the stale identifier, and releases only the exact finished
+operation. The other checks prove that the native runtime passes the identifier
+into the page transport context and that request-resource cancellation/timeout
+lifecycle events retain it:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  browser_resource_operation_correlation_is_tab_scoped_bounded_and_exactly_released --lib
+cargo test --locked --no-default-features --features desktop-product \
+  native_fetch_passes_browser_operation_id_to_page_transport_context --lib
+cargo test --locked --no-default-features --features desktop-product \
+  cancelled_nomadnet_request_releases_outbound_resource_and_reports_direction --lib
+cargo test --locked --no-default-features --features desktop-product \
+  timed_out_nomadnet_request_releases_outbound_resource --lib
+```
+
+The operation map retains at most one entry per browser tab. These tests do not
+claim live concurrent Python/NomadNet transfer interoperability.
+
+Reticulum 0.9 link ownership is covered by two local lifecycle regressions.
+The first proves the transport returns one active link for repeated destination
+lookups, an explicit close emits `LinkClose`, and a later lookup creates a new
+pending link. The second proves the fixed 32-stripe page coordinator excludes
+same-stripe teardown ownership, permits another stripe, and releases a
+cancelled waiter without acquiring the guard:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  reticulum09_reuses_active_page_link_and_reconnects_only_after_close --lib
+cargo test --locked --no-default-features --features desktop-product \
+  nomadnet_page_link_coordinator_serializes_same_stripe_and_is_cancellable --lib
+```
+
+Production still closes the page link after each request. These tests do not
+claim pinned-Python repeated-request interoperability or establish that
+keeping links alive improves latency, link count, CPU, or memory.
+
+## Reticulum 0.9 receipt correlation
+
+The clean transport receipt tests exercise the project boundary immediately
+after upstream proof validation. They require exact packet-hash to logical
+LXMF-message mapping, one status/evidence emission for a matching receipt,
+diagnostic-only duplicate handling, and diagnostic-only stale handling after a
+failed or retired attempt. The stale-attempt regression keeps a newer retry
+pending and proves that the old receipt cannot complete or otherwise mutate it.
+Resource terminal tests separately require completion/failure/cancellation to
+release the resource-hash correlation exactly once.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  clean_reticulum_receipt_handler
+cargo test --locked --no-default-features --features desktop-product \
+  clean_reticulum_stale_receipt
+cargo test --locked --no-default-features --features desktop-product \
+  clean_lxmf_resource
+```
+
+These are deterministic application-boundary tests. They do not synthesize a
+cryptographic proof packet or claim pinned-Python receipt equality, live retry
+timing, restart delivery, or authoritative peer-level LXMF delivery.
+
+## LXMF peer stamp-cost policy
+
+The Phase 4 policy tests compare every admitted direct cost boundary used by
+OMEN with the published `lxmf-wire` 0.9 parser. They separately require typed
+decisions for missing/legacy data, an explicit nil cost, a required cost, a
+valid reply-ticket override, and malformed or out-of-range costs. Existing
+tests cover directory retention, 0.9 SDK/RPC field mapping, low-cost direct and
+propagation stamp generation/validation, and ticket-stamp precedence.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  delivery_stamp_policy
+cargo test --locked --no-default-features --features desktop-product \
+  delivery_stamp_cost_parser
+cargo test --locked --no-default-features --features desktop-product \
+  direct_stamp_generation
+cargo test --locked --no-default-features --features desktop-product \
+  ticket_stamp
+```
+
+The integrated direct-stamp policy additionally tests ticket precedence, the
+cost-8 safety ceiling, a 65,536-attempt work limit, a two-job blocking gate,
+permit release, and cooperative cancellation:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  clean_direct_stamp
+```
+
+Live direct-stamp admission is a separate ignored interoperability test:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  pinned_python_lxmf_live_direct_stamp_accepts_stamped_and_rejects_unstamped -- \
+  --ignored --nocapture --test-threads=1
+```
+
+The Python router advertises cost 1 and enforces stamps. It must invoke exactly
+one delivery callback for the production-signed stamped message and none for a
+second valid but unstamped control. The same case is selected by the
+`current_python_lxmf` filter. Missing/legacy policy remains a compatibility
+send; malformed policy and required costs above 8 fail locally. This does not
+measure high-cost proof work or retry after a stale-policy rejection.
+
+First-send policy discovery has an additional application-boundary case:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  clean_direct_policy
+cargo test --locked --no-default-features --features desktop-product \
+  pinned_python_lxmf_first_direct_send_discovers_stamp_policy_before_encoding -- \
+  --ignored --nocapture --test-threads=1
+```
+
+The deterministic case distinguishes authenticated empty policy from absence,
+ignores unrelated announce events, fails closed when matching app data was not
+admitted, and proves timeout/shutdown ownership. The live case starts the real
+integrated runtime, removes cached policy, and requires policy discovery before
+wire construction. Python must accept that stamped first send and reject the
+unstamped control. This does not claim an automatic retry after remote
+rejection; no authoritative rejection event exists on the integrated path.
+
+Ticket wire/lifecycle compatibility is exercised separately in both Python
+lanes:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  pinned_python_lxmf_ticket_issue_use_expiry_and_reuse_match_rust -- \
+  --ignored --nocapture --test-threads=1
+```
+
+The matrix passes reusable ticket material only through files under a unique
+temporary root and reports booleans, versions, and byte counts—not ticket bytes.
+It requires Rust ticket-stamp acceptance/wrong-ticket rejection plus Python
+issue, reuse, renewal, delivery-throttle, remembered-use, expiry, and cleanup
+behavior. High-cost latency and user-policy UX remain future work.
+
+The live ticket exchange is a distinct ignored interoperability test:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  pinned_python_lxmf_live_ticket_roundtrip_uses_rust_issued_ticket -- \
+  --ignored --nocapture --test-threads=1
+```
+
+Rust sends a production-signed direct message containing a generated ticket.
+Python must authenticate and remember it, use it for a real direct reply, and
+receive the reply proof. Rust independently verifies the reply signature,
+message ID, and exact ticket-derived stamp before production decoding. The same
+case runs in the current-package filter.
+
 ## Native LXMF attachment admission
 
 Native LXMF attachment tests use generated isolated roots. Outbound coverage
@@ -2047,6 +2518,245 @@ cargo test --locked --lib --no-default-features --features desktop-product \
 
 The tests do not use the maintainer's real attachment, identity, message, or
 Reticulum roots.
+
+## Pinned Python IFAC wire fixture
+
+The project-local IFAC TCP client has a deterministic public fixture generated
+through the Python Reticulum transmit path pinned for the 0.9.5 parity lane.
+The release-blocking deterministic lane fetches that exact revision into a
+temporary isolated directory, verifies its Git identity and clean state, and
+compares Python and Rust identity, destination-name, destination-address, and
+IFAC bytes:
+
+```bash
+bash scripts/run-pinned-python-reticulum.sh
+```
+
+An already checked-out source tree can be supplied for an offline rerun:
+
+```bash
+bash scripts/run-pinned-python-reticulum.sh \
+  --rns-source /path/to/Reticulum-at-15320e4d2cfabb143c1db20ca887e275fd521585 \
+  --lxmf-source /path/to/LXMF-at-727830cefda83d9c6e3982b48675425f3f988f9c
+```
+
+The Python oracle refuses a different Reticulum or LXMF commit or any
+tracked/untracked source change. It imports directly from the verified trees
+rather than installing or floating a Python package. Its identity, network
+name, and passphrase are fixed
+public test fixtures and must never be replaced with live credentials. The
+temporary checkout is removed on exit. The deterministic portion does not
+start a Reticulum runtime and proves identity/destination derivation and
+wire-byte equality. The bounded live portions below cover the supported client
+direction; broader role and platform coverage remains separate.
+
+The same runner also executes an ignored-by-default real-socket test against a
+bounded Python peer imported from the verified source tree. It proves a Rust
+IFAC TCP client packet is authenticated by Python, Python replies are
+authenticated by Rust, an HDLC frame split across writes is reconstructed, two
+frames coalesced into one write are delivered separately, a closed socket is
+reconnected after the production delay, and mismatched credentials are
+rejected in both directions. The peer binds only an ephemeral IPv4 loopback
+port, caps each frame at 4 KiB, uses eight-second I/O deadlines, accepts at most
+two connections, and never initializes Python Reticulum storage or interfaces.
+
+Role reversal is not claimed: the retained OMEN compatibility implementation
+is a TCP client. omenchatd deliberately rejects an IFAC-configured stock TCP
+server because upstream 0.9.5 does not apply the Python IFAC transform there.
+Adding a new server implementation is outside this compatibility unit. Native
+IPv6, multiple simultaneous clients, and long-running reconnect/resource
+measurements remain pending.
+
+The runner also starts a complete Python Reticulum instance with one inbound
+`omeninterop.link` destination and a real IFAC `TCPServerInterface`. Its config,
+storage, fixed identity, and listener are confined to a unique temporary root
+and ephemeral IPv4 loopback port. The production Rust `IfacTcpClient` and
+registry 0.9.5 `Transport` must send a path request, receive and validate the
+Python announce, recall the exact identity, establish a link, send encrypted
+link data, receive the Python echo, and validate Python's packet proof against
+the exact finalized encrypted packet hash. The receipt handler uses a bounded
+four-item metadata channel and rejects a duplicate callback. Startup and
+exchange reads, Python's wait, Rust transport waits, interface shutdown, child
+shutdown, and the outer script are all bounded. The test remains ignored
+outside the explicit lane:
+
+```bash
+OMEN_PINNED_RNS_SOURCE=/path/to/pinned/Reticulum \
+  cargo test --locked --manifest-path src/server/Cargo.toml \
+  -p omen-ifac-tcp --test pinned_python_reticulum -- \
+  --ignored --nocapture --test-threads=1
+```
+
+This proves the supported Python-server/Rust-client path, announce, identity,
+link, small link-data, and cryptographically validated transport-proof
+sequence. Rust first sends an old attempt; Python retains it without returning
+a proof, and Rust requires a bounded 250 ms no-proof interval before sending a
+replacement attempt on the same active link. Python then sends a modified-hash
+invalid-signature proof, the correctly signed old packet proof, and the
+replacement proof. Rust must reject the forgery and expose the old/current
+hashes in order. The runner separately executes the production clean LXMF
+correlation regression requiring that a removed old attempt emits only a
+diagnostic and cannot advance the newer retry. It also uses an isolated message
+root to persist old and current correlations, lets the first runtime recover
+both, durably deletes the obsolete thread, then reopens the store and a fresh
+runtime. Only the surviving hash may recover and emit delivery state; a receipt
+for the deleted hash must remain diagnostic-only. A second regression repeats
+that contract across an operating-system process boundary: the parent drops its
+runtime/store ownership and launches the current unit-test executable with the
+isolated root supplied only through a test environment variable. The child
+reopens the persisted bytes, rebuilds correlation ownership, and runs both
+receipts through the production handler. Child execution is bounded to ten
+seconds, output is retained on failure, and the parent removes the temporary
+root. The lane also verifies the scheduled durable timeout accepts the active
+clean-transport pair (`submitted_to_clean_reticulum` plus
+`waiting_for_transport_receipt`). It persists that transition, adds a replacement
+attempt with the same logical operation identity and a different packet hash,
+and proves a late old proof remains scoped to the old message before restart.
+After restart, only the replacement correlation is recovered. A separate
+post-commit crash regression performs the timeout and replacement in a child
+process, publishes a synced readiness marker only after both store operations
+return, and parks. The parent terminates and reaps that child, then requires the
+same old/current recovery behavior from the committed bytes. This covers abrupt
+process loss after the atomic store operations, not interruption during a file
+write or replacement. Message publication has a second boundary harness. It
+injects returned errors after staging creation, write, sync, destination commit,
+and directory sync; every case must leave parseable complete old or new JSON and
+remove its stage. It also kills a child after stage sync and after destination
+commit. The former preserves the old thread and initially leaves one non-JSON
+stage plus its locked lease; the latter preserves the new thread and initially
+leaves only the lease. Process death releases the OS lock. On reopen,
+`MessageStore` acquires each abandoned lease nonblockingly, removes only the
+associated abandoned artifacts, syncs the directory, and loads the correct
+ownership. A cross-process live-lock regression proves a second store cannot
+delete a stage whose child writer still holds the lease. A separate concurrent
+publisher regression proves the process-local active-lease registry protects a
+writer thread even where same-process operating-system lock semantics differ.
+An unleased legacy stage is retained rather than guessed dead, and
+publication-artifact discovery rejects more than 4,096 entries. The lane
+does not exercise Reticulum Resources, request/response, automatic retry
+dispatch, Python-as-client role reversal, IPv6, lock behavior on network
+filesystems, physical power loss, authoritative LXMF delivery, NomadNet, or
+OMENchat semantics.
+
+The release-blocking lane also imports Python Reticulum commit
+`15320e4d2cfabb143c1db20ca887e275fd521585` (module version 1.2.2) and Python
+LXMF commit `727830cefda83d9c6e3982b48675425f3f988f9c` (module version 0.9.6)
+from separate verified source roots. It runs the same isolated propagation-node
+topology as the current drift lane: Python learns the Rust receiver announce,
+queues a signed recipient-encrypted transient in its real router store, and
+serves the production Rust `/get` list/get/ack sync. Rust must authenticate the
+announced sender and publish the exact message; Python must retain the store
+entry until acknowledgement and then remove it. This proves one pinned
+software topology. The same pinned lane separately generates a cost-2
+propagation stamp with Rust under a 4,096-attempt ceiling and invokes the exact
+Python `LXStamper.validate_pn_stamps` primitive. Python must calculate the same
+achieved value, preserve the transient/stamp, accept at that value, and reject
+the same bytes at value+1. The deterministic value+1 case avoids probabilistic
+corruption tests. It proves stamp-algorithm and validator-boundary
+compatibility. The pinned lane additionally sends two messages through the
+production Rust clean propagated-send path and Python's real network-facing
+propagation handler. Python accepts and locally delivers the signed first
+message at its minimum advertised cost 13. The fixture then raises its live
+admission floor to 255 without issuing a new announce; Python must reject the
+second stale-policy envelope, leave its accepted-client counter at one, and
+avoid a second delivery callback. The pinned lane also runs the isolated ticket
+issue/use/expiry/reuse matrix and live Rust-issue/Python-reply exchange described
+above. Resources, restart during sync,
+multiple recipients, policy-refresh recovery, and peer delivery beyond node
+acknowledgement remain outside this case.
+
+## Current Python drift lane
+
+The current-Python lane is deliberately separate from the immutable pinned
+reference above. As of 2026-07-17 it installs exactly RNS 1.3.8, LXMF 1.0.1,
+and NomadNet 1.2.7 into a disposable virtual environment, records the resolved
+Python and pip versions, and verifies that all three packages import. It then
+reuses the bounded compatibility-vector, IFAC TCP, and link/proof tests against
+the installed RNS package and runs reciprocal Rust/Python LXMF direct-delivery
+cases:
+
+```bash
+bash scripts/run-current-python-drift.sh \
+  --report target/current-python-drift-report.json
+```
+
+The scheduled workflow pins Python 3.12.11 and uploads the JSON report for 14
+days. The job is informational (`continue-on-error`) and cannot replace or
+weaken the pinned-reference release gate. Its top-level Python stack versions
+are exact, while transitive Python dependencies are resolved afresh rather
+than treated as a reproducible release input; their resolved names and versions
+are captured in the report. A failure therefore reports drift for investigation
+instead of silently moving the release baseline.
+
+This lane proves current-RNS identity/destination/IFAC vectors, the
+supported Python-server/Rust-client IFAC direction, reconnect and wrong-key
+rejection, announce/path/link data, forged-proof rejection, and stale/current
+proof ordering. For LXMF it also requires Rust to announce the exact local
+`lxmf.delivery` identity, waits for Python to learn that identity, sends a
+production-encoded signed direct message over an activated link, and requires
+Python LXMF to report the exact source, destination, title, content, direct
+method, and a valid signature. Rust separately requires the Python packet proof
+to match the sent packet hash. In the reverse direction, Python announces its
+source, learns the Rust delivery destination from an authenticated announce,
+sends through `LXMRouter`, and requires the Rust packet proof. Rust requires the
+production verifier to preserve exact source/destination/title/content/message
+ID and validate the wire signature against the identity learned from the
+authenticated Python `lxmf.delivery` announce. Deterministic admission tests
+also reject an unknown source, a forged signature, and a cached identity that
+does not derive the claimed source destination; they require authentication
+before attachment storage and suppress a verified replay by message ID. These
+are two small link packets. The same informational lane now starts an isolated
+Python LXMF 1.0.1 propagation node, queues one Python-signed recipient-encrypted
+transient through its router, and drives the production Rust `/get` list/get/ack
+sync. Rust must authenticate the announced Python sender before publication,
+preserve the exact title/content/source and propagated method, and the Python
+node must observe removal only after the Rust acknowledgement. Live Python
+LXMF also accepts a bounded Rust propagation stamp at its exact achieved value
+and rejects the identical bytes at value+1 through its upstream validator. Its
+real network handler accepts and delivers one production Rust cost-13 envelope,
+then rejects an under-cost second envelope after a simulated stale-policy
+change without incrementing accepted-message or delivery counts. The drift lane
+also applies its installed Python stack to the ticket matrix and records
+`ticket_issue_use_expiry_reuse` and `live_ticket_roundtrip` in the JSON report.
+Live Python Resources/attachments, node restart, automatic propagation-policy
+refresh, NomadNet behavior, and mixed-version behavior remain unclaimed.
+The strict production admission boundary also covers decrypted clean-transport
+propagation payloads: deterministic tests require a matching authenticated
+sender identity, reject unknown/mismatched/forged senders before attachment
+storage, and prove a rejected local payload is left unacknowledged for retry.
+An unknown authenticated source exposes its exact 16-byte destination to the
+sync coordinator, which requests each missing sender path once and caps a sync
+at 32 such requests. Duplicate transient bytes in one response and already
+delivered transients are suppressed before decryption/publication; only the
+first successfully verified copy can be acknowledged.
+The recovery and replay bounds are deterministic Rust evidence; the single
+current-Python enqueue/sync/ack case is live interoperability evidence for that
+narrow topology. All Python configuration and Reticulum/LXMF storage used by
+live tests remain under unique temporary roots and are removed on exit.
+
+Run the repeated-crash publication recovery measurement with:
+
+```sh
+bash scripts/measure-message-publication-recovery.sh
+```
+
+The harness uses the current unit-test executable and a unique temporary
+message root. Sixteen child processes each sync a complete replacement stage,
+publish a synced readiness marker, and park before rename. The parent kills and
+reaps every child, removes only the markers, then performs one recovery pass.
+Its machine-readable summary reports crash count, artifact count, retained
+artifact bytes, recovery microseconds, post-recovery artifacts/bytes, and total
+elapsed milliseconds. The test requires the original thread to remain
+byte-exact throughout, all 32 stage/lease artifacts to be removed in one pass,
+and the reopened store to parse the old ownership. It does not set a
+hardware-independent latency threshold or write outside the isolated root.
+The same script then fills the exact 4,096-artifact ceiling with 2,047
+abandoned pairs and one child-held live pair. Its first recovery pass must
+remove every abandoned pair while retaining exactly the live stage and lease.
+After the parent terminates and reaps that child, a second pass must remove the
+last pair. The summary reports initial/retained/final items and bytes plus both
+recovery latencies. The existing overload regression separately verifies that
+artifact 4,097 is rejected before cleanup work becomes unbounded.
 
 ## Bounded plugin discovery
 
@@ -2095,3 +2805,762 @@ cargo test --locked --no-default-features --features desktop-product \
 cargo test --locked --no-default-features --features desktop-product \
   plugin_install_total_byte_budget --lib
 ```
+
+## Runtime lifecycle and capability diagnostics
+
+The diagnostics snapshot regression uses an explicitly isolated temporary root
+and the mock runtime. It verifies that lifecycle and typed capability records
+are projected into the snapshot, that supported and unsupported capabilities
+remain distinct, and that runtime failure technical detail is redacted from
+the exported JSON. The application export regression additionally verifies the
+compact lifecycle/capability UI summaries and the serialized field names.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  diagnostics --lib
+```
+
+This is deterministic projection/redaction evidence. It does not prove live
+Reticulum interface state, shared-instance ownership, next-hop selection, or a
+remote SDK/RPC capability negotiation.
+
+The path/interface projection adds a separate fail-closed regression. A
+snapshot with placeholder zero/false values and unavailable evidence flags must
+render aggregate path table, request-failure metrics, and shared-instance status
+as unavailable. A fixture that explicitly marks those metrics available must
+continue to render its exact counts.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  network_doctor --lib
+```
+
+This test does not turn configured managed/external mode into proof of a live
+shared Reticulum instance.
+
+## Local LXMF announce rate limiting
+
+The isolated mock-runtime regression proves that a second request is coalesced
+while the first local announce is pending and that a completed attempt cannot
+be repeated inside the 30-second monotonic cooldown. The native pre-send
+regression proves a rate-limited required announce does not leave a deferred
+send action that could resume after an unrelated future announce.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  local_lxmf_announce --lib
+cargo test --locked --no-default-features --features desktop-product \
+  rate_limited_pre_send_announce --lib
+```
+
+The tests use isolated application roots and do not transmit a live announce.
+They do not prove targeted announce support or network propagation behavior.
+
+## External/shared runtime ownership gate
+
+Two isolated regressions enforce the same fail-closed invariant at independent
+boundaries: application startup must not create an identity or queue startup
+when External is configured, and direct use of the native adapter must not
+construct an integrated transport. A separate projection regression verifies
+configured external state remains distinct from uncollected/negotiated shared
+capability.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  external_mode --lib
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_ownership_line --lib
+```
+
+These tests do not prove an external backend works. They prove the deferred mode
+cannot silently start a conflicting integrated instance.
+
+## OMENchat reconnect link ownership
+
+The clean Reticulum regressions prove explicit opens are cancellation-aware and
+that reconnect retirement closes only the prior link for the matching
+destination. Desktop regressions prove a newer reconnect cancels its prior task,
+while a stale completion cannot remove the current generation's owner or count
+as a failed current attempt.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  clean_omenchat_link_coordinator --lib
+cargo test --locked --no-default-features --features desktop-product \
+  clean_omenchat_reconnect_retires --lib
+cargo test --locked --no-default-features --features desktop-product \
+  clean_omenchat_cancelled_pending --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_stale_reconnect_result --lib
+cargo test --locked --no-default-features --features desktop-product \
+  newer_omenchat_reconnect_cancels --lib
+```
+
+The tests use in-memory Reticulum transports and isolated application roots.
+They establish local ownership and cleanup semantics, not live server restart,
+mixed-version, Python, radio/interface, latency, CPU, or link-count evidence.
+
+## omenchatd same-link mutation replay
+
+The standalone server regressions send the same room-message, part, and kick
+frames twice on one authenticated link. They require retained origin responses,
+one durable SQLite event, one applicable peer/user-list fan-out, one moderation
+disconnect, one rate-limit charge, and a replay hit. Reusing the message
+sequence with different content must produce an error without another event. A
+rate-limited kick must leave its target connected. Classification coverage
+requires all mutating commands to be guarded and the read-only `rooms` command
+to remain uncached. A separate cache regression crosses the per-link item
+limit, rejects an oversized entry, and proves close releases all item/byte
+accounting.
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless replay
+)
+```
+
+These tests use isolated SQLite paths and an in-memory captured transport. They
+do not prove cross-link, server-restart, mixed-version, Python, or live Reticulum
+retry idempotency; protocol v1 lacks the durable session nonce required to make
+that claim safely.
+
+## omenchatd duplicate peer-link retirement
+
+The standalone server replacement regressions open two links with the same
+identified peer. They require the older physical Reticulum link to receive one
+close request, the replacement to remain the sole active link, the closure to
+be counted and summarized, and all old per-link room, response-context,
+replay-cache, timing, and traffic ownership to be released.
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    duplicate_peer
+  cargo test --locked --no-default-features --features server-headless \
+    live_server_reports_active_identity_link_counts_after_duplicate_replacement
+)
+```
+
+These are deterministic lifecycle tests using the captured transport and an
+in-memory SQLite store. They do not establish a server-federation feature (none
+is currently defined), live close delivery, reconnect-storm fairness,
+cross-link idempotency, mixed-version interoperability, or task/RSS stability.
+
+## omenchatd pending Resource retention
+
+The standalone server Resource regressions require fixed item, total-byte, and
+per-entry budgets; exact-boundary acceptance; explicit overflow rejection;
+replacement accounting; and capacity restoration after removal. Transport
+tests require successful response batches and injected send failures to release
+all generated payloads. A separate two-peer test requires a resource-backed
+user list to reach both joined links with identical bytes before its retained
+copy is released.
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    pending_resource
+  cargo test --locked --no-default-features --features server-headless \
+    link_bridge_
+  cargo test --locked --no-default-features --features server-headless \
+    live_server_retains_resource_payload_through_userlist_fanout_then_releases_it
+)
+```
+
+These deterministic tests use in-memory SQLite and captured/rejecting
+transports. They do not prove live Reticulum resource completion/cancellation,
+slow-recipient fairness, task/RSS stability, or mixed-version interoperability.
+Unauthenticated link lifetime remains a separate Phase 7.5 admission boundary.
+
+## omenchatd pending upload-offer ownership
+
+The pending-offer regressions require a global 256-item ceiling, an eight-item
+per-identity ceiling, independent admission for another identity, same-owner
+replacement without double counting, six-hour expiry, and capacity restoration
+after removal. Engine tests require oversized filename metadata and the ninth
+same-identity offer to return typed upload rejection frames. An identity
+mismatch must leave the true owner's offer usable, and live link closure must
+release every offer owned by that identity while updating status counters.
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    pending_upload
+  cargo test --locked --no-default-features --features server-headless \
+    upload_offer_rejects_metadata_and_pending_identity_overload
+  cargo test --locked --no-default-features --features server-headless \
+    accepted_upload_resource_is_stored_and_announced_to_room
+  cargo test --locked --no-default-features --features server-headless \
+    live_server_link_close_releases_owned_pending_upload_offers
+)
+```
+
+These tests use deterministic store timestamps, in-memory SQLite, captured
+transport, and an isolated upload root. They do not prove live low-bandwidth
+Resource completion before expiry, Reticulum cancellation, reconnect transfer
+resumption, mixed-version interoperability, or process RSS stability.
+Unauthenticated link lifetime and total active-link admission remain separate
+Phase 7.5 boundaries.
+
+## omenchatd Resource terminal ownership
+
+The standalone live-server tests require Reticulum Resource terminal events to
+remain typed at the project boundary. An inbound failure must release the
+identified peer's pending upload offers without closing a healthy link.
+Outbound completion, failure, and cancellation must remain observable even
+after link cleanup and must not be misclassified as unknown-link traffic.
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    resource_terminal
+  cargo test --locked --no-default-features --features server-headless \
+    reticulum_resource_terminals_cross_production_bridge_and_shutdown_cleanly
+  cargo test --locked --no-default-features --features server-headless \
+    inbound_resource_failure_releases_peer_upload_offers_without_closing_link
+  cargo test --locked --no-default-features --features server-headless \
+    live_server_link_close_releases_owned_pending_upload_offers
+  cargo test --locked --no-default-features --features server-headless \
+    accepted_upload_resource_is_stored_and_announced_to_room
+)
+```
+
+These tests use isolated/in-memory storage and a captured transport. The bridge
+test constructs the public Reticulum 0.9 `ResourceEvent` variants and drives
+the production receiver, bounded control queue, typed project projection, and
+owned shutdown path; it does not inject project-owned substitute terminals.
+Reticulum 0.9 inbound-failure events contain a link and transfer hash but no
+Resource metadata, so cleanup is deliberately per identified peer rather than
+falsely correlated to one upload offer. A physical initiator-cancel packet,
+live cancellation timing, resumable transfers, mixed 0.6/0.9, and Python
+interop remain separate gates.
+
+Run the explicit local Rust-to-Rust initiator-cancellation interoperability
+harness on a host that permits loopback UDP sockets:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    reticulum_loopback_resource_cancel_crosses_wire_and_production_bridge \
+    -- --ignored --nocapture
+)
+```
+
+The harness creates two in-memory Reticulum 0.9 transports with ephemeral
+identities and two point-to-point UDP interfaces on dynamically reserved
+loopback ports. It establishes a real announce/path/link, observes the Resource
+advertisement and `ResourceInitiatorCancel` packets at the receiving interface,
+requires the production bridge to emit the typed outbound-cancel terminal,
+checks both link ends remain active, drains the bounded control queue, detaches
+both interfaces, joins the bridge, and removes its isolated temporary roots.
+It is ignored in the fast suite because it binds sockets. A complete Resource
+transfer after cancellation was not established by this single-process harness
+and remains a separate multi-process/pinned-Python gate.
+
+## omenchatd two-process Resource completion gate
+
+The explicit two-process gate re-executes only its own ignored test in separate
+receiver and sender processes. It uses deterministic test-only identities,
+dynamically reserved point-to-point UDP ports, bounded child lifetimes, and an
+isolated coordination root. The intended sequence is baseline completion,
+active-transfer initiator cancellation, and completion on the reused link:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    reticulum_multiprocess_resource_complete_cancel_reuse \
+    -- --ignored --nocapture
+)
+```
+
+As of 2026-07-16 this is an intentionally failing release gate. The first
+4 KiB baseline Resource does not complete, so cancellation/reuse is not
+reached. Upstream diagnostics prove the sender accepts each request, finds the
+outbound Resource, and builds four requested parts. The UDP worker then drops
+those parts because its `size_of::<Packet>() * 3` transmit buffer is 456 bytes
+on this target, while a maximum type-one Resource wire packet is 483 bytes;
+serialization failure is silently ignored. The same implementation is present
+in upstream v0.9.0, v0.9.1, v0.9.5, and `main` as checked on 2026-07-16.
+
+The capacity invariant has its own quick, deliberately red regression:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    reticulum_udp_tx_buffer_covers_max_resource_wire_packet \
+    -- --ignored --nocapture
+)
+```
+
+Do not mark the Resource, UDP, attachment, history, or post-cancel-reuse gates
+complete until the upstream implementation uses a serialized-size-derived
+buffer, reports serialization errors, and both explicit commands pass. Do not
+work around this by lowering protocol bounds or silently fragmenting the
+OMENchat wire protocol.
+
+## omenchatd link admission and handshake lifetime
+
+The live server admits at most 256 links and 32 incomplete handshakes. A
+handshake remains pending until both the Reticulum `PeerIdentified` event and a
+valid OMENchat `SessionOpen` have been observed. A narrow one-second deadline
+sweep closes incomplete links at 30 seconds and releases their owned live
+state. The limits are fixed safety ceilings and require no configuration or
+wire-version negotiation.
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    pending_handshake
+  cargo test --locked --no-default-features --features server-headless \
+    incomplete_handshake_expires_at_deadline_but_complete_link_survives
+  cargo test --locked --no-default-features --features server-headless \
+    total_active_link_admission_is_bounded
+)
+```
+
+These deterministic tests prove exact pending/total saturation, physical
+rejection, capacity recovery after complete authentication/session
+negotiation, the exact timeout boundary, completed-link survival, cleanup, and
+counter projection.
+
+Run the ignored optimized reconnect/slow-handshake measurement on Linux:
+
+```bash
+scripts/measure-omenchatd-links.sh /tmp/omenchatd-link-results
+```
+
+The 60-second harness keeps 224 authenticated sessions resident, repeatedly
+saturates the remaining 32 pending slots, rejects an excess link, expires all
+slow handshakes, replaces an authenticated identity, and finally drains to
+zero. It records RSS, file descriptors, tasks, peak link counts, close-command
+latency, rejection/expiry accounting, and final ownership. Override its duration
+only for a harness smoke with `OMENCHATD_LINK_SOAK_SECONDS`; a shortened run is
+not release evidence. The harness uses in-memory SQLite and a discard/count
+transport, never the maintainer's state roots. Live Reticulum slow-handshake
+and reconnect behavior, mixed 0.6/0.9, pinned/current Python, and native
+Windows/macOS remain separate gates.
+
+The 2026-07-16 optimized 60-second reference run completed 4,587 cycles,
+rejected 4,587 excess links, expired 146,784 slow handshakes, reached exactly
+256 active/32 pending links, and drained to zero. Maximum measured close-path
+latency was 691 us; RSS grew 176,128 bytes; FD and task counts remained at four
+and two respectively. Raw local evidence was written outside the repository at
+`/tmp/omenchatd-link-60s`.
+
+## OMENchat history resource integrity
+
+The shared client decoder tests both immediate and delayed history-resource
+delivery. Valid resources must preserve existing behavior. Invalid purpose and
+oversized advertised lengths must fail before an offer enters pending retention;
+after arrival, mismatched compression, uncompressed length, or compressed
+payload length must fail before batch values reach the chat client. Boundary
+coverage accepts the exact 4 MiB compressed/uncompressed offer limits and
+rejects the next byte.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  chat::rns::tests::resource
+cargo test --locked --no-default-features --features desktop-product \
+  chat::protocol::batch::tests::resource_offer_lengths
+```
+
+These are deterministic in-memory transport tests. Live Reticulum resource
+cancellation/progress, link loss during transfer, Python peers, and mixed
+0.6/0.9 peers remain separate interoperability evidence.
+
+## OMENchat resource terminal cleanup
+
+The desktop lifecycle regressions prove that failed/cancelled inbound resource
+events cross an item/byte-bounded staging queue, release retained pending-offer
+bytes, and do not close an otherwise healthy link. Outbound terminals are not
+misrouted into inbound cleanup.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_event_staging_is_item_byte_and_release_bounded --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_transport_consumes_and_bounds_resource_payloads_and_offers --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_inbound_resource_failure_releases_pending_offers_but_keeps_link --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_inbound_resource_cancellation_releases_pending_offer_but_keeps_link --lib
+```
+
+These tests inject project-owned lifecycle events and use isolated temporary
+application roots. They do not prove an actual Reticulum initiator-cancel
+exchange, per-resource cancellation, Python interoperability, or link loss
+during a physical transfer.
+
+## OMENchat announce identity attribution
+
+Discovery tests require authenticated announce identity metadata to survive the
+runtime candidate boundary, Directory ingestion, persistence/reload, filtering,
+and selected-server presentation. Malformed hashes and identity mutation for an
+existing destination must fail before state changes. Old records with no
+identity field remain valid.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_announce_identity
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_announce_rejects_malformed_identity_hash_before_mutation
+cargo test --locked --no-default-features --features desktop-product \
+  directory_selected_state_lines_are_kind_specific --lib
+cargo test --locked --no-default-features --features desktop-product \
+  directory_view_filter_matches_verified_identity_hash --lib
+cargo test --locked --no-default-features --features desktop-product \
+  announce_state_deduplicates_and_counts_payloads --lib
+```
+
+These deterministic tests do not replace a live Rust/Python announce signature,
+path, reconnect, or server-impersonation interoperability test.
+
+## OMENchat manual reconnect action validity
+
+The typed connection-state regression distinguishes automatic retryability from
+whether a user may start a new reconnect. A manual reconnect is available only
+when disconnected or after a retryable failure; it is unavailable while
+connection work is in flight, while joined or draining, and after a terminal
+failure. Every tiled, compact, and maximized OMENchat pane toolbar consumes this
+same predicate.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  connection_state_labels_and_retryability_are_typed --lib
+```
+
+This is a deterministic UI-policy/model test. It does not replace live manual
+reconnect, automatic backoff, server restart, or Rust/Python interoperability
+evidence.
+
+## OMENchat outbound acceptance indicator
+
+Timeline presentation tests distinguish a locally queued room message from a
+server-accepted event using the existing temporary local-echo identifier. The
+pending row must show `queued · awaiting server acceptance`; an ordinary event
+must not show that marker. Existing live-client tests separately prove a
+correlated `MessageAck` replaces the temporary identifier and that absence of
+an acknowledgement retains the local echo for bounded delayed resend.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_timeline_marks_only_unacknowledged_local_echoes_pending --lib
+cargo test --locked --no-default-features --features desktop-product \
+  live_send_message_local_echo_is_confirmed_by_message_ack --lib
+cargo test --locked --no-default-features --features desktop-product \
+  live_send_message_without_ack_keeps_pending_local_echo --lib
+```
+
+These deterministic tests do not claim live omenchatd acceptance latency,
+disconnect/reconnect delivery, mixed-version behavior, or Reticulum transport
+interoperability.
+
+## OMENchat pending local-echo correlation bounds
+
+The client retains only fixed-size correlation metadata for unacknowledged room
+messages and actions: at most 64 entries per session and 256 globally. The
+saturation regressions require rejection before transport send, exact pending
+and rejected metrics, per-session fairness, capacity restoration after a valid
+`MessageAck`, and complete entry release on session cleanup.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  live_pending_local_echoes --lib
+```
+
+The overload error uses the existing desktop failure path, which preserves the
+composer draft. These deterministic in-memory tests do not replace a slow or
+unresponsive live omenchatd saturation test, reconnect storm, mixed-version
+test, or long-running memory measurement.
+
+## Redacted OMENchat session diagnostics
+
+The per-session diagnostics regression requires a valid JSON report no larger
+than 8 KiB and verifies that public connection/transport metrics remain useful.
+Its adversarial fixture places a private path, token-shaped text, a message
+body, composer draft, room name, and free-form disconnect reason in live UI
+state and requires all of them to be absent. A closed session must fail safely
+without placing stale data on the clipboard.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_session_diagnostics --lib
+cargo test --locked --no-default-features --features desktop-product \
+  copy_omenchat_session_diagnostics --lib
+```
+
+These are deterministic serialization, redaction, and routing tests. They do
+not prove platform clipboard integration, live Reticulum counters, or that a
+human support workflow cannot disclose information copied separately by the
+user.
+
+## OMENchat pane resource progress
+
+The pane progress regressions populate the same bounded active-resource model
+used by Network Doctor. They require source=`omenchat`, inbound direction, and
+the exact active link identity before projecting progress into a session. When
+multiple matching transfers are active, the newest is displayed and the
+remaining count is reported. Terminal and other-link records are ignored, an
+unknown total remains useful without a percentage, and maximum `u64` values do
+not overflow percentage arithmetic.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_session_resource_progress --lib
+```
+
+This is deterministic attribution and presentation evidence. It does not prove
+live Reticulum progress cadence or identify whether an opaque OMENchat Resource
+contains history, a user list, or media; that distinction remains unavailable
+at the public transfer boundary.
+
+## OMENchat link sequence ownership
+
+The sequence regressions drive the client allocator at `u32::MAX`. They require
+the final session-open/join pair to be reserved atomically, reject exhaustion
+before transport send or local echo, keep other sessions independent, and
+reset to `1,2` only when reconnect retires the prior link state. Equal numeric
+sequences on independent sessions must coexist in pending message/upload maps,
+and cancelling one session's transfers must neither remove the other's entries
+nor reset the active link allocator.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  live_sequence --lib
+cargo test --locked --no-default-features --features desktop-product \
+  live_pending_correlations_allow_equal_sequences --lib
+cargo test --locked --no-default-features --features desktop-product \
+  live_reconnect_releases_prior_link_transfer_state --lib
+```
+
+These deterministic boundary tests preserve the existing `u32` wire field and
+same-link omenchatd replay policy. They do not simulate four billion live
+operations or replace mixed-version reconnect/replay interoperability tests.
+
+## OMENchat reconnect backoff and stable reset
+
+The reconnect-policy regressions require deterministic per-session jitter,
+strictly increasing exponential delays, a 30-second cap, and exactly five
+scheduled automatic attempts. A replacement link retains its attempt count
+until its explicit stability deadline; merely registering a link or clearing
+stale pending work cannot reset the budget. Deadline maintenance then clears
+the budget without polling or closing the healthy transport.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_reconnect_backoff --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_retry_ --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_delayed_reconnect --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_reconnect_limit --lib
+```
+
+These deterministic scheduler tests do not replace a live server-restart soak,
+real path variability, mixed-version peers, or CPU/RSS/link-count measurements.
+
+## Stamped direct LXMF Resource interoperability
+
+The direct-Resource regression sends a deterministic 64 KiB stamped body over
+the integrated Reticulum runtime. It requires automatic `link-resource`
+selection, a bounded `0 / total` outbound offer, terminal completion correlated
+to the same message and Resource hash, and Python verification of body size,
+SHA-256, source signature, and stamp admission.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  clean_lxmf_resource_offer_reports_bounded_total_and_operation --lib
+
+OMEN_PINNED_RNS_SOURCE=/path/to/pinned/Reticulum \
+OMEN_PINNED_LXMF_SOURCE=/path/to/pinned/LXMF \
+cargo test --locked --no-default-features --features desktop-product \
+  pinned_python_lxmf_stamped_direct_resource_preserves_bytes_and_reports_progress \
+  -- --ignored --nocapture --test-threads=1
+```
+
+`scripts/run-current-python-drift.sh` selects the current-Python counterpart.
+The test uses temporary config/storage roots and prints only bounded metadata.
+Outbound incremental percentages are not claimed because the 0.9.5 transport
+currently exposes receiver progress and sender terminal events.
+
+## Mixed OMENbrowser 0.6.0-1 and 0.9.5-1 LXMF/OMENchat
+
+This Linux-only multi-process harness tests actual application binaries rather
+than importing 0.6 types into the current build:
+
+```bash
+bash scripts/run-mixed-0-6-0-9-lxmf.sh \
+  --report target/mixed-0-6-0-9-lxmf-report.json
+
+bash scripts/run-mixed-0-6-0-9-lxmf.sh --resource \
+  --report target/mixed-0-6-0-9-lxmf-resource-report.json
+
+bash scripts/run-mixed-0-6-0-9-lxmf.sh --restart \
+  --report target/mixed-0-6-0-9-lxmf-restart-report.json
+
+bash scripts/run-mixed-0-6-0-9-propagation.sh \
+  --report target/mixed-0-6-0-9-lxmf-propagation-report.json
+
+bash scripts/run-mixed-0-6-0-9-propagation.sh --reverse \
+  --report target/mixed-0-6-0-9-lxmf-propagation-reverse-report.json
+
+bash scripts/run-mixed-0-6-0-9-propagation.sh --node-restart \
+  --report target/mixed-0-6-0-9-lxmf-propagation-node-restart-report.json
+
+bash scripts/run-mixed-0-6-0-9-propagation.sh --node-crash \
+  --report target/mixed-0-6-0-9-lxmf-propagation-node-crash-report.json
+
+bash scripts/run-mixed-0-6-0-9-propagation.sh --stamp-ticket \
+  --report target/mixed-0-6-0-9-lxmf-propagation-stamp-ticket-report.json
+
+bash scripts/run-mixed-0-6-0-9-omenchat-history.sh \
+  --report target/mixed-0-6-0-9-omenchat-history-report.json
+
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh \
+  --report target/mixed-0-6-0-9-omenchat-live-current-client-report.json
+
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse \
+  --report target/mixed-0-6-0-9-omenchat-live-old-client-report.json
+
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --restart \
+  --report target/mixed-0-6-0-9-omenchat-live-restart-current-client-report.json
+
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --restart \
+  --report target/mixed-0-6-0-9-omenchat-live-restart-old-client-report.json
+
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --history-resource \
+  --report target/mixed-0-6-0-9-omenchat-live-history-resource-current-client-report.json
+
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --history-resource \
+  --report target/mixed-0-6-0-9-omenchat-live-history-resource-old-client-report.json
+```
+
+The old binary is built with `--locked` from immutable hardened commit
+`5ba6683055fb6c59111919fbad1ac37f56a4c203` in a disposable Git archive. The
+current binary uses the canonical native-network layers. Separate temporary
+application/identity/Reticulum roots connect through exact Python RNS 1.3.8 on
+ephemeral loopback TCP with fixed public IFAC fixture credentials supplied by
+an owner-only file. The harness requires both direct sends, one reciprocal
+peer-bound message in each process, and exact 32-byte-title/102-byte-content
+shape metadata. It retains no raw application report containing paths or
+identity material.
+
+Announce/path readiness permits at most three paired attempts and reports the
+successful attempt. With `--resource`, the harness copies both source trees to
+disposable roots and applies
+`fixtures/lxmf/mixed_application_resource_driver.patch`. That fixture-only
+patch changes the diagnostic message body to 65,536 ASCII bytes; it does not
+alter either manifest, runtime adapter, protocol, state, or normal CLI in the
+working tree. Both versions select Resource above their shared 431-byte
+Link-packet MDU. The harness then requires one exactly 65,536-byte, peer-bound
+decoded message in each application.
+
+With `--restart`, each direction runs sequentially with its receive-only peer
+online before the sender opens a link. This avoids simultaneous cross-link
+activation and never retries a logical message that may already have arrived.
+After the initial two-direction exchange, both processes exit, reopen the same
+application/identity/configuration/Reticulum roots, and repeat. The report
+requires stable local destinations, new outbound and inbound message IDs,
+exact peer-send/inbound-ID correlation, and exactly one inbound event per
+direction. Compared IDs and destinations are discarded rather than retained.
+
+The propagation command tests both store-and-forward directions separately.
+The sender submits one propagated message to exact Python RNS 1.3.8/LXMF 1.0.1;
+the recipient then reconnects with the same isolated identity and syncs it. In
+the reverse case, the current recipient must initially defer the unknown old
+sender without acknowledgement, request sender-path recovery, learn a fresh
+authenticated announce without a message retransmission, and then decode the
+same retained transient. A link-activation failure before payload admission is
+retryable once; no other state is. Both reports require source correlation,
+the expected message shape, and a zero-entry node after acknowledgement.
+
+With `--node-restart`, the current sender still submits exactly once. The
+Python node exits only after reporting one queued transient, then reopens the
+same LXMF storage with the same deterministic identity on a new ephemeral
+loopback port. The harness requires the restarted router to report one restored
+entry and the same propagation destination before the old recipient syncs and
+acknowledges it. This proves orderly restart persistence, not power-loss or
+filesystem durability.
+
+With `--node-crash`, the fixture takes a baseline of its isolated LXMF storage,
+then requires the storage to change, remain stable across bounded samples, and
+contain nonzero bytes after the single queue admission. Only then does the
+harness send `SIGKILL` to that fixture PID. A new process must restore the same
+node identity and one transient before exactly-once recipient sync and
+acknowledgement. This is process-crash recovery after observed settled storage;
+it is not physical power-loss, filesystem, or storage-device durability proof.
+
+With `--stamp-ticket`, Python enables propagation-stamp enforcement and
+advertises its effective positive cost. The current application must report a
+bounded stamp at that exact cost and include a fresh reply ticket. Queue
+admission proves Python accepted the stamp; the old application must decode
+the same message and recover a correctly shaped ticket before acknowledgement
+removes the transient. Ticket bytes and stamp material are checked only inside
+the temporary root and are never retained.
+
+The OMENchat history command is deliberately network-free. It builds a small
+probe against each version's canonical `desktop-product` graph and uses only
+the public `SqliteChatStore` API. The old application seeds server, room,
+active-room, and event state; current reopens and appends; old reopens that
+current write and appends; current performs the final reopen. All four stages
+must preserve exact event ordering/content and metadata. The database lives
+under one explicit temporary root and is deleted; the retained report contains
+only versions, counts, and validation booleans.
+
+The live OMENchat command builds the selected client/server pair from the
+immutable hardened `0.6.0-1` source and current `0.9.5-1` source. The default
+case is current client to old server; `--reverse` is old client to current
+server. Each starts both binaries with separate isolated roots over an
+ephemeral loopback TCP interface, then requires the client to start its
+runtime, open a link and session, join a room, send one message, and observe
+the echoed room event. All identity, server, message, and Reticulum state is
+deleted. These cases prove reciprocal single-session message compatibility;
+history Resource transfer remains a separate gate.
+
+With `--restart`, the selected client first completes its exchange with the
+opposite-version server. The harness stops that server within a bounded
+deadline, reopens the same server home on the same interface, requires an
+unchanged destination, and runs the client again with its original application
+root. The second process must repeat link/session/join/message/echo
+successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
+therefore exits with the expected signal status; current `0.9.5-1` must report
+an orderly stop. Neither test claims that a continuously running desktop
+automatically reconnected.
+
+With `--history-resource`, the current client connects to the hardened old
+server and the isolated server configuration sets its large-batch threshold to
+one byte. A normal small first-client message therefore makes the production
+history path choose an OMENchat Resource without changing the committed server
+default or using an oversized room message. A second client with a separate
+identity/root must receive `resource_data`, decode `history_prepended` from
+inside that Resource event, and observe the first client's exact message
+content. This proves current-client consumption of old-server history
+Resources. The reciprocal `--reverse --history-resource` case applies the same
+isolated threshold to current omenchatd and requires the hardened old client to
+decode and validate its history Resource. Together they prove both application
+directions without changing either production default.
+
+The scheduled Python-interoperability workflow runs all fifteen cases as
+release-blocking mixed-application gates and retains only their redacted
+summaries for 14 days. The Resource result proves complete application decode
+in both directions, not peer delivery from a sender-side Resource completion
+event. The stamp/ticket case does not prove ticket use on a propagated reply.
+The SQLite case proves store-format reopening, not history-resource transfer or
+crash durability. The live cases prove both client/server directions for one
+session/message exchange. The restart cases prove both client-state roots
+reopen after the opposite-version server process restarts, not live automatic
+reconnect. The history-Resource cases prove both mixed application directions.
+The same scheduled workflow also runs the current-product continuous reconnect
+case and the current-product two-client upload/Resource case, retaining only
+their redacted reports. Physical power-loss durability remains separate
+evidence.

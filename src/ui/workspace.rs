@@ -152,6 +152,11 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &App) {
         .as_ref()
         .map(|loading| format!(" | loading {}", loading.target))
         .unwrap_or_default();
+    let transfer = tab
+        .transfer_status
+        .as_ref()
+        .map(|status| format!(" | {status}"))
+        .unwrap_or_default();
     let path_warmup = tab
         .path_warmup
         .as_ref()
@@ -214,9 +219,10 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &App) {
         })
         .unwrap_or_else(|| tab.address_input.clone());
     let address = Paragraph::new(format!(
-        "Address ({focus}): {}{}{}{}\nControls: Alt-Left Back | Alt-Right Forward | Ctrl-R Reload | R Retry | Ctrl-F Partials | Ctrl-D Download | N Probe | D Path | PgUp/PgDn Scroll | Tab Focus | Enter/Space Activate | o overlays | O expand | Esc Stop | {partials} | {micronplus}{control}{probe}",
+        "Address ({focus}): {}{}{}{}{}\nControls: Alt-Left Back | Alt-Right Forward | Ctrl-R Reload | R Retry | Ctrl-F Partials | Ctrl-D Download | N Probe | D Path | PgUp/PgDn Scroll | Tab Focus | Enter/Space Activate | o overlays | O expand | Esc Stop | {partials} | {micronplus}{control}{probe}",
         address_text,
         loading,
+        transfer,
         path_warmup,
         retry
     ))
@@ -416,6 +422,11 @@ fn render_browser_result_strip(frame: &mut Frame, area: Rect, app: &App) {
         .as_ref()
         .map(|loading| format!("loading {}", loading.target))
         .unwrap_or_else(|| "idle".into());
+    let transfer = tab
+        .transfer_status
+        .as_deref()
+        .map(|status| format!(" | {status}"))
+        .unwrap_or_default();
     let probe = tab
         .probe_summary
         .as_ref()
@@ -436,7 +447,9 @@ fn render_browser_result_strip(frame: &mut Frame, area: Rect, app: &App) {
         Style::default()
     };
     let lines = vec![
-        Line::from(format!("result={source} | state={load_state} | url={url}")),
+        Line::from(format!(
+            "result={source} | state={load_state}{transfer} | url={url}"
+        )),
         Line::from(format!("status: {}", app.status.task)),
         Line::from(probe),
     ];
@@ -755,6 +768,9 @@ fn selected_interface_detail(
             profile.kind, profile.enabled
         )),
         Line::from(
+            "scope: controls write managed config; changes activate on next runtime start/restart (live mutation not negotiated)",
+        ),
+        Line::from(
             "create: [gateway] custom TCP | [1] RMAP gateway | [2] WNS gateway | [i2p] I2P | [rnode] RNode",
         ),
         Line::from("selected: [rename] name | [toggle] enabled | [delete] remove"),
@@ -935,7 +951,7 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
             app,
             settings_action_index(SettingsAction::CycleReticulumMode),
             format!(
-                "[reticulum mode] {:?} | native feature: {}",
+                "[reticulum mode] {:?} | external/shared: deferred | native feature: {}",
                 app.settings.reticulum_instance_mode,
                 if cfg!(feature = "native-reticulum") {
                     "available"
@@ -1271,6 +1287,11 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(format!("runtime: {:?}", app.runtime_status.backend)),
         Line::from(format!("connected: {}", app.runtime_status.connected)),
         Line::from(format!("message: {}", app.runtime_status.message)),
+        Line::from(app.runtime_lifecycle_diagnostics_line()),
+        Line::from(app.runtime_capabilities_diagnostics_line()),
+        Line::from(app.runtime_ownership_diagnostics_line()),
+        Line::from(app.interface_diagnostics_line()),
+        Line::from(app.path_network_diagnostics_line()),
         Line::from(format!(
             "native Reticulum: compiled={} configured={} ready={}",
             native_readiness.compiled, native_readiness.configured, native_readiness.ready
@@ -1453,7 +1474,15 @@ fn diagnostics_live_fetch_summary(lines: &[String]) -> Option<TuiLiveFetchSummar
         .unwrap_or_else(|| "unknown".into());
     let request_backend = live_fetch
         .get("metadata")
-        .and_then(|metadata| json_string_field(metadata, &["native_request_backend"]))
+        .and_then(|metadata| {
+            let backend = json_string_field(metadata, &["native_request_backend"])?;
+            Some(
+                match json_string_field(metadata, &["native_request_primitive"]) {
+                    Some(primitive) => format!("{backend}/{primitive}"),
+                    None => backend,
+                },
+            )
+        })
         .unwrap_or_else(|| {
             if ok {
                 "missing metadata".into()
@@ -1894,7 +1923,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::masked_passphrase_status;
+    use super::{diagnostics_live_fetch_summary, masked_passphrase_status};
 
     #[test]
     fn passphrase_status_never_renders_the_active_secret() {
@@ -1902,5 +1931,33 @@ mod tests {
         assert_eq!(masked_passphrase_status(true, false), "editing (hidden)");
         assert_eq!(masked_passphrase_status(false, true), "configured");
         assert_eq!(masked_passphrase_status(false, false), "not set");
+    }
+
+    #[test]
+    fn live_fetch_summary_names_request_resource_compatibility_primitive() {
+        let lines = serde_json::to_string_pretty(&serde_json::json!({
+            "live_fetch": {
+                "ok": true,
+                "stage_hint": "response_decode",
+                "url": "00112233445566778899aabbccddeeff:/page/index.mu",
+                "title": "Node Home",
+                "markup_bytes": 32,
+                "markup_lines": 2,
+                "metadata": {
+                    "native_request_backend": "reticulum-transport",
+                    "native_request_primitive": "request-resource"
+                }
+            }
+        }))
+        .expect("live fetch preview json")
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+        let summary = diagnostics_live_fetch_summary(&lines).expect("live fetch summary");
+        assert_eq!(
+            summary.request_backend,
+            "reticulum-transport/request-resource"
+        );
     }
 }

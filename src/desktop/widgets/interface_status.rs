@@ -460,7 +460,7 @@ pub(in crate::desktop) fn interface_restart_recommendation_line(
 
     if stale_enabled {
         Some(
-            "restart recommended: enabled interface changes are not active in the running native runtime"
+            "runtime/config mismatch: restart the runtime to activate the saved managed interface config"
                 .into(),
         )
     } else {

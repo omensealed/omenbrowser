@@ -16,8 +16,11 @@ out_root="${TMPDIR:-/tmp}/omenbrowser-rs-omenchat-smoke"
 message="OMENchat release smoke from packaged script"
 upload_file=""
 server_upload_max_file_bytes=""
+server_large_batch_threshold_bytes=""
 keep_roots=0
 multi_client=0
+restart_server=0
+continuous_client_reconnect=0
 
 usage() {
   cat <<'USAGE'
@@ -44,7 +47,12 @@ Options:
   --upload-file FILE   Upload this file during the OMENchat smoke and fetch it back
   --server-upload-max-file-bytes BYTES
                        Raise isolated omenchatd per-file upload limit for this run
+  --server-large-batch-threshold-bytes BYTES
+                       Set the isolated server history/resource threshold for this run
   --multi-client       Run a second isolated browser root and verify it receives the first message
+  --restart-server     Gracefully restart omenchatd, reuse the first browser root, and rerun smoke
+  --continuous-client-reconnect
+                       Keep one browser smoke process alive while omenchatd restarts
   --keep-roots         Leave generated browser/server roots in place
   -h, --help           Show this help
 
@@ -112,8 +120,20 @@ while [[ $# -gt 0 ]]; do
       server_upload_max_file_bytes="${2:-}"
       shift 2
       ;;
+    --server-large-batch-threshold-bytes)
+      server_large_batch_threshold_bytes="${2:-}"
+      shift 2
+      ;;
     --multi-client)
       multi_client=1
+      shift
+      ;;
+    --restart-server)
+      restart_server=1
+      shift
+      ;;
+    --continuous-client-reconnect)
+      continuous_client_reconnect=1
       shift
       ;;
     --keep-roots)
@@ -172,6 +192,16 @@ if [[ -n "$server_upload_max_file_bytes" ]] && ! [[ "$server_upload_max_file_byt
   echo "--server-upload-max-file-bytes must be an integer byte count" >&2
   exit 2
 fi
+if [[ -n "$server_large_batch_threshold_bytes" ]] \
+  && { ! [[ "$server_large_batch_threshold_bytes" =~ ^[0-9]+$ ]] \
+    || [[ "$server_large_batch_threshold_bytes" -lt 1 ]]; }; then
+  echo "--server-large-batch-threshold-bytes must be a positive integer" >&2
+  exit 2
+fi
+if [[ "$restart_server" -eq 1 && "$continuous_client_reconnect" -eq 1 ]]; then
+  echo "--restart-server and --continuous-client-reconnect are separate cases" >&2
+  exit 2
+fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_dir="${out_root%/}/omenchat-smoke-${timestamp}"
@@ -211,7 +241,12 @@ if [[ -n "$passphrase_file" ]]; then
 fi
 
 server_pid=""
+client_pid=""
 cleanup() {
+  if [[ -n "$client_pid" ]] && kill -0 "$client_pid" 2>/dev/null; then
+    kill "$client_pid" 2>/dev/null || true
+    wait "$client_pid" 2>/dev/null || true
+  fi
   if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
@@ -230,6 +265,11 @@ echo "== Initializing isolated omenchatd =="
 if [[ -n "$server_upload_max_file_bytes" ]]; then
   "$server_bin" config set --home "$server_home" \
     --upload-max-file-bytes "$server_upload_max_file_bytes" \
+    >> "$run_dir/omenchatd-config.txt"
+fi
+if [[ -n "$server_large_batch_threshold_bytes" ]]; then
+  "$server_bin" config set --home "$server_home" \
+    --large-batch-threshold-bytes "$server_large_batch_threshold_bytes" \
     >> "$run_dir/omenchatd-config.txt"
 fi
 
@@ -276,9 +316,18 @@ echo "== Creating isolated browser identity =="
   2> "$run_dir/browser-identity.stderr"
 
 echo "== Running OMENchat client smoke =="
+restart_destination_stable=0
+restart_stop="not-run"
 upload_args=()
 if [[ -n "$upload_file" ]]; then
   upload_args=(--omenchat-upload-file "$upload_file")
+fi
+continuous_args=()
+if [[ "$continuous_client_reconnect" -eq 1 ]]; then
+  continuous_args=(
+    --omenchat-reconnect-ready-file "$run_dir/continuous-client-ready"
+    --omenchat-reconnect-wait 75
+  )
 fi
 "$browser_bin" \
   --omenchat-smoke "$destination" \
@@ -287,14 +336,217 @@ fi
   --app-root "$browser_root" \
   --omenchat-message "$message" \
   "${upload_args[@]}" \
+  "${continuous_args[@]}" \
   --output "$run_dir/omenchat-smoke.json" \
   > "$run_dir/omenchat-smoke.stdout" \
-  2> "$run_dir/omenchat-smoke.stderr"
+  2> "$run_dir/omenchat-smoke.stderr" &
+client_pid="$!"
+
+if [[ "$continuous_client_reconnect" -eq 1 ]]; then
+  for _ in {1..480}; do
+    if [[ -f "$run_dir/continuous-client-ready" ]]; then
+      break
+    fi
+    if ! kill -0 "$client_pid" 2>/dev/null; then
+      echo "OMENchat smoke exited before reaching the reconnect boundary" >&2
+      cat "$run_dir/omenchat-smoke.stderr" >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if [[ ! -f "$run_dir/continuous-client-ready" ]]; then
+    echo "OMENchat smoke did not reach the reconnect boundary in time" >&2
+    exit 1
+  fi
+
+  echo "== Restarting omenchatd while the client remains alive =="
+  kill "$server_pid"
+  for _ in {1..80}; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  if kill -0 "$server_pid" 2>/dev/null; then
+    echo "omenchatd did not stop within the continuous reconnect deadline" >&2
+    exit 1
+  fi
+  set +e
+  wait "$server_pid"
+  server_stop_status=$?
+  set -e
+  case "$server_stop_status" in
+    0) restart_stop="orderly" ;;
+    143) restart_stop="sigterm" ;;
+    *)
+      echo "omenchatd returned unexpected continuous restart status $server_stop_status" >&2
+      exit 1
+      ;;
+  esac
+  server_pid=""
+
+  "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+    > "$run_dir/omenchatd-run-continuous-restart.log" 2>&1 &
+  server_pid="$!"
+  for _ in {1..80}; do
+    if grep -q 'live server ready' "$run_dir/omenchatd-run-continuous-restart.log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "restarted omenchatd exited before becoming ready" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if ! grep -q 'live server ready' "$run_dir/omenchatd-run-continuous-restart.log" 2>/dev/null; then
+    echo "restarted omenchatd did not become ready in time" >&2
+    exit 1
+  fi
+  "$server_bin" status --home "$server_home" > "$run_dir/omenchatd-status-continuous-restart.txt"
+  continuous_destination="$(
+    sed -n 's/^client uri: omenchat:\/\/\([0-9a-fA-F]\+\)$/\1/p' \
+      "$run_dir/omenchatd-status-continuous-restart.txt" | head -n 1
+  )"
+  if [[ "$continuous_destination" != "$destination" ]]; then
+    echo "omenchatd destination changed during continuous reconnect" >&2
+    exit 1
+  fi
+  restart_destination_stable=1
+fi
+
+for _ in {1..480}; do
+  if ! kill -0 "$client_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+if kill -0 "$client_pid" 2>/dev/null; then
+  echo "OMENchat smoke did not finish within its bounded deadline" >&2
+  exit 1
+fi
+wait "$client_pid"
+client_pid=""
 
 if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke.json"; then
   echo "OMENchat smoke did not report pass" >&2
   cat "$run_dir/omenchat-smoke.stderr" >&2
   exit 1
+fi
+continuous_link_closed=0
+continuous_link_reopened=0
+continuous_session_reconnected=0
+continuous_message_echoed=0
+if [[ "$continuous_client_reconnect" -eq 1 ]]; then
+  python3 - "$run_dir/omenchat-smoke.json" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+stages = {
+    stage.get("stage"): stage
+    for stage in report.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+required = (
+    "continuous_link_close_wait",
+    "continuous_link_reopen",
+    "continuous_session_reconnect",
+    "continuous_message_send",
+    "continuous_message_echo_wait",
+)
+if any(stages.get(name, {}).get("ok") is not True for name in required):
+    raise SystemExit("continuous reconnect stage evidence was incomplete")
+if stages["continuous_link_reopen"].get("link_changed") is not True:
+    raise SystemExit("continuous reconnect reused the closed link identifier")
+PY
+  continuous_link_closed=1
+  continuous_link_reopened=1
+  continuous_session_reconnected=1
+  continuous_message_echoed=1
+fi
+
+if [[ "$restart_server" -eq 1 ]]; then
+  echo "== Restarting isolated omenchatd =="
+  kill "$server_pid"
+  for _ in {1..80}; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  if kill -0 "$server_pid" 2>/dev/null; then
+    echo "omenchatd did not stop within the restart deadline" >&2
+    exit 1
+  fi
+  set +e
+  wait "$server_pid"
+  server_stop_status=$?
+  set -e
+  case "$server_stop_status" in
+    0)
+      restart_stop="orderly"
+      ;;
+    143)
+      # The hardened 0.6 server predates the owned SIGTERM drain path. It still
+      # stops within the deadline; mixed-version restart evidence records that
+      # narrower signal-stop boundary instead of claiming orderly shutdown.
+      restart_stop="sigterm"
+      ;;
+    *)
+      echo "omenchatd returned unexpected restart status $server_stop_status" >&2
+      exit 1
+      ;;
+  esac
+  server_pid=""
+
+  "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+    > "$run_dir/omenchatd-run-restart.log" 2>&1 &
+  server_pid="$!"
+  for _ in {1..80}; do
+    if grep -q 'live server ready' "$run_dir/omenchatd-run-restart.log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "restarted omenchatd exited before becoming ready" >&2
+      tail -n 80 "$run_dir/omenchatd-run-restart.log" >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if ! grep -q 'live server ready' "$run_dir/omenchatd-run-restart.log" 2>/dev/null; then
+    echo "restarted omenchatd did not become ready in time" >&2
+    tail -n 80 "$run_dir/omenchatd-run-restart.log" >&2 || true
+    exit 1
+  fi
+
+  "$server_bin" status --home "$server_home" > "$run_dir/omenchatd-status-restart.txt"
+  restart_destination="$(
+    sed -n 's/^client uri: omenchat:\/\/\([0-9a-fA-F]\+\)$/\1/p' \
+      "$run_dir/omenchatd-status-restart.txt" | head -n 1
+  )"
+  if [[ -z "$restart_destination" || "$restart_destination" != "$destination" ]]; then
+    echo "omenchatd destination changed across restart" >&2
+    exit 1
+  fi
+  restart_destination_stable=1
+
+  echo "== Reopening OMENchat client state after server restart =="
+  "$browser_bin" \
+    --omenchat-smoke "$restart_destination" \
+    "${client_interface_args[@]}" \
+    --path-wait "$path_wait" \
+    --app-root "$browser_root" \
+    --omenchat-message "${message} (after server restart)" \
+    --output "$run_dir/omenchat-smoke-restart.json" \
+    > "$run_dir/omenchat-smoke-restart.stdout" \
+    2> "$run_dir/omenchat-smoke-restart.stderr"
+
+  if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke-restart.json"; then
+    echo "post-restart OMENchat smoke did not report pass" >&2
+    cat "$run_dir/omenchat-smoke-restart.stderr" >&2
+    exit 1
+  fi
 fi
 
 if [[ "$multi_client" -eq 1 ]]; then
@@ -365,6 +617,15 @@ browser_root: $browser_root
 browser_root_2: $([[ "$multi_client" -eq 1 ]] && printf '%s' "$browser_root_2" || printf 'not-run')
 server_home: $server_home
 multi_client: $multi_client
+restart_server: $restart_server
+continuous_client_reconnect: $continuous_client_reconnect
+continuous_link_closed: $continuous_link_closed
+continuous_link_reopened: $continuous_link_reopened
+continuous_session_reconnected: $continuous_session_reconnected
+continuous_message_echoed: $continuous_message_echoed
+restart_destination_stable: $restart_destination_stable
+restart_stop: $restart_stop
+server_large_batch_threshold_bytes: $([[ -n "$server_large_batch_threshold_bytes" ]] && printf '%s' "$server_large_batch_threshold_bytes" || printf 'default')
 upload_file: $([[ -n "$upload_file" ]] && printf '%s' "$upload_file" || printf 'not-run')
 EOF
 

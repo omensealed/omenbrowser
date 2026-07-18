@@ -4,13 +4,16 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::directory::DirectoryService;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+use crate::messaging::store::SdkDeliveryStoreUpdate;
 use crate::messaging::{
-    ConversationThread, DeliveryMode, MessageEnvelope, MessageStore, MessageSummary,
+    ConversationThread, DeliveryMode, LxmfHistoryReconcileReport, MessageEnvelope, MessageStore,
+    MessageSummary, OutboundOperationIdentity,
 };
 use crate::runtime::{
-    LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, NetworkRuntime, OutboundDeliveryState,
-    OutboundStatus,
+    LxmfCancelOutcome, LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, LxmfHistoryPage,
+    NetworkRuntime, OutboundDeliveryState, OutboundStatus, RuntimeLxmfDeliveryState,
+    RuntimeLxmfDeliveryUpdate,
 };
 
 #[derive(Clone)]
@@ -18,6 +21,23 @@ pub struct MessagingService {
     runtime: Arc<dyn NetworkRuntime>,
     store: MessageStore,
     directory: Option<DirectoryService>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutboundComposeRequest {
+    pub peer_hash: String,
+    pub title: String,
+    pub content: String,
+    pub delivery_mode: DeliveryMode,
+    pub include_ticket: bool,
+    pub attachments: Vec<PathBuf>,
+    pub operation: OutboundOperationIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LxmfCancellationUpdate {
+    pub outcome: LxmfCancelOutcome,
+    pub fields: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for MessagingService {
@@ -108,23 +128,46 @@ impl MessagingService {
         include_ticket: bool,
         attachments: Vec<PathBuf>,
     ) -> AppResult<MessageSummary> {
-        let native_reply_ticket = match delivery_mode {
+        self.compose_with_operation(OutboundComposeRequest {
+            peer_hash: peer_hash.into(),
+            title: title.into(),
+            content: content.into(),
+            delivery_mode,
+            include_ticket,
+            attachments,
+            operation: OutboundOperationIdentity::generate(),
+        })
+        .await
+    }
+
+    pub async fn compose_with_operation(
+        &self,
+        request: OutboundComposeRequest,
+    ) -> AppResult<MessageSummary> {
+        if request.operation.remaining_ttl_ms().is_none() {
+            return Err(AppError::Runtime(
+                "LXMF send deadline expired before runtime admission; prepare a new send".into(),
+            ));
+        }
+        let native_reply_ticket = match &request.delivery_mode {
             DeliveryMode::Direct => self
                 .store
-                .latest_valid_lxmf_reply_ticket(peer_hash, current_unix_secs_f64())?,
+                .latest_valid_lxmf_reply_ticket(&request.peer_hash, current_unix_secs_f64())?,
             DeliveryMode::Propagated => None,
         };
         let envelope = MessageEnvelope {
-            peer_hash: peer_hash.into(),
-            title: title.into(),
-            body: content.into(),
-            delivery_mode,
-            include_ticket,
+            peer_hash: request.peer_hash.clone(),
+            title: request.title,
+            body: request.content,
+            delivery_mode: request.delivery_mode,
+            include_ticket: request.include_ticket,
             native_reply_ticket,
-            attachments,
+            operation: Some(request.operation.clone()),
+            attachments: request.attachments,
         };
         let mut sent = self.runtime.send_message(envelope).await?;
-        sent.peer_label = self.label_for(peer_hash, Some(&sent.peer_label))?;
+        request.operation.insert_fields(&mut sent.fields);
+        sent.peer_label = self.label_for(&request.peer_hash, Some(&sent.peer_label))?;
         sent.unread = false;
         self.store.append(sent)
     }
@@ -179,6 +222,25 @@ impl MessagingService {
             }
             .into(),
         );
+        if status.evidence.as_deref() == Some("rns_packet_proof") {
+            fields.insert(
+                "native_lxmf_proof_state".into(),
+                "rns_packet_proof_peer_unconfirmed".into(),
+            );
+            fields.insert(
+                "native_lxmf_receipt_state".into(),
+                "rns_packet_proof_peer_delivery_unconfirmed".into(),
+            );
+            fields.insert(
+                "native_lxmf_state".into(),
+                "transport_proof_received".into(),
+            );
+            fields.insert(
+                "native_lxmf_retry_guidance".into(),
+                "RNS packet proof received, but native Rust has not observed LXMF router delivery or peer activity"
+                    .into(),
+            );
+        }
         if let Some(submitted_at) = status
             .evidence
             .as_deref()
@@ -318,8 +380,68 @@ impl MessagingService {
         }
     }
 
+    pub fn apply_sdk_delivery_update(&self, update: &RuntimeLxmfDeliveryUpdate) -> AppResult<bool> {
+        let Some(peer_hash) = update.peer_hash.as_deref() else {
+            return Ok(false);
+        };
+        let (delivered, failed) = sdk_delivery_legacy_projection(update.state);
+        self.store.update_sdk_delivery_with_fields(
+            peer_hash,
+            &update.message_id,
+            SdkDeliveryStoreUpdate {
+                seq_no: update.seq_no,
+                terminal: update.terminal,
+                delivered,
+                failed,
+                fields: sdk_delivery_fields(update),
+            },
+        )
+    }
+
+    pub fn reconcile_sdk_history(
+        &self,
+        page: LxmfHistoryPage,
+        reconciled_at_ms: u64,
+    ) -> AppResult<LxmfHistoryReconcileReport> {
+        self.store.reconcile_sdk_history(page, reconciled_at_ms)
+    }
+
+    pub async fn cancel_delivery(
+        &self,
+        peer_hash: &str,
+        message_id: &str,
+    ) -> AppResult<LxmfCancellationUpdate> {
+        let outcome = self.runtime.cancel_lxmf_delivery(message_id).await?;
+        let mut fields = BTreeMap::from([(
+            "native_lxmf_sdk_cancel_outcome".into(),
+            outcome.as_str().into(),
+        )]);
+        fields.insert(
+            "native_lxmf_sdk_cancel_observed_at".into(),
+            format!("{:.3}", current_unix_secs_f64()),
+        );
+        fields.insert(
+            "native_lxmf_next_action".into(),
+            match outcome {
+                LxmfCancelOutcome::Accepted => "waiting_for_authoritative_cancelled_delivery_event",
+                LxmfCancelOutcome::AlreadyTerminal => "delivery_was_already_terminal",
+                LxmfCancelOutcome::NotFound => "refresh_delivery_snapshot",
+                LxmfCancelOutcome::TooLateToCancel => "wait_for_terminal_delivery_state",
+                LxmfCancelOutcome::Unsupported => "cancellation_is_not_supported_by_backend",
+            }
+            .into(),
+        );
+        self.store
+            .update_fields(peer_hash, message_id, fields.clone())?;
+        Ok(LxmfCancellationUpdate { outcome, fields })
+    }
+
     pub fn reconcile_pending(&self, pending_ids: &[String]) -> AppResult<bool> {
         self.store.reconcile_pending(pending_ids, 10.0)
+    }
+
+    pub fn reconcile_expired_lxmf(&self, now_ms: u64) -> AppResult<Vec<MessageSummary>> {
+        self.store.reconcile_expired_lxmf(now_ms)
     }
 
     pub fn reconcile_stale_native_lxmf_direct(
@@ -358,6 +480,108 @@ impl MessagingService {
             .map(str::to_string)
             .unwrap_or_else(|| peer_hash.chars().take(8).collect()))
     }
+}
+
+pub(crate) fn apply_sdk_delivery_update_to_message(
+    message: &mut MessageSummary,
+    update: &RuntimeLxmfDeliveryUpdate,
+) -> bool {
+    if message.message_id.as_deref() != Some(update.message_id.as_str())
+        || update
+            .peer_hash
+            .as_deref()
+            .is_some_and(|peer| !message.peer_hash.eq_ignore_ascii_case(peer))
+    {
+        return false;
+    }
+    let current_seq = message
+        .fields
+        .get("native_lxmf_sdk_seq_no")
+        .and_then(|value| value.parse::<u64>().ok());
+    if current_seq.is_some_and(|current| current >= update.seq_no) {
+        return false;
+    }
+    let current_terminal = message
+        .fields
+        .get("native_lxmf_sdk_terminal")
+        .is_some_and(|value| value == "true");
+    if (current_terminal || message.delivered || message.failed) && !update.terminal {
+        return false;
+    }
+    let (delivered, failed) = sdk_delivery_legacy_projection(update.state);
+    message.delivered = delivered;
+    message.failed = failed;
+    message.fields.extend(sdk_delivery_fields(update));
+    true
+}
+
+fn sdk_delivery_legacy_projection(state: RuntimeLxmfDeliveryState) -> (bool, bool) {
+    (
+        state == RuntimeLxmfDeliveryState::Delivered,
+        state.is_failure_terminal(),
+    )
+}
+
+fn sdk_delivery_fields(update: &RuntimeLxmfDeliveryUpdate) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::from([
+        ("native_lxmf_sdk_state".into(), update.state.as_str().into()),
+        (
+            "native_lxmf_sdk_terminal".into(),
+            update.terminal.to_string(),
+        ),
+        (
+            "native_lxmf_sdk_attempts".into(),
+            update.attempts.to_string(),
+        ),
+        (
+            "native_lxmf_sdk_last_updated_ms".into(),
+            update.last_updated_ms.to_string(),
+        ),
+        ("native_lxmf_sdk_event_id".into(), update.event_id.clone()),
+        ("native_lxmf_sdk_seq_no".into(), update.seq_no.to_string()),
+        ("native_lxmf_sdk_cursor".into(), update.cursor.clone()),
+        ("native_lxmf_state".into(), update.state.as_str().into()),
+    ]);
+    if let Some(previous) = update.previous_state {
+        fields.insert(
+            "native_lxmf_sdk_previous_state".into(),
+            previous.as_str().into(),
+        );
+    }
+    if let Some(reason) = &update.reason_code {
+        fields.insert("native_lxmf_sdk_reason_code".into(), reason.clone());
+        fields.insert("native_lxmf_failure_reason".into(), reason.clone());
+    }
+    fields.insert(
+        "native_lxmf_retry_guidance".into(),
+        match update.state {
+            RuntimeLxmfDeliveryState::Queued => "queued by the LXMF SDK; wait for dispatch",
+            RuntimeLxmfDeliveryState::Dispatching | RuntimeLxmfDeliveryState::InFlight => {
+                "LXMF delivery is in progress; wait for a terminal state"
+            }
+            RuntimeLxmfDeliveryState::Sent => {
+                "LXMF reports sent, but peer delivery is not yet confirmed"
+            }
+            RuntimeLxmfDeliveryState::Delivered => "LXMF reports peer delivery; no retry is needed",
+            RuntimeLxmfDeliveryState::Failed => {
+                "LXMF delivery failed; inspect the reason before retrying"
+            }
+            RuntimeLxmfDeliveryState::Cancelled => {
+                "LXMF delivery was cancelled; resend only as a new user action"
+            }
+            RuntimeLxmfDeliveryState::Expired => {
+                "LXMF delivery expired; review TTL and path availability before retrying"
+            }
+            RuntimeLxmfDeliveryState::Rejected => {
+                "LXMF delivery was rejected; inspect policy, stamp, and ticket requirements"
+            }
+            RuntimeLxmfDeliveryState::Unknown => {
+                "LXMF returned a forward-compatible delivery state; reconcile before retrying"
+            }
+        }
+        .into(),
+    );
+    fields
 }
 
 fn current_unix_secs_f64() -> f64 {
@@ -807,5 +1031,95 @@ fn lxmf_delivery_evidence_kind_label(kind: LxmfDeliveryEvidenceKind) -> &'static
         LxmfDeliveryEvidenceKind::LxmfRouterFailed => "lxmf_router_failed",
         LxmfDeliveryEvidenceKind::InboundPeerMessage => "inbound_peer_message",
         LxmfDeliveryEvidenceKind::NoReceiptObserved => "no_receipt_observed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::messaging::TransportMethod;
+
+    fn message() -> MessageSummary {
+        MessageSummary {
+            peer_hash: "peer-1".into(),
+            peer_label: "Peer".into(),
+            title: "Subject".into(),
+            content: "Body".into(),
+            timestamp: 1.0,
+            transport_method: TransportMethod::Direct,
+            delivered: false,
+            failed: false,
+            incoming: false,
+            unread: false,
+            message_id: Some("message-1".into()),
+            fields: BTreeMap::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    fn update(state: RuntimeLxmfDeliveryState, seq_no: u64) -> RuntimeLxmfDeliveryUpdate {
+        RuntimeLxmfDeliveryUpdate {
+            message_id: "message-1".into(),
+            peer_hash: Some("peer-1".into()),
+            previous_state: None,
+            state,
+            terminal: state.is_terminal(),
+            attempts: 1,
+            reason_code: None,
+            last_updated_ms: 10,
+            event_id: format!("event-{seq_no}"),
+            seq_no,
+            cursor: format!("v2:runtime:stream:{seq_no}"),
+        }
+    }
+
+    #[test]
+    fn sent_remains_distinct_from_delivered_in_legacy_projection() {
+        let mut message = message();
+        assert!(apply_sdk_delivery_update_to_message(
+            &mut message,
+            &update(RuntimeLxmfDeliveryState::Sent, 2)
+        ));
+        assert!(!message.delivered);
+        assert!(!message.failed);
+        assert_eq!(
+            message
+                .fields
+                .get("native_lxmf_sdk_state")
+                .map(String::as_str),
+            Some("sent")
+        );
+        assert_eq!(
+            message
+                .fields
+                .get("native_lxmf_sdk_terminal")
+                .map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn terminal_delivery_rejects_replayed_or_regressive_updates() {
+        let mut message = message();
+        assert!(apply_sdk_delivery_update_to_message(
+            &mut message,
+            &update(RuntimeLxmfDeliveryState::Delivered, 7)
+        ));
+        assert!(message.delivered);
+        assert!(!apply_sdk_delivery_update_to_message(
+            &mut message,
+            &update(RuntimeLxmfDeliveryState::Queued, 6)
+        ));
+        assert!(!apply_sdk_delivery_update_to_message(
+            &mut message,
+            &update(RuntimeLxmfDeliveryState::Queued, 8)
+        ));
+        assert_eq!(
+            message
+                .fields
+                .get("native_lxmf_sdk_state")
+                .map(String::as_str),
+            Some("delivered")
+        );
     }
 }

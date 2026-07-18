@@ -43,18 +43,36 @@ impl DesktopApp {
             let quick_reconnect =
                 omenchat_close_reason_allows_quick_reconnect(closed.reason.as_deref());
             let status = if quick_reconnect {
-                self.omenchat
-                    .omenchat_live_retry_after
-                    .insert(session_id, current_epoch_ms().saturating_add(500));
-                if omenchat_close_reason_is_timeout(closed.reason.as_deref()) {
-                    format!("OMENchat link timed out; reconnecting ({reason})")
+                let (attempt, retry_after) = self.schedule_omenchat_reconnect(session_id, now);
+                let retry_status = if retry_after.is_some() {
+                    format!("reconnecting with backoff (attempt {attempt})")
                 } else {
-                    format!("OMENchat link closed; reconnecting ({reason})")
+                    format!("automatic reconnect paused after {attempt} attempts")
+                };
+                if omenchat_close_reason_is_timeout(closed.reason.as_deref()) {
+                    format!("OMENchat link timed out; {retry_status} ({reason})")
+                } else {
+                    format!("OMENchat link closed; {retry_status} ({reason})")
                 }
             } else {
                 self.clear_omenchat_reconnect_state(session_id);
                 format!("OMENchat disconnected: {reason}; use Reconnect to open a new link")
             };
+            self.set_omenchat_connection_state(
+                session_id,
+                if quick_reconnect
+                    && self
+                        .omenchat
+                        .omenchat_live_retry_after
+                        .contains_key(&session_id)
+                {
+                    crate::chat::ChatConnectionState::Reconnecting
+                } else if quick_reconnect {
+                    crate::chat::ChatConnectionState::Failed { retryable: true }
+                } else {
+                    crate::chat::ChatConnectionState::Disconnected
+                },
+            );
             self.set_omenchat_session_status(session_id, status);
             self.persist_omenchat_session(session_id);
             self.app.status.task = format!(
@@ -65,6 +83,38 @@ impl DesktopApp {
                     .map(|session| session.server.display_name.as_str())
                     .unwrap_or("session")
             );
+        }
+        for terminal in self.app.drain_omenchat_resource_terminals() {
+            let Some(peer) = terminal.peer.as_deref() else {
+                continue;
+            };
+            let Some(session_id) = self.omenchat.omenchat_live_transports.iter().find_map(
+                |(session_id, transport)| {
+                    (hex_bytes(&transport.link_id) == peer).then_some(*session_id)
+                },
+            ) else {
+                continue;
+            };
+            let released = self
+                .omenchat
+                .omenchat_live_transports
+                .get_mut(&session_id)
+                .map_or(0, |transport| transport.clear_pending_resource_offers());
+            if released == 0 {
+                continue;
+            }
+            let state = match terminal.state {
+                crate::runtime::ResourceLifecycleState::Failed => "failed",
+                crate::runtime::ResourceLifecycleState::Cancelled => "was cancelled",
+                _ => continue,
+            };
+            self.set_omenchat_session_status(
+                session_id,
+                format!(
+                    "OMENchat inbound Resource {state}; released {released} pending offer(s); retry history or reconnect"
+                ),
+            );
+            self.persist_omenchat_session(session_id);
         }
         for data in self.app.drain_omenchat_link_data() {
             let Some(session_id) = self

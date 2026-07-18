@@ -48,6 +48,7 @@ fn app_event_represents_runtime_browser_message_and_partial_paths() {
     });
     let announce = AppEvent::Runtime(RuntimeBusEvent::Announce(AnnouncePayload {
         destination_hash: "hash".into(),
+        identity_hash: None,
         display_name: "Node".into(),
         kind: DirectoryKind::Node,
         associated_hash: None,

@@ -23,8 +23,9 @@ use crate::interfaces::{
     GatewayProfileCreateOutcome, InterfaceConfigService, InterfaceKind, ReticulumInterfaceProfile,
 };
 use crate::messaging::{
-    Conversation, ConversationThread, DeliveryMode, MessageSendState, MessageStore, MessageSummary,
-    MessagingService, TransportMethod,
+    Conversation, ConversationThread, DeliveryMode, LxmfCancellationUpdate, MessageSendState,
+    MessageStore, MessageSummary, MessagingService, OutboundComposeRequest,
+    OutboundOperationIdentity, PreparedRetryOperation, TransportMethod,
 };
 use crate::micron::parser::DEFAULT_FG_DARK;
 use crate::micron::render::{
@@ -45,11 +46,13 @@ use crate::plugins::micronplus::{
 use crate::plugins::BUILTIN_MICRONPLUS_PLUGIN_ID;
 use crate::plugins::{InstalledPlugin, PluginManifest, PluginRegistry};
 use crate::runtime::{
-    build_runtime, CancellationToken, DestinationInspection, LxmfDeliveryEvidence,
-    LxmfDeliveryEvidenceKind, LxmfDeliveryProbeReport, LxmfDeliveryProbeStage,
-    LxmfSdkRpcProbeSnapshot, NetworkRuntime, NetworkSnapshot, NetworkStatus, OutboundDeliveryState,
-    OutboundStatus, PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep,
-    RuntimeBackendName, RuntimeBusEvent, RuntimeFacadeEvent, RuntimeStatus,
+    build_runtime, CancellationToken, DestinationInspection, LxmfCancelOutcome,
+    LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, LxmfDeliveryProbeReport,
+    LxmfDeliveryProbeStage, LxmfSdkRpcProbeSnapshot, NetworkRuntime, NetworkSnapshot,
+    NetworkStatus, OutboundDeliveryState, OutboundStatus, PageFetchProbeReport,
+    PageFetchProbeStage, PageFetchProbeStep, RuntimeBackendName, RuntimeBusEvent,
+    RuntimeCapabilityAvailability, RuntimeCapabilitySnapshot, RuntimeFacadeEvent,
+    RuntimeLifecycleSnapshot, RuntimeStatus,
 };
 use crate::storage::files::sanitize_filename;
 use crate::storage::form_state::BrowserFormStateStore;
@@ -67,9 +70,11 @@ use crate::structured_log_writer::{
     StructuredLogFlushHandle, StructuredLogWorker, StructuredLogWorkerMetrics,
     STRUCTURED_LOG_MAX_FILE_BYTES, STRUCTURED_LOG_MAX_RETAIN_FILES, STRUCTURED_LOG_MIN_FILE_BYTES,
 };
+
 use crate::workspace::{FocusArea, WorkspaceSection};
 
 pub type TabId = u64;
+const LOCAL_LXMF_ANNOUNCE_COOLDOWN: Duration = Duration::from_secs(30);
 const UI_PREFERENCE_AUTOSAVE_DELAY_MS: u64 = 500;
 const STRUCTURED_LOG_DEFAULT_MAX_BYTES: u64 = 256 * 1024;
 const STRUCTURED_LOG_MESSAGE_BYTES: usize = 16 * 1024;
@@ -78,7 +83,7 @@ const STRUCTURED_LOG_MEMORY_BYTES: usize = 4 * 1024 * 1024;
 const STRUCTURED_LOG_STARTUP_ENTRY_LIMIT: usize = 4096;
 const STRUCTURED_LOG_STARTUP_DIRECTORY_ENTRY_LIMIT: usize = 4096;
 const STRUCTURED_LOG_STARTUP_FILE_LIMIT: usize = 16;
-const INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const INTERNAL_EVENT_QUEUE_MAX_BYTES: usize = 32 * 1024 * 1024;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 const OMENCHAT_STAGED_FRAME_MAX_ITEMS: usize = 256;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -91,16 +96,22 @@ const OMENCHAT_STAGED_RESOURCE_MAX_BYTES: usize = 32 * 1024 * 1024;
 const OMENCHAT_STAGED_CLOSE_MAX_ITEMS: usize = 256;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 const OMENCHAT_STAGED_CLOSE_MAX_BYTES: usize = 256 * 1024;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+const OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_ITEMS: usize = 64;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+const OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_BYTES: usize = 256 * 1024;
 const STRUCTURED_LOG_STARTUP_FILE_BYTES: usize = 512 * 1024;
 const STRUCTURED_LOG_STARTUP_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const LXMF_DIRECT_PROOF_TIMEOUT_SECONDS: f64 = 45.0;
 const LXMF_DIRECT_PROOF_RECONCILE_INTERVAL_MS: u64 = 5_000;
+const LXMF_EXPIRY_RECONCILE_INTERVAL_MS: u64 = 60_000;
 const LXMF_PROPAGATION_ROUTER_TIMEOUT_SECONDS: f64 = 45.0;
 const LXMF_PROPAGATION_RECONCILE_INTERVAL_MS: u64 = 5_000;
 const MICRONPLUS_COLUMN_PREVIEW_MIN_WIDTH: usize = 48;
 const MICRONPLUS_NODE_WARNING_HISTORY_LIMIT: usize = 20;
 const RESTORE_BROWSER_CACHE_ON_STARTUP: bool = true;
-const INTERFACE_RESTART_RECOMMENDED: &str = "restart recommended";
+const INTERFACE_CHANGE_SCOPE: &str =
+    "saved to managed config; takes effect on next runtime start/restart";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScrollState {
@@ -308,7 +319,7 @@ impl BrowserProbeSummary {
                 "run Diagnostics D to request path and inspect dry-run state"
             }
             PageFetchProbeStage::LinkSetup => {
-                "run Diagnostics X or L for a live probe and inspect Reticulum 0.6 link setup"
+                "run Diagnostics X or L for a live probe and inspect Reticulum 0.9 link setup"
             }
             PageFetchProbeStage::RequestSend => {
                 "run Diagnostics X or L and inspect request payload/path send traces"
@@ -681,6 +692,7 @@ pub struct BrowserTab {
     pub current_page: Option<BrowserPage>,
     pub render_cache: RenderCache,
     pub loading: Option<LoadState>,
+    pub transfer_status: Option<String>,
     pub path_warmup: Option<LoadState>,
     pub partials: PartialRefreshState,
     pub scroll: ScrollState,
@@ -759,6 +771,12 @@ pub enum MessageTaskResult {
         peer_hash: String,
         result: Result<bool, String>,
     },
+    Cancellation {
+        conversation_id: u64,
+        peer_hash: String,
+        message_id: String,
+        result: Result<LxmfCancellationUpdate, String>,
+    },
     Error {
         conversation_id: Option<u64>,
         generation: u64,
@@ -829,6 +847,9 @@ pub enum DiagnosticsTaskResult {
 #[derive(Debug)]
 pub enum InternalAppEvent {
     BrowserTask(BrowserTaskResult),
+    BrowserOperationFinished {
+        operation_id: String,
+    },
     MessageTask(MessageTaskResult),
     DiagnosticsTask(DiagnosticsTaskResult),
     MicronPlusWidget {
@@ -922,7 +943,7 @@ impl InternalEventPayloadBudget {
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                     current
                         .checked_add(bytes)
-                        .filter(|next| *next <= INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES)
+                        .filter(|next| *next <= INTERNAL_EVENT_QUEUE_MAX_BYTES)
                 });
         if reserved.is_err() {
             self.rejected_events.fetch_add(1, Ordering::Relaxed);
@@ -959,7 +980,7 @@ impl Drop for InternalEventPayloadPermit {
     }
 }
 
-fn internal_omenchat_event_payload_bytes(event: &InternalAppEvent) -> usize {
+fn internal_event_payload_bytes(event: &InternalAppEvent) -> usize {
     match event {
         InternalAppEvent::Runtime(RuntimeBusEvent::OmenChatLinkData(data)) => {
             data.frame_bytes.len()
@@ -971,13 +992,28 @@ fn internal_omenchat_event_payload_bytes(event: &InternalAppEvent) -> usize {
         InternalAppEvent::Runtime(RuntimeBusEvent::OmenChatLinkClosed(data)) => {
             data.reason.as_ref().map_or(0, String::len)
         }
+        InternalAppEvent::Runtime(RuntimeBusEvent::LxmfHistoryRecovered(page)) => {
+            page.messages.iter().fold(
+                page.next_cursor.as_ref().map_or(0, String::len),
+                |bytes, record| {
+                    bytes
+                        .saturating_add(record.message_id.len())
+                        .saturating_add(record.source.len())
+                        .saturating_add(record.destination.len())
+                        .saturating_add(record.title.len())
+                        .saturating_add(record.content.len())
+                        .saturating_add(record.direction.len())
+                        .saturating_add(record.receipt_status.as_ref().map_or(0, String::len))
+                },
+            )
+        }
         _ => 0,
     }
 }
 
 impl InternalEventSender {
     async fn send(&self, event: InternalAppEvent) -> Result<(), InternalEventSendError> {
-        let bytes = internal_omenchat_event_payload_bytes(&event);
+        let bytes = internal_event_payload_bytes(&event);
         let permit = self.payload_budget.reserve(bytes);
         if bytes > 0 && permit.is_none() {
             return Err(InternalEventSendError::ByteBudget);
@@ -997,7 +1033,7 @@ impl InternalEventSender {
     }
 
     fn try_send(&self, event: InternalAppEvent) -> Result<(), InternalEventTrySendError> {
-        let bytes = internal_omenchat_event_payload_bytes(&event);
+        let bytes = internal_event_payload_bytes(&event);
         let permit = self.payload_budget.reserve(bytes);
         if bytes > 0 && permit.is_none() {
             return Err(InternalEventTrySendError::ByteBudget);
@@ -1053,6 +1089,7 @@ impl std::hash::Hash for InternalEventWake {
 }
 
 fn spawn_runtime_event_forwarder(
+    runtime: std::sync::Weak<dyn NetworkRuntime>,
     event_tx: InternalEventSender,
     mut receiver: broadcast::Receiver<crate::runtime::RuntimeBusEvent>,
 ) -> bool {
@@ -1060,18 +1097,226 @@ fn spawn_runtime_event_forwarder(
         return false;
     };
     handle.spawn(async move {
+        let mut worker = crate::runtime::RuntimeEventWorkerState::default();
         loop {
             match receiver.recv().await {
-                Ok(event) => match event_tx.send(InternalAppEvent::Runtime(event)).await {
-                    Ok(()) | Err(InternalEventSendError::ByteBudget) => {}
-                    Err(InternalEventSendError::Closed) => break,
-                },
+                Ok(event) => {
+                    if !worker.observe(&event) {
+                        continue;
+                    }
+                    if let RuntimeBusEvent::StreamGap(gap) = event {
+                        let Some(runtime) = runtime.upgrade() else {
+                            break;
+                        };
+                        if !recover_runtime_event_gap(&runtime, &event_tx, gap).await {
+                            break;
+                        }
+                        continue;
+                    }
+                    let overloaded_link = match &event {
+                        RuntimeBusEvent::OmenChatLinkData(data) => Some(data.link_id),
+                        RuntimeBusEvent::OmenChatResourceData(data) => Some(data.link_id),
+                        _ => None,
+                    };
+                    match event_tx.send(InternalAppEvent::Runtime(event)).await {
+                        Ok(()) => {}
+                        Err(InternalEventSendError::ByteBudget) => {
+                            let Some(runtime) = runtime.upgrade() else {
+                                break;
+                            };
+                            if let Some(link_id) = overloaded_link {
+                                let _ = runtime.close_omenchat_link(link_id).await;
+                            }
+                            let gap = worker.downstream_byte_gap();
+                            if !recover_runtime_event_gap(&runtime, &event_tx, gap).await {
+                                break;
+                            }
+                        }
+                        Err(InternalEventSendError::Closed) => break,
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    let Some(runtime) = runtime.upgrade() else {
+                        break;
+                    };
+                    let gap = worker.source_gap(skipped);
+                    if !recover_runtime_event_gap(&runtime, &event_tx, gap).await {
+                        break;
+                    }
+                }
             }
         }
     });
     true
+}
+
+async fn recover_runtime_event_gap(
+    runtime: &Arc<dyn NetworkRuntime>,
+    event_tx: &InternalEventSender,
+    gap: crate::runtime::RuntimeEventGap,
+) -> bool {
+    let cursor = gap.next_cursor.saturating_sub(1);
+    let source = gap.source.clone();
+    if event_tx
+        .send(InternalAppEvent::Runtime(RuntimeBusEvent::StreamGap(gap)))
+        .await
+        == Err(InternalEventSendError::Closed)
+    {
+        return false;
+    }
+
+    let mut recovery = crate::runtime::RuntimeEventRecovery {
+        source: source.clone(),
+        cursor,
+        status_recovered: false,
+        interfaces_recovered: false,
+        network_snapshot_recovered: false,
+        propagation_recovered: false,
+        directory_entries_recovered: 0,
+        messages_recovered: 0,
+        errors: Vec::new(),
+    };
+
+    let status = runtime.status().await;
+    recovery.status_recovered = event_tx
+        .send(InternalAppEvent::Runtime(RuntimeBusEvent::StatusChanged(
+            status,
+        )))
+        .await
+        .is_ok();
+
+    match runtime.interface_stats().await {
+        Ok(stats) => {
+            recovery.interfaces_recovered = event_tx
+                .send(InternalAppEvent::Runtime(RuntimeBusEvent::InterfaceStats(
+                    stats,
+                )))
+                .await
+                .is_ok();
+        }
+        Err(_) => recovery
+            .errors
+            .push("interface snapshot unavailable".into()),
+    }
+    recovery.network_snapshot_recovered = runtime.network_snapshot().await.is_ok();
+    if !recovery.network_snapshot_recovered {
+        recovery.errors.push("network snapshot unavailable".into());
+    }
+
+    match runtime.propagation_status().await {
+        Ok(status) => {
+            recovery.propagation_recovered = event_tx
+                .send(InternalAppEvent::Runtime(
+                    RuntimeBusEvent::PropagationStatus(status),
+                ))
+                .await
+                .is_ok();
+        }
+        Err(_) => recovery
+            .errors
+            .push("propagation snapshot unavailable".into()),
+    }
+
+    match runtime.directory_candidates(Some(256), true).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                let event = RuntimeBusEvent::Announce(crate::runtime::AnnouncePayload {
+                    destination_hash: candidate.destination_hash,
+                    identity_hash: candidate.identity_hash,
+                    display_name: candidate.display_name,
+                    kind: candidate.kind,
+                    associated_hash: candidate.associated_hash,
+                    node_associated_hash: candidate.node_associated_hash,
+                    has_ratchet: candidate.has_ratchet,
+                    lxmf_stamp_cost: candidate.lxmf_stamp_cost,
+                });
+                if event_tx
+                    .send(InternalAppEvent::Runtime(event))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                recovery.directory_entries_recovered =
+                    recovery.directory_entries_recovered.saturating_add(1);
+            }
+        }
+        Err(_) => recovery
+            .errors
+            .push("directory snapshot unavailable".into()),
+    }
+
+    match runtime.list_messages().await {
+        Ok(messages) => {
+            for message in messages {
+                if event_tx
+                    .send(InternalAppEvent::Runtime(RuntimeBusEvent::MessageReceived(
+                        message,
+                    )))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                recovery.messages_recovered = recovery.messages_recovered.saturating_add(1);
+            }
+        }
+        Err(_) => recovery.errors.push("message snapshot unavailable".into()),
+    }
+
+    if source == crate::runtime::RuntimeEventSource::SdkRpc {
+        match enqueue_lxmf_history_recovery(runtime, event_tx).await {
+            Ok(recovered) => {
+                recovery.messages_recovered = recovery.messages_recovered.saturating_add(recovered);
+            }
+            Err(crate::error::AppError::Unsupported(_)) => {}
+            Err(_) => recovery
+                .errors
+                .push("SDK history snapshot unavailable".into()),
+        }
+    }
+
+    event_tx
+        .send(InternalAppEvent::Runtime(RuntimeBusEvent::StreamRecovered(
+            recovery,
+        )))
+        .await
+        != Err(InternalEventSendError::Closed)
+}
+
+async fn enqueue_lxmf_history_recovery(
+    runtime: &Arc<dyn NetworkRuntime>,
+    event_tx: &InternalEventSender,
+) -> AppResult<usize> {
+    let mut cursor = None;
+    let mut recovered = 0usize;
+    for _ in 0..crate::runtime::network::LXMF_HISTORY_RECOVERY_MAX_PAGES {
+        let request = crate::runtime::LxmfHistoryRequest::bounded(None, cursor.clone(), 128)?;
+        let page = runtime.lxmf_history_page(request).await?;
+        let next_cursor = page.next_cursor.clone();
+        recovered = recovered.saturating_add(page.messages.len());
+        event_tx
+            .send(InternalAppEvent::Runtime(
+                RuntimeBusEvent::LxmfHistoryRecovered(page),
+            ))
+            .await
+            .map_err(|error| {
+                crate::error::AppError::Runtime(format!(
+                    "LXMF history recovery event queue rejected a page: {error:?}"
+                ))
+            })?;
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        if cursor.as_deref() == Some(next_cursor.as_str()) {
+            return Err(crate::error::AppError::Runtime(
+                "LXMF history recovery returned a repeated cursor".into(),
+            ));
+        }
+        cursor = Some(next_cursor);
+    }
+    Ok(recovered)
 }
 
 async fn collect_live_interop_report(
@@ -1406,6 +1651,7 @@ async fn collect_native_lxmf_smoke_send_report(
             delivery_mode: delivery_mode.clone(),
             include_ticket,
             native_reply_ticket: None,
+            operation: Some(crate::messaging::OutboundOperationIdentity::generate()),
             attachments: Vec::new(),
         };
         runtime
@@ -1422,6 +1668,9 @@ async fn collect_native_lxmf_smoke_send_report(
                     "delivered": message.delivered,
                     "failed": message.failed,
                     "native_lxmf_state": message.fields.get("native_lxmf_state").cloned(),
+                    "native_lxmf_propagation_stamp_cost": message.fields.get("native_lxmf_propagation_stamp_cost").cloned(),
+                    "native_lxmf_propagation_stamp_value": message.fields.get("native_lxmf_propagation_stamp_value").cloned(),
+                    "native_lxmf_propagation_stamp_attempts": message.fields.get("native_lxmf_propagation_stamp_attempts").cloned(),
                     "include_ticket": include_ticket,
                     "native_lxmf_include_ticket": message.fields.get("native_lxmf_include_ticket").cloned(),
                     "native_lxmf_reply_ticket_offered": message.fields.get("native_lxmf_reply_ticket_offered").cloned(),
@@ -1535,6 +1784,7 @@ async fn collect_native_lxmf_live_interop_report(
                 delivery_mode: delivery_mode.clone(),
                 include_ticket,
                 native_reply_ticket: None,
+                operation: Some(crate::messaging::OutboundOperationIdentity::generate()),
                 attachments: Vec::new(),
             };
             runtime
@@ -1549,6 +1799,9 @@ async fn collect_native_lxmf_live_interop_report(
                         "packet_hash": message.message_id,
                         "native_lxmf_state": message.fields.get("native_lxmf_state").cloned(),
                         "native_lxmf_propagation_node": message.fields.get("native_lxmf_propagation_node").cloned(),
+                        "native_lxmf_propagation_stamp_cost": message.fields.get("native_lxmf_propagation_stamp_cost").cloned(),
+                        "native_lxmf_propagation_stamp_value": message.fields.get("native_lxmf_propagation_stamp_value").cloned(),
+                        "native_lxmf_propagation_stamp_attempts": message.fields.get("native_lxmf_propagation_stamp_attempts").cloned(),
                         "include_ticket": include_ticket,
                         "native_lxmf_include_ticket": message.fields.get("native_lxmf_include_ticket").cloned(),
                         "native_lxmf_reply_ticket_offered": message.fields.get("native_lxmf_reply_ticket_offered").cloned(),
@@ -3161,7 +3414,7 @@ fn native_network_smoke_test_verdicts(
             live_report,
             execute_live_probe,
             PageFetchProbeStage::LinkSetup,
-            "run Diagnostics L or X to perform an explicit live probe; if it fails, inspect Reticulum 0.6 link setup"
+            "run Diagnostics L or X to perform an explicit live probe; if it fails, inspect Reticulum 0.9 link setup"
         ),
         "request_send": live_or_skipped_stage_verdict(
             live_report,
@@ -3267,7 +3520,7 @@ fn native_network_smoke_test_classification(
             "link_setup",
             "fail",
             "live link setup failed",
-            "inspect Reticulum 0.6 link setup details in live_page_probe or run with --live --fetch-page --stdout",
+            "inspect Reticulum 0.9 link setup details in live_page_probe or run with --live --fetch-page --stdout",
         ),
         (
             "request_send",
@@ -3410,7 +3663,7 @@ fn page_fetch_stage_next_step(stage: Option<&PageFetchProbeStage>) -> &'static s
             "request the destination path, use --warm-path, and retry after Reticulum path discovery"
         }
         Some(PageFetchProbeStage::LinkSetup) => {
-            "inspect Reticulum 0.6 link setup details in live_page_probe"
+            "inspect Reticulum 0.9 link setup details in live_page_probe"
         }
         Some(PageFetchProbeStage::RequestSend) => {
             "inspect request payload/path traces and clean Reticulum request send behavior"
@@ -3975,6 +4228,21 @@ fn network_doctor_facade_events_from_runtime_bus_event(
             }
             events
         }
+        RuntimeBusEvent::SdkDeliveryUpdated(update) => vec![RuntimeFacadeEvent::LxmfEvent {
+            event: format!("sdk_delivery_{}", update.state.as_str()),
+            detail: Some(format!(
+                "peer={} message={} terminal={} attempts={} sequence={}",
+                update
+                    .peer_hash
+                    .as_deref()
+                    .map(compact_hash)
+                    .unwrap_or_else(|| "unknown".into()),
+                update.message_id,
+                update.terminal,
+                update.attempts,
+                update.seq_no
+            )),
+        }],
         RuntimeBusEvent::LxmfDeliveryEvidence(evidence) => {
             let mut events = vec![RuntimeFacadeEvent::LxmfEvent {
                 event: format!("{:?}", evidence.kind).to_ascii_lowercase(),
@@ -4062,6 +4330,30 @@ fn network_doctor_facade_events_from_runtime_bus_event(
                 }]
             }
         },
+        RuntimeBusEvent::StreamGap(gap) => vec![RuntimeFacadeEvent::Diagnostic {
+            section: "event_stream".into(),
+            message: format!(
+                "gap source={:?} reason={:?} dropped={} cursor={}..{}",
+                gap.source, gap.reason, gap.dropped_count, gap.last_cursor, gap.next_cursor
+            ),
+        }],
+        RuntimeBusEvent::StreamRecovered(recovery) => vec![RuntimeFacadeEvent::Diagnostic {
+            section: "event_stream".into(),
+            message: format!(
+                "recovered cursor={} directory={} messages={} errors={}",
+                recovery.cursor,
+                recovery.directory_entries_recovered,
+                recovery.messages_recovered,
+                recovery.errors.len()
+            ),
+        }],
+        RuntimeBusEvent::SdkRpcEvent(event) => vec![RuntimeFacadeEvent::Diagnostic {
+            section: "sdk_rpc_event".into(),
+            message: format!(
+                "type={} sequence={} source={}",
+                event.event_type, event.seq_no, event.source_component
+            ),
+        }],
         _ => Vec::new(),
     }
 }
@@ -4956,6 +5248,10 @@ pub struct InterfacesPanelState {
 pub struct DiagnosticsPanelState {
     pub last_snapshot: Option<String>,
     pub last_lxmf_sdk_rpc_probe: Option<LxmfSdkRpcProbeSnapshot>,
+    pub last_runtime_lifecycle: Option<RuntimeLifecycleSnapshot>,
+    pub last_runtime_capabilities: Option<RuntimeCapabilitySnapshot>,
+    pub last_interface_stats: Option<crate::runtime::InterfaceStats>,
+    pub last_network_snapshot: Option<NetworkSnapshot>,
     pub last_export_path: Option<PathBuf>,
     pub last_export_summary: Option<String>,
     pub preview_lines: Vec<String>,
@@ -5001,9 +5297,12 @@ pub struct OmenChatEventStagingMetrics {
     pub resource_bytes: usize,
     pub close_items: usize,
     pub close_bytes: usize,
+    pub terminal_items: usize,
+    pub terminal_bytes: usize,
     pub rejected_frames: u64,
     pub rejected_resources: u64,
     pub rejected_closes: u64,
+    pub rejected_terminals: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -6081,6 +6380,8 @@ pub struct App {
     pub input: InputState,
     pub status: StatusModel,
     next_tab_id: u64,
+    next_browser_operation_id: u64,
+    browser_operations: BTreeMap<String, (TabId, u64)>,
     next_conversation_id: u64,
     next_message_generation: u64,
     next_diagnostics_generation: u64,
@@ -6088,9 +6389,11 @@ pub struct App {
     propagation_sync_pending: Option<u64>,
     lxmf_peer_inspection: Option<LxmfPeerInspectionState>,
     local_lxmf_announce_pending: bool,
+    last_local_lxmf_announce_started: Option<Instant>,
     pending_local_lxmf_announce_action: Option<PendingLocalLxmfAnnounceAction>,
     pending_outbound_statuses: BTreeMap<String, OutboundStatus>,
     pending_lxmf_delivery_evidence: BTreeMap<String, Vec<LxmfDeliveryEvidence>>,
+    pending_lxmf_cancellations: BTreeSet<String>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pending_omenchat_link_data: Vec<crate::runtime::OmenChatLinkData>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -6104,11 +6407,17 @@ pub struct App {
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pending_omenchat_resource_data_bytes: usize,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pending_omenchat_resource_terminals: Vec<crate::runtime::ResourceLifecycleEvent>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pending_omenchat_resource_terminal_bytes: usize,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     rejected_omenchat_staged_frames: u64,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     rejected_omenchat_staged_resources: u64,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     rejected_omenchat_staged_closes: u64,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    rejected_omenchat_staged_resource_terminals: u64,
     micronplus_node_warnings: BTreeMap<String, Vec<MicronPlusNodeWarning>>,
     diagnostics_export_pending: Option<u64>,
     runtime_startup_pending: bool,
@@ -6122,6 +6431,7 @@ pub struct App {
     pending_ui_preferences_save: Option<PendingUiPreferenceSave>,
     next_lxmf_direct_reconcile_epoch_ms: u64,
     next_lxmf_propagation_reconcile_epoch_ms: u64,
+    next_lxmf_expiry_reconcile_epoch_ms: u64,
     next_lxmf_auto_propagation_sync_epoch_ms: u64,
     active_conversation_autoread_enabled: bool,
 }
@@ -6175,6 +6485,7 @@ impl App {
         if let Some(legacy_dir) = &config.paths.legacy_python_conversations_dir {
             let _ = message_store.import_missing_threads_from(legacy_dir);
         }
+        let expired_lxmf_on_startup = message_store.reconcile_expired_lxmf(current_epoch_ms())?;
         let directory_service = DirectoryService::new(config.paths.directory_file.clone())?;
         let messaging_service = MessagingService::with_directory(
             runtime.clone(),
@@ -6295,6 +6606,16 @@ impl App {
             config.settings.logs.load_recent_entries,
         );
         logs.push(LogSeverity::Info, "OMENbrowser_rs mock shell initialized");
+        if !expired_lxmf_on_startup.is_empty() {
+            logs.push_with_source(
+                LogSeverity::Info,
+                LogSource::Messaging,
+                format!(
+                    "reconciled {} expired outbound LXMF operation(s) from durable history",
+                    expired_lxmf_on_startup.len()
+                ),
+            );
+        }
         if let Some(warning) = log_policy_warning {
             logs.push_with_source(LogSeverity::Warn, LogSource::App, warning);
         }
@@ -6368,6 +6689,8 @@ impl App {
                 task: runtime_decision.warning.unwrap_or_else(|| "ready".into()),
             },
             next_tab_id,
+            next_browser_operation_id: 1,
+            browser_operations: BTreeMap::new(),
             next_conversation_id,
             next_message_generation: 1,
             next_diagnostics_generation: 1,
@@ -6375,9 +6698,11 @@ impl App {
             propagation_sync_pending: None,
             lxmf_peer_inspection: None,
             local_lxmf_announce_pending: false,
+            last_local_lxmf_announce_started: None,
             pending_local_lxmf_announce_action: None,
             pending_outbound_statuses: BTreeMap::new(),
             pending_lxmf_delivery_evidence: BTreeMap::new(),
+            pending_lxmf_cancellations: BTreeSet::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             pending_omenchat_link_data: Vec::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -6391,11 +6716,17 @@ impl App {
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             pending_omenchat_resource_data_bytes: 0,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            pending_omenchat_resource_terminals: Vec::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            pending_omenchat_resource_terminal_bytes: 0,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             rejected_omenchat_staged_frames: 0,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             rejected_omenchat_staged_resources: 0,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             rejected_omenchat_staged_closes: 0,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            rejected_omenchat_staged_resource_terminals: 0,
             micronplus_node_warnings: BTreeMap::new(),
             diagnostics_export_pending: None,
             runtime_startup_pending: false,
@@ -6409,6 +6740,7 @@ impl App {
             pending_ui_preferences_save: None,
             next_lxmf_direct_reconcile_epoch_ms: 0,
             next_lxmf_propagation_reconcile_epoch_ms: 0,
+            next_lxmf_expiry_reconcile_epoch_ms: 0,
             next_lxmf_auto_propagation_sync_epoch_ms: 0,
             active_conversation_autoread_enabled: true,
         };
@@ -6437,7 +6769,11 @@ impl App {
             }
         }
         if let Some(receiver) = app.runtime.subscribe_events() {
-            if !spawn_runtime_event_forwarder(app.event_tx.clone(), receiver) {
+            if !spawn_runtime_event_forwarder(
+                Arc::downgrade(&app.runtime),
+                app.event_tx.clone(),
+                receiver,
+            ) {
                 app.logs.push_with_source(
                     LogSeverity::Debug,
                     LogSource::Runtime,
@@ -6583,6 +6919,7 @@ impl App {
             current_page,
             render_cache: RenderCache::default(),
             loading: None,
+            transfer_status: None,
             path_warmup: None,
             partials: PartialRefreshState::default(),
             scroll: ScrollState {
@@ -7253,7 +7590,11 @@ impl App {
                 };
                 self.status.backend = runtime_backend_status_label(&decision.backend);
                 if let Some(receiver) = self.runtime.subscribe_events() {
-                    if !spawn_runtime_event_forwarder(self.event_tx.clone(), receiver) {
+                    if !spawn_runtime_event_forwarder(
+                        Arc::downgrade(&self.runtime),
+                        self.event_tx.clone(),
+                        receiver,
+                    ) {
                         self.logs.push_with_source(
                             LogSeverity::Debug,
                             LogSource::Runtime,
@@ -7359,11 +7700,14 @@ impl App {
                 true
             }
             RuntimeBackendName::Reticulum => {
-                self.logs.push_with_source(
-                    LogSeverity::Info,
-                    LogSource::Runtime,
-                    "launch bootstrap selecting native Reticulum runtime; startup is managed by OMENbrowser_rs",
-                );
+                let startup_message = match self.settings.reticulum_instance_mode {
+                    ReticulumInstanceMode::Managed => {
+                        "launch bootstrap selecting managed integrated Reticulum runtime"
+                    }
+                    ReticulumInstanceMode::External => "launch bootstrap found external/shared Reticulum mode; integrated automatic startup will remain disabled",
+                };
+                self.logs
+                    .push_with_source(LogSeverity::Info, LogSource::Runtime, startup_message);
                 let started = self.start_configured_runtime_nonblocking();
                 if started {
                     self.status.task = "starting Reticulum automatically".into();
@@ -7721,6 +8065,13 @@ impl App {
             self.status.task = "local LXMF announce already pending".into();
             return true;
         }
+        if let Some(remaining) = self.local_lxmf_announce_cooldown_remaining() {
+            self.status.task = format!(
+                "local LXMF announce rate limited; retry in {}s",
+                remaining.as_secs().saturating_add(1)
+            );
+            return false;
+        }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             self.status.task = "announce now requires a running async runtime".into();
             return false;
@@ -7729,7 +8080,8 @@ impl App {
         let tx = self.event_tx.clone();
         let identity = self.active_identity_profile_from_settings();
         self.local_lxmf_announce_pending = true;
-        self.status.task = "announcing local LXMF identity".into();
+        self.last_local_lxmf_announce_started = Some(Instant::now());
+        self.status.task = "sending local LXMF delivery announce (not targeted)".into();
         handle.spawn(async move {
             let result = async {
                 if let Some(identity) = identity {
@@ -7742,6 +8094,11 @@ impl App {
             let _ = tx.send(InternalAppEvent::LocalLxmfAnnounce(result)).await;
         });
         true
+    }
+
+    fn local_lxmf_announce_cooldown_remaining(&self) -> Option<Duration> {
+        self.last_local_lxmf_announce_started
+            .and_then(|started| LOCAL_LXMF_ANNOUNCE_COOLDOWN.checked_sub(started.elapsed()))
     }
 
     fn ensure_managed_identity_for_native_startup(&mut self) -> bool {
@@ -7817,7 +8174,12 @@ impl App {
         self.settings.restart_required = true;
         let mode = self.settings.reticulum_instance_mode.clone();
         if self.save_settings_change("reticulum instance mode") {
-            self.status.task = format!("reticulum mode set to {mode:?}; restart required");
+            self.status.task = match mode {
+                ReticulumInstanceMode::Managed => {
+                    "reticulum mode set to Managed; restart required".into()
+                }
+                ReticulumInstanceMode::External => "reticulum mode set to External; external/shared backend is deferred and integrated startup will remain disabled; restart required".into(),
+            };
             true
         } else {
             false
@@ -8880,7 +9242,7 @@ impl App {
                 Ok(_) => {
                     self.refresh_interface_state_preserving_selection(&profile_id);
                     self.status.task = format!(
-                        "interface '{}' {} | {INTERFACE_RESTART_RECOMMENDED}",
+                        "interface '{}' {} | {INTERFACE_CHANGE_SCOPE}",
                         updated.name,
                         if updated.enabled {
                             "enabled"
@@ -10031,6 +10393,18 @@ impl App {
             );
             return false;
         }
+        if matches!(
+            self.settings.reticulum_instance_mode,
+            ReticulumInstanceMode::External
+        ) {
+            self.status.task = "external/shared Reticulum mode is configured but not yet negotiated; integrated startup is disabled to avoid a conflicting second instance".into();
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                "blocked integrated Reticulum startup while external/shared mode is configured",
+            );
+            return false;
+        }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             self.status.task = "native runtime startup requires an active Tokio runtime".into();
             self.logs.push_with_source(
@@ -10397,8 +10771,8 @@ impl App {
         let request_backend = tab
             .current_page
             .as_ref()
-            .and_then(page_native_request_backend)
-            .unwrap_or("none");
+            .and_then(page_native_request_transport_label)
+            .unwrap_or_else(|| "none".into());
         let loading = tab
             .loading
             .as_ref()
@@ -10704,6 +11078,12 @@ impl App {
         if let Some(snapshot) = snapshot {
             self.diagnostics_state.last_lxmf_sdk_rpc_probe =
                 Some(snapshot.native_lxmf_sdk_rpc_probe.clone());
+            self.diagnostics_state.last_runtime_lifecycle =
+                Some(snapshot.runtime_lifecycle.clone());
+            self.diagnostics_state.last_runtime_capabilities =
+                Some(snapshot.runtime_capabilities.clone());
+            self.diagnostics_state.last_interface_stats = Some(snapshot.interface_stats.clone());
+            self.diagnostics_state.last_network_snapshot = Some(snapshot.network.clone());
         }
         let bundle = self.redacted_diagnostics_bundle_with_snapshot(snapshot);
         let content = match serde_json::to_string_pretty(&bundle) {
@@ -10903,7 +11283,7 @@ impl App {
                     self.refresh_interface_state_preserving_selection(&profile.profile_id);
                     self.workspace.active_section = WorkspaceSection::Interfaces;
                     self.status.task = format!(
-                        "created {label} interface '{}' | {INTERFACE_RESTART_RECOMMENDED}",
+                        "created {label} interface '{}' | {INTERFACE_CHANGE_SCOPE}",
                         profile.name
                     );
                     self.refresh_diagnostics_summary();
@@ -10940,11 +11320,11 @@ impl App {
                     self.workspace.active_section = WorkspaceSection::Interfaces;
                     self.status.task = match outcome {
                         GatewayProfileCreateOutcome::Created(profile) => format!(
-                            "created {label} gateway '{}:{}' | {INTERFACE_RESTART_RECOMMENDED}",
+                            "created {label} gateway '{}:{}' | {INTERFACE_CHANGE_SCOPE}",
                             profile.target_host, profile.target_port
                         ),
                         GatewayProfileCreateOutcome::Enabled(profile) => format!(
-                            "enabled {label} gateway '{}:{}' | {INTERFACE_RESTART_RECOMMENDED}",
+                            "enabled {label} gateway '{}:{}' | {INTERFACE_CHANGE_SCOPE}",
                             profile.target_host, profile.target_port
                         ),
                         GatewayProfileCreateOutcome::AlreadyEnabled(profile) => format!(
@@ -11076,8 +11456,8 @@ impl App {
                     self.refresh_interface_state_preserving_selection(&profile_id);
                     self.refresh_diagnostics_summary();
                     self.status.task = format!(
-                        "I2P interface '{}' connectable={}",
-                        updated.name, updated.connectable
+                        "I2P interface '{}' connectable={} | {INTERFACE_CHANGE_SCOPE}",
+                        updated.name, updated.connectable,
                     );
                     true
                 }
@@ -11308,6 +11688,7 @@ impl App {
             current_page,
             render_cache: RenderCache::default(),
             loading: None,
+            transfer_status: None,
             path_warmup: None,
             partials: PartialRefreshState::default(),
             scroll: ScrollState::default(),
@@ -11780,9 +12161,8 @@ impl App {
                         )
                     };
                     self.refresh_diagnostics_summary();
-                    self.status.task = format!(
-                        "deleted interface '{profile_name}' | {INTERFACE_RESTART_RECOMMENDED}"
-                    );
+                    self.status.task =
+                        format!("deleted interface '{profile_name}' | {INTERFACE_CHANGE_SCOPE}");
                     true
                 }
                 Err(error) => {
@@ -12059,7 +12439,7 @@ impl App {
                                 format!("updated RNode coding rate for '{profile_name}'")
                             }
                         };
-                    self.status.task = format!("{status} | {INTERFACE_RESTART_RECOMMENDED}");
+                    self.status.task = format!("{status} | {INTERFACE_CHANGE_SCOPE}");
                     true
                 }
                 Err(error) => {
@@ -13361,6 +13741,7 @@ impl App {
                 self.status.task = "announcing local LXMF identity before send".into();
                 return;
             }
+            self.pending_local_lxmf_announce_action = None;
         }
         if let Some(blocker) = self.active_conversation_send_blocker() {
             self.status.task = blocker.clone();
@@ -13384,13 +13765,21 @@ impl App {
             include_ticket,
             attachments,
             peer_label,
+            operation,
         ) = {
             let conversation = &mut self.workspace.conversations[active];
+            let operation = conversation
+                .prepared_retry_operation
+                .take()
+                .filter(|prepared| prepared.matches_draft(conversation))
+                .map(|prepared| prepared.identity)
+                .unwrap_or_else(OutboundOperationIdentity::generate);
             conversation.pending_send = Some(MessageSendState { generation });
             if !message_pending_placeholder_present(conversation, generation) {
                 conversation.push_message(pending_outbound_message_from_conversation(
                     conversation,
                     generation,
+                    &operation,
                 ));
             }
             let send = (
@@ -13402,6 +13791,7 @@ impl App {
                 conversation.include_ticket,
                 conversation.attachments.clone(),
                 conversation.peer_label.clone(),
+                operation,
             );
             conversation.draft_title.clear();
             conversation.draft_body.clear();
@@ -13421,14 +13811,15 @@ impl App {
 
         tokio::spawn(async move {
             let result = match service
-                .compose(
-                    &peer_hash,
-                    &title,
-                    &body,
+                .compose_with_operation(OutboundComposeRequest {
+                    peer_hash,
+                    title,
+                    content: body,
                     delivery_mode,
                     include_ticket,
                     attachments,
-                )
+                    operation,
+                })
                 .await
             {
                 Ok(message) => MessageTaskResult::Sent {
@@ -13588,6 +13979,65 @@ impl App {
         true
     }
 
+    pub fn cancel_lxmf_message_by_key(&mut self, key: &str) -> bool {
+        let active = self.workspace.active_conversation;
+        let Some(message) = self.workspace.conversations[active]
+            .thread
+            .messages
+            .iter()
+            .find(|message| message_summary_key(message) == key)
+            .cloned()
+        else {
+            self.status.task = "message cancellation target not found".into();
+            return false;
+        };
+        if message.incoming
+            || message.delivered
+            || message.failed
+            || message
+                .fields
+                .get("native_lxmf_sdk_terminal")
+                .is_some_and(|terminal| terminal == "true")
+        {
+            self.status.task = "message cancellation blocked: delivery is already terminal".into();
+            return false;
+        }
+        let Some(message_id) = message.message_id.clone() else {
+            self.status.task = "message cancellation blocked: message ID is unavailable".into();
+            return false;
+        };
+        let peer_hash = message.peer_hash.clone();
+        let cancellation_key = format!("{peer_hash}:{message_id}");
+        if !self
+            .pending_lxmf_cancellations
+            .insert(cancellation_key.clone())
+        {
+            self.status.task = "message cancellation is already pending".into();
+            return false;
+        }
+        let conversation_id = self.workspace.conversations[active].id;
+        let service = self.messaging_service.clone();
+        let tx = self.event_tx.clone();
+        self.status.task = "requesting LXMF delivery cancellation".into();
+        tokio::spawn(async move {
+            let result = service
+                .cancel_delivery(&peer_hash, &message_id)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = tx
+                .send(InternalAppEvent::MessageTask(
+                    MessageTaskResult::Cancellation {
+                        conversation_id,
+                        peer_hash,
+                        message_id,
+                        result,
+                    },
+                ))
+                .await;
+        });
+        true
+    }
+
     fn prepare_lxmf_retry_from_message(&mut self, active: usize, message: MessageSummary) -> bool {
         let conversation = &mut self.workspace.conversations[active];
         conversation.draft_title = message.title.clone();
@@ -13619,6 +14069,18 @@ impl App {
             .filter_map(|attachment| attachment.path.clone())
             .collect();
         conversation.selected_message_key = Some(message_summary_key(&message));
+        let now_ms = current_epoch_ms();
+        let identity = OutboundOperationIdentity::from_message_at(&message, now_ms)
+            .filter(|identity| identity.remaining_ttl_ms_at(now_ms).is_some())
+            .unwrap_or_else(OutboundOperationIdentity::generate);
+        conversation.prepared_retry_operation = Some(PreparedRetryOperation {
+            identity,
+            title: conversation.draft_title.clone(),
+            body: conversation.draft_body.clone(),
+            attachments: conversation.attachments.clone(),
+            delivery_mode: conversation.delivery_mode.clone(),
+            include_ticket: conversation.include_ticket,
+        });
 
         let peer_hash = conversation.peer_hash.clone();
         let conversation_id = conversation.id;
@@ -14080,6 +14542,17 @@ impl App {
         if self.local_lxmf_announce_pending {
             return true;
         }
+        if let Some(remaining) = self.local_lxmf_announce_cooldown_remaining() {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Messaging,
+                format!(
+                    "local LXMF announce before {reason} is rate limited; retry in {}s",
+                    remaining.as_secs().saturating_add(1)
+                ),
+            );
+            return false;
+        }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             self.logs.push_with_source(
                 LogSeverity::Warn,
@@ -14099,6 +14572,7 @@ impl App {
             format!("announcing local LXMF identity before {reason}"),
         );
         self.local_lxmf_announce_pending = true;
+        self.last_local_lxmf_announce_started = Some(Instant::now());
         handle.spawn(async move {
             let result = runtime
                 .announce_identity()
@@ -14116,6 +14590,7 @@ impl App {
             Ok(true) => {
                 self.runtime_status.message =
                     set_status_message_bool(&self.runtime_status.message, "announced", true);
+                self.status.task = "local LXMF delivery announce sent".into();
                 self.logs.push_with_source(
                     LogSeverity::Info,
                     LogSource::Messaging,
@@ -14125,6 +14600,7 @@ impl App {
                 true
             }
             Ok(false) => {
+                self.status.task = "local LXMF delivery announce was not sent".into();
                 self.logs.push_with_source(
                     LogSeverity::Warn,
                     LogSource::Messaging,
@@ -14133,6 +14609,7 @@ impl App {
                 false
             }
             Err(error) => {
+                self.status.task = format!("local LXMF delivery announce failed: {error}");
                 self.logs.push_with_source(
                     LogSeverity::Warn,
                     LogSource::Messaging,
@@ -14202,6 +14679,7 @@ impl App {
                 }
                 return true;
             }
+            self.pending_local_lxmf_announce_action = None;
         }
         if !is_16_byte_hex_hash(&peer_hash) {
             self.lxmf_peer_inspection = Some(LxmfPeerInspectionState {
@@ -15799,6 +16277,44 @@ impl App {
         }
     }
 
+    pub fn reconcile_due_lxmf_expiry(&mut self, now_epoch_ms: u64) -> usize {
+        if now_epoch_ms < self.next_lxmf_expiry_reconcile_epoch_ms {
+            return 0;
+        }
+        self.next_lxmf_expiry_reconcile_epoch_ms =
+            now_epoch_ms.saturating_add(LXMF_EXPIRY_RECONCILE_INTERVAL_MS);
+        match self.messaging_service.reconcile_expired_lxmf(now_epoch_ms) {
+            Ok(messages) => {
+                for message in &messages {
+                    self.apply_message_update_to_visible_conversations(message);
+                }
+                if !messages.is_empty() {
+                    self.status.task = format!(
+                        "{} outbound LXMF operation(s) expired; retry creates a new send",
+                        messages.len()
+                    );
+                    self.logs.push_with_source(
+                        LogSeverity::Info,
+                        LogSource::Messaging,
+                        format!(
+                            "reconciled {} outbound LXMF TTL expiry event(s)",
+                            messages.len()
+                        ),
+                    );
+                }
+                messages.len()
+            }
+            Err(error) => {
+                self.logs.push_with_source(
+                    LogSeverity::Warn,
+                    LogSource::Messaging,
+                    format!("LXMF expiry reconciliation failed: {error}"),
+                );
+                0
+            }
+        }
+    }
+
     pub fn drain_internal_events(&mut self) -> usize {
         self.drain_internal_events_matching(|_| true)
     }
@@ -15824,7 +16340,8 @@ impl App {
         (
             self.event_wake.id(),
             self.next_lxmf_direct_reconcile_epoch_ms
-                .min(self.next_lxmf_propagation_reconcile_epoch_ms),
+                .min(self.next_lxmf_propagation_reconcile_epoch_ms)
+                .min(self.next_lxmf_expiry_reconcile_epoch_ms),
         )
     }
 
@@ -15871,6 +16388,16 @@ impl App {
     pub fn handle_internal_event(&mut self, event: InternalAppEvent) -> bool {
         match event {
             InternalAppEvent::BrowserTask(result) => self.apply_browser_task_result(result),
+            InternalAppEvent::BrowserOperationFinished { operation_id } => {
+                let Some((tab_id, _generation)) = self.browser_operations.remove(&operation_id)
+                else {
+                    return false;
+                };
+                if let Some(index) = self.browser_tab_index(tab_id) {
+                    self.workspace.browser_tabs[index].transfer_status = None;
+                }
+                true
+            }
             InternalAppEvent::MessageTask(result) => self.apply_message_task_result(result),
             InternalAppEvent::DiagnosticsTask(result) => self.apply_diagnostics_task_result(result),
             InternalAppEvent::MicronPlusWidget { tab_id, event } => {
@@ -15915,6 +16442,7 @@ impl App {
                         if status.connected {
                             self.apply_preferred_propagation_node_nonblocking();
                             self.queue_startup_path_requests_nonblocking();
+                            self.queue_lxmf_history_recovery_nonblocking();
                             if let Some(action) = self.pending_post_startup_action.take() {
                                 match action {
                                     PendingPostStartupAction::NativeLiveFetchValidation => {
@@ -15991,6 +16519,28 @@ impl App {
                 true
             }
         }
+    }
+
+    fn queue_lxmf_history_recovery_nonblocking(&mut self) -> bool {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return false;
+        };
+        let runtime = self.runtime.clone();
+        let tx = self.event_tx.clone();
+        handle.spawn(async move {
+            match enqueue_lxmf_history_recovery(&runtime, &tx).await {
+                Ok(_) => {}
+                Err(crate::error::AppError::Unsupported(_)) => {}
+                Err(error) => {
+                    let _ = tx
+                        .send(InternalAppEvent::Runtime(RuntimeBusEvent::Debug(format!(
+                            "startup LXMF history snapshot unavailable: {error}"
+                        ))))
+                        .await;
+                }
+            }
+        });
+        true
     }
 
     pub async fn wait_for_message_task_result(&mut self) -> bool {
@@ -16076,6 +16626,14 @@ impl App {
     }
 
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub fn drain_omenchat_resource_terminals(
+        &mut self,
+    ) -> Vec<crate::runtime::ResourceLifecycleEvent> {
+        self.pending_omenchat_resource_terminal_bytes = 0;
+        std::mem::take(&mut self.pending_omenchat_resource_terminals)
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub fn omenchat_event_staging_metrics(&self) -> OmenChatEventStagingMetrics {
         OmenChatEventStagingMetrics {
             frame_items: self.pending_omenchat_link_data.len(),
@@ -16084,9 +16642,12 @@ impl App {
             resource_bytes: self.pending_omenchat_resource_data_bytes,
             close_items: self.pending_omenchat_link_closed.len(),
             close_bytes: self.pending_omenchat_link_closed_bytes,
+            terminal_items: self.pending_omenchat_resource_terminals.len(),
+            terminal_bytes: self.pending_omenchat_resource_terminal_bytes,
             rejected_frames: self.rejected_omenchat_staged_frames,
             rejected_resources: self.rejected_omenchat_staged_resources,
             rejected_closes: self.rejected_omenchat_staged_closes,
+            rejected_terminals: self.rejected_omenchat_staged_resource_terminals,
         }
     }
 
@@ -16527,14 +17088,19 @@ impl App {
                     .estimated_inbound_bytes
                     .saturating_add(estimated_announce_bytes(&announce));
                 let announce_for_probe_summary = announce.clone();
-                let entry = self.directory_service.ingest_announce_with_metadata(
-                    announce.destination_hash,
-                    announce.display_name,
-                    announce.kind,
-                    announce.associated_hash,
-                    announce.node_associated_hash,
-                    announce.lxmf_stamp_cost,
-                );
+                let entry = self
+                    .directory_service
+                    .ingest_announce_with_identity_metadata(
+                        announce.destination_hash,
+                        announce.display_name,
+                        announce.kind,
+                        crate::directory::DirectoryAnnounceMetadata {
+                            identity_hash: announce.identity_hash,
+                            associated_hash: announce.associated_hash,
+                            node_associated_hash: announce.node_associated_hash,
+                            lxmf_stamp_cost: announce.lxmf_stamp_cost,
+                        },
+                    );
                 match entry {
                     Ok(entry) => {
                         if self.workspace.active_section == WorkspaceSection::Directory {
@@ -16587,6 +17153,16 @@ impl App {
                 }
             }
             crate::runtime::RuntimeBusEvent::MessageReceived(message) => {
+                if conversation_deleted_at(&self.settings, &message.peer_hash)
+                    .is_some_and(|deleted_at| message.timestamp <= deleted_at)
+                {
+                    self.logs.push_with_source(
+                        LogSeverity::Debug,
+                        LogSource::Messaging,
+                        "ignored a stale recovered message for deleted conversation history",
+                    );
+                    return true;
+                }
                 self.monitoring_state.inbound_messages =
                     self.monitoring_state.inbound_messages.saturating_add(1);
                 self.monitoring_state.estimated_inbound_bytes = self
@@ -16631,6 +17207,90 @@ impl App {
                     return true;
                 }
                 self.defer_outbound_status(status)
+            }
+            crate::runtime::RuntimeBusEvent::SdkDeliveryUpdated(update) => {
+                self.monitoring_state.outbound_status_updates = self
+                    .monitoring_state
+                    .outbound_status_updates
+                    .saturating_add(1);
+                let stored = self
+                    .messaging_service
+                    .apply_sdk_delivery_update(&update)
+                    .unwrap_or(false);
+                let visible = self.apply_sdk_delivery_update_to_visible_conversations(&update);
+                self.status.task = format!(
+                    "LXMF SDK delivery {}: {}",
+                    update.message_id,
+                    update.state.as_str()
+                );
+                self.logs.push_with_source(
+                    if update.state.is_failure_terminal() {
+                        LogSeverity::Warn
+                    } else {
+                        LogSeverity::Debug
+                    },
+                    LogSource::Runtime,
+                    format!(
+                        "LXMF SDK delivery message_id={} peer={} state={} terminal={} attempts={} reason={}",
+                        update.message_id,
+                        update
+                            .peer_hash
+                            .as_deref()
+                            .map(compact_hash)
+                            .unwrap_or_else(|| "unknown".into()),
+                        update.state.as_str(),
+                        update.terminal,
+                        update.attempts,
+                        update.reason_code.as_deref().unwrap_or("none")
+                    ),
+                );
+                stored || visible || update.peer_hash.is_none()
+            }
+            crate::runtime::RuntimeBusEvent::LxmfHistoryRecovered(mut page) => {
+                page.messages.retain(|record| {
+                    let direction = record.direction.trim().to_ascii_lowercase();
+                    let peer = match direction.as_str() {
+                        "in" | "inbound" | "received" => record.source.as_str(),
+                        "out" | "outbound" | "sent" => record.destination.as_str(),
+                        _ => return true,
+                    };
+                    !conversation_deleted_at(&self.settings, peer)
+                        .is_some_and(|deleted_at| record.timestamp as f64 <= deleted_at)
+                });
+                match self
+                    .messaging_service
+                    .reconcile_sdk_history(page, current_epoch_ms())
+                {
+                    Ok(report) => {
+                        for message in &report.changed_messages {
+                            if !self.apply_message_update_to_visible_conversations(message) {
+                                self.merge_message_into_conversation(message.clone());
+                            }
+                        }
+                        self.status.task = format!(
+                            "LXMF history reconciled: matched={} imported={} updated={} skipped={}",
+                            report.matched,
+                            report.imported_inbound,
+                            report.updated_outbound,
+                            report.skipped
+                        );
+                        self.logs.push_with_source(
+                            LogSeverity::Info,
+                            LogSource::Messaging,
+                            self.status.task.clone(),
+                        );
+                        !report.changed_messages.is_empty()
+                    }
+                    Err(error) => {
+                        self.status.task = format!("LXMF history reconciliation failed: {error}");
+                        self.logs.push_with_source(
+                            LogSeverity::Warn,
+                            LogSource::Messaging,
+                            self.status.task.clone(),
+                        );
+                        false
+                    }
+                }
             }
             crate::runtime::RuntimeBusEvent::LxmfDeliveryEvidence(evidence) => {
                 self.monitoring_state.lxmf_evidence_updates = self
@@ -17014,16 +17674,24 @@ impl App {
                 true
             }
             crate::runtime::RuntimeBusEvent::ResourceProgress(progress) => {
+                let label = resource_transfer_label(
+                    progress.source.as_deref(),
+                    progress.direction.as_deref(),
+                );
                 self.status.task = match progress.total {
                     Some(total) => format!(
-                        "resource {} {}/{} bytes",
+                        "{label} {} {}/{} bytes",
                         progress.transfer_id, progress.received, total
                     ),
                     None => format!(
-                        "resource {} {} bytes",
+                        "{label} {} {} bytes",
                         progress.transfer_id, progress.received
                     ),
                 };
+                self.apply_browser_transfer_status(
+                    progress.operation_id.as_deref(),
+                    &self.status.task.clone(),
+                );
                 self.logs.push_with_source(
                     LogSeverity::Debug,
                     LogSource::Runtime,
@@ -17032,11 +17700,56 @@ impl App {
                 true
             }
             crate::runtime::RuntimeBusEvent::ResourceLifecycle(lifecycle) => {
-                let source = lifecycle.source.as_deref().unwrap_or("resource");
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+                if lifecycle.source.as_deref() == Some("omenchat")
+                    && lifecycle.direction.as_deref() == Some("inbound")
+                    && lifecycle.peer.is_some()
+                    && matches!(
+                        &lifecycle.state,
+                        crate::runtime::ResourceLifecycleState::Failed
+                            | crate::runtime::ResourceLifecycleState::Cancelled
+                    )
+                {
+                    let retained_bytes = lifecycle
+                        .transfer_id
+                        .len()
+                        .saturating_add(lifecycle.reason.as_ref().map_or(0, String::len))
+                        .saturating_add(lifecycle.operation_id.as_ref().map_or(0, String::len))
+                        .saturating_add(lifecycle.source.as_ref().map_or(0, String::len))
+                        .saturating_add(lifecycle.purpose.as_ref().map_or(0, String::len))
+                        .saturating_add(lifecycle.direction.as_ref().map_or(0, String::len))
+                        .saturating_add(lifecycle.peer.as_ref().map_or(0, String::len));
+                    if self.pending_omenchat_resource_terminals.len()
+                        >= OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_ITEMS
+                        || self
+                            .pending_omenchat_resource_terminal_bytes
+                            .saturating_add(retained_bytes)
+                            > OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_BYTES
+                    {
+                        self.rejected_omenchat_staged_resource_terminals = self
+                            .rejected_omenchat_staged_resource_terminals
+                            .saturating_add(1);
+                        self.logs.push_with_source(
+                            LogSeverity::Warn,
+                            LogSource::Runtime,
+                            "OMENchat resource-terminal staging budget exceeded",
+                        );
+                    } else {
+                        self.pending_omenchat_resource_terminal_bytes = self
+                            .pending_omenchat_resource_terminal_bytes
+                            .saturating_add(retained_bytes);
+                        self.pending_omenchat_resource_terminals
+                            .push(lifecycle.clone());
+                    }
+                }
+                let label = resource_transfer_label(
+                    lifecycle.source.as_deref(),
+                    lifecycle.direction.as_deref(),
+                );
                 let reason = lifecycle.reason.as_deref().unwrap_or("no detail");
                 self.status.task = match lifecycle.state {
                     crate::runtime::ResourceLifecycleState::Offered => format!(
-                        "{source} offered {} size={}",
+                        "{label} offered {} size={}",
                         lifecycle.transfer_id,
                         lifecycle
                             .bytes
@@ -17044,7 +17757,7 @@ impl App {
                             .unwrap_or_else(|| "unknown".into())
                     ),
                     crate::runtime::ResourceLifecycleState::Complete => format!(
-                        "{source} complete {} size={}",
+                        "{label} complete {} size={}",
                         lifecycle.transfer_id,
                         lifecycle
                             .bytes
@@ -17054,12 +17767,16 @@ impl App {
                     crate::runtime::ResourceLifecycleState::Failed => {
                         self.monitoring_state.runtime_errors =
                             self.monitoring_state.runtime_errors.saturating_add(1);
-                        format!("{source} failed {}: {reason}", lifecycle.transfer_id)
+                        format!("{label} failed {}: {reason}", lifecycle.transfer_id)
                     }
                     crate::runtime::ResourceLifecycleState::Cancelled => {
-                        format!("{source} cancelled {}: {reason}", lifecycle.transfer_id)
+                        format!("{label} cancelled {}: {reason}", lifecycle.transfer_id)
                     }
                 };
+                self.apply_browser_transfer_status(
+                    lifecycle.operation_id.as_deref(),
+                    &self.status.task.clone(),
+                );
                 self.logs.push_with_source(
                     match lifecycle.state {
                         crate::runtime::ResourceLifecycleState::Failed => LogSeverity::Warn,
@@ -17067,6 +17784,67 @@ impl App {
                     },
                     LogSource::Runtime,
                     self.status.task.clone(),
+                );
+                true
+            }
+            crate::runtime::RuntimeBusEvent::StreamGap(gap) => {
+                self.monitoring_state.runtime_errors =
+                    self.monitoring_state.runtime_errors.saturating_add(1);
+                self.status.task = format!(
+                    "runtime event gap: dropped {} event(s); recovering snapshots",
+                    gap.dropped_count
+                );
+                self.logs.push_with_source(
+                    LogSeverity::Warn,
+                    LogSource::Runtime,
+                    format!(
+                        "runtime event gap source={:?} reason={:?} dropped={} cursor={}..{}",
+                        gap.source, gap.reason, gap.dropped_count, gap.last_cursor, gap.next_cursor
+                    ),
+                );
+                true
+            }
+            crate::runtime::RuntimeBusEvent::SdkRpcEvent(event) => {
+                self.status.task = format!(
+                    "SDK/RPC event {} sequence {}",
+                    event.event_type, event.seq_no
+                );
+                self.logs.push_with_source(
+                    LogSeverity::Debug,
+                    LogSource::Runtime,
+                    format!(
+                        "SDK/RPC event type={} sequence={} source={} cursor={}",
+                        event.event_type, event.seq_no, event.source_component, event.cursor
+                    ),
+                );
+                true
+            }
+            crate::runtime::RuntimeBusEvent::StreamRecovered(recovery) => {
+                self.status.task = format!(
+                    "runtime event recovery complete: directory={} messages={} errors={}",
+                    recovery.directory_entries_recovered,
+                    recovery.messages_recovered,
+                    recovery.errors.len()
+                );
+                self.logs.push_with_source(
+                    if recovery.errors.is_empty() {
+                        LogSeverity::Info
+                    } else {
+                        LogSeverity::Warn
+                    },
+                    LogSource::Runtime,
+                    format!(
+                        "runtime event recovery source={:?} cursor={} status={} interfaces={} network={} propagation={} directory={} messages={} errors={}",
+                        recovery.source,
+                        recovery.cursor,
+                        recovery.status_recovered,
+                        recovery.interfaces_recovered,
+                        recovery.network_snapshot_recovered,
+                        recovery.propagation_recovered,
+                        recovery.directory_entries_recovered,
+                        recovery.messages_recovered,
+                        recovery.errors.join(" | ")
+                    ),
                 );
                 true
             }
@@ -17088,6 +17866,23 @@ impl App {
                 true
             }
         }
+    }
+
+    fn apply_browser_transfer_status(&mut self, operation_id: Option<&str>, status: &str) -> bool {
+        let Some((tab_id, generation)) = operation_id
+            .and_then(|operation_id| self.browser_operations.get(operation_id))
+            .copied()
+        else {
+            return false;
+        };
+        let Some(index) = self.browser_tab_index(tab_id) else {
+            return false;
+        };
+        if self.workspace.browser_tabs[index].session.generation != generation {
+            return false;
+        }
+        self.workspace.browser_tabs[index].transfer_status = Some(status.to_owned());
+        true
     }
 
     pub fn apply_diagnostics_task_result(&mut self, result: DiagnosticsTaskResult) -> bool {
@@ -17743,6 +18538,91 @@ impl App {
                 peer_hash,
                 result,
             ),
+            MessageTaskResult::Cancellation {
+                conversation_id,
+                peer_hash,
+                message_id,
+                result,
+            } => {
+                self.pending_lxmf_cancellations
+                    .remove(&format!("{peer_hash}:{message_id}"));
+                let Some(index) = self.conversation_index(conversation_id) else {
+                    return false;
+                };
+                let message = self.workspace.conversations[index]
+                    .thread
+                    .messages
+                    .iter_mut()
+                    .find(|message| {
+                        message.peer_hash.eq_ignore_ascii_case(&peer_hash)
+                            && message.message_id.as_deref() == Some(message_id.as_str())
+                    });
+                match result {
+                    Ok(mut update) => {
+                        let delivery_is_terminal = message.as_ref().is_some_and(|message| {
+                            message.delivered
+                                || message.failed
+                                || message
+                                    .fields
+                                    .get("native_lxmf_sdk_terminal")
+                                    .is_some_and(|terminal| terminal == "true")
+                        });
+                        if delivery_is_terminal {
+                            update.fields.insert(
+                                "native_lxmf_next_action".into(),
+                                "delivery_is_already_terminal".into(),
+                            );
+                            let _ = self.message_store.update_fields(
+                                &peer_hash,
+                                &message_id,
+                                update.fields.clone(),
+                            );
+                        }
+                        if let Some(message) = message {
+                            message.fields.extend(update.fields);
+                        }
+                        self.status.task = match update.outcome {
+                            LxmfCancelOutcome::Accepted if delivery_is_terminal => {
+                                "cancellation accepted; delivery is already terminal"
+                            }
+                            LxmfCancelOutcome::Accepted => {
+                                "cancellation accepted; waiting for terminal delivery event"
+                            }
+                            LxmfCancelOutcome::AlreadyTerminal => {
+                                "cancellation not applied: delivery was already terminal"
+                            }
+                            LxmfCancelOutcome::NotFound => {
+                                "cancellation target was not found; refresh delivery state"
+                            }
+                            LxmfCancelOutcome::TooLateToCancel => {
+                                "cancellation was too late; waiting for delivery outcome"
+                            }
+                            LxmfCancelOutcome::Unsupported => {
+                                "cancellation is unsupported by the active backend"
+                            }
+                        }
+                        .into();
+                    }
+                    Err(error) => {
+                        let fields = BTreeMap::from([
+                            ("native_lxmf_sdk_cancel_outcome".into(), "failed".into()),
+                            (
+                                "native_lxmf_next_action".into(),
+                                "inspect_backend_and_retry_cancellation".into(),
+                            ),
+                        ]);
+                        if let Some(message) = message {
+                            message.fields.extend(fields.clone());
+                        }
+                        let _ = self
+                            .message_store
+                            .update_fields(&peer_hash, &message_id, fields);
+                        self.status.task = format!("message cancellation failed: {error}");
+                    }
+                }
+                self.refresh_context_status();
+                true
+            }
             MessageTaskResult::Error {
                 conversation_id,
                 generation,
@@ -17862,6 +18742,20 @@ impl App {
                 })
                 .collect()
         };
+        let mut fields = BTreeMap::from([
+            ("native_lxmf_state".into(), "failed".into()),
+            ("native_lxmf_proof_state".into(), "failed".into()),
+            ("native_lxmf_failure_reason".into(), reason.into()),
+            (
+                "native_lxmf_retry_guidance".into(),
+                "send failed before delivery was queued; fix the blocker and retry".into(),
+            ),
+        ]);
+        if let Some(pending) = pending_message {
+            if let Some(operation) = OutboundOperationIdentity::from_message(pending) {
+                operation.insert_fields(&mut fields);
+            }
+        }
         MessageSummary {
             peer_hash: conversation.peer_hash.clone(),
             peer_label: conversation.peer_label.clone(),
@@ -17874,15 +18768,7 @@ impl App {
             incoming: false,
             unread: false,
             message_id: Some(format!("failed-send-{generation}")),
-            fields: BTreeMap::from([
-                ("native_lxmf_state".into(), "failed".into()),
-                ("native_lxmf_proof_state".into(), "failed".into()),
-                ("native_lxmf_failure_reason".into(), reason.into()),
-                (
-                    "native_lxmf_retry_guidance".into(),
-                    "send failed before delivery was queued; fix the blocker and retry".into(),
-                ),
-            ]),
+            fields,
             attachments,
         }
     }
@@ -18011,13 +18897,15 @@ impl App {
     }
 
     fn spawn_browser_task(
-        &self,
+        &mut self,
         tab_id: TabId,
         generation: u64,
         mut session: BrowserSession,
         kind: BrowserTaskKind,
         cancel: CancellationToken,
     ) {
+        let operation_id = self.begin_browser_operation(tab_id, generation);
+        session.set_operation_id(Some(operation_id.clone()));
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
             let timeout = browser_task_timeout(&kind);
@@ -18166,7 +19054,24 @@ impl App {
                 }
             };
             let _ = tx.send(InternalAppEvent::BrowserTask(result)).await;
+            let _ = tx
+                .send(InternalAppEvent::BrowserOperationFinished { operation_id })
+                .await;
         });
+    }
+
+    fn begin_browser_operation(&mut self, tab_id: TabId, generation: u64) -> String {
+        self.browser_operations
+            .retain(|_, (active_tab_id, _)| *active_tab_id != tab_id);
+        let sequence = self.next_browser_operation_id;
+        self.next_browser_operation_id = self.next_browser_operation_id.checked_add(1).unwrap_or(1);
+        let operation_id = format!("browser-{tab_id}-{generation}-{sequence}");
+        self.browser_operations
+            .insert(operation_id.clone(), (tab_id, generation));
+        if let Some(index) = self.browser_tab_index(tab_id) {
+            self.workspace.browser_tabs[index].transfer_status = None;
+        }
+        operation_id
     }
 
     pub fn apply_browser_task_result(&mut self, result: BrowserTaskResult) -> bool {
@@ -18174,7 +19079,7 @@ impl App {
             BrowserTaskResult::Page {
                 tab_id,
                 generation,
-                session,
+                mut session,
                 page,
             } => {
                 let Some(index) = self
@@ -18194,6 +19099,7 @@ impl App {
                     .saturating_add(1);
                 self.monitoring_state
                     .note_inbound(estimated_browser_page_bytes(&page));
+                session.set_operation_id(None);
                 self.workspace.browser_tabs[index].session = *session;
                 self.sync_browser_tab_from_session(index, Some(page));
                 self.workspace.browser_tabs[index].scroll.offset = 0;
@@ -18876,6 +19782,7 @@ impl App {
             address_input: url.clone(),
             render_cache: RenderCache::default(),
             loading: None,
+            transfer_status: None,
             path_warmup: None,
             partials: PartialRefreshState::default(),
             scroll: ScrollState::default(),
@@ -19994,6 +20901,21 @@ impl App {
         changed
     }
 
+    fn apply_sdk_delivery_update_to_visible_conversations(
+        &mut self,
+        update: &crate::runtime::RuntimeLxmfDeliveryUpdate,
+    ) -> bool {
+        let mut changed = false;
+        for conversation in &mut self.workspace.conversations {
+            for message in &mut conversation.thread.messages {
+                changed |= crate::messaging::service::apply_sdk_delivery_update_to_message(
+                    message, update,
+                );
+            }
+        }
+        changed
+    }
+
     fn apply_lxmf_delivery_evidence_to_visible_conversations(
         &mut self,
         evidence: &LxmfDeliveryEvidence,
@@ -20371,6 +21293,125 @@ impl App {
             }
         }
     }
+
+    pub fn runtime_lifecycle_diagnostics_line(&self) -> String {
+        let Some(snapshot) = &self.diagnostics_state.last_runtime_lifecycle else {
+            return "runtime lifecycle: not collected; export diagnostics bundle to refresh".into();
+        };
+        let mut line = format!(
+            "runtime lifecycle: state={:?} backend={:?}",
+            snapshot.state, snapshot.backend
+        );
+        if let Some(failure) = &snapshot.failure {
+            line.push_str(&format!(
+                " failure={:?} retryable={}",
+                failure.category, failure.retryable
+            ));
+        }
+        line
+    }
+
+    pub fn runtime_capabilities_diagnostics_line(&self) -> String {
+        let Some(snapshot) = &self.diagnostics_state.last_runtime_capabilities else {
+            return "runtime capabilities: not collected; export diagnostics bundle to refresh"
+                .into();
+        };
+        let mut supported = 0usize;
+        let mut unsupported = 0usize;
+        let mut unknown = 0usize;
+        for record in &snapshot.capabilities {
+            match record.availability {
+                RuntimeCapabilityAvailability::Supported => supported += 1,
+                RuntimeCapabilityAvailability::Unsupported => unsupported += 1,
+                RuntimeCapabilityAvailability::Unknown => unknown += 1,
+            }
+        }
+        format!(
+            "runtime capabilities: backend={:?} supported={supported} unsupported={unsupported} unknown={unknown}",
+            snapshot.backend
+        )
+    }
+
+    pub fn runtime_ownership_diagnostics_line(&self) -> String {
+        let configured = match self.settings.reticulum_instance_mode {
+            ReticulumInstanceMode::Managed => "managed_integrated",
+            ReticulumInstanceMode::External => "external_deferred",
+        };
+        let negotiated = self
+            .diagnostics_state
+            .last_runtime_capabilities
+            .as_ref()
+            .map(|snapshot| {
+                format!(
+                    "{:?}",
+                    snapshot.availability(crate::runtime::RuntimeCapability::SharedInstance)
+                )
+            })
+            .unwrap_or_else(|| "not_collected".into());
+        format!("runtime ownership: configured={configured} negotiated_shared={negotiated}")
+    }
+
+    pub fn interface_diagnostics_line(&self) -> String {
+        let Some(stats) = &self.diagnostics_state.last_interface_stats else {
+            return "interfaces: not collected; export diagnostics bundle to refresh".into();
+        };
+        if !stats.available {
+            return format!(
+                "interfaces: unavailable ({})",
+                stats.reason.as_deref().unwrap_or("no runtime evidence")
+            );
+        }
+        let attached = stats
+            .samples
+            .iter()
+            .filter(|sample| sample.attached)
+            .count();
+        let enabled = stats.samples.iter().filter(|sample| sample.enabled).count();
+        let unsupported = stats
+            .samples
+            .iter()
+            .filter(|sample| !sample.supported)
+            .count();
+        format!(
+            "interfaces: samples={} enabled={enabled} attached={attached} unsupported={unsupported}",
+            stats.samples.len()
+        )
+    }
+
+    pub fn path_network_diagnostics_line(&self) -> String {
+        let Some(snapshot) = &self.diagnostics_state.last_network_snapshot else {
+            return "network paths: not collected; export diagnostics bundle to refresh".into();
+        };
+        let announce_count = snapshot
+            .announce_counts
+            .values()
+            .fold(0_u32, |total, count| total.saturating_add(*count));
+        let path_table = if snapshot.path_table_available {
+            snapshot.path_table_count.to_string()
+        } else {
+            "unavailable".into()
+        };
+        let request_failures = if snapshot.request_failure_metrics_available {
+            snapshot.request_failures.to_string()
+        } else {
+            "unavailable".into()
+        };
+        let shared_instance = if snapshot.shared_instance_status_available {
+            if snapshot.connected_to_shared_instance {
+                "connected"
+            } else if snapshot.is_shared_instance {
+                "hosting"
+            } else {
+                "not_shared"
+            }
+        } else {
+            "unavailable"
+        };
+        format!(
+            "network paths: known_destinations={} announces={announce_count} pending={} path_table={path_table} request_failures={request_failures} shared_instance={shared_instance}",
+            snapshot.known_destinations, snapshot.pending_announces
+        )
+    }
 }
 
 fn format_native_lxmf_sdk_rpc_probe_line(probe: &LxmfSdkRpcProbeSnapshot) -> String {
@@ -20384,6 +21425,12 @@ fn format_native_lxmf_sdk_rpc_probe_line(probe: &LxmfSdkRpcProbeSnapshot) -> Str
     }
     if let Some(version) = probe.active_contract_version {
         line.push_str(&format!(" contract={version}"));
+    }
+    if let Some(position) = probe.event_stream_position {
+        line.push_str(&format!(" event_cursor={position}"));
+    }
+    if let Some(revision) = probe.config_revision {
+        line.push_str(&format!(" config_revision={revision}"));
     }
     if probe.queued_messages.is_some() || probe.in_flight_messages.is_some() {
         line.push_str(&format!(
@@ -20407,6 +21454,7 @@ pub fn current_epoch_ms() -> u64 {
 
 fn estimated_announce_bytes(announce: &crate::runtime::AnnouncePayload) -> u64 {
     let text_bytes = announce.destination_hash.len()
+        + announce.identity_hash.as_deref().map(str::len).unwrap_or(0)
         + announce.display_name.len()
         + announce
             .associated_hash
@@ -20809,11 +21857,26 @@ fn pending_send_message_id(generation: u64) -> String {
 fn pending_outbound_message_from_conversation(
     conversation: &Conversation,
     generation: u64,
+    operation: &OutboundOperationIdentity,
 ) -> MessageSummary {
     let transport_method = match conversation.delivery_mode {
         DeliveryMode::Direct => TransportMethod::Direct,
         DeliveryMode::Propagated => TransportMethod::Propagated,
     };
+    let mut fields = BTreeMap::from([
+        ("native_lxmf_state".into(), "sending".into()),
+        ("native_lxmf_proof_state".into(), "pending".into()),
+        ("native_lxmf_receipt_state".into(), "pending".into()),
+        (
+            "native_lxmf_pending_generation".into(),
+            generation.to_string(),
+        ),
+        (
+            "native_lxmf_next_action".into(),
+            "waiting_for_runtime_result".into(),
+        ),
+    ]);
+    operation.insert_fields(&mut fields);
     MessageSummary {
         peer_hash: conversation.peer_hash.clone(),
         peer_label: conversation.peer_label.clone(),
@@ -20826,19 +21889,7 @@ fn pending_outbound_message_from_conversation(
         incoming: false,
         unread: false,
         message_id: Some(pending_send_message_id(generation)),
-        fields: BTreeMap::from([
-            ("native_lxmf_state".into(), "sending".into()),
-            ("native_lxmf_proof_state".into(), "pending".into()),
-            ("native_lxmf_receipt_state".into(), "pending".into()),
-            (
-                "native_lxmf_pending_generation".into(),
-                generation.to_string(),
-            ),
-            (
-                "native_lxmf_next_action".into(),
-                "waiting_for_runtime_result".into(),
-            ),
-        ]),
+        fields,
         attachments: conversation
             .attachments
             .iter()
@@ -21247,6 +22298,24 @@ fn page_native_request_backend(page: &BrowserPage) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
+fn page_native_request_primitive(page: &BrowserPage) -> Option<&str> {
+    page.metadata
+        .get("native_request_primitive")
+        .and_then(serde_json::Value::as_str)
+}
+
+fn page_native_request_transport_label(page: &BrowserPage) -> Option<String> {
+    match (
+        page_native_request_backend(page),
+        page_native_request_primitive(page),
+    ) {
+        (Some(backend), Some(primitive)) => Some(format!("{backend}/{primitive}")),
+        (Some(backend), None) => Some(backend.into()),
+        (None, Some(primitive)) => Some(format!("unknown/{primitive}")),
+        (None, None) => None,
+    }
+}
+
 fn browser_live_page_evidence_line(
     page: Option<&BrowserPage>,
     backend: &RuntimeBackendName,
@@ -21256,12 +22325,19 @@ fn browser_live_page_evidence_line(
     };
     match page.source {
         PageSource::Network if matches!(backend, RuntimeBackendName::Reticulum) => {
-            match page_native_request_backend(page) {
-                Some(native_backend) => format!(
+            match (
+                page_native_request_backend(page),
+                page_native_request_primitive(page),
+            ) {
+                (Some(native_backend), Some(primitive)) => format!(
+                    "live evidence: verified native NomadNet page via {native_backend}/{primitive}: {}",
+                    page.url
+                ),
+                (Some(native_backend), None) => format!(
                     "live evidence: verified native NomadNet page via {native_backend}: {}",
                     page.url
                 ),
-                None => format!(
+                (None, _) => format!(
                     "live evidence: verified native network page {}; request backend metadata missing",
                     page.url
                 ),
@@ -21438,12 +22514,17 @@ fn native_reticulum_readiness(
     if matches!(
         settings.reticulum_instance_mode,
         ReticulumInstanceMode::External
-    ) && !config_dir.exists()
-    {
-        issues.push(format!(
-            "external Reticulum mode requires an existing config path: {}",
-            config_dir.display()
-        ));
+    ) {
+        issues.push(
+            "external/shared Reticulum mode is deferred; integrated startup is disabled until a live backend is negotiated"
+                .into(),
+        );
+        if !config_dir.exists() {
+            issues.push(format!(
+                "external Reticulum mode requires an existing config path: {}",
+                config_dir.display()
+            ));
+        }
     }
 
     if let Some(identity_path) = &settings.identity_path {
@@ -21639,14 +22720,51 @@ fn prune_deleted_conversation_layout_node(
 fn browser_page_loaded_status(page: &BrowserPage, backend: &RuntimeBackendName) -> String {
     match page.source {
         PageSource::Network if matches!(backend, RuntimeBackendName::Reticulum) => {
-            match page_native_request_backend(page) {
-                Some(native_backend) => format!("NomadNet ready via {native_backend}"),
-                None => "NomadNet ready".into(),
+            let empty = page
+                .metadata
+                .get("native_response_empty")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            match (
+                page_native_request_backend(page),
+                page_native_request_primitive(page),
+            ) {
+                (Some(native_backend), Some(primitive)) if empty => {
+                    format!(
+                        "NomadNet returned a valid empty response via {native_backend}/{primitive}"
+                    )
+                }
+                (Some(native_backend), None) if empty => {
+                    format!("NomadNet returned a valid empty response via {native_backend}")
+                }
+                (None, _) if empty => "NomadNet returned a valid empty response".into(),
+                (Some(native_backend), Some(primitive)) => {
+                    format!("NomadNet ready via {native_backend}/{primitive}")
+                }
+                (Some(native_backend), None) => format!("NomadNet ready via {native_backend}"),
+                (None, _) => "NomadNet ready".into(),
             }
         }
         PageSource::Network => "page loaded".into(),
         PageSource::Cache => "cached page".into(),
         PageSource::Mock => format!("mock page: {}", page.url),
+    }
+}
+
+fn resource_transfer_label(source: Option<&str>, direction: Option<&str>) -> String {
+    if source == Some("nomadnet-page") {
+        return match direction {
+            Some("outbound") => "NomadNet request upload".into(),
+            Some("inbound") => "NomadNet response download".into(),
+            _ => "NomadNet page transfer".into(),
+        };
+    }
+
+    match (source, direction) {
+        (Some(source), Some(direction)) => format!("{source} {direction} resource"),
+        (Some(source), None) => source.into(),
+        (None, Some(direction)) => format!("{direction} resource"),
+        (None, None) => "resource".into(),
     }
 }
 
@@ -21695,6 +22813,57 @@ mod tests {
             paths: AppPaths::from_root(root),
             settings,
         }
+    }
+
+    #[test]
+    fn sdk_history_recovery_respects_deleted_conversation_tombstone() {
+        let mut config = test_config("sdk-history-deleted-conversation");
+        config
+            .settings
+            .deleted_conversations
+            .push(DeletedConversationSettings {
+                peer_hash: FIXTURE_PEER_HASH.into(),
+                deleted_at: 100.0,
+            });
+        let mut app = App::new(config);
+        let page = crate::runtime::LxmfHistoryPage {
+            messages: vec![
+                crate::runtime::LxmfHistoryRecord {
+                    message_id: "stale-history".into(),
+                    source: FIXTURE_PEER_HASH.into(),
+                    destination: "local".into(),
+                    title: "stale".into(),
+                    content: "must remain deleted".into(),
+                    timestamp: 99,
+                    direction: "in".into(),
+                    receipt_status: Some("received".into()),
+                },
+                crate::runtime::LxmfHistoryRecord {
+                    message_id: "new-history".into(),
+                    source: FIXTURE_PEER_HASH.into(),
+                    destination: "local".into(),
+                    title: "new".into(),
+                    content: "arrived after deletion".into(),
+                    timestamp: 101,
+                    direction: "in".into(),
+                    receipt_status: Some("received".into()),
+                },
+            ],
+            next_cursor: None,
+        };
+
+        assert!(app.handle_runtime_bus_event(RuntimeBusEvent::LxmfHistoryRecovered(page)));
+
+        let thread = app
+            .message_store
+            .get_thread(FIXTURE_PEER_HASH)
+            .expect("recovered thread");
+        assert_eq!(thread.messages.len(), 1);
+        assert_eq!(
+            thread.messages[0].message_id.as_deref(),
+            Some("new-history")
+        );
+        assert!(conversation_deleted_at(&app.settings, FIXTURE_PEER_HASH).is_none());
     }
 
     fn micronplus_columns_page() -> BrowserPage {
@@ -21827,6 +22996,7 @@ mod tests {
         let mut state = NetworkDoctorPanelState::default();
         state.record_announce(&crate::runtime::AnnouncePayload {
             destination_hash: FIXTURE_NODE_HASH.into(),
+            identity_hash: None,
             display_name: "Node".into(),
             kind: DirectoryKind::Node,
             associated_hash: None,
@@ -22033,6 +23203,7 @@ mod tests {
         let announce_events = network_doctor_facade_events_from_runtime_bus_event(
             &RuntimeBusEvent::Announce(crate::runtime::AnnouncePayload {
                 destination_hash: FIXTURE_NODE_HASH.into(),
+                identity_hash: None,
                 display_name: "Node".into(),
                 kind: DirectoryKind::Node,
                 associated_hash: None,
@@ -22151,6 +23322,28 @@ mod tests {
                     && detail.as_deref().unwrap_or_default().contains("msg-1")
         ));
 
+        let sdk_delivery_events = network_doctor_facade_events_from_runtime_bus_event(
+            &RuntimeBusEvent::SdkDeliveryUpdated(crate::runtime::RuntimeLxmfDeliveryUpdate {
+                message_id: "sdk-msg-1".into(),
+                peer_hash: Some(FIXTURE_PEER_HASH.into()),
+                previous_state: Some(crate::runtime::RuntimeLxmfDeliveryState::Sent),
+                state: crate::runtime::RuntimeLxmfDeliveryState::Delivered,
+                terminal: true,
+                attempts: 1,
+                reason_code: None,
+                last_updated_ms: 10,
+                event_id: "sdk-event-1".into(),
+                seq_no: 7,
+                cursor: "v2:runtime:stream:7".into(),
+            }),
+        );
+        assert!(matches!(
+            &sdk_delivery_events[..],
+            [RuntimeFacadeEvent::LxmfEvent { event, detail }]
+                if event == "sdk_delivery_delivered"
+                    && detail.as_deref().unwrap_or_default().contains("sdk-msg-1")
+        ));
+
         let delivery_progress_events = network_doctor_facade_events_from_runtime_bus_event(
             &RuntimeBusEvent::MessageDeliveryUpdated(OutboundStatus {
                 peer_hash: FIXTURE_PEER_HASH.into(),
@@ -22252,6 +23445,7 @@ mod tests {
                 transfer_id: "res-typed".into(),
                 received: 5,
                 total: Some(10),
+                operation_id: None,
                 source: Some("typed-source".into()),
                 purpose: Some("typed-purpose".into()),
                 direction: Some("inbound".into()),
@@ -22284,6 +23478,7 @@ mod tests {
                 state: crate::runtime::ResourceLifecycleState::Complete,
                 bytes: Some(99),
                 reason: None,
+                operation_id: None,
                 source: Some("nomadnet-page".into()),
                 purpose: Some("nomadnet-page".into()),
                 direction: Some("inbound".into()),
@@ -22353,6 +23548,7 @@ mod tests {
                     transfer_id: "res-live".into(),
                     received: 64,
                     total: Some(128),
+                    operation_id: None,
                     source: Some("omenchat".into()),
                     purpose: Some("omenchat-resource".into()),
                     direction: Some("inbound".into()),
@@ -22414,6 +23610,7 @@ mod tests {
                     state: crate::runtime::ResourceLifecycleState::Offered,
                     bytes: Some(256),
                     reason: None,
+                    operation_id: None,
                     source: Some("omenchat".into()),
                     purpose: Some("history-batch".into()),
                     direction: Some("inbound".into()),
@@ -22440,6 +23637,7 @@ mod tests {
                     state: crate::runtime::ResourceLifecycleState::Complete,
                     bytes: Some(42),
                     reason: None,
+                    operation_id: None,
                     source: Some("omenchat".into()),
                     purpose: Some("omenchat-resource".into()),
                     direction: Some("inbound".into()),
@@ -22468,6 +23666,7 @@ mod tests {
                     state: crate::runtime::ResourceLifecycleState::Failed,
                     bytes: None,
                     reason: Some("timeout".into()),
+                    operation_id: None,
                     source: Some("lxmf-propagation".into()),
                     purpose: Some("lxmf-propagation".into()),
                     direction: Some("outbound".into()),
@@ -22495,6 +23694,7 @@ mod tests {
                     state: crate::runtime::ResourceLifecycleState::Cancelled,
                     bytes: Some(7),
                     reason: Some("user cancelled".into()),
+                    operation_id: None,
                     source: Some("nomadnet".into()),
                     purpose: Some("page-resource".into()),
                     direction: Some("inbound".into()),
@@ -22513,6 +23713,156 @@ mod tests {
         assert!(cancelled.detail.contains("cancelled"));
         assert!(cancelled.detail.contains("user cancelled"));
         assert!(app.status.task.contains("cancelled"));
+    }
+
+    #[test]
+    fn nomadnet_resource_status_distinguishes_request_and_response_transfer_direction() {
+        let mut app = App::new(test_config("nomadnet-resource-direction-status"));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
+                crate::runtime::ResourceLifecycleEvent {
+                    transfer_id: "request-resource".into(),
+                    state: crate::runtime::ResourceLifecycleState::Offered,
+                    bytes: Some(20),
+                    reason: None,
+                    operation_id: None,
+                    source: Some("nomadnet-page".into()),
+                    purpose: Some("nomadnet-page".into()),
+                    direction: Some("outbound".into()),
+                    peer: None,
+                },
+            ))
+        );
+        assert!(app.status.task.contains("NomadNet request upload offered"));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceProgress(
+                crate::runtime::ResourceProgressEvent {
+                    transfer_id: "response-resource".into(),
+                    received: 40,
+                    total: Some(80),
+                    operation_id: None,
+                    source: Some("nomadnet-page".into()),
+                    purpose: Some("nomadnet-page".into()),
+                    direction: Some("inbound".into()),
+                    peer: None,
+                },
+            ))
+        );
+        assert!(app
+            .status
+            .task
+            .contains("NomadNet response download response-resource 40/80 bytes"));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
+                crate::runtime::ResourceLifecycleEvent {
+                    transfer_id: "request-resource".into(),
+                    state: crate::runtime::ResourceLifecycleState::Cancelled,
+                    bytes: Some(20),
+                    reason: Some("browser request cancelled".into()),
+                    operation_id: None,
+                    source: Some("nomadnet-page".into()),
+                    purpose: Some("nomadnet-page".into()),
+                    direction: Some("outbound".into()),
+                    peer: None,
+                },
+            ))
+        );
+        assert!(app
+            .status
+            .task
+            .contains("NomadNet request upload cancelled"));
+    }
+
+    #[test]
+    fn browser_resource_operation_correlation_is_tab_scoped_bounded_and_exactly_released() {
+        let mut app = App::new(test_config("browser-resource-operation-correlation"));
+        app.new_browser_tab();
+        let first_tab = app.workspace.browser_tabs[0].id;
+        let second_tab = app.workspace.browser_tabs[1].id;
+        let first_generation = app.workspace.browser_tabs[0].session.generation;
+        let second_generation = app.workspace.browser_tabs[1].session.generation;
+        let first_operation = app.begin_browser_operation(first_tab, first_generation);
+        let second_operation = app.begin_browser_operation(second_tab, second_generation);
+
+        assert_eq!(app.browser_operations.len(), 2);
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceProgress(
+                crate::runtime::ResourceProgressEvent {
+                    transfer_id: "first-response".into(),
+                    received: 8,
+                    total: Some(16),
+                    operation_id: Some(first_operation.clone()),
+                    source: Some("nomadnet-page".into()),
+                    purpose: Some("nomadnet-page".into()),
+                    direction: Some("inbound".into()),
+                    peer: None,
+                },
+            ))
+        );
+        assert!(app.workspace.browser_tabs[0]
+            .transfer_status
+            .as_deref()
+            .is_some_and(|status| status.contains("first-response 8/16")));
+        assert!(app.workspace.browser_tabs[1].transfer_status.is_none());
+
+        let replacement = app.begin_browser_operation(first_tab, first_generation);
+        assert_ne!(replacement, first_operation);
+        assert_eq!(app.browser_operations.len(), 2);
+        assert!(app.workspace.browser_tabs[0].transfer_status.is_none());
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceProgress(
+                crate::runtime::ResourceProgressEvent {
+                    transfer_id: "stale-response".into(),
+                    received: 12,
+                    total: Some(16),
+                    operation_id: Some(first_operation.clone()),
+                    source: Some("nomadnet-page".into()),
+                    purpose: Some("nomadnet-page".into()),
+                    direction: Some("inbound".into()),
+                    peer: None,
+                },
+            ))
+        );
+        assert!(app.workspace.browser_tabs[0].transfer_status.is_none());
+        assert!(
+            !app.handle_internal_event(InternalAppEvent::BrowserOperationFinished {
+                operation_id: first_operation,
+            })
+        );
+        assert!(app.browser_operations.contains_key(&replacement));
+        assert!(app.browser_operations.contains_key(&second_operation));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
+                crate::runtime::ResourceLifecycleEvent {
+                    transfer_id: "replacement-request".into(),
+                    state: crate::runtime::ResourceLifecycleState::Complete,
+                    bytes: Some(16),
+                    reason: None,
+                    operation_id: Some(replacement.clone()),
+                    source: Some("nomadnet-page".into()),
+                    purpose: Some("nomadnet-page".into()),
+                    direction: Some("outbound".into()),
+                    peer: None,
+                },
+            ))
+        );
+        assert!(app.workspace.browser_tabs[0]
+            .transfer_status
+            .as_deref()
+            .is_some_and(|status| status.contains("replacement-request")));
+        assert!(
+            app.handle_internal_event(InternalAppEvent::BrowserOperationFinished {
+                operation_id: replacement.clone(),
+            })
+        );
+        assert!(!app.browser_operations.contains_key(&replacement));
+        assert!(app.workspace.browser_tabs[0].transfer_status.is_none());
+        assert!(app.browser_operations.contains_key(&second_operation));
     }
 
     #[test]
@@ -24656,6 +26006,7 @@ side
             app.handle_runtime_bus_event(crate::runtime::RuntimeBusEvent::Announce(
                 crate::runtime::AnnouncePayload {
                     destination_hash: "0123456789abcdef0123456789abcdef".into(),
+                    identity_hash: None,
                     display_name: "Peer".into(),
                     kind: DirectoryKind::Peer,
                     associated_hash: None,
@@ -24991,11 +26342,47 @@ side
             status_message_bool(&app.runtime_status.message, "announced"),
             Some(true)
         );
+        assert_eq!(app.status.task, "local LXMF delivery announce sent");
         assert!(app
             .logs
             .lines
             .iter()
             .any(|line| line.contains("local LXMF identity announced")));
+    }
+
+    #[tokio::test]
+    async fn manual_local_lxmf_announce_is_coalesced_and_rate_limited() {
+        let mut app = App::new(test_config("manual-local-announce-rate-limit"));
+
+        assert!(app.announce_local_lxmf_now());
+        assert!(app.local_lxmf_announce_pending);
+        assert!(app.announce_local_lxmf_now());
+        assert!(app.status.task.contains("already pending"));
+
+        assert!(app.apply_local_lxmf_announce_result(Ok(true)));
+        assert!(!app.announce_local_lxmf_now());
+        assert!(app.status.task.contains("rate limited"));
+        assert!(app.status.task.contains("retry in"));
+    }
+
+    #[cfg(feature = "native-reticulum")]
+    #[tokio::test]
+    async fn rate_limited_pre_send_announce_does_not_retain_deferred_action() {
+        let mut app = make_native_send_ready_app("native-send-announce-rate-limit");
+        app.runtime_status.message = format!(
+            "local_lxmf_registered=true proof_capable=true announced=false local_lxmf_destination={FIXTURE_NODE_HASH}"
+        );
+        app.last_local_lxmf_announce_started = Some(Instant::now());
+
+        app.send_active_conversation_draft();
+
+        assert_eq!(app.pending_local_lxmf_announce_action, None);
+        assert!(!app.local_lxmf_announce_pending);
+        assert!(app
+            .logs
+            .lines
+            .iter()
+            .any(|line| { line.contains("local LXMF announce before LXMF send is rate limited") }));
     }
 
     #[cfg(feature = "native-reticulum")]
@@ -26082,6 +27469,10 @@ side
             app.settings.reticulum_instance_mode,
             ReticulumInstanceMode::External
         );
+        assert!(app
+            .status
+            .task
+            .contains("external/shared backend is deferred"));
         assert!(app.toggle_announce_on_start());
         assert!(!app.settings.announce_on_start);
         assert!(app.toggle_periodic_lxmf_sync());
@@ -26184,6 +27575,38 @@ side
         assert!(!app.start_configured_runtime_nonblocking());
         assert!(app.status.task.contains("active backend is Mock"));
         assert!(app.status.task.contains("Setup / Start Native"));
+    }
+
+    #[cfg(feature = "native-reticulum")]
+    #[test]
+    fn external_mode_blocks_integrated_runtime_startup_without_creating_identity() {
+        let mut config = test_config("native-start-external-blocked");
+        config.settings.runtime_backend = RuntimeBackendSetting::Reticulum;
+        config.settings.reticulum_instance_mode = ReticulumInstanceMode::External;
+        let mut app = App::new(config);
+
+        assert!(!app.start_configured_runtime_nonblocking());
+        assert!(!app.runtime_startup_pending);
+        assert!(app.settings.identity_path.is_none());
+        assert!(app.status.task.contains("external/shared"));
+        assert!(app.status.task.contains("integrated startup is disabled"));
+        assert!(app.logs.entries.iter().any(|entry| {
+            entry
+                .message
+                .contains("blocked integrated Reticulum startup")
+        }));
+    }
+
+    #[test]
+    fn runtime_ownership_line_separates_configuration_from_negotiation() {
+        let mut config = test_config("runtime-ownership-line");
+        config.settings.reticulum_instance_mode = ReticulumInstanceMode::External;
+        let app = App::new(config);
+
+        assert_eq!(
+            app.runtime_ownership_diagnostics_line(),
+            "runtime ownership: configured=external_deferred negotiated_shared=not_collected"
+        );
     }
 
     #[test]
@@ -26372,6 +27795,7 @@ side
             .expect("updated tcp");
         assert_eq!(updated.target_host, "new.example");
         assert!(app.status.task.contains("updated TCP gateway host"));
+        assert!(app.status.task.contains("next runtime start/restart"));
 
         assert!(app.edit_selected_interface_tcp_port());
         app.input
@@ -26452,6 +27876,7 @@ side
         assert_eq!(app.interfaces_state.selected, Some(0));
         let created = app.interfaces_state.profiles[0].clone();
         assert_eq!(created.kind, InterfaceKind::TcpClient);
+        assert!(app.status.task.contains("next runtime start/restart"));
         let rendered = std::fs::read_to_string(app.paths.reticulum_config_dir.join("config"))
             .expect("managed config after create");
         assert!(rendered.contains("type = TCPClientInterface"));
@@ -26491,6 +27916,7 @@ side
         assert!(app.input.active.is_none());
         assert_eq!(app.interfaces_state.profiles.len(), starting_len);
         assert!(app.status.task.contains("deleted interface"));
+        assert!(app.status.task.contains("next runtime start/restart"));
 
         assert!(!app.begin_selected_interface_delete_flow());
         assert!(app.status.task.contains("last interface"));
@@ -26510,6 +27936,7 @@ side
         assert_eq!(rmap.target_host, "rmap.world");
         assert_eq!(rmap.target_port, 4242);
         assert!(app.status.task.contains("created RMAP gateway"));
+        assert!(app.status.task.contains("next runtime start/restart"));
 
         assert!(app.create_wns_gateway_interface_profile());
         let wns = app.interfaces_state.profiles[0].clone();
@@ -26528,12 +27955,13 @@ side
         let len_after_presets = app.interfaces_state.profiles.len();
         assert!(app.toggle_selected_interface_enabled());
         assert!(!app.interfaces_state.profiles[0].enabled);
-        assert!(app.status.task.contains("restart recommended"));
+        assert!(app.status.task.contains("next runtime start/restart"));
 
         assert!(app.create_wns_gateway_interface_profile());
         assert_eq!(app.interfaces_state.profiles.len(), len_after_presets);
         assert!(app.interfaces_state.profiles[0].enabled);
         assert!(app.status.task.contains("enabled WNS gateway"));
+        assert!(app.status.task.contains("next runtime start/restart"));
 
         assert!(app.create_wns_gateway_interface_profile());
         assert_eq!(app.interfaces_state.profiles.len(), len_after_presets);
@@ -26959,6 +28387,8 @@ side
         assert!(exported.contains("interface_stats"));
         assert!(exported.contains("propagation_status"));
         assert!(exported.contains("native_lxmf_sdk_rpc_probe"));
+        assert!(exported.contains("runtime_lifecycle"));
+        assert!(exported.contains("runtime_capabilities"));
         assert!(exported.contains("cache_files"));
         assert!(!exported.contains(&identity_path.display().to_string()));
         assert!(!exported.contains("secret message text"));
@@ -26970,6 +28400,20 @@ side
         assert!(app
             .native_lxmf_sdk_rpc_probe_line()
             .contains("state=disabled"));
+        assert!(app
+            .runtime_lifecycle_diagnostics_line()
+            .contains("state=Running"));
+        assert!(app
+            .runtime_capabilities_diagnostics_line()
+            .contains("supported=4"));
+        assert!(app
+            .interface_diagnostics_line()
+            .contains("interfaces: unavailable"));
+        let path_line = app.path_network_diagnostics_line();
+        assert!(path_line.contains("known_destinations=2"));
+        assert!(path_line.contains("path_table=unavailable"));
+        assert!(path_line.contains("request_failures=unavailable"));
+        assert!(path_line.contains("shared_instance=unavailable"));
         assert!(app
             .diagnostics_state
             .last_export_summary
@@ -27226,6 +28670,30 @@ side
     }
 
     #[test]
+    fn browser_page_loaded_status_calls_out_valid_empty_native_response() {
+        let mut page = BrowserPage::mock_home("0011223344556677:/empty.mu");
+        page.source = PageSource::Network;
+        page.markup.clear();
+        page.metadata.insert(
+            "native_request_backend".into(),
+            serde_json::Value::String("reticulum-transport".into()),
+        );
+        page.metadata.insert(
+            "native_request_primitive".into(),
+            serde_json::Value::String("request-resource".into()),
+        );
+        page.metadata.insert(
+            "native_response_empty".into(),
+            serde_json::Value::Bool(true),
+        );
+
+        assert_eq!(
+            browser_page_loaded_status(&page, &RuntimeBackendName::Reticulum),
+            "NomadNet returned a valid empty response via reticulum-transport/request-resource"
+        );
+    }
+
+    #[test]
     fn native_request_backend_metadata_is_visible_in_status_and_trace() {
         let mut app = App::new(test_config("native-request-backend-visible"));
         app.runtime_status.backend = RuntimeBackendName::Reticulum;
@@ -27233,17 +28701,22 @@ side
         page.source = PageSource::Network;
         page.metadata.insert(
             "native_request_backend".into(),
-            serde_json::Value::String("rns-net".into()),
+            serde_json::Value::String("reticulum-transport".into()),
+        );
+        page.metadata.insert(
+            "native_request_primitive".into(),
+            serde_json::Value::String("request-resource".into()),
         );
         app.active_browser_tab_mut().current_page = Some(page.clone());
 
         assert!(
             browser_page_loaded_status(&page, &RuntimeBackendName::Reticulum)
-                .contains("via rns-net")
+                .contains("via reticulum-transport/request-resource")
         );
         let trace = app.browser_live_trace_lines(8).join("\n");
-        assert!(trace.contains("request backend: rns-net"));
-        assert!(trace.contains("verified native NomadNet page via rns-net"));
+        assert!(trace.contains("request backend: reticulum-transport/request-resource"));
+        assert!(trace
+            .contains("verified native NomadNet page via reticulum-transport/request-resource"));
     }
 
     #[test]
@@ -29253,7 +30726,7 @@ side
     fn native_browser_load_failure_reports_exact_link_request_response_stage() {
         let cases = [
             (
-                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during link setup: Reticulum 0.6 failed to create page request link"),
+                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during link setup: Reticulum 0.9 failed to create page request link"),
                 PageFetchProbeStage::LinkSetup,
                 "native-load",
                 "link setup failed",
@@ -29999,6 +31472,7 @@ side
             app.enqueue_runtime_event(crate::runtime::RuntimeBusEvent::Announce(
                 crate::runtime::AnnouncePayload {
                     destination_hash: destination.into(),
+                    identity_hash: None,
                     display_name: "Observed Node".into(),
                     kind: DirectoryKind::Node,
                     associated_hash: None,
@@ -30037,6 +31511,7 @@ side
             app.enqueue_runtime_event(crate::runtime::RuntimeBusEvent::Announce(
                 crate::runtime::AnnouncePayload {
                     destination_hash: peer_destination.into(),
+                    identity_hash: None,
                     display_name: "Node Peer".into(),
                     kind: DirectoryKind::Peer,
                     associated_hash: Some(node_destination.into()),
@@ -30073,6 +31548,7 @@ side
             app.enqueue_runtime_event(crate::runtime::RuntimeBusEvent::Announce(
                 crate::runtime::AnnouncePayload {
                     destination_hash: destination.into(),
+                    identity_hash: None,
                     display_name: "Observed Node".into(),
                     kind: DirectoryKind::Node,
                     associated_hash: None,
@@ -30630,6 +32106,7 @@ side
             .any(|detail| detail.profile_id == i2p.profile_id && detail.blocks_native_startup));
 
         assert!(app.toggle_selected_interface_connectable());
+        assert!(app.status.task.contains("next runtime start/restart"));
         assert!(
             !app.interface_service
                 .get(&i2p.profile_id)
@@ -31422,8 +32899,9 @@ side
         let mut app = App::new(test_config("event-announce"));
         let announce = crate::runtime::AnnouncePayload {
             destination_hash: "node.hash".into(),
-            display_name: "Node".into(),
-            kind: DirectoryKind::Node,
+            identity_hash: Some("00112233445566778899aabbccddeeff".into()),
+            display_name: "Chat Server".into(),
+            kind: DirectoryKind::OmenChat,
             associated_hash: None,
             node_associated_hash: None,
             has_ratchet: false,
@@ -31439,6 +32917,10 @@ side
         app.refresh_panels_from_services();
         assert_eq!(app.directory_state.entries.len(), 1);
         assert_eq!(app.directory_state.entries[0].destination_hash, "node.hash");
+        assert_eq!(
+            app.directory_state.entries[0].identity_hash.as_deref(),
+            Some("00112233445566778899aabbccddeeff")
+        );
     }
 
     #[test]
@@ -31491,6 +32973,7 @@ side
         let mut app = App::new(test_config("runtime-forwarder-announce"));
         let (runtime_tx, runtime_rx) = tokio::sync::broadcast::channel(8);
         assert!(spawn_runtime_event_forwarder(
+            Arc::downgrade(&app.runtime),
             app.event_tx.clone(),
             runtime_rx
         ));
@@ -31499,6 +32982,7 @@ side
             .send(crate::runtime::RuntimeBusEvent::Announce(
                 crate::runtime::AnnouncePayload {
                     destination_hash: "node.forwarded".into(),
+                    identity_hash: None,
                     display_name: "Forwarded Node".into(),
                     kind: DirectoryKind::Node,
                     associated_hash: None,
@@ -31525,6 +33009,113 @@ side
     }
 
     #[tokio::test]
+    async fn runtime_event_forwarder_reports_lag_and_recovers_bounded_snapshots() {
+        let mut app = App::new(test_config("runtime-forwarder-gap-recovery"));
+        let runtime: Arc<dyn NetworkRuntime> =
+            Arc::new(crate::runtime::MockNetworkRuntime::default());
+        let (runtime_tx, runtime_rx) = tokio::sync::broadcast::channel(2);
+        for index in 0..5 {
+            runtime_tx
+                .send(crate::runtime::RuntimeBusEvent::Debug(format!(
+                    "burst-{index}"
+                )))
+                .expect("queue runtime burst");
+        }
+        assert!(spawn_runtime_event_forwarder(
+            Arc::downgrade(&runtime),
+            app.event_tx.clone(),
+            runtime_rx
+        ));
+
+        let mut gap = None;
+        let mut recovery = None;
+        for _ in 0..20 {
+            let Some(envelope) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), app.event_rx.recv())
+                    .await
+                    .expect("forwarded recovery event")
+            else {
+                break;
+            };
+            match envelope.event {
+                InternalAppEvent::Runtime(RuntimeBusEvent::StreamGap(value)) => {
+                    gap = Some(value);
+                }
+                InternalAppEvent::Runtime(RuntimeBusEvent::StreamRecovered(value)) => {
+                    recovery = Some(value);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let gap = gap.expect("explicit gap marker");
+        assert_eq!(gap.dropped_count, 3);
+        assert_eq!(gap.reason, crate::runtime::RuntimeEventGapReason::SourceLag);
+        let recovery = recovery.expect("snapshot recovery marker");
+        assert!(recovery.status_recovered);
+        assert!(recovery.interfaces_recovered);
+        assert!(recovery.network_snapshot_recovered);
+        assert!(recovery.propagation_recovered);
+        assert_eq!(recovery.directory_entries_recovered, 3);
+        assert_eq!(recovery.messages_recovered, 1);
+        assert!(recovery.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_event_forwarder_recovers_an_upstream_sdk_gap() {
+        let mut app = App::new(test_config("runtime-forwarder-sdk-gap-recovery"));
+        let runtime: Arc<dyn NetworkRuntime> =
+            Arc::new(crate::runtime::MockNetworkRuntime::default());
+        let (runtime_tx, runtime_rx) = tokio::sync::broadcast::channel(8);
+        assert!(spawn_runtime_event_forwarder(
+            Arc::downgrade(&runtime),
+            app.event_tx.clone(),
+            runtime_rx
+        ));
+        runtime_tx
+            .send(RuntimeBusEvent::StreamGap(
+                crate::runtime::RuntimeEventGap {
+                    source: crate::runtime::RuntimeEventSource::SdkRpc,
+                    reason: crate::runtime::RuntimeEventGapReason::UpstreamStreamGap,
+                    dropped_count: 4,
+                    last_cursor: 8,
+                    next_cursor: 13,
+                    upstream_cursor: Some("v2:runtime:stream:13".into()),
+                },
+            ))
+            .expect("send upstream gap");
+
+        let mut gap = None;
+        let mut recovery = None;
+        for _ in 0..20 {
+            let Some(envelope) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), app.event_rx.recv())
+                    .await
+                    .expect("forwarded upstream recovery event")
+            else {
+                break;
+            };
+            match envelope.event {
+                InternalAppEvent::Runtime(RuntimeBusEvent::StreamGap(value)) => gap = Some(value),
+                InternalAppEvent::Runtime(RuntimeBusEvent::StreamRecovered(value)) => {
+                    recovery = Some(value);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let gap = gap.expect("upstream gap marker");
+        assert_eq!(gap.source, crate::runtime::RuntimeEventSource::SdkRpc);
+        assert_eq!(gap.upstream_cursor.as_deref(), Some("v2:runtime:stream:13"));
+        let recovery = recovery.expect("upstream snapshot recovery marker");
+        assert_eq!(recovery.source, crate::runtime::RuntimeEventSource::SdkRpc);
+        assert!(recovery.status_recovered);
+        assert!(recovery.errors.is_empty());
+    }
+
+    #[tokio::test]
     async fn relevant_announces_warm_selected_associated_paths() {
         let mut app = App::new(test_config("announce-warm-selected-associated"));
         app.directory_service
@@ -31547,6 +33138,7 @@ side
             app.enqueue_runtime_event(crate::runtime::RuntimeBusEvent::Announce(
                 crate::runtime::AnnouncePayload {
                     destination_hash: "peer.hash".into(),
+                    identity_hash: None,
                     display_name: "Associated Peer".into(),
                     kind: DirectoryKind::Peer,
                     associated_hash: Some("mock.node".into()),
@@ -31582,6 +33174,7 @@ side
             app.handle_runtime_bus_event(crate::runtime::RuntimeBusEvent::Announce(
                 crate::runtime::AnnouncePayload {
                     destination_hash: "unsaved.node".into(),
+                    identity_hash: None,
                     display_name: "Unsaved Node".into(),
                     kind: DirectoryKind::Node,
                     associated_hash: None,
@@ -32065,11 +33658,44 @@ side
         assert!(app.logs.lines.iter().any(|line| line == "second event"));
     }
 
+    #[test]
+    fn lxmf_history_pages_share_the_internal_payload_byte_budget() {
+        let app = App::new(test_config("lxmf-history-event-byte-budget"));
+        let event = || {
+            RuntimeBusEvent::LxmfHistoryRecovered(crate::runtime::LxmfHistoryPage {
+                messages: vec![crate::runtime::LxmfHistoryRecord {
+                    message_id: "history".into(),
+                    source: FIXTURE_PEER_HASH.into(),
+                    destination: "local".into(),
+                    title: "history".into(),
+                    content: "x".repeat(1024 * 1024),
+                    timestamp: 1,
+                    direction: "unknown".into(),
+                    receipt_status: None,
+                }],
+                next_cursor: None,
+            })
+        };
+        let payload_bytes = internal_event_payload_bytes(&InternalAppEvent::Runtime(event()));
+        let admitted = INTERNAL_EVENT_QUEUE_MAX_BYTES / payload_bytes;
+        assert!(admitted > 0);
+        for _ in 0..admitted {
+            assert!(app.enqueue_runtime_event(event()));
+        }
+        assert!(!app.enqueue_runtime_event(event()));
+        assert_eq!(app.internal_event_payload_metrics().queued_items, admitted);
+        assert_eq!(
+            app.internal_event_payload_metrics().queued_bytes,
+            admitted * payload_bytes
+        );
+        assert_eq!(app.internal_event_payload_metrics().rejected_events, 1);
+    }
+
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
     fn omenchat_internal_event_payload_budget_saturates_and_releases_on_handling() {
         let mut app = App::new(test_config("omenchat-event-channel-byte-budget"));
-        let resource_bytes = INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES / 4;
+        let resource_bytes = INTERNAL_EVENT_QUEUE_MAX_BYTES / 4;
 
         for index in 0..4 {
             assert!(
@@ -32096,7 +33722,7 @@ side
             app.internal_event_payload_metrics(),
             InternalEventPayloadMetrics {
                 queued_items: 4,
-                queued_bytes: INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES,
+                queued_bytes: INTERNAL_EVENT_QUEUE_MAX_BYTES,
                 rejected_events: 1,
             }
         );
@@ -32106,7 +33732,7 @@ side
         assert_eq!(app.omenchat_event_staging_metrics().resource_items, 4);
         assert_eq!(
             app.omenchat_event_staging_metrics().resource_bytes,
-            INTERNAL_OMENCHAT_EVENT_QUEUE_MAX_BYTES
+            INTERNAL_EVENT_QUEUE_MAX_BYTES
         );
         assert_eq!(app.drain_omenchat_resource_data().len(), 4);
         assert_eq!(app.omenchat_event_staging_metrics().resource_bytes, 0);
@@ -32227,6 +33853,53 @@ side
             app.drain_omenchat_link_closed().len(),
             OMENCHAT_STAGED_CLOSE_MAX_ITEMS
         );
+
+        for index in 0..=OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_ITEMS {
+            assert!(
+                app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
+                    crate::runtime::ResourceLifecycleEvent {
+                        transfer_id: format!("resource-{index}"),
+                        state: crate::runtime::ResourceLifecycleState::Failed,
+                        bytes: None,
+                        reason: Some("transfer failed".into()),
+                        operation_id: None,
+                        source: Some("omenchat".into()),
+                        purpose: Some("omenchat-resource".into()),
+                        direction: Some("inbound".into()),
+                        peer: Some("11".repeat(16)),
+                    }
+                ))
+            );
+        }
+        let terminals = app.omenchat_event_staging_metrics();
+        assert_eq!(
+            terminals.terminal_items,
+            OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_ITEMS
+        );
+        assert!(terminals.terminal_bytes <= OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_BYTES);
+        assert_eq!(terminals.rejected_terminals, 1);
+        assert_eq!(
+            app.drain_omenchat_resource_terminals().len(),
+            OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_ITEMS
+        );
+        assert_eq!(app.omenchat_event_staging_metrics().terminal_bytes, 0);
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
+                crate::runtime::ResourceLifecycleEvent {
+                    transfer_id: "outbound-not-staged".into(),
+                    state: crate::runtime::ResourceLifecycleState::Cancelled,
+                    bytes: None,
+                    reason: None,
+                    operation_id: None,
+                    source: Some("omenchat".into()),
+                    purpose: Some("omenchat-resource".into()),
+                    direction: Some("outbound".into()),
+                    peer: Some("22".repeat(16)),
+                }
+            ))
+        );
+        assert_eq!(app.omenchat_event_staging_metrics().terminal_items, 0);
     }
 
     #[tokio::test]
@@ -32264,6 +33937,7 @@ side
 
         assert_eq!(app.reconcile_due_lxmf_direct_timeouts(1_000), 0);
         assert_eq!(app.reconcile_due_lxmf_propagation_timeouts(1_000), 0);
+        assert_eq!(app.reconcile_due_lxmf_expiry(1_000), 0);
         assert_eq!(
             app.desktop_lxmf_reconcile_deadline(),
             (app_id, 1_000 + LXMF_DIRECT_PROOF_RECONCILE_INTERVAL_MS)
@@ -32385,6 +34059,14 @@ side
             fields: BTreeMap::from([
                 ("native_lxmf_state".into(), "submitted_unconfirmed".into()),
                 (
+                    crate::messaging::OUTBOUND_IDEMPOTENCY_FIELD.into(),
+                    "idem-retry-a".into(),
+                ),
+                (
+                    crate::messaging::OUTBOUND_CORRELATION_FIELD.into(),
+                    "corr-retry-a".into(),
+                ),
+                (
                     "native_lxmf_receipt_state".into(),
                     "lxmf_delivery_receipt_unavailable_native_wire".into(),
                 ),
@@ -32398,6 +34080,13 @@ side
         assert_eq!(conversation.draft_title, "Retry subject");
         assert_eq!(conversation.draft_body, "Retry body");
         assert_eq!(conversation.delivery_mode, DeliveryMode::Direct);
+        assert_eq!(
+            conversation
+                .prepared_retry_operation
+                .as_ref()
+                .map(|prepared| prepared.identity.idempotency_key.as_str()),
+            Some("idem-retry-a")
+        );
         assert_eq!(conversation.thread.messages.len(), 1);
         assert!(app.status.task.contains("prepared retry"));
     }
@@ -32422,6 +34111,14 @@ side
             message_id: Some("packet-a".into()),
             fields: BTreeMap::from([
                 ("native_lxmf_state".into(), "propagation_retry_ready".into()),
+                (
+                    crate::messaging::OUTBOUND_IDEMPOTENCY_FIELD.into(),
+                    "idem-propagated-retry".into(),
+                ),
+                (
+                    crate::messaging::OUTBOUND_CORRELATION_FIELD.into(),
+                    "corr-propagated-retry".into(),
+                ),
                 (
                     "native_lxmf_propagation_fallback_available".into(),
                     "true".into(),
@@ -32631,6 +34328,89 @@ side
         );
     }
 
+    #[test]
+    fn retry_after_ttl_expiry_creates_a_new_logical_operation() {
+        let mut app = App::new(test_config("retry-after-ttl-expiry"));
+        let expired =
+            OutboundOperationIdentity::generate_at(1, 1_000).expect("bounded expired operation");
+        let old_idempotency_key = expired.idempotency_key.clone();
+        let mut fields = BTreeMap::from([("native_lxmf_state".into(), "expired".into())]);
+        expired.insert_fields(&mut fields);
+        let conversation = app.active_conversation_mut_for_test();
+        conversation.peer_hash = FIXTURE_NODE_HASH.into();
+        conversation.peer_label = "Peer".into();
+        conversation.push_message(MessageSummary {
+            peer_hash: FIXTURE_NODE_HASH.into(),
+            peer_label: "Peer".into(),
+            title: "Expired".into(),
+            content: "Body".into(),
+            timestamp: 1.0,
+            transport_method: TransportMethod::Direct,
+            delivered: false,
+            failed: true,
+            incoming: false,
+            unread: false,
+            message_id: Some("expired-operation".into()),
+            fields,
+            attachments: Vec::new(),
+        });
+        let key = message_summary_key(&conversation.thread.messages[0]);
+
+        assert!(app.prepare_lxmf_retry_by_message_key(&key));
+        let prepared = app
+            .active_conversation()
+            .prepared_retry_operation
+            .as_ref()
+            .expect("prepared retry");
+        assert_ne!(prepared.identity.idempotency_key, old_idempotency_key);
+        assert!(prepared.identity.remaining_ttl_ms().is_some());
+    }
+
+    #[test]
+    fn scheduled_ttl_reconciliation_updates_durable_and_visible_message_state() {
+        let mut app = App::new(test_config("scheduled-ttl-reconciliation"));
+        let mut fields = BTreeMap::from([("native_lxmf_sdk_state".into(), "queued".into())]);
+        OutboundOperationIdentity::generate_at(1_000, 1_000)
+            .expect("bounded operation")
+            .insert_fields(&mut fields);
+        let message = MessageSummary {
+            peer_hash: FIXTURE_NODE_HASH.into(),
+            peer_label: "Peer".into(),
+            title: "Queued".into(),
+            content: "Body".into(),
+            timestamp: 1.0,
+            transport_method: TransportMethod::Direct,
+            delivered: false,
+            failed: false,
+            incoming: false,
+            unread: false,
+            message_id: Some("scheduled-expiry".into()),
+            fields,
+            attachments: Vec::new(),
+        };
+        app.message_store
+            .append(message.clone())
+            .expect("persist queued operation");
+        app.active_conversation_mut_for_test().peer_hash = FIXTURE_NODE_HASH.into();
+        app.active_conversation_mut_for_test().push_message(message);
+
+        assert_eq!(app.reconcile_due_lxmf_expiry(2_000), 1);
+        assert!(app.active_conversation().thread.messages[0].failed);
+        assert_eq!(
+            app.active_conversation().thread.messages[0]
+                .fields
+                .get("native_lxmf_sdk_state")
+                .map(String::as_str),
+            Some("expired")
+        );
+        assert_eq!(app.reconcile_due_lxmf_expiry(2_001), 0);
+        let stored = app
+            .message_store
+            .get_thread(FIXTURE_NODE_HASH)
+            .expect("durable thread");
+        assert!(stored.messages[0].failed);
+    }
+
     #[tokio::test]
     async fn send_active_conversation_draft_uses_messaging_service() {
         let mut app = App::new(test_config("send-draft"));
@@ -32693,6 +34473,14 @@ side
             fields: BTreeMap::from([
                 ("native_lxmf_state".into(), "propagation_retry_ready".into()),
                 (
+                    crate::messaging::OUTBOUND_IDEMPOTENCY_FIELD.into(),
+                    "idem-propagated-retry".into(),
+                ),
+                (
+                    crate::messaging::OUTBOUND_CORRELATION_FIELD.into(),
+                    "corr-propagated-retry".into(),
+                ),
+                (
                     "native_lxmf_propagation_fallback_available".into(),
                     "true".into(),
                 ),
@@ -32703,6 +34491,13 @@ side
 
         assert!(app.send_lxmf_retry_by_message_key(&retry_key));
         assert!(app.active_conversation().pending_send.is_some());
+        assert_eq!(
+            app.active_conversation().thread.messages[1]
+                .fields
+                .get(crate::messaging::OUTBOUND_IDEMPOTENCY_FIELD)
+                .map(String::as_str),
+            Some("idem-propagated-retry")
+        );
         assert_eq!(
             app.active_conversation().delivery_mode,
             DeliveryMode::Propagated
@@ -32718,6 +34513,199 @@ side
             conversation.thread.messages[1].transport_method,
             TransportMethod::Propagated
         );
+        assert_eq!(
+            conversation.thread.messages[1]
+                .fields
+                .get(crate::messaging::OUTBOUND_IDEMPOTENCY_FIELD)
+                .map(String::as_str),
+            Some("idem-propagated-retry")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_lxmf_message_reports_unsupported_without_claiming_terminal_state() {
+        let mut app = App::new(test_config("cancel-lxmf-message"));
+        let conversation = app.active_conversation_mut_for_test();
+        conversation.peer_hash = FIXTURE_NODE_HASH.into();
+        conversation.peer_label = "Peer".into();
+        conversation.push_message(MessageSummary {
+            peer_hash: FIXTURE_NODE_HASH.into(),
+            peer_label: "Peer".into(),
+            title: "Queued".into(),
+            content: "Body".into(),
+            timestamp: 1.0,
+            transport_method: TransportMethod::Direct,
+            delivered: false,
+            failed: false,
+            incoming: false,
+            unread: false,
+            message_id: Some("cancel-message-a".into()),
+            fields: BTreeMap::from([("native_lxmf_sdk_state".into(), "queued".into())]),
+            attachments: Vec::new(),
+        });
+        let key = message_summary_key(&conversation.thread.messages[0]);
+
+        assert!(app.cancel_lxmf_message_by_key(&key));
+        assert!(!app.cancel_lxmf_message_by_key(&key));
+        assert!(app.wait_for_message_task_result().await);
+
+        let message = &app.active_conversation().thread.messages[0];
+        assert!(!message.delivered);
+        assert!(!message.failed);
+        assert_eq!(
+            message
+                .fields
+                .get("native_lxmf_sdk_cancel_outcome")
+                .map(String::as_str),
+            Some("unsupported")
+        );
+        assert!(app.pending_lxmf_cancellations.is_empty());
+    }
+
+    #[test]
+    fn accepted_cancellation_waits_for_authoritative_cancelled_event() {
+        let mut app = App::new(test_config("cancel-lxmf-race"));
+        let conversation_id = app.active_conversation().id;
+        let peer_hash = FIXTURE_NODE_HASH.to_string();
+        let message_id = "cancel-race-a".to_string();
+        app.active_conversation_mut_for_test()
+            .push_message(MessageSummary {
+                peer_hash: peer_hash.clone(),
+                peer_label: "Peer".into(),
+                title: "Queued".into(),
+                content: "Body".into(),
+                timestamp: 1.0,
+                transport_method: TransportMethod::Direct,
+                delivered: false,
+                failed: false,
+                incoming: false,
+                unread: false,
+                message_id: Some(message_id.clone()),
+                fields: BTreeMap::from([("native_lxmf_sdk_state".into(), "queued".into())]),
+                attachments: Vec::new(),
+            });
+        app.pending_lxmf_cancellations
+            .insert(format!("{peer_hash}:{message_id}"));
+
+        assert!(
+            app.apply_message_task_result(MessageTaskResult::Cancellation {
+                conversation_id,
+                peer_hash: peer_hash.clone(),
+                message_id: message_id.clone(),
+                result: Ok(LxmfCancellationUpdate {
+                    outcome: LxmfCancelOutcome::Accepted,
+                    fields: BTreeMap::from([(
+                        "native_lxmf_sdk_cancel_outcome".into(),
+                        "accepted".into(),
+                    )]),
+                }),
+            })
+        );
+        let message = &app.active_conversation().thread.messages[0];
+        assert!(!message.delivered);
+        assert!(!message.failed);
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::SdkDeliveryUpdated(
+                crate::runtime::RuntimeLxmfDeliveryUpdate {
+                    message_id,
+                    peer_hash: Some(peer_hash),
+                    previous_state: Some(crate::runtime::RuntimeLxmfDeliveryState::Queued),
+                    state: crate::runtime::RuntimeLxmfDeliveryState::Cancelled,
+                    terminal: true,
+                    attempts: 0,
+                    reason_code: Some("cancelled_by_user".into()),
+                    last_updated_ms: 2,
+                    event_id: "cancel-event-a".into(),
+                    seq_no: 2,
+                    cursor: "cursor-2".into(),
+                }
+            ))
+        );
+        let message = &app.active_conversation().thread.messages[0];
+        assert!(!message.delivered);
+        assert!(message.failed);
+        assert_eq!(
+            message
+                .fields
+                .get("native_lxmf_sdk_state")
+                .map(String::as_str),
+            Some("cancelled")
+        );
+    }
+
+    #[test]
+    fn terminal_delivery_event_wins_when_cancellation_response_arrives_late() {
+        let mut app = App::new(test_config("cancel-lxmf-reverse-race"));
+        let conversation_id = app.active_conversation().id;
+        let peer_hash = FIXTURE_NODE_HASH.to_string();
+        let message_id = "cancel-race-b".to_string();
+        app.active_conversation_mut_for_test()
+            .push_message(MessageSummary {
+                peer_hash: peer_hash.clone(),
+                peer_label: "Peer".into(),
+                title: "Dispatching".into(),
+                content: "Body".into(),
+                timestamp: 1.0,
+                transport_method: TransportMethod::Direct,
+                delivered: false,
+                failed: false,
+                incoming: false,
+                unread: false,
+                message_id: Some(message_id.clone()),
+                fields: BTreeMap::from([("native_lxmf_sdk_state".into(), "dispatching".into())]),
+                attachments: Vec::new(),
+            });
+        app.pending_lxmf_cancellations
+            .insert(format!("{peer_hash}:{message_id}"));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::SdkDeliveryUpdated(
+                crate::runtime::RuntimeLxmfDeliveryUpdate {
+                    message_id: message_id.clone(),
+                    peer_hash: Some(peer_hash.clone()),
+                    previous_state: Some(crate::runtime::RuntimeLxmfDeliveryState::Dispatching),
+                    state: crate::runtime::RuntimeLxmfDeliveryState::Delivered,
+                    terminal: true,
+                    attempts: 1,
+                    reason_code: None,
+                    last_updated_ms: 3,
+                    event_id: "delivered-before-cancel-response".into(),
+                    seq_no: 3,
+                    cursor: "cursor-3".into(),
+                }
+            ))
+        );
+        assert!(
+            app.apply_message_task_result(MessageTaskResult::Cancellation {
+                conversation_id,
+                peer_hash,
+                message_id,
+                result: Ok(LxmfCancellationUpdate {
+                    outcome: LxmfCancelOutcome::Accepted,
+                    fields: BTreeMap::from([(
+                        "native_lxmf_sdk_cancel_outcome".into(),
+                        "accepted".into(),
+                    )]),
+                }),
+            })
+        );
+
+        let message = &app.active_conversation().thread.messages[0];
+        assert!(message.delivered);
+        assert!(!message.failed);
+        assert_eq!(
+            message
+                .fields
+                .get("native_lxmf_next_action")
+                .map(String::as_str),
+            Some("delivery_is_already_terminal")
+        );
+        assert_eq!(
+            app.status.task,
+            "cancellation accepted; delivery is already terminal"
+        );
+        assert!(app.pending_lxmf_cancellations.is_empty());
     }
 
     #[tokio::test]
@@ -32864,7 +34852,11 @@ side
             conversation.draft_title = "Subject".into();
             conversation.draft_body = "Body".into();
             conversation.pending_send = Some(MessageSendState { generation: 12 });
-            let pending = pending_outbound_message_from_conversation(conversation, 12);
+            let pending = pending_outbound_message_from_conversation(
+                conversation,
+                12,
+                &OutboundOperationIdentity::generate(),
+            );
             conversation.push_message(pending);
             conversation.draft_title.clear();
             conversation.draft_body.clear();
@@ -32912,7 +34904,11 @@ side
             conversation.draft_title = "Subject".into();
             conversation.draft_body = "Body".into();
             conversation.pending_send = Some(MessageSendState { generation: 13 });
-            let pending = pending_outbound_message_from_conversation(conversation, 13);
+            let pending = pending_outbound_message_from_conversation(
+                conversation,
+                13,
+                &OutboundOperationIdentity::generate(),
+            );
             conversation.push_message(pending);
             conversation.draft_title.clear();
             conversation.draft_body.clear();
@@ -33015,7 +35011,13 @@ side
         app.active_conversation_mut_for_test().draft_body = "Body".into();
         app.active_conversation_mut_for_test().pending_send =
             Some(MessageSendState { generation: 7 });
-        let pending = pending_outbound_message_from_conversation(app.active_conversation(), 7);
+        let operation = OutboundOperationIdentity::validated(
+            "idem-failed-send".into(),
+            "corr-failed-send".into(),
+        )
+        .expect("valid operation");
+        let pending =
+            pending_outbound_message_from_conversation(app.active_conversation(), 7, &operation);
         app.active_conversation_mut_for_test().push_message(pending);
         app.active_conversation_mut_for_test().draft_title.clear();
         app.active_conversation_mut_for_test().draft_body.clear();
@@ -33042,6 +35044,10 @@ side
             .fields
             .get("native_lxmf_failure_reason")
             .is_some_and(|reason| reason.contains("link setup")));
+        assert_eq!(
+            OutboundOperationIdentity::from_message(failed),
+            Some(operation)
+        );
         let stored = app
             .message_store
             .get_thread(FIXTURE_NODE_HASH)

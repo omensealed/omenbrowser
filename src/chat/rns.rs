@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::codec::{decode_frame, encode_frame};
+use super::model::CHAT_RESOURCE_ID_MAX_BYTES;
 use super::protocol::batch::{
-    decode_compressed_values_body, decode_compressed_values_payload, decode_resource_offer_body,
-    ResourceOffer,
+    decode_compressed_values_body, decode_resource_batch_payload, decode_resource_offer_body,
+    validate_resource_offer_lengths, ResourceOffer,
 };
 use super::protocol::{ChatOp, Frame, FrameValue};
 
@@ -137,11 +138,12 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
         }
         ChatOp::HistoryResourceOffer | ChatOp::UserListSnapshotResource => {
             let offer = decode_resource_offer_body(&frame.body)?;
+            validate_resource_offer(&offer, frame.op)?;
             let Some(payload) = transport.fetch_resource(&offer.resource_id)? else {
                 transport.defer_resource_offer(&offer.resource_id, bytes)?;
                 return Ok(None);
             };
-            let values = decode_compressed_values_payload(&payload)?;
+            let values = decode_resource_batch_payload(&offer, &payload)?;
             Ok(Some(ChatLinkEvent::ResourceBatch {
                 op: frame.op,
                 room_id: frame.room_id,
@@ -168,6 +170,22 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
         }
         _ => Ok(Some(ChatLinkEvent::Frame(frame))),
     }
+}
+
+fn validate_resource_offer(offer: &ResourceOffer, op: ChatOp) -> anyhow::Result<()> {
+    validate_resource_offer_lengths(offer)?;
+    if offer.resource_id.is_empty() || offer.resource_id.len() > CHAT_RESOURCE_ID_MAX_BYTES {
+        anyhow::bail!("OMENchat resource offer id is empty or exceeds client limits");
+    }
+    let expected_purpose = match op {
+        ChatOp::HistoryResourceOffer => "history",
+        ChatOp::UserListSnapshotResource => "userlist",
+        _ => anyhow::bail!("OMENchat operation is not a batch resource offer"),
+    };
+    if offer.purpose != expected_purpose {
+        anyhow::bail!("OMENchat resource offer purpose mismatch: expected {expected_purpose}");
+    }
+    Ok(())
 }
 
 fn decode_upload_resource_offer(frame: &Frame) -> Option<(String, String, Option<String>)> {
@@ -364,9 +382,17 @@ pub mod native {
 mod tests {
     use super::*;
     use crate::chat::protocol::batch::{
-        compressed_values_body, compressed_values_payload, resource_offer_body,
+        compressed_values_batch, compressed_values_body, compressed_values_payload,
+        resource_offer_body,
     };
     use crate::chat::protocol::{ChatOp, Frame, FrameBody, FrameValue};
+
+    mod v0_6_0_1 {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/omenchat/v0_6_0_1_wire.rs"
+        ));
+    }
 
     #[test]
     fn client_transport_sends_encoded_frames() {
@@ -398,6 +424,7 @@ mod tests {
             ))
             .expect("push inline");
         let resource_id = "history:1:test".to_owned();
+        let batch = compressed_values_batch(&values).expect("resource batch");
         transport.insert_resource(
             resource_id.clone(),
             compressed_values_payload(&values).expect("resource payload"),
@@ -410,8 +437,8 @@ mod tests {
                 resource_offer_body(&ResourceOffer {
                     resource_id,
                     compression: super::super::protocol::Compression::Bzip2,
-                    uncompressed_len: 1,
-                    compressed_len: 1,
+                    uncompressed_len: batch.uncompressed_len,
+                    compressed_len: batch.bytes.len() as u64,
                     purpose: "history".into(),
                 }),
             ))
@@ -431,6 +458,7 @@ mod tests {
     fn resource_offer_is_replayed_after_delayed_resource_arrives() {
         let values = vec![FrameValue::String("late history".into())];
         let resource_id = "history:1:late".to_owned();
+        let batch = compressed_values_batch(&values).expect("resource batch");
         let mut transport = CapturedChatTransport::default();
         transport
             .push_incoming_frame(&Frame::new(
@@ -440,8 +468,8 @@ mod tests {
                 resource_offer_body(&ResourceOffer {
                     resource_id: resource_id.clone(),
                     compression: super::super::protocol::Compression::Bzip2,
-                    uncompressed_len: 12,
-                    compressed_len: 12,
+                    uncompressed_len: batch.uncompressed_len,
+                    compressed_len: batch.bytes.len() as u64,
                     purpose: "history".into(),
                 }),
             ))
@@ -474,9 +502,86 @@ mod tests {
     }
 
     #[test]
+    fn invalid_resource_offer_is_rejected_before_pending_retention() {
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::HistoryResourceOffer,
+                1,
+                Some(1),
+                resource_offer_body(&ResourceOffer {
+                    resource_id: "history:1:invalid".into(),
+                    compression: super::super::protocol::Compression::Bzip2,
+                    uncompressed_len: 1,
+                    compressed_len: 1,
+                    purpose: "userlist".into(),
+                }),
+            ))
+            .expect("push invalid offer");
+
+        let error = recv_chat_event(&mut transport).expect_err("purpose mismatch");
+
+        assert!(error.to_string().contains("purpose mismatch"));
+        assert!(transport.pending_resource_offers.is_empty());
+    }
+
+    #[test]
+    fn resource_payload_must_match_offer_compression_and_lengths() {
+        let values = vec![FrameValue::String("bound history".into())];
+        let batch = compressed_values_batch(&values).expect("resource batch");
+        let payload = compressed_values_payload(&values).expect("resource payload");
+        let offers = [
+            ResourceOffer {
+                resource_id: "history:1:compression".into(),
+                compression: super::super::protocol::Compression::None,
+                uncompressed_len: batch.uncompressed_len,
+                compressed_len: batch.bytes.len() as u64,
+                purpose: "history".into(),
+            },
+            ResourceOffer {
+                resource_id: "history:1:uncompressed".into(),
+                compression: super::super::protocol::Compression::Bzip2,
+                uncompressed_len: batch.uncompressed_len + 1,
+                compressed_len: batch.bytes.len() as u64,
+                purpose: "history".into(),
+            },
+            ResourceOffer {
+                resource_id: "history:1:compressed".into(),
+                compression: super::super::protocol::Compression::Bzip2,
+                uncompressed_len: batch.uncompressed_len,
+                compressed_len: batch.bytes.len() as u64 + 1,
+                purpose: "history".into(),
+            },
+        ];
+
+        for offer in offers {
+            let mut transport = CapturedChatTransport::default();
+            transport.insert_resource(offer.resource_id.clone(), payload.clone());
+            transport
+                .push_incoming_frame(&Frame::new(
+                    ChatOp::HistoryResourceOffer,
+                    2,
+                    Some(1),
+                    resource_offer_body(&offer),
+                ))
+                .expect("push offer");
+
+            let error = recv_chat_event(&mut transport).expect_err("metadata mismatch");
+            assert!(error.to_string().contains("mismatch"), "{error}");
+        }
+    }
+
+    #[test]
     fn resource_metadata_round_trips_resource_id() {
         let metadata = resource_metadata("history:1:abc");
 
+        assert_eq!(v0_6_0_1::PROTOCOL_VERSION, 1);
+        assert_eq!(v0_6_0_1::PROTOCOL_NAME, "omenchat-v0.1");
+        assert!(!v0_6_0_1::SESSION_OPEN.is_empty());
+        assert!(!v0_6_0_1::ROOM_MESSAGE.is_empty());
+        assert!(!v0_6_0_1::HISTORY_RESOURCE_OFFER.is_empty());
+        assert_eq!(OMENCHAT_LINK_CONTEXT, v0_6_0_1::LINK_CONTEXT);
+        assert!(metadata.starts_with(v0_6_0_1::RESOURCE_METADATA_PREFIX));
         assert_eq!(
             resource_id_from_metadata(Some(&metadata)).as_deref(),
             Some("history:1:abc")

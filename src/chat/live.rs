@@ -26,6 +26,8 @@ pub const LIVE_INLINE_DOWNLOAD_MAX_PENDING_CHUNKS: usize = 1_024;
 pub const LIVE_PENDING_UPLOAD_MAX_ITEMS: usize = 4;
 pub const LIVE_PENDING_UPLOAD_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const LIVE_PENDING_UPLOAD_MAX_RESOURCE_BYTES: usize = 8 * 1024 * 1024;
+pub const LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS: usize = 256;
+pub const LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION: usize = 64;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LiveInlineDownloadMetrics {
@@ -43,28 +45,25 @@ pub struct LivePendingUploadMetrics {
     pub rejected: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LivePendingLocalEchoMetrics {
+    pub items: usize,
+    pub rejected: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveChatClientState {
-    next_seq: u32,
-    pending_local_echoes: BTreeMap<u32, PendingLocalEcho>,
-    pending_uploads: BTreeMap<u32, PendingLiveUpload>,
+    next_seq_by_session: BTreeMap<ChatSessionId, u64>,
+    pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
+    pending_uploads: BTreeMap<(ChatSessionId, u32), PendingLiveUpload>,
     pending_upload_downloads: BTreeMap<String, PendingLiveUploadDownload>,
+    rejected_pending_local_echoes: u64,
     rejected_upload_downloads: u64,
     rejected_pending_uploads: u64,
 }
 
-impl Default for LiveChatClientState {
-    fn default() -> Self {
-        Self {
-            next_seq: 1,
-            pending_local_echoes: BTreeMap::new(),
-            pending_uploads: BTreeMap::new(),
-            pending_upload_downloads: BTreeMap::new(),
-            rejected_upload_downloads: 0,
-            rejected_pending_uploads: 0,
-        }
-    }
-}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SequenceSpaceExhausted;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingLocalEcho {
@@ -93,10 +92,41 @@ struct PendingLiveUploadDownload {
 }
 
 impl LiveChatClientState {
-    fn reserve_seq(&mut self) -> u32 {
-        let seq = self.next_seq;
-        self.next_seq = self.next_seq.saturating_add(1).max(1);
-        seq
+    fn reserve_sequence_range(
+        &mut self,
+        session_id: ChatSessionId,
+        count: u64,
+    ) -> Result<u64, SequenceSpaceExhausted> {
+        let next = self
+            .next_seq_by_session
+            .get(&session_id)
+            .copied()
+            .unwrap_or(1);
+        let Some(last) = next.checked_add(count.saturating_sub(1)) else {
+            return Err(SequenceSpaceExhausted);
+        };
+        if count == 0 || next == 0 || last > u64::from(u32::MAX) {
+            return Err(SequenceSpaceExhausted);
+        }
+        self.next_seq_by_session
+            .insert(session_id, last.saturating_add(1));
+        Ok(next)
+    }
+
+    fn reserve_seq(&mut self, session_id: ChatSessionId) -> Result<u32, SequenceSpaceExhausted> {
+        let next = self.reserve_sequence_range(session_id, 1)?;
+        u32::try_from(next).map_err(|_| SequenceSpaceExhausted)
+    }
+
+    fn reserve_seq_pair(
+        &mut self,
+        session_id: ChatSessionId,
+    ) -> Result<[u32; 2], SequenceSpaceExhausted> {
+        let first = self.reserve_sequence_range(session_id, 2)?;
+        let second = first.saturating_add(1);
+        let first = u32::try_from(first).map_err(|_| SequenceSpaceExhausted)?;
+        let second = u32::try_from(second).map_err(|_| SequenceSpaceExhausted)?;
+        Ok([first, second])
     }
 
     pub fn inline_download_metrics(&self) -> LiveInlineDownloadMetrics {
@@ -133,6 +163,20 @@ impl LiveChatClientState {
         }
     }
 
+    pub fn pending_local_echo_metrics(&self) -> LivePendingLocalEchoMetrics {
+        LivePendingLocalEchoMetrics {
+            items: self.pending_local_echoes.len(),
+            rejected: self.rejected_pending_local_echoes,
+        }
+    }
+
+    pub fn pending_local_echo_session_items(&self, session_id: ChatSessionId) -> usize {
+        self.pending_local_echoes
+            .values()
+            .filter(|echo| echo.session_id == session_id)
+            .count()
+    }
+
     pub fn cancel_session_transfers(&mut self, session_id: ChatSessionId) {
         self.pending_local_echoes
             .retain(|_, echo| echo.session_id != session_id);
@@ -140,6 +184,19 @@ impl LiveChatClientState {
             .retain(|_, upload| upload.session_id != session_id);
         self.pending_upload_downloads
             .retain(|_, download| download.session_id != session_id);
+    }
+
+    pub fn retire_session_link_state(&mut self, session_id: ChatSessionId) {
+        self.cancel_session_transfers(session_id);
+        self.next_seq_by_session.remove(&session_id);
+    }
+}
+
+fn sequence_space_exhausted_event(session_id: ChatSessionId) -> ChatClientEvent {
+    ChatClientEvent::Error {
+        session_id: Some(session_id),
+        message: "OMENchat link sequence space exhausted; reconnect before sending more operations"
+            .into(),
     }
 }
 
@@ -172,11 +229,15 @@ pub fn handle_live_request<T: ChatLinkTransport>(
                     message: "room name is empty or exceeds client limits".into(),
                 }]
             } else {
+                let seq = match state.reserve_seq(session_id) {
+                    Ok(seq) => seq,
+                    Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+                };
                 send_frame_or_error(
                     transport,
                     Frame::new(
                         ChatOp::JoinRoom,
-                        state.reserve_seq(),
+                        seq,
                         None,
                         FrameBody::Text(room.to_owned()),
                     ),
@@ -294,7 +355,7 @@ pub fn reconnect_live_server<T: ChatLinkTransport>(
             message: "OMENchat reconnect destination changed".into(),
         }];
     }
-    state.cancel_session_transfers(session_id);
+    state.retire_session_link_state(session_id);
     let session = client
         .session_mut(session_id)
         .expect("reconnect session was validated above");
@@ -369,9 +430,13 @@ pub fn ping_live_session<T: ChatLinkTransport>(
     transport: &mut T,
     session_id: ChatSessionId,
 ) -> Option<ChatClientEvent> {
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return Some(sequence_space_exhausted_event(session_id)),
+    };
     send_frame_or_error(
         transport,
-        Frame::new(ChatOp::Ping, state.reserve_seq(), None, FrameBody::Empty),
+        Frame::new(ChatOp::Ping, seq, None, FrameBody::Empty),
         Some(session_id),
     )
 }
@@ -451,6 +516,10 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     local_display_name: Option<&str>,
 ) -> Vec<ChatClientEvent> {
     let mut events = Vec::new();
+    let [session_open_seq, join_seq] = match state.reserve_seq_pair(session_id) {
+        Ok(sequences) => sequences,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     let session_open_body = local_display_name
         .map(|name| {
             FrameBody::Fields(vec![
@@ -463,7 +532,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         transport,
         &Frame::new(
             ChatOp::SessionOpen,
-            state.reserve_seq(),
+            session_open_seq,
             None,
             session_open_body,
         ),
@@ -481,12 +550,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         .unwrap_or_else(|| "lobby".to_string());
     if let Err(error) = send_chat_frame(
         transport,
-        &Frame::new(
-            ChatOp::JoinRoom,
-            state.reserve_seq(),
-            None,
-            FrameBody::Text(room_name),
-        ),
+        &Frame::new(ChatOp::JoinRoom, join_seq, None, FrameBody::Text(room_name)),
     ) {
         events.push(ChatClientEvent::Error {
             session_id: Some(session_id),
@@ -534,14 +598,13 @@ fn part_live_room<T: ChatLinkTransport>(
             message: "OMENchat live session is not available".into(),
         }];
     };
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     send_frame_or_error(
         transport,
-        Frame::new(
-            ChatOp::PartRoom,
-            state.reserve_seq(),
-            Some(room_id),
-            FrameBody::Empty,
-        ),
+        Frame::new(ChatOp::PartRoom, seq, Some(room_id), FrameBody::Empty),
         Some(session_id),
     )
     .map_or_else(
@@ -567,19 +630,39 @@ fn send_live_room_text<T: ChatLinkTransport>(
             message: "OMENchat live session is not available".into(),
         }];
     };
-    let seq = state.reserve_seq();
+    let tracks_server_acceptance = matches!(op, ChatOp::RoomMessage | ChatOp::RoomAction);
+    if tracks_server_acceptance
+        && (state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+            || state.pending_local_echo_session_items(session_id)
+                >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION)
+    {
+        state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
+        let message =
+            "OMENchat pending message queue is full; wait for server acceptance or reconnect";
+        if let Some(session) = client.session_mut(session_id) {
+            session.status = message.into();
+        }
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: message.into(),
+        }];
+    }
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     let frame = Frame::new(op, seq, Some(room_id), FrameBody::Text(body.clone()));
     match send_frame_or_error(transport, frame, Some(session_id)) {
         Some(event) => vec![event],
         None => {
-            if matches!(op, ChatOp::RoomMessage | ChatOp::RoomAction) {
+            if tracks_server_acceptance {
                 let Some(local_echo) =
                     append_pending_local_echo(client, session_id, room_id, seq, body, op)
                 else {
                     return drain_live_events(client, transport, Some(session_id));
                 };
                 state.pending_local_echoes.insert(
-                    seq,
+                    (session_id, seq),
                     PendingLocalEcho {
                         session_id,
                         room_id,
@@ -693,9 +776,12 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
         }];
     }
     let byte_len = bytes.len() as u64;
-    let seq = state.reserve_seq();
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     state.pending_uploads.insert(
-        seq,
+        (session_id, seq),
         PendingLiveUpload {
             session_id,
             filename: filename.clone(),
@@ -722,7 +808,7 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
         ),
         Some(session_id),
     ) {
-        state.pending_uploads.remove(&seq);
+        state.pending_uploads.remove(&(session_id, seq));
         return vec![event];
     }
     if let Some(session) = client.session_mut(session_id) {
@@ -754,9 +840,13 @@ fn request_live_upload_resource<T: ChatLinkTransport>(
             message: "upload resource id is empty or exceeds client limits".into(),
         }];
     }
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     let frame = Frame::new(
         ChatOp::UploadFetch,
-        state.reserve_seq(),
+        seq,
         Some(room_id),
         FrameBody::Fields(vec![FrameValue::String(resource_id.clone())]),
     );
@@ -788,9 +878,13 @@ fn load_live_history_before<T: ChatLinkTransport>(
         .map(|event| event.event_id)
         .min()
         .unwrap_or(u64::MAX);
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     let frame = Frame::new(
         ChatOp::HistoryBefore,
-        state.reserve_seq(),
+        seq,
         Some(session.active_room.room_id),
         FrameBody::Fields(vec![FrameValue::U64(before)]),
     );
@@ -816,9 +910,13 @@ fn sync_live_recent_history<T: ChatLinkTransport>(
         }];
     };
     let fingerprint = recent_history_fingerprint(session);
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     let frame = Frame::new(
         ChatOp::HistoryRecent,
-        state.reserve_seq(),
+        seq,
         Some(session.active_room.room_id),
         FrameBody::Fields(vec![
             FrameValue::U64(fingerprint.first_event_id),
@@ -851,14 +949,13 @@ fn refresh_live_rooms<T: ChatLinkTransport>(
     transport: &mut T,
     session_id: ChatSessionId,
 ) -> Vec<ChatClientEvent> {
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     send_frame_or_error(
         transport,
-        Frame::new(
-            ChatOp::Command,
-            state.reserve_seq(),
-            None,
-            FrameBody::Text("rooms".into()),
-        ),
+        Frame::new(ChatOp::Command, seq, None, FrameBody::Text("rooms".into())),
         Some(session_id),
     )
     .map_or_else(
@@ -890,11 +987,15 @@ fn set_live_room_topic<T: ChatLinkTransport>(
         }];
     }
     let command = format!("topic {}", topic.trim()).trim().to_owned();
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     send_frame_or_error(
         transport,
         Frame::new(
             ChatOp::Command,
-            state.reserve_seq(),
+            seq,
             Some(room_id),
             FrameBody::Text(command),
         ),
@@ -938,14 +1039,13 @@ fn create_live_room<T: ChatLinkTransport>(
         .filter(|topic| !topic.is_empty())
         .map(|topic| format!("create {room} {topic}"))
         .unwrap_or_else(|| format!("create {room}"));
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     send_frame_or_error(
         transport,
-        Frame::new(
-            ChatOp::Command,
-            state.reserve_seq(),
-            None,
-            FrameBody::Text(command),
-        ),
+        Frame::new(ChatOp::Command, seq, None, FrameBody::Text(command)),
         Some(session_id),
     )
     .map_or_else(
@@ -986,11 +1086,15 @@ fn moderate_live_user<T: ChatLinkTransport>(
                 "usage: /kick <user>, /ban <user>, /unban <user>, /mute <user>, /unmute <user>, or /role <user> <role>".into(),
         }];
     }
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
     send_frame_or_error(
         transport,
         Frame::new(
             ChatOp::Command,
-            state.reserve_seq(),
+            seq,
             Some(room_id),
             FrameBody::Text(format!("{action} {target}")),
         ),
@@ -1591,13 +1695,12 @@ fn apply_message_ack(
     frame: &Frame,
     events: &mut Vec<ChatClientEvent>,
 ) {
-    let Some(pending) = state.pending_local_echoes.remove(&frame.seq) else {
+    let Some(session_id) = preferred_session_id else {
         return;
     };
-    if preferred_session_id.is_some_and(|session_id| session_id != pending.session_id) {
-        state.pending_local_echoes.insert(frame.seq, pending);
+    let Some(pending) = state.pending_local_echoes.remove(&(session_id, frame.seq)) else {
         return;
-    }
+    };
     let Some(values) = body_values(&frame.body) else {
         return;
     };
@@ -1682,7 +1785,7 @@ fn apply_upload_accept(
         });
         return;
     };
-    let Some(upload) = state.pending_uploads.remove(&frame.seq) else {
+    let Some(upload) = state.pending_uploads.remove(&(session_id, frame.seq)) else {
         events.push(ChatClientEvent::Error {
             session_id: Some(session_id),
             message: "OMENchat upload accepted but no matching pending file exists".into(),
@@ -1690,7 +1793,9 @@ fn apply_upload_accept(
         return;
     };
     if upload.session_id != session_id {
-        state.pending_uploads.insert(frame.seq, upload);
+        state
+            .pending_uploads
+            .insert((upload.session_id, frame.seq), upload);
         events.push(ChatClientEvent::Error {
             session_id: Some(session_id),
             message: "OMENchat upload accept belongs to another session".into(),
@@ -1740,10 +1845,10 @@ fn apply_upload_reject(
     if let Some(state) = state {
         if state
             .pending_uploads
-            .get(&frame.seq)
+            .get(&(session_id, frame.seq))
             .is_some_and(|upload| upload.session_id == session_id)
         {
-            state.pending_uploads.remove(&frame.seq);
+            state.pending_uploads.remove(&(session_id, frame.seq));
         }
     }
     let reason = body_values(&frame.body)
@@ -3385,6 +3490,14 @@ mod tests {
         ));
         assert_eq!(state.pending_upload_metrics().items, 0);
         assert_eq!(state.inline_download_metrics().items, 0);
+        let reconnect_sequences = transport
+            .sent_frames
+            .iter()
+            .rev()
+            .take(2)
+            .map(|bytes| decode_frame(bytes).expect("reconnect frame").seq)
+            .collect::<Vec<_>>();
+        assert_eq!(reconnect_sequences, vec![2, 1]);
     }
 
     #[test]
@@ -4055,6 +4168,227 @@ mod tests {
                     && event.actor_display_name.as_deref() == Some("You")
         ));
         assert_eq!(client.session(session_id).expect("session").events.len(), 1);
+    }
+
+    #[test]
+    fn live_sequences_are_session_scoped_atomic_and_reset_only_on_link_retirement() {
+        let mut state = LiveChatClientState::default();
+
+        assert_eq!(state.reserve_seq(11), Ok(1));
+        assert_eq!(state.reserve_seq(22), Ok(1));
+        assert_eq!(state.reserve_seq(11), Ok(2));
+
+        state
+            .next_seq_by_session
+            .insert(11, u64::from(u32::MAX) - 1);
+        assert_eq!(state.reserve_seq_pair(11), Ok([u32::MAX - 1, u32::MAX]));
+        assert_eq!(state.reserve_seq(11), Err(SequenceSpaceExhausted));
+        assert_eq!(state.reserve_seq(22), Ok(2));
+
+        state.next_seq_by_session.insert(33, u64::from(u32::MAX));
+        assert!(state.reserve_seq_pair(33).is_err());
+        assert_eq!(state.reserve_seq(33), Ok(u32::MAX));
+        assert!(state.reserve_seq(33).is_err());
+
+        state.retire_session_link_state(11);
+        assert_eq!(state.reserve_seq_pair(11), Ok([1, 2]));
+    }
+
+    #[test]
+    fn live_pending_correlations_allow_equal_sequences_on_independent_links() {
+        let mut state = LiveChatClientState::default();
+        for session_id in [11, 22] {
+            state.pending_local_echoes.insert(
+                (session_id, 1),
+                PendingLocalEcho {
+                    session_id,
+                    room_id: 1,
+                    temp_event_id: local_echo_event_id(1),
+                },
+            );
+            state.pending_uploads.insert(
+                (session_id, 2),
+                PendingLiveUpload {
+                    session_id,
+                    filename: format!("session-{session_id}.bin"),
+                    content_type: None,
+                    bytes: vec![session_id as u8],
+                },
+            );
+        }
+
+        assert_eq!(state.pending_local_echo_metrics().items, 2);
+        assert_eq!(state.pending_upload_metrics().items, 2);
+        assert_eq!(state.reserve_seq(11), Ok(1));
+        state.cancel_session_transfers(11);
+        assert!(state.pending_local_echoes.contains_key(&(22, 1)));
+        assert!(state.pending_uploads.contains_key(&(22, 2)));
+        assert_eq!(state.pending_local_echo_metrics().items, 1);
+        assert_eq!(state.pending_upload_metrics().items, 1);
+        assert_eq!(state.reserve_seq(11), Ok(2));
+    }
+
+    #[test]
+    fn live_sequence_exhaustion_rejects_before_frame_or_local_echo() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        state
+            .next_seq_by_session
+            .insert(session_id, u64::from(u32::MAX) + 1);
+        let mut transport = CapturedChatTransport::default();
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendMessage {
+                session_id,
+                room: "lobby".into(),
+                body: "must not be sent with a reused sequence".into(),
+            },
+        );
+
+        assert!(transport.sent_frames.is_empty());
+        assert_eq!(state.pending_local_echo_metrics().items, 0);
+        assert!(client
+            .session(session_id)
+            .expect("session")
+            .events
+            .is_empty());
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("sequence space exhausted")
+        ));
+    }
+
+    #[test]
+    fn live_pending_local_echoes_enforce_per_session_budget_and_release_capacity() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        for index in 0..LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION {
+            let events = handle_live_request(
+                &mut client,
+                &mut state,
+                &mut transport,
+                ChatClientRequest::SendMessage {
+                    session_id,
+                    room: "lobby".into(),
+                    body: format!("pending-{index}"),
+                },
+            );
+            assert!(matches!(
+                events.as_slice(),
+                [ChatClientEvent::EventAppended { .. }]
+            ));
+        }
+
+        let rejected = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendMessage {
+                session_id,
+                room: "lobby".into(),
+                body: "must remain in the composer".into(),
+            },
+        );
+        assert_eq!(
+            transport.sent_frames.len(),
+            LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
+        );
+        assert_eq!(
+            state.pending_local_echo_metrics(),
+            LivePendingLocalEchoMetrics {
+                items: LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION,
+                rejected: 1,
+            }
+        );
+        assert!(matches!(
+            rejected.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("pending message queue is full")
+        ));
+
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::MessageAck,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![FrameValue::U64(101)]),
+            ))
+            .expect("message ack");
+        let _ =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert_eq!(
+            state.pending_local_echo_metrics().items,
+            LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION - 1
+        );
+
+        let admitted = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendMessage {
+                session_id,
+                room: "lobby".into(),
+                body: "capacity restored".into(),
+            },
+        );
+        assert!(matches!(
+            admitted.as_slice(),
+            [ChatClientEvent::EventAppended { .. }]
+        ));
+        assert_eq!(
+            state.pending_local_echo_metrics().items,
+            LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
+        );
+
+        state.cancel_session_transfers(session_id);
+        assert_eq!(state.pending_local_echo_metrics().items, 0);
+        assert_eq!(state.pending_local_echo_metrics().rejected, 1);
+    }
+
+    #[test]
+    fn live_pending_local_echoes_enforce_global_budget_before_sending() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        for index in 0..LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS {
+            let owner_session_id =
+                100 + (index / LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION) as u64;
+            let seq = index as u32 + 1;
+            state.pending_local_echoes.insert(
+                (owner_session_id, seq),
+                PendingLocalEcho {
+                    session_id: owner_session_id,
+                    room_id: 1,
+                    temp_event_id: local_echo_event_id(seq),
+                },
+            );
+        }
+        let mut transport = CapturedChatTransport::default();
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendAction {
+                session_id,
+                room: "lobby".into(),
+                body: "not sent after global saturation".into(),
+            },
+        );
+
+        assert!(transport.sent_frames.is_empty());
+        assert_eq!(
+            state.pending_local_echo_metrics(),
+            LivePendingLocalEchoMetrics {
+                items: LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS,
+                rejected: 1,
+            }
+        );
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
     }
 
     #[test]

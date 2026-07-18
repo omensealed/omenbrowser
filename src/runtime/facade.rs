@@ -1,5 +1,183 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLifecycleState {
+    #[default]
+    New,
+    Starting,
+    Running,
+    Draining,
+    Stopped,
+    Failed,
+}
+
+impl RuntimeLifecycleState {
+    pub fn accepts_new_work(self) -> bool {
+        self == Self::Running
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Stopped | Self::Failed)
+    }
+
+    pub fn can_transition_to(self, next: Self) -> bool {
+        if self == next {
+            return true;
+        }
+        matches!(
+            (self, next),
+            (Self::New, Self::Starting | Self::Stopped | Self::Failed)
+                | (
+                    Self::Starting,
+                    Self::Running | Self::Draining | Self::Stopped | Self::Failed
+                )
+                | (Self::Running, Self::Draining | Self::Failed)
+                | (Self::Draining, Self::Stopped | Self::Failed)
+                | (Self::Stopped, Self::Starting)
+                | (
+                    Self::Failed,
+                    Self::Starting | Self::Draining | Self::Stopped
+                )
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeFailureCategory {
+    Configuration,
+    Identity,
+    Interface,
+    Transport,
+    Rpc,
+    Storage,
+    Protocol,
+    Shutdown,
+    Internal,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeFailure {
+    pub category: RuntimeFailureCategory,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub technical_detail: Option<String>,
+    pub retryable: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeLifecycleSnapshot {
+    pub state: RuntimeLifecycleState,
+    pub backend: crate::runtime::network::RuntimeBackendName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RuntimeFailure>,
+}
+
+impl RuntimeLifecycleSnapshot {
+    pub fn new(
+        state: RuntimeLifecycleState,
+        backend: crate::runtime::network::RuntimeBackendName,
+    ) -> Self {
+        Self {
+            state,
+            backend,
+            failure: None,
+        }
+    }
+
+    pub fn failed(
+        backend: crate::runtime::network::RuntimeBackendName,
+        failure: RuntimeFailure,
+    ) -> Self {
+        Self {
+            state: RuntimeLifecycleState::Failed,
+            backend,
+            failure: Some(failure),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCapability {
+    DirectDelivery,
+    OpportunisticDelivery,
+    PropagatedDelivery,
+    PaperUriDelivery,
+    DeliveryCancellation,
+    EventStream,
+    History,
+    ConversationListing,
+    Tickets,
+    Stamps,
+    PropagationStatus,
+    Attachments,
+    SharedInstance,
+    PathMetadata,
+    InterfaceMutation,
+    IntegratedBackend,
+    RpcBackend,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCapabilityAvailability {
+    Supported,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCapabilitySource {
+    Compiled,
+    Configured,
+    Negotiated,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeCapabilityRecord {
+    pub capability: RuntimeCapability,
+    pub availability: RuntimeCapabilityAvailability,
+    pub source: RuntimeCapabilitySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeCapabilitySnapshot {
+    pub backend: crate::runtime::network::RuntimeBackendName,
+    pub capabilities: Vec<RuntimeCapabilityRecord>,
+}
+
+impl Default for RuntimeCapabilitySnapshot {
+    fn default() -> Self {
+        Self {
+            backend: crate::runtime::network::RuntimeBackendName::Auto,
+            capabilities: Vec::new(),
+        }
+    }
+}
+
+impl RuntimeCapabilitySnapshot {
+    pub fn availability(&self, capability: RuntimeCapability) -> RuntimeCapabilityAvailability {
+        self.capabilities
+            .iter()
+            .find(|record| record.capability == capability)
+            .map(|record| record.availability)
+            .unwrap_or_default()
+    }
+
+    pub fn supports(&self, capability: RuntimeCapability) -> bool {
+        self.availability(capability) == RuntimeCapabilityAvailability::Supported
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeCapabilities {
     pub reticulum_links: bool,
@@ -175,6 +353,71 @@ mod tests {
         assert!(!capabilities.reticulum_resources);
         assert!(!capabilities.lxmf_direct);
         assert!(!capabilities.embedded_runtime);
+    }
+
+    #[test]
+    fn lifecycle_transitions_are_explicit_and_restartable() {
+        use RuntimeLifecycleState as State;
+
+        assert!(State::New.can_transition_to(State::Starting));
+        assert!(State::Starting.can_transition_to(State::Running));
+        assert!(State::Running.can_transition_to(State::Draining));
+        assert!(State::Draining.can_transition_to(State::Stopped));
+        assert!(State::Stopped.can_transition_to(State::Starting));
+        assert!(State::Failed.can_transition_to(State::Starting));
+        assert!(State::Running.can_transition_to(State::Running));
+
+        assert!(!State::New.can_transition_to(State::Running));
+        assert!(!State::Running.can_transition_to(State::Stopped));
+        assert!(!State::Draining.can_transition_to(State::Running));
+        assert!(!State::Stopped.can_transition_to(State::Running));
+        assert!(State::Running.accepts_new_work());
+        assert!(!State::Draining.accepts_new_work());
+        assert!(State::Stopped.is_terminal());
+        assert!(State::Failed.is_terminal());
+    }
+
+    #[test]
+    fn lifecycle_failure_is_structured_and_user_safe() {
+        let snapshot = RuntimeLifecycleSnapshot::failed(
+            crate::runtime::network::RuntimeBackendName::Reticulum,
+            RuntimeFailure {
+                category: RuntimeFailureCategory::Interface,
+                summary: "configured interface could not start".into(),
+                technical_detail: Some("tcp client rejected an empty host".into()),
+                retryable: true,
+            },
+        );
+
+        assert_eq!(snapshot.state, RuntimeLifecycleState::Failed);
+        assert_eq!(
+            snapshot.failure.as_ref().map(|failure| failure.category),
+            Some(RuntimeFailureCategory::Interface)
+        );
+        assert!(snapshot
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.retryable));
+    }
+
+    #[test]
+    fn capability_snapshot_defaults_missing_entries_to_unknown() {
+        let snapshot = RuntimeCapabilitySnapshot {
+            backend: crate::runtime::network::RuntimeBackendName::Reticulum,
+            capabilities: vec![RuntimeCapabilityRecord {
+                capability: RuntimeCapability::DirectDelivery,
+                availability: RuntimeCapabilityAvailability::Supported,
+                source: RuntimeCapabilitySource::Negotiated,
+                detail: Some("backend probe".into()),
+            }],
+        };
+
+        assert!(snapshot.supports(RuntimeCapability::DirectDelivery));
+        assert!(!snapshot.supports(RuntimeCapability::EventStream));
+        assert_eq!(
+            snapshot.availability(RuntimeCapability::EventStream),
+            RuntimeCapabilityAvailability::Unknown
+        );
     }
 
     #[test]

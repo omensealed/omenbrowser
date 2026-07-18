@@ -50,6 +50,8 @@ const PROPAGATION_WORKBLOCK_EXPAND_ROUNDS: u32 = 1000;
 pub const DEFAULT_PROPAGATION_STAMP_TARGET_COST: u8 = 16;
 pub const DEFAULT_PROPAGATION_STAMP_MAX_ATTEMPTS: u64 = 1 << 22;
 pub const DEFAULT_DIRECT_STAMP_MAX_ATTEMPTS: u64 = 1 << 22;
+pub const CLEAN_DIRECT_STAMP_MAX_COST: u8 = 8;
+pub const CLEAN_DIRECT_STAMP_MAX_ATTEMPTS: u64 = 1 << 16;
 const MAX_LXMF_ANNOUNCE_BYTES: usize = 4 * 1024;
 const MAX_LXMF_ANNOUNCE_CONTAINER_ITEMS: usize = 64;
 const MAX_LXMF_ANNOUNCE_TOTAL_VALUES: usize = 256;
@@ -125,21 +127,53 @@ pub fn delivery_display_name_from_app_data(app_data: &[u8]) -> Option<String> {
         .flatten()
 }
 
-pub fn delivery_announce_stamp_cost(app_data: &[u8]) -> Option<u8> {
-    validate_lxmf_announce_msgpack(app_data).ok()?;
-    let mut cursor = std::io::Cursor::new(app_data);
-    let value = rmpv::decode::read_value(&mut cursor).ok()?;
-    if cursor.position() != app_data.len() as u64 {
-        return None;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectStampPolicy {
+    Unknown,
+    NotRequired,
+    Required { cost: u8 },
+    TicketAccepted,
+    Unsupported,
+}
+
+pub fn delivery_announce_direct_stamp_policy(
+    app_data: Option<&[u8]>,
+    valid_reply_ticket: bool,
+) -> DirectStampPolicy {
+    if valid_reply_ticket {
+        return DirectStampPolicy::TicketAccepted;
     }
-    let rmpv::Value::Array(items) = value else {
-        return None;
+    let Some(app_data) = app_data.filter(|data| !data.is_empty()) else {
+        return DirectStampPolicy::Unknown;
     };
-    let cost = items.get(1).and_then(value_as_u64)?;
-    if cost == 0 || cost >= 255 {
-        return None;
+    if validate_lxmf_announce_msgpack(app_data).is_err() {
+        return DirectStampPolicy::Unknown;
     }
-    u8::try_from(cost).ok()
+    let mut cursor = std::io::Cursor::new(app_data);
+    let Ok(rmpv::Value::Array(items)) = rmpv::decode::read_value(&mut cursor) else {
+        return DirectStampPolicy::Unknown;
+    };
+    if cursor.position() != app_data.len() as u64 {
+        return DirectStampPolicy::Unsupported;
+    }
+    match items.get(1) {
+        Some(rmpv::Value::Nil) => DirectStampPolicy::NotRequired,
+        Some(value) => match value_as_u64(value) {
+            Some(cost @ 1..=254) => DirectStampPolicy::Required { cost: cost as u8 },
+            _ => DirectStampPolicy::Unsupported,
+        },
+        None => DirectStampPolicy::Unknown,
+    }
+}
+
+pub fn delivery_announce_stamp_cost(app_data: &[u8]) -> Option<u8> {
+    match delivery_announce_direct_stamp_policy(Some(app_data), false) {
+        DirectStampPolicy::Required { cost } => Some(cost),
+        DirectStampPolicy::Unknown
+        | DirectStampPolicy::NotRequired
+        | DirectStampPolicy::TicketAccepted
+        | DirectStampPolicy::Unsupported => None,
+    }
 }
 
 pub fn encode_delivery_display_name_app_data(display_name: &str) -> AppResult<Vec<u8>> {
@@ -513,9 +547,29 @@ pub fn generate_direct_stamp_for_message(
     target_cost: u8,
     max_attempts: u64,
 ) -> AppResult<GeneratedDirectStamp> {
+    generate_direct_stamp_for_message_cancellable(message_id, target_cost, max_attempts, || false)
+}
+
+pub fn generate_direct_stamp_for_message_cancellable(
+    message_id: [u8; 32],
+    target_cost: u8,
+    max_attempts: u64,
+    mut cancelled: impl FnMut() -> bool,
+) -> AppResult<GeneratedDirectStamp> {
+    if cancelled() {
+        return Err(AppError::Runtime(
+            "LXMF direct stamp generation cancelled before work".into(),
+        ));
+    }
     let workblock = stamp_workblock(&message_id, DIRECT_WORKBLOCK_EXPAND_ROUNDS)?;
     let mut stamp = vec![0u8; LXMF_STAMP_SIZE];
     for attempt in 1..=max_attempts {
+        if cancelled() {
+            return Err(AppError::Runtime(format!(
+                "LXMF direct stamp generation cancelled after {} attempts",
+                attempt - 1
+            )));
+        }
         rand_core::OsRng.fill_bytes(&mut stamp);
         if stamp_valid(&stamp, target_cost, &workblock) {
             let stamp_value = stamp_value(&workblock, &stamp);
@@ -618,21 +672,57 @@ pub fn encode_signed_wire_message(
 }
 
 pub fn decode_wire_message(bytes: &[u8]) -> AppResult<MessageSummary> {
-    decode_wire_message_inner(bytes, None)
+    decode_wire_message_inner(bytes, None, None)
 }
 
 pub fn decode_wire_message_storing_attachments(
     bytes: &[u8],
     attachments_dir: &Path,
 ) -> AppResult<MessageSummary> {
-    decode_wire_message_inner(bytes, Some(attachments_dir))
+    decode_wire_message_inner(bytes, Some(attachments_dir), None)
+}
+
+pub fn decode_verified_wire_message(
+    bytes: &[u8],
+    source_identity: &Identity,
+) -> AppResult<MessageSummary> {
+    decode_wire_message_inner(bytes, None, Some(source_identity))
+}
+
+pub fn decode_verified_wire_message_storing_attachments(
+    bytes: &[u8],
+    source_identity: &Identity,
+    attachments_dir: &Path,
+) -> AppResult<MessageSummary> {
+    decode_wire_message_inner(bytes, Some(attachments_dir), Some(source_identity))
+}
+
+pub fn wire_source_hash(bytes: &[u8]) -> AppResult<[u8; 16]> {
+    let (wire, _) = decode_wire_and_message(bytes)?;
+    Ok(wire.source)
 }
 
 fn decode_wire_message_inner(
     bytes: &[u8],
     attachments_dir: Option<&Path>,
+    source_identity: Option<&Identity>,
 ) -> AppResult<MessageSummary> {
     let (wire, message) = decode_wire_and_message(bytes)?;
+    if let Some(source_identity) = source_identity {
+        let expected_source = lxmf_delivery_destination_hash(source_identity);
+        if wire.source != expected_source {
+            return Err(AppError::Runtime(
+                "LXMF source identity does not match signed source destination".into(),
+            ));
+        }
+        if !wire.verify(source_identity).map_err(|err| {
+            AppError::Runtime(format!("LXMF signature verification failed: {err}"))
+        })? {
+            return Err(AppError::Runtime(
+                "LXMF signature is missing or invalid".into(),
+            ));
+        }
+    }
     let peer_hash = hex16(&wire.source);
     let message_id = hex32(&wire.message_id());
     let attachments = if let Some(attachments_dir) = attachments_dir {
@@ -657,6 +747,20 @@ fn decode_wire_message_inner(
         fields,
         attachments,
     })
+}
+
+fn lxmf_delivery_destination_hash(identity: &Identity) -> [u8; 16] {
+    let destination = reticulum_rs::core::destination::Destination::<
+        Identity,
+        reticulum_rs::core::destination::Output,
+        reticulum_rs::core::destination::Single,
+    >::new(
+        *identity,
+        reticulum_rs::core::destination::DestinationName::new("lxmf", "delivery"),
+    );
+    let mut destination_hash = [0u8; 16];
+    destination_hash.copy_from_slice(destination.desc.address_hash.as_slice());
+    destination_hash
 }
 
 fn native_lxmf_summary_fields_from_message_fields(
@@ -776,8 +880,20 @@ fn decode_propagated_lxmf_data_inner(
     private_identity_bytes: &[u8],
     attachments_dir: Option<&Path>,
 ) -> AppResult<MessageSummary> {
-    if let Ok(message) = decode_wire_message_inner(lxmf_data, attachments_dir) {
+    if let Ok(message) = decode_wire_message_inner(lxmf_data, attachments_dir, None) {
         return Ok(message);
+    }
+    let wire = unpack_propagated_lxmf_wire(lxmf_data, private_identity_bytes)?;
+    let message = decode_wire_message_inner(&wire, attachments_dir, None)?;
+    Ok(mark_message_propagated(message))
+}
+
+pub fn unpack_propagated_lxmf_wire(
+    lxmf_data: &[u8],
+    private_identity_bytes: &[u8],
+) -> AppResult<Vec<u8>> {
+    if decode_wire_and_message(lxmf_data).is_ok() {
+        return Ok(lxmf_data.to_vec());
     }
     if lxmf_data.len() <= 16 {
         return Err(AppError::Runtime(
@@ -794,13 +910,26 @@ fn decode_propagated_lxmf_data_inner(
     let mut wire = Vec::with_capacity(16 + decrypted.len());
     wire.extend_from_slice(destination_hash);
     wire.extend_from_slice(&decrypted);
-    let mut message = decode_wire_message_inner(&wire, attachments_dir)?;
+    preflight_lxmf_wire(&wire)?;
+    Ok(wire)
+}
+
+pub fn decode_verified_propagated_wire_message_storing_attachments(
+    wire: &[u8],
+    source_identity: &Identity,
+    attachments_dir: &Path,
+) -> AppResult<MessageSummary> {
+    let message = decode_wire_message_inner(wire, Some(attachments_dir), Some(source_identity))?;
+    Ok(mark_message_propagated(message))
+}
+
+fn mark_message_propagated(mut message: MessageSummary) -> MessageSummary {
     message.transport_method = AppTransportMethod::Propagated;
     message.fields.insert(
         "native_lxmf_delivery_source".into(),
         "propagation_sync".into(),
     );
-    Ok(message)
+    message
 }
 
 pub fn propagation_envelope_entries(bytes: &[u8]) -> AppResult<Vec<Vec<u8>>> {
@@ -1546,6 +1675,21 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::sync::{mpsc, Arc};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use omen_ifac_tcp::IfacTcpClient;
+    use rns_transport::delivery::{await_link_activation, send_on_link_observed, LinkSendResult};
+    use rns_transport::hash::AddressHash;
+    use rns_transport::identity::PrivateIdentity as TransportPrivateIdentity;
+    use rns_transport::transport::{DeliveryReceipt, ReceiptHandler, Transport, TransportConfig};
+
     use super::*;
     use crate::identity::IdentityMaterialProvider;
     use crate::messaging::DeliveryMode;
@@ -1553,6 +1697,489 @@ mod tests {
 
     const DEST: &str = "00112233445566778899aabbccddeeff";
     const SRC: &str = "ffeeddccbbaa99887766554433221100";
+
+    struct CurrentLxmfReceiptCapture {
+        sender: tokio::sync::mpsc::Sender<[u8; 32]>,
+    }
+
+    impl ReceiptHandler for CurrentLxmfReceiptCapture {
+        fn on_receipt(&self, receipt: &DeliveryReceipt) {
+            let _ = self.sender.try_send(receipt.message_id);
+        }
+    }
+
+    struct CurrentLxmfRoot(PathBuf);
+
+    impl CurrentLxmfRoot {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "omen-current-python-lxmf-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).expect("create isolated current LXMF root");
+            Self(path)
+        }
+    }
+
+    impl Drop for CurrentLxmfRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct CurrentPythonLxmfPeer {
+        child: Child,
+        json_lines: mpsc::Receiver<serde_json::Value>,
+        reader: Option<JoinHandle<()>>,
+        ready: serde_json::Value,
+    }
+
+    impl CurrentPythonLxmfPeer {
+        fn spawn(root: &Path, port: u16, source: &str) -> Self {
+            let source_path = std::env::var_os("OMEN_PYTHON_RNS_SOURCE")
+                .map(PathBuf::from)
+                .expect("OMEN_PYTHON_RNS_SOURCE must name current Python site-packages");
+            let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/server/crates/omen-ifac-tcp/tests/fixtures/current_python_lxmf_peer.py");
+            let mut child = Command::new("python3")
+                .arg(script)
+                .arg("--rns-source")
+                .arg(source_path)
+                .arg("--root")
+                .arg(root)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--source")
+                .arg(source)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("spawn current Python LXMF peer");
+            let (json_lines, reader) =
+                current_lxmf_json_reader(child.stdout.take().expect("current Python peer stdout"));
+            let ready = current_lxmf_json_line(
+                &json_lines,
+                Duration::from_secs(8),
+                "current Python LXMF readiness",
+            );
+            assert_eq!(ready["ready"], true);
+            assert_eq!(ready["port"], port);
+            assert_eq!(ready["rns"], "1.3.8");
+            assert_eq!(ready["lxmf"], "1.0.1");
+            Self {
+                child,
+                json_lines,
+                reader: Some(reader),
+                ready,
+            }
+        }
+
+        fn wait_for_source_announce(&self) {
+            let announced = current_lxmf_json_line(
+                &self.json_lines,
+                Duration::from_secs(10),
+                "current Python LXMF source announce",
+            );
+            assert_eq!(announced["source_announced"], true);
+        }
+
+        fn finish(mut self) -> serde_json::Value {
+            let result = current_lxmf_json_line(
+                &self.json_lines,
+                Duration::from_secs(22),
+                "current Python LXMF delivery result",
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(status) = self.child.try_wait().expect("poll current Python peer") {
+                    assert!(status.success(), "current Python LXMF peer exited {status}");
+                    self.join_reader();
+                    return result;
+                }
+                if Instant::now() >= deadline {
+                    let _ = self.child.kill();
+                    panic!("current Python LXMF peer did not exit within bounded shutdown");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn join_reader(&mut self) {
+            if let Some(reader) = self.reader.take() {
+                reader.join().expect("current Python stdout reader join");
+            }
+        }
+    }
+
+    impl Drop for CurrentPythonLxmfPeer {
+        fn drop(&mut self) {
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+            self.join_reader();
+        }
+    }
+
+    struct CurrentPythonLxmfSender {
+        child: Child,
+        json_lines: mpsc::Receiver<serde_json::Value>,
+        reader: Option<JoinHandle<()>>,
+        ready: serde_json::Value,
+    }
+
+    impl CurrentPythonLxmfSender {
+        fn spawn(root: &Path, port: u16, destination: &str) -> Self {
+            let source_path = std::env::var_os("OMEN_PYTHON_RNS_SOURCE")
+                .map(PathBuf::from)
+                .expect("OMEN_PYTHON_RNS_SOURCE must name current Python site-packages");
+            let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "src/server/crates/omen-ifac-tcp/tests/fixtures/current_python_lxmf_sender.py",
+            );
+            let mut child = Command::new("python3")
+                .arg(script)
+                .arg("--rns-source")
+                .arg(source_path)
+                .arg("--root")
+                .arg(root)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--destination")
+                .arg(destination)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("spawn current Python LXMF sender");
+            let (json_lines, reader) = current_lxmf_json_reader(
+                child.stdout.take().expect("current Python sender stdout"),
+            );
+            let ready = current_lxmf_json_line(
+                &json_lines,
+                Duration::from_secs(8),
+                "current Python LXMF sender readiness",
+            );
+            assert_eq!(ready["ready"], true);
+            assert_eq!(ready["port"], port);
+            assert_eq!(ready["rns"], "1.3.8");
+            assert_eq!(ready["lxmf"], "1.0.1");
+            Self {
+                child,
+                json_lines,
+                reader: Some(reader),
+                ready,
+            }
+        }
+
+        fn finish(mut self) -> serde_json::Value {
+            let result = current_lxmf_json_line(
+                &self.json_lines,
+                Duration::from_secs(22),
+                "current Python LXMF sender result",
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(status) = self.child.try_wait().expect("poll current Python sender") {
+                    assert!(
+                        status.success(),
+                        "current Python LXMF sender exited {status}"
+                    );
+                    self.join_reader();
+                    return result;
+                }
+                if Instant::now() >= deadline {
+                    let _ = self.child.kill();
+                    panic!("current Python LXMF sender did not exit within bounded shutdown");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn join_reader(&mut self) {
+            if let Some(reader) = self.reader.take() {
+                reader
+                    .join()
+                    .expect("current Python sender stdout reader join");
+            }
+        }
+    }
+
+    impl Drop for CurrentPythonLxmfSender {
+        fn drop(&mut self) {
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+            self.join_reader();
+        }
+    }
+
+    struct PythonLxmfTicketRoundtripPeer {
+        child: Child,
+        json_lines: mpsc::Receiver<serde_json::Value>,
+        reader: Option<JoinHandle<()>>,
+        ready: serde_json::Value,
+    }
+
+    impl PythonLxmfTicketRoundtripPeer {
+        fn spawn(
+            root: &Path,
+            port: u16,
+            rust_source: &str,
+            rns_source_env: &str,
+            lxmf_source_env: Option<&str>,
+            expected_rns: &str,
+            expected_lxmf: &str,
+        ) -> Self {
+            let rns_source = std::env::var_os(rns_source_env)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("{rns_source_env} must name a Python RNS source"));
+            let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "src/server/crates/omen-ifac-tcp/tests/fixtures/python_lxmf_ticket_roundtrip_peer.py",
+            );
+            let mut command = Command::new("python3");
+            command.arg(script).arg("--rns-source").arg(rns_source);
+            if let Some(lxmf_source_env) = lxmf_source_env {
+                let lxmf_source = std::env::var_os(lxmf_source_env)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| panic!("{lxmf_source_env} must name a Python LXMF source"));
+                command.arg("--lxmf-source").arg(lxmf_source);
+            }
+            let mut child = command
+                .arg("--expected-rns")
+                .arg(expected_rns)
+                .arg("--expected-lxmf")
+                .arg(expected_lxmf)
+                .arg("--root")
+                .arg(root)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--rust-source")
+                .arg(rust_source)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("spawn Python LXMF ticket round-trip peer");
+            let (json_lines, reader) = current_lxmf_json_reader(
+                child
+                    .stdout
+                    .take()
+                    .expect("Python ticket round-trip stdout"),
+            );
+            let ready = current_lxmf_json_line(
+                &json_lines,
+                Duration::from_secs(8),
+                "Python LXMF ticket round-trip readiness",
+            );
+            assert_eq!(ready["ready"], true);
+            assert_eq!(ready["port"], port);
+            assert_eq!(ready["rns"], expected_rns);
+            assert_eq!(ready["lxmf"], expected_lxmf);
+            Self {
+                child,
+                json_lines,
+                reader: Some(reader),
+                ready,
+            }
+        }
+
+        fn wait_for_source_announce(&self) {
+            let announced = current_lxmf_json_line(
+                &self.json_lines,
+                Duration::from_secs(12),
+                "Python LXMF ticket source announce",
+            );
+            assert_eq!(announced["source_announced"], true);
+        }
+
+        fn finish(mut self) -> serde_json::Value {
+            let result = current_lxmf_json_line(
+                &self.json_lines,
+                Duration::from_secs(28),
+                "Python LXMF ticket round-trip result",
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(status) = self.child.try_wait().expect("poll Python ticket peer") {
+                    assert!(status.success(), "Python LXMF ticket peer exited {status}");
+                    self.join_reader();
+                    return result;
+                }
+                if Instant::now() >= deadline {
+                    let _ = self.child.kill();
+                    panic!("Python LXMF ticket peer did not exit within bounded shutdown");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn join_reader(&mut self) {
+            if let Some(reader) = self.reader.take() {
+                reader.join().expect("Python ticket stdout reader join");
+            }
+        }
+    }
+
+    impl Drop for PythonLxmfTicketRoundtripPeer {
+        fn drop(&mut self) {
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+            self.join_reader();
+        }
+    }
+
+    struct PythonLxmfDirectStampPeer {
+        child: Child,
+        json_lines: mpsc::Receiver<serde_json::Value>,
+        reader: Option<JoinHandle<()>>,
+        ready: serde_json::Value,
+    }
+
+    impl PythonLxmfDirectStampPeer {
+        fn spawn(
+            root: &Path,
+            port: u16,
+            rust_source: &str,
+            rns_source_env: &str,
+            lxmf_source_env: Option<&str>,
+            expected_rns: &str,
+            expected_lxmf: &str,
+        ) -> Self {
+            let rns_source = std::env::var_os(rns_source_env)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("{rns_source_env} must name a Python RNS source"));
+            let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "src/server/crates/omen-ifac-tcp/tests/fixtures/python_lxmf_direct_stamp_peer.py",
+            );
+            let mut command = Command::new("python3");
+            command.arg(script).arg("--rns-source").arg(rns_source);
+            if let Some(lxmf_source_env) = lxmf_source_env {
+                let lxmf_source = std::env::var_os(lxmf_source_env)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| panic!("{lxmf_source_env} must name a Python LXMF source"));
+                command.arg("--lxmf-source").arg(lxmf_source);
+            }
+            let mut child = command
+                .arg("--expected-rns")
+                .arg(expected_rns)
+                .arg("--expected-lxmf")
+                .arg(expected_lxmf)
+                .arg("--root")
+                .arg(root)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--rust-source")
+                .arg(rust_source)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("spawn Python LXMF direct-stamp peer");
+            let (json_lines, reader) =
+                current_lxmf_json_reader(child.stdout.take().expect("Python direct-stamp stdout"));
+            let ready = current_lxmf_json_line(
+                &json_lines,
+                Duration::from_secs(8),
+                "Python LXMF direct-stamp readiness",
+            );
+            assert_eq!(ready["ready"], true);
+            assert_eq!(ready["port"], port);
+            assert_eq!(ready["rns"], expected_rns);
+            assert_eq!(ready["lxmf"], expected_lxmf);
+            Self {
+                child,
+                json_lines,
+                reader: Some(reader),
+                ready,
+            }
+        }
+
+        fn wait_for_source_announce(&self) {
+            let announced = current_lxmf_json_line(
+                &self.json_lines,
+                Duration::from_secs(12),
+                "Python LXMF direct-stamp source announce",
+            );
+            assert_eq!(announced["source_announced"], true);
+        }
+
+        fn finish(mut self) -> serde_json::Value {
+            let result = current_lxmf_json_line(
+                &self.json_lines,
+                Duration::from_secs(28),
+                "Python LXMF direct-stamp result",
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(status) = self.child.try_wait().expect("poll Python stamp peer") {
+                    assert!(status.success(), "Python LXMF stamp peer exited {status}");
+                    self.join_reader();
+                    return result;
+                }
+                if Instant::now() >= deadline {
+                    let _ = self.child.kill();
+                    panic!("Python LXMF stamp peer did not exit within bounded shutdown");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn join_reader(&mut self) {
+            if let Some(reader) = self.reader.take() {
+                reader.join().expect("Python stamp stdout reader join");
+            }
+        }
+    }
+
+    impl Drop for PythonLxmfDirectStampPeer {
+        fn drop(&mut self) {
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+            self.join_reader();
+        }
+    }
+
+    fn current_lxmf_json_reader(
+        stdout: ChildStdout,
+    ) -> (mpsc::Receiver<serde_json::Value>, JoinHandle<()>) {
+        let (sender, receiver) = mpsc::sync_channel(4);
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if sender.send(value).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        (receiver, reader)
+    }
+
+    fn current_lxmf_json_line(
+        lines: &mpsc::Receiver<serde_json::Value>,
+        timeout: Duration,
+        description: &str,
+    ) -> serde_json::Value {
+        lines
+            .recv_timeout(timeout)
+            .unwrap_or_else(|error| panic!("{description}: {error}"))
+    }
+
+    fn current_lxmf_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve LXMF loopback port");
+        listener.local_addr().expect("reserved address").port()
+    }
 
     fn lxmf_delivery_hash(identity: &PrivateIdentity) -> [u8; 16] {
         lxmf_delivery_destination_hash_from_private_identity_bytes(
@@ -1668,6 +2295,87 @@ mod tests {
     }
 
     #[test]
+    fn delivery_stamp_policy_distinguishes_unknown_required_ticket_and_unsupported() {
+        fn encode(values: Vec<rmpv::Value>) -> Vec<u8> {
+            let mut encoded = Vec::new();
+            rmpv::encode::write_value(&mut encoded, &rmpv::Value::Array(values))
+                .expect("encode delivery announce");
+            encoded
+        }
+
+        let required = encode(vec![
+            rmpv::Value::Binary(b"Peer".to_vec()),
+            rmpv::Value::from(8_u64),
+        ]);
+        let not_required = encode(vec![
+            rmpv::Value::Binary(b"Peer".to_vec()),
+            rmpv::Value::Nil,
+        ]);
+        let unsupported_zero = encode(vec![
+            rmpv::Value::Binary(b"Peer".to_vec()),
+            rmpv::Value::from(0_u64),
+        ]);
+        let unsupported_high = encode(vec![
+            rmpv::Value::Binary(b"Peer".to_vec()),
+            rmpv::Value::from(255_u64),
+        ]);
+        let unsupported_type = encode(vec![
+            rmpv::Value::Binary(b"Peer".to_vec()),
+            rmpv::Value::String("expensive".into()),
+        ]);
+
+        assert_eq!(
+            delivery_announce_direct_stamp_policy(Some(&required), false),
+            DirectStampPolicy::Required { cost: 8 }
+        );
+        assert_eq!(
+            delivery_announce_direct_stamp_policy(Some(&not_required), false),
+            DirectStampPolicy::NotRequired
+        );
+        assert_eq!(
+            delivery_announce_direct_stamp_policy(Some(&required), true),
+            DirectStampPolicy::TicketAccepted
+        );
+        assert_eq!(
+            delivery_announce_direct_stamp_policy(None, false),
+            DirectStampPolicy::Unknown
+        );
+        assert_eq!(
+            delivery_announce_direct_stamp_policy(Some(b"legacy peer"), false),
+            DirectStampPolicy::Unknown
+        );
+        assert_eq!(
+            delivery_announce_direct_stamp_policy(Some(&unsupported_zero), false),
+            DirectStampPolicy::Unsupported
+        );
+        assert_eq!(
+            delivery_announce_direct_stamp_policy(Some(&unsupported_high), false),
+            DirectStampPolicy::Unsupported
+        );
+        assert_eq!(
+            delivery_announce_direct_stamp_policy(Some(&unsupported_type), false),
+            DirectStampPolicy::Unsupported
+        );
+    }
+
+    #[test]
+    fn delivery_stamp_cost_parser_matches_upstream_09_for_admitted_costs() {
+        for cost in [1_u64, 8, 16, 254] {
+            let value = rmpv::Value::Array(vec![
+                rmpv::Value::Binary(b"Peer".to_vec()),
+                rmpv::Value::from(cost),
+            ]);
+            let mut encoded = Vec::new();
+            rmpv::encode::write_value(&mut encoded, &value).expect("encode delivery announce");
+
+            assert_eq!(
+                delivery_announce_stamp_cost(&encoded).map(i64::from),
+                lxmf::wire::announce::stamp_cost_from_app_data(Some(&encoded))
+            );
+        }
+    }
+
+    #[test]
     fn propagation_announce_display_name_parser_reuses_python_metadata_shape() {
         let value = rmpv::Value::Array(vec![
             rmpv::Value::Nil,
@@ -1775,6 +2483,24 @@ mod tests {
     }
 
     #[test]
+    fn direct_stamp_generation_observes_cooperative_cancellation() {
+        let mut checks = 0_u8;
+        let error = generate_direct_stamp_for_message_cancellable(
+            [0x44; 32],
+            254,
+            CLEAN_DIRECT_STAMP_MAX_ATTEMPTS,
+            || {
+                checks = checks.saturating_add(1);
+                checks > 3
+            },
+        )
+        .expect_err("cancelled stamp work");
+
+        assert!(error.to_string().contains("cancelled after"));
+        assert_eq!(checks, 4);
+    }
+
+    #[test]
     fn signed_propagation_envelope_uses_encrypted_transient_and_generated_stamp() {
         let sender_provider = NativeReticulumIdentityProvider;
         let sender_private = sender_provider
@@ -1795,6 +2521,7 @@ mod tests {
             delivery_mode: DeliveryMode::Propagated,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
         let outbound =
@@ -1837,6 +2564,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
         let mut outbound = build_outbound_message(&envelope, SRC).expect("outbound");
@@ -1852,7 +2580,7 @@ mod tests {
             Some(stamp.stamp_value)
         );
         assert_eq!(
-            outbound.message.stamp.as_ref().map(Vec::as_slice),
+            outbound.message.stamp.as_deref(),
             Some(stamp.stamp.as_slice())
         );
     }
@@ -1870,6 +2598,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: Some(ticket),
+            operation: None,
             attachments: Vec::new(),
         };
         let mut outbound = build_outbound_message(&envelope, SRC).expect("outbound");
@@ -1892,6 +2621,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
 
@@ -1925,6 +2655,7 @@ mod tests {
             delivery_mode: DeliveryMode::Propagated,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
 
@@ -1943,6 +2674,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: true,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
 
@@ -1962,7 +2694,7 @@ mod tests {
             .create_identity_material("sender")
             .expect("native identity");
         let signer = PrivateIdentity::from_private_key_bytes(&private).expect("signer");
-        let source = signer.address_hash().to_hex_string();
+        let source = hex16_bytes(&lxmf_delivery_destination_hash(signer.as_identity()));
         let envelope = MessageEnvelope {
             peer_hash: DEST.into(),
             title: "Ticketed".into(),
@@ -1970,6 +2702,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: true,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
         let outbound = build_outbound_message(&envelope, &source).expect("outbound");
@@ -1996,8 +2729,7 @@ mod tests {
         );
         assert!(summary
             .fields
-            .get("native_lxmf_reply_ticket_expires")
-            .is_some());
+            .contains_key("native_lxmf_reply_ticket_expires"));
     }
 
     #[test]
@@ -2009,6 +2741,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: true,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
 
@@ -2046,6 +2779,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: Some(ticket.clone()),
+            operation: None,
             attachments: Vec::new(),
         };
 
@@ -2084,6 +2818,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
         let outbound = build_outbound_message(&envelope, &source).expect("outbound");
@@ -2097,6 +2832,99 @@ mod tests {
         assert!(summary.incoming);
         assert!(summary.unread);
         assert!(summary.message_id.is_some());
+    }
+
+    #[test]
+    fn verified_signed_wire_message_requires_matching_source_identity() {
+        let provider = NativeReticulumIdentityProvider;
+        let private = provider
+            .create_identity_material("verified-sender")
+            .expect("native identity");
+        let signer = PrivateIdentity::from_private_key_bytes(&private).expect("signer");
+        let source = hex16_bytes(&lxmf_delivery_destination_hash(signer.as_identity()));
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Verified".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: None,
+            attachments: Vec::new(),
+        };
+        let outbound = build_outbound_message(&envelope, &source).expect("outbound");
+        let wire = encode_signed_wire_message(&outbound, &private).expect("encode");
+
+        let summary = decode_verified_wire_message(&wire, signer.as_identity())
+            .expect("matching identity verifies");
+
+        assert_eq!(summary.peer_hash, source);
+        assert_eq!(summary.title, "Verified");
+    }
+
+    #[test]
+    fn verified_signed_wire_message_rejects_forged_signature_and_identity_mismatch() {
+        let sender = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let other = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let source = hex16_bytes(&lxmf_delivery_destination_hash(sender.as_identity()));
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Verified".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: None,
+            attachments: Vec::new(),
+        };
+        let outbound = build_outbound_message(&envelope, &source).expect("outbound");
+        let mut wire = outbound
+            .message
+            .to_wire(Some(&sender))
+            .expect("signed wire");
+
+        let mismatch = decode_verified_wire_message(&wire, other.as_identity())
+            .expect_err("different source identity must be rejected");
+        assert!(mismatch.to_string().contains("does not match"));
+
+        wire[32] ^= 0x01;
+        let forged = decode_verified_wire_message(&wire, sender.as_identity())
+            .expect_err("mutated signature must be rejected");
+        assert!(forged.to_string().contains("missing or invalid"));
+    }
+
+    #[test]
+    fn forged_signed_attachment_is_rejected_before_filesystem_write() {
+        let sender = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let source = hex16_bytes(&lxmf_delivery_destination_hash(sender.as_identity()));
+        let source_dir = unique_test_path("omenbrowser-lxmf-forged-source");
+        let stored_dir = unique_test_path("omenbrowser-lxmf-forged-stored");
+        std::fs::create_dir_all(&source_dir).expect("create source dir");
+        let attachment = source_dir.join("forged.bin");
+        std::fs::write(&attachment, b"must not be stored").expect("write source attachment");
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: "Forged".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: None,
+            attachments: vec![attachment],
+        };
+        let outbound = build_outbound_message(&envelope, &source).expect("outbound");
+        let mut wire = outbound
+            .message
+            .to_wire(Some(&sender))
+            .expect("signed wire");
+        wire[32] ^= 0x01;
+
+        decode_verified_wire_message_storing_attachments(&wire, sender.as_identity(), &stored_dir)
+            .expect_err("forged attachment message must be rejected");
+
+        assert!(!stored_dir.exists());
+        let _ = std::fs::remove_dir_all(source_dir);
+        let _ = std::fs::remove_dir_all(stored_dir);
     }
 
     #[test]
@@ -2114,6 +2942,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
         let mut outbound = build_outbound_message(&envelope, &source).expect("outbound");
@@ -2211,6 +3040,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
         let mut outbound = build_outbound_message(&envelope, &source).expect("outbound");
@@ -2260,6 +3090,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: vec![attachment.clone()],
         };
 
@@ -2358,6 +3189,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: vec![unique_test_path("omenbrowser-missing-attachment.bin")],
         };
 
@@ -2382,6 +3214,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: vec![path.clone()],
         };
 
@@ -2413,6 +3246,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: vec![first, second],
         };
 
@@ -2439,6 +3273,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: (0..=MAX_LXMF_ATTACHMENT_ITEMS)
                 .map(|index| unique_test_path(&format!("missing-{index}")))
                 .collect(),
@@ -2467,6 +3302,7 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: vec![link],
         };
 
@@ -2626,6 +3462,157 @@ mod tests {
     }
 
     #[test]
+    fn verified_propagated_wire_accepts_matching_announced_sender() {
+        let sender = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let receiver = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let sender_hash = lxmf_delivery_hash(&sender);
+        let payload = lxmf::Payload::new(
+            42.0,
+            Some(b"Body".to_vec()),
+            Some(b"Verified propagated".to_vec()),
+            None,
+            None,
+        );
+        let mut message =
+            lxmf::WireMessage::new(lxmf_delivery_hash(&receiver), sender_hash, payload);
+        message.sign(&sender).expect("sign");
+        let (encrypted, _) = message
+            .pack_propagation_transient_with_rng(receiver.as_identity(), rand_core::OsRng)
+            .expect("pack propagated");
+        let wire =
+            unpack_propagated_lxmf_wire(&encrypted, receiver.to_private_key_bytes().as_slice())
+                .expect("decrypt propagated wire");
+        let attachments_dir = unique_test_path("verified-propagated");
+
+        let summary = decode_verified_propagated_wire_message_storing_attachments(
+            &wire,
+            sender.as_identity(),
+            &attachments_dir,
+        )
+        .expect("verified propagated message");
+
+        assert_eq!(summary.peer_hash, hex16_bytes(&sender_hash));
+        assert_eq!(summary.title, "Verified propagated");
+        assert_eq!(summary.transport_method, AppTransportMethod::Propagated);
+        assert_eq!(
+            summary
+                .fields
+                .get("native_lxmf_delivery_source")
+                .map(String::as_str),
+            Some("propagation_sync")
+        );
+        let _ = std::fs::remove_dir_all(attachments_dir);
+    }
+
+    #[test]
+    fn verified_propagated_wire_rejects_forgery_and_sender_mismatch() {
+        let sender = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let other = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let receiver = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let payload = lxmf::Payload::new(
+            42.0,
+            Some(b"Body".to_vec()),
+            Some(b"Rejected propagated".to_vec()),
+            None,
+            None,
+        );
+        let mut message = lxmf::WireMessage::new(
+            lxmf_delivery_hash(&receiver),
+            lxmf_delivery_hash(&sender),
+            payload,
+        );
+        message.sign(&sender).expect("sign");
+        let (encrypted, _) = message
+            .pack_propagation_transient_with_rng(receiver.as_identity(), rand_core::OsRng)
+            .expect("pack propagated");
+        let wire =
+            unpack_propagated_lxmf_wire(&encrypted, receiver.to_private_key_bytes().as_slice())
+                .expect("decrypt propagated wire");
+        let attachments_dir = unique_test_path("rejected-propagated");
+
+        let mismatch = decode_verified_propagated_wire_message_storing_attachments(
+            &wire,
+            other.as_identity(),
+            &attachments_dir,
+        )
+        .expect_err("wrong sender identity must be rejected");
+        assert!(mismatch.to_string().contains("does not match"));
+
+        message.signature.as_mut().expect("signature")[0] ^= 0x01;
+        let (forged_encrypted, _) = message
+            .pack_propagation_transient_with_rng(receiver.as_identity(), rand_core::OsRng)
+            .expect("pack forged propagated");
+        let forged_wire = unpack_propagated_lxmf_wire(
+            &forged_encrypted,
+            receiver.to_private_key_bytes().as_slice(),
+        )
+        .expect("decrypt forged wire");
+        let forged = decode_verified_propagated_wire_message_storing_attachments(
+            &forged_wire,
+            sender.as_identity(),
+            &attachments_dir,
+        )
+        .expect_err("forged propagated signature must be rejected");
+        assert!(forged.to_string().contains("missing or invalid"));
+        assert!(!attachments_dir.exists());
+    }
+
+    #[test]
+    fn forged_propagated_attachment_is_rejected_before_filesystem_write() {
+        let sender = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let receiver = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let source_dir = unique_test_path("forged-propagated-source");
+        let stored_dir = unique_test_path("forged-propagated-stored");
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+        let attachment = source_dir.join("forged-propagated.bin");
+        std::fs::write(&attachment, b"must not be stored").expect("attachment fixture");
+        let envelope = MessageEnvelope {
+            peer_hash: hex16_bytes(&lxmf_delivery_hash(&receiver)),
+            title: "Forged propagated attachment".into(),
+            body: "Body".into(),
+            delivery_mode: DeliveryMode::Propagated,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: None,
+            attachments: vec![attachment],
+        };
+        let outbound =
+            build_outbound_message(&envelope, &hex16_bytes(&lxmf_delivery_hash(&sender)))
+                .expect("outbound");
+        let payload = lxmf::Payload::new(
+            outbound.message.timestamp.unwrap_or(42.0),
+            Some(outbound.message.content.clone()),
+            Some(outbound.message.title.clone()),
+            outbound.message.fields.clone(),
+            None,
+        );
+        let mut message = lxmf::WireMessage::new(
+            outbound.message.destination_hash.expect("destination"),
+            outbound.message.source_hash.expect("source"),
+            payload,
+        );
+        message.sign(&sender).expect("sign");
+        message.signature.as_mut().expect("signature")[0] ^= 0x01;
+        let (encrypted, _) = message
+            .pack_propagation_transient_with_rng(receiver.as_identity(), rand_core::OsRng)
+            .expect("pack forged propagated");
+        let wire =
+            unpack_propagated_lxmf_wire(&encrypted, receiver.to_private_key_bytes().as_slice())
+                .expect("decrypt forged wire");
+
+        decode_verified_propagated_wire_message_storing_attachments(
+            &wire,
+            sender.as_identity(),
+            &stored_dir,
+        )
+        .expect_err("forged propagated attachment must be rejected");
+
+        assert!(!stored_dir.exists());
+        let _ = std::fs::remove_dir_all(source_dir);
+        let _ = std::fs::remove_dir_all(stored_dir);
+    }
+
+    #[test]
     fn propagated_lxmf_destination_helpers_match_wire_destination() {
         let receiver = PrivateIdentity::new_from_rand(rand_core::OsRng);
         let receiver_hash = lxmf_delivery_hash(&receiver);
@@ -2688,12 +3675,811 @@ mod tests {
             delivery_mode: DeliveryMode::Direct,
             include_ticket: false,
             native_reply_ticket: None,
+            operation: None,
             attachments: Vec::new(),
         };
 
         let error = build_outbound_message(&envelope, SRC).expect_err("invalid hash");
 
         assert!(error.to_string().contains("32 hex"));
+    }
+
+    #[test]
+    #[ignore = "explicit current-Python LXMF direct-delivery interoperability test"]
+    fn current_python_lxmf_router_accepts_rust_direct_signed_message() {
+        const TITLE: &str = "OMEN Rust direct LXMF";
+        const CONTENT: &str = "current Python LXMF 1.0.1 received this signed message";
+
+        let root = CurrentLxmfRoot::new();
+        let port = current_lxmf_port();
+        let transport_identity =
+            TransportPrivateIdentity::new_from_name("omen-current-python-lxmf-client");
+        let local_identity =
+            PrivateIdentity::from_private_key_bytes(&transport_identity.to_private_key_bytes())
+                .expect("matching core signing identity");
+        let local_lxmf_hash = lxmf_delivery_hash(&local_identity);
+        let local_lxmf_hash_hex = hex16_bytes(&local_lxmf_hash);
+        let peer = CurrentPythonLxmfPeer::spawn(&root.0, port, &local_lxmf_hash_hex);
+        let destination = AddressHash::new_from_hex_string(
+            peer.ready["destination"]
+                .as_str()
+                .expect("current Python delivery destination"),
+        )
+        .expect("valid current Python destination hash");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("current LXMF Tokio runtime");
+        let packet_hash = runtime.block_on(async {
+            let (receipt_tx, mut receipt_rx) = tokio::sync::mpsc::channel(2);
+            let mut transport = Transport::new(TransportConfig::new(
+                "current-python-lxmf-interop",
+                &transport_identity,
+                true,
+            ));
+            let local_delivery = transport
+                .add_destination(
+                    transport_identity.clone(),
+                    rns_transport::destination::DestinationName::new("lxmf", "delivery"),
+                )
+                .await;
+            assert_eq!(
+                local_delivery
+                    .lock()
+                    .await
+                    .desc
+                    .address_hash
+                    .to_hex_string(),
+                local_lxmf_hash_hex
+            );
+            transport
+                .set_receipt_handler(Box::new(CurrentLxmfReceiptCapture { sender: receipt_tx }))
+                .await;
+            let transport = Arc::new(transport);
+            let mut announces = transport.recv_announces().await;
+
+            let (iface_address, iface_task) = {
+                let manager = transport.iface_manager();
+                let mut manager = manager.lock().await;
+                let client = IfacTcpClient::new(
+                    format!("127.0.0.1:{port}"),
+                    Some("omen-ifac-vector".into()),
+                    Some("public-test-fixture".into()),
+                    16,
+                )
+                .expect("current LXMF IFAC client");
+                let context = manager.new_context(client);
+                let address = *context.channel.address();
+                (address, tokio::spawn(IfacTcpClient::spawn(context)))
+            };
+
+            assert!(
+                transport
+                    .await_path(&destination, Duration::from_secs(8), Some(iface_address))
+                    .await,
+                "Rust path request did not yield current Python LXMF announce"
+            );
+            let event = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let event = announces
+                        .recv()
+                        .await
+                        .expect("current Python announce stream remains open");
+                    if event.destination.lock().await.desc.address_hash == destination {
+                        return event;
+                    }
+                }
+            })
+            .await
+            .expect("matching current Python LXMF announce");
+            let local_announce = local_delivery
+                .lock()
+                .await
+                .announce(rand_core::OsRng, None)
+                .expect("current LXMF source announce");
+            let announce_dispatch = transport
+                .send_packet_broadcast_with_trace(local_announce)
+                .await
+                .dispatch;
+            assert!(
+                announce_dispatch.sent_ifaces > 0 || announce_dispatch.queued_ifaces > 0,
+                "current LXMF source announce was not dispatched"
+            );
+            peer.wait_for_source_announce();
+            let destination_desc = event.destination.lock().await.desc;
+            let link = transport.link(destination_desc).await;
+            await_link_activation(&transport, &link, Duration::from_secs(8))
+                .await
+                .expect("Rust-to-current-Python LXMF link activation");
+
+            let envelope = MessageEnvelope {
+                peer_hash: destination.to_hex_string(),
+                title: TITLE.into(),
+                body: CONTENT.into(),
+                delivery_mode: DeliveryMode::Direct,
+                include_ticket: false,
+                native_reply_ticket: None,
+                operation: None,
+                attachments: Vec::new(),
+            };
+            let outbound = build_outbound_message(&envelope, &hex16_bytes(&local_lxmf_hash))
+                .expect("build current Python LXMF message");
+            let wire = encode_signed_wire_message(
+                &outbound,
+                local_identity.to_private_key_bytes().as_slice(),
+            )
+            .expect("encode signed current Python LXMF message");
+            let sent = send_on_link_observed(
+                &transport,
+                &link,
+                wire.as_slice(),
+                |_| {},
+                |_| panic!("small current LXMF fixture unexpectedly used a Resource"),
+            )
+            .await
+            .expect("send current Python LXMF direct message");
+            let packet_hash = match sent {
+                LinkSendResult::Packet(packet) => packet.hash(),
+                LinkSendResult::Resource(_) => {
+                    panic!("small current LXMF fixture unexpectedly used a Resource")
+                }
+            };
+            let receipt = tokio::time::timeout(Duration::from_secs(4), receipt_rx.recv())
+                .await
+                .expect("current Python LXMF packet proof timeout")
+                .expect("current LXMF receipt channel remains open");
+            assert_eq!(receipt, packet_hash.to_bytes());
+
+            assert_eq!(transport.detach_interfaces().await, 1);
+            tokio::time::timeout(Duration::from_secs(1), iface_task)
+                .await
+                .expect("current LXMF IFAC task shutdown")
+                .expect("current LXMF IFAC task join");
+            packet_hash
+        });
+
+        let result = peer.finish();
+        assert_eq!(result["received"], true);
+        assert_eq!(result["title"], TITLE);
+        assert_eq!(result["content"], CONTENT);
+        assert_eq!(result["source_hash"], hex16_bytes(&local_lxmf_hash));
+        assert_eq!(result["destination_hash"], destination.to_hex_string());
+        assert_eq!(result["signature_validated"], true);
+        assert_eq!(result["method"], result["direct_method"]);
+        assert_ne!(packet_hash.to_bytes(), [0u8; 32]);
+    }
+
+    #[test]
+    #[ignore = "explicit current-Python-to-Rust LXMF direct-delivery interoperability test"]
+    fn rust_accepts_current_python_lxmf_router_direct_signed_message() {
+        let root = CurrentLxmfRoot::new();
+        let port = current_lxmf_port();
+        let transport_identity =
+            TransportPrivateIdentity::new_from_name("omen-current-python-lxmf-receiver");
+        let local_identity =
+            PrivateIdentity::from_private_key_bytes(&transport_identity.to_private_key_bytes())
+                .expect("matching core receiver identity");
+        let local_lxmf_hash = lxmf_delivery_hash(&local_identity);
+        let local_lxmf_hash_hex = hex16_bytes(&local_lxmf_hash);
+        let sender = CurrentPythonLxmfSender::spawn(&root.0, port, &local_lxmf_hash_hex);
+        let python_source = AddressHash::new_from_hex_string(
+            sender.ready["source"]
+                .as_str()
+                .expect("current Python LXMF source destination"),
+        )
+        .expect("valid current Python LXMF source hash");
+        let expected_title = sender.ready["title"]
+            .as_str()
+            .expect("current Python LXMF title")
+            .to_string();
+        let expected_content = sender.ready["content"]
+            .as_str()
+            .expect("current Python LXMF content")
+            .to_string();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("current Python sender Tokio runtime");
+        let (message, signature_valid, wire_message_id) = runtime.block_on(async {
+            let mut transport = Transport::new(TransportConfig::new(
+                "current-python-lxmf-receiver",
+                &transport_identity,
+                true,
+            ));
+            let local_delivery = transport
+                .add_destination(
+                    transport_identity.clone(),
+                    rns_transport::destination::DestinationName::new("lxmf", "delivery"),
+                )
+                .await;
+            let transport = Arc::new(transport);
+            let mut announces = transport.recv_announces().await;
+            let mut inbound_links = transport.in_link_events();
+
+            let (iface_address, iface_task) = {
+                let manager = transport.iface_manager();
+                let mut manager = manager.lock().await;
+                let client = IfacTcpClient::new(
+                    format!("127.0.0.1:{port}"),
+                    Some("omen-ifac-vector".into()),
+                    Some("public-test-fixture".into()),
+                    16,
+                )
+                .expect("current Python sender IFAC client");
+                let context = manager.new_context(client);
+                let address = *context.channel.address();
+                (address, tokio::spawn(IfacTcpClient::spawn(context)))
+            };
+
+            assert!(
+                transport
+                    .await_path(&python_source, Duration::from_secs(8), Some(iface_address))
+                    .await,
+                "Rust path request did not yield current Python sender announce"
+            );
+            let source_event = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let event = announces
+                        .recv()
+                        .await
+                        .expect("current Python sender announce stream remains open");
+                    if event.destination.lock().await.desc.address_hash == python_source {
+                        return event;
+                    }
+                }
+            })
+            .await
+            .expect("matching current Python sender announce");
+            let source_identity = source_event.destination.lock().await.desc.identity;
+            let source_identity = Identity::new_from_slices(
+                source_identity.public_key_bytes(),
+                source_identity.verifying_key_bytes(),
+            );
+
+            let local_announce = local_delivery
+                .lock()
+                .await
+                .announce(rand_core::OsRng, None)
+                .expect("current Rust receiver LXMF announce");
+            let announce_dispatch = transport
+                .send_packet_broadcast_with_trace(local_announce)
+                .await
+                .dispatch;
+            assert!(
+                announce_dispatch.sent_ifaces > 0 || announce_dispatch.queued_ifaces > 0,
+                "current Rust receiver LXMF announce was not dispatched"
+            );
+
+            let wire_bytes = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let event = inbound_links
+                        .recv()
+                        .await
+                        .expect("current Python inbound link stream remains open");
+                    if let rns_transport::destination::link::LinkEvent::Data(payload) = event.event
+                    {
+                        return payload.as_slice().to_vec();
+                    }
+                }
+            })
+            .await
+            .expect("current Python direct LXMF payload");
+            let wire = lxmf::WireMessage::unpack(&wire_bytes)
+                .expect("current Python wire parses with lxmf-wire 0.9.5");
+            let signature_valid = wire
+                .verify(&source_identity)
+                .expect("current Python LXMF signature verification");
+            let wire_message_id = hex32(&wire.message_id());
+            let message = decode_verified_wire_message(&wire_bytes, &source_identity)
+                .expect("production verifier accepts current Python LXMF wire");
+
+            assert_eq!(transport.detach_interfaces().await, 1);
+            tokio::time::timeout(Duration::from_secs(1), iface_task)
+                .await
+                .expect("current Python sender IFAC task shutdown")
+                .expect("current Python sender IFAC task join");
+            (message, signature_valid, wire_message_id)
+        });
+
+        let result = sender.finish();
+        assert_eq!(result["delivered"], true);
+        assert_eq!(result["failed"], false);
+        assert_eq!(result["source_hash"], python_source.to_hex_string());
+        assert_eq!(result["destination_hash"], local_lxmf_hash_hex);
+        assert_eq!(result["method"], result["direct_method"]);
+        assert_eq!(result["message_id"], wire_message_id);
+        assert_eq!(message.peer_hash, python_source.to_hex_string());
+        assert_eq!(message.title, expected_title);
+        assert_eq!(message.content, expected_content);
+        assert_eq!(
+            message.message_id.as_deref(),
+            Some(wire_message_id.as_str())
+        );
+        assert!(message.incoming);
+        assert!(signature_valid);
+    }
+
+    #[test]
+    #[ignore = "explicit current-Python live LXMF ticket round-trip interoperability test"]
+    fn current_python_lxmf_live_ticket_roundtrip_uses_rust_issued_ticket() {
+        run_python_lxmf_live_ticket_roundtrip(
+            "current-python-lxmf-live-ticket",
+            "OMEN_PYTHON_RNS_SOURCE",
+            None,
+            "1.3.8",
+            "1.0.1",
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit pinned-Python live LXMF ticket round-trip interoperability test"]
+    fn pinned_python_lxmf_live_ticket_roundtrip_uses_rust_issued_ticket() {
+        run_python_lxmf_live_ticket_roundtrip(
+            "pinned-python-lxmf-live-ticket",
+            "OMEN_PINNED_RNS_SOURCE",
+            Some("OMEN_PINNED_LXMF_SOURCE"),
+            "1.2.2",
+            "0.9.6",
+        );
+    }
+
+    fn run_python_lxmf_live_ticket_roundtrip(
+        case: &str,
+        rns_source_env: &str,
+        lxmf_source_env: Option<&str>,
+        expected_rns: &str,
+        expected_lxmf: &str,
+    ) {
+        const TITLE: &str = "OMEN Rust ticket issue";
+        const CONTENT: &str = "Python must use this ticket for its direct reply";
+
+        let root = CurrentLxmfRoot::new();
+        let port = current_lxmf_port();
+        let transport_identity = TransportPrivateIdentity::new_from_name(case);
+        let local_identity =
+            PrivateIdentity::from_private_key_bytes(&transport_identity.to_private_key_bytes())
+                .expect("matching core ticket issuer identity");
+        let local_lxmf_hash = lxmf_delivery_hash(&local_identity);
+        let local_lxmf_hash_hex = hex16_bytes(&local_lxmf_hash);
+        let peer = PythonLxmfTicketRoundtripPeer::spawn(
+            &root.0,
+            port,
+            &local_lxmf_hash_hex,
+            rns_source_env,
+            lxmf_source_env,
+            expected_rns,
+            expected_lxmf,
+        );
+        let python_destination = AddressHash::new_from_hex_string(
+            peer.ready["destination"]
+                .as_str()
+                .expect("Python ticket delivery destination"),
+        )
+        .expect("valid Python ticket destination");
+        let expected_reply_title = peer.ready["reply_title"]
+            .as_str()
+            .expect("Python ticket reply title")
+            .to_string();
+        let expected_reply_content = peer.ready["reply_content"]
+            .as_str()
+            .expect("Python ticket reply content")
+            .to_string();
+
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("ticket round-trip Tokio runtime");
+        let (reply, reply_message_id) = tokio.block_on(async {
+            let mut transport = Transport::new(TransportConfig::new(
+                format!("{case}-transport"),
+                &transport_identity,
+                true,
+            ));
+            let local_delivery = transport
+                .add_destination(
+                    transport_identity.clone(),
+                    rns_transport::destination::DestinationName::new("lxmf", "delivery"),
+                )
+                .await;
+            let transport = Arc::new(transport);
+            let mut announces = transport.recv_announces().await;
+            let mut inbound_links = transport.in_link_events();
+
+            let (iface_address, iface_task) = {
+                let manager = transport.iface_manager();
+                let mut manager = manager.lock().await;
+                let client = IfacTcpClient::new(
+                    format!("127.0.0.1:{port}"),
+                    Some("omen-ifac-vector".into()),
+                    Some("public-test-fixture".into()),
+                    16,
+                )
+                .expect("ticket round-trip IFAC client");
+                let context = manager.new_context(client);
+                let address = *context.channel.address();
+                (address, tokio::spawn(IfacTcpClient::spawn(context)))
+            };
+
+            assert!(
+                transport
+                    .await_path(
+                        &python_destination,
+                        Duration::from_secs(8),
+                        Some(iface_address),
+                    )
+                    .await,
+                "Rust path request did not yield Python ticket-peer announce"
+            );
+            let python_event = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let event = announces
+                        .recv()
+                        .await
+                        .expect("Python ticket announce stream remains open");
+                    if event.destination.lock().await.desc.address_hash == python_destination {
+                        return event;
+                    }
+                }
+            })
+            .await
+            .expect("matching Python ticket-peer announce");
+            let python_identity = python_event.destination.lock().await.desc.identity;
+            let python_identity = Identity::new_from_slices(
+                python_identity.public_key_bytes(),
+                python_identity.verifying_key_bytes(),
+            );
+
+            let local_announce = local_delivery
+                .lock()
+                .await
+                .announce(rand_core::OsRng, None)
+                .expect("Rust ticket issuer announce");
+            let dispatch = transport
+                .send_packet_broadcast_with_trace(local_announce)
+                .await
+                .dispatch;
+            assert!(
+                dispatch.sent_ifaces > 0 || dispatch.queued_ifaces > 0,
+                "Rust ticket issuer announce was not dispatched"
+            );
+            peer.wait_for_source_announce();
+
+            let link = transport
+                .link(python_event.destination.lock().await.desc)
+                .await;
+            await_link_activation(&transport, &link, Duration::from_secs(8))
+                .await
+                .expect("Rust-to-Python ticket link activation");
+            let envelope = MessageEnvelope {
+                peer_hash: python_destination.to_hex_string(),
+                title: TITLE.into(),
+                body: CONTENT.into(),
+                delivery_mode: DeliveryMode::Direct,
+                include_ticket: true,
+                native_reply_ticket: None,
+                operation: None,
+                attachments: Vec::new(),
+            };
+            let outbound = build_outbound_message(&envelope, &local_lxmf_hash_hex)
+                .expect("build ticket-issuing outbound message");
+            let (_, issued_ticket) = ticket_entry_from_fields(outbound.message.fields.as_ref())
+                .expect("production outbound contains reply ticket");
+            let wire = encode_signed_wire_message(
+                &outbound,
+                local_identity.to_private_key_bytes().as_slice(),
+            )
+            .expect("encode signed ticket-issuing message");
+            send_on_link_observed(
+                &transport,
+                &link,
+                wire.as_slice(),
+                |_| {},
+                |_| panic!("small ticket fixture unexpectedly used a Resource"),
+            )
+            .await
+            .expect("send ticket-issuing direct message");
+
+            let reply_bytes = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let event = inbound_links
+                        .recv()
+                        .await
+                        .expect("ticket reply link stream remains open");
+                    if let rns_transport::destination::link::LinkEvent::Data(payload) = event.event
+                    {
+                        return payload.as_slice().to_vec();
+                    }
+                }
+            })
+            .await
+            .expect("Python ticket-stamped direct reply");
+            let reply_wire = lxmf::WireMessage::unpack(&reply_bytes)
+                .expect("Python ticket reply parses with lxmf-wire");
+            assert_eq!(reply_wire.destination, local_lxmf_hash);
+            assert_eq!(
+                reply_wire.source,
+                parse_lxmf_hash(&python_destination.to_hex_string())
+                    .expect("parse Python ticket source hash"),
+            );
+            assert!(
+                reply_wire
+                    .verify(&python_identity)
+                    .expect("verify Python ticket reply signature"),
+                "Python ticket reply signature was invalid"
+            );
+            let reply_message_id = reply_wire.message_id();
+            let expected_stamp = ticket_stamp_for_message(&issued_ticket, &reply_message_id)
+                .expect("calculate expected Python ticket stamp");
+            assert_eq!(
+                reply_wire.payload.stamp.as_ref().map(AsRef::as_ref),
+                Some(expected_stamp.as_slice()),
+                "Python reply did not use the exact Rust-issued ticket"
+            );
+            let reply = decode_verified_wire_message(&reply_bytes, &python_identity)
+                .expect("production verifier accepts Python ticket reply");
+
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(transport.detach_interfaces().await, 1);
+            tokio::time::timeout(Duration::from_secs(1), iface_task)
+                .await
+                .expect("ticket IFAC task shutdown")
+                .expect("ticket IFAC task join");
+            (reply, hex32(&reply_message_id))
+        });
+
+        let result = peer.finish();
+        assert_eq!(result["passed"], true);
+        assert_eq!(result["received"], true);
+        assert_eq!(result["received_signature_validated"], true);
+        assert_eq!(result["received_source"], local_lxmf_hash_hex);
+        assert_eq!(result["ticket_shape_valid"], true);
+        assert_eq!(result["ticket_remembered"], true);
+        assert_eq!(result["reply_ticket_applied"], true);
+        assert_eq!(result["reply_ticket_cost"], true);
+        assert_eq!(result["reply_stamp_matches"], true);
+        assert_eq!(result["reply_delivered"], true);
+        assert_eq!(result["reply_failed"], false);
+        assert_eq!(result["reply_message_id"], reply_message_id);
+        assert_eq!(reply.peer_hash, python_destination.to_hex_string());
+        assert_eq!(reply.title, expected_reply_title);
+        assert_eq!(reply.content, expected_reply_content);
+        assert_eq!(reply.message_id.as_deref(), Some(reply_message_id.as_str()));
+        assert!(reply.incoming);
+    }
+
+    #[test]
+    #[ignore = "explicit current-Python live LXMF direct-stamp admission interoperability test"]
+    fn current_python_lxmf_live_direct_stamp_accepts_stamped_and_rejects_unstamped() {
+        run_python_lxmf_live_direct_stamp_admission(
+            "current-python-lxmf-live-direct-stamp",
+            "OMEN_PYTHON_RNS_SOURCE",
+            None,
+            "1.3.8",
+            "1.0.1",
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit pinned-Python live LXMF direct-stamp admission interoperability test"]
+    fn pinned_python_lxmf_live_direct_stamp_accepts_stamped_and_rejects_unstamped() {
+        run_python_lxmf_live_direct_stamp_admission(
+            "pinned-python-lxmf-live-direct-stamp",
+            "OMEN_PINNED_RNS_SOURCE",
+            Some("OMEN_PINNED_LXMF_SOURCE"),
+            "1.2.2",
+            "0.9.6",
+        );
+    }
+
+    fn run_python_lxmf_live_direct_stamp_admission(
+        case: &str,
+        rns_source_env: &str,
+        lxmf_source_env: Option<&str>,
+        expected_rns: &str,
+        expected_lxmf: &str,
+    ) {
+        const STAMPED_TITLE: &str = "OMEN Rust stamped direct LXMF";
+        const UNSTAMPED_TITLE: &str = "OMEN Rust unstamped direct LXMF";
+
+        let root = CurrentLxmfRoot::new();
+        let port = current_lxmf_port();
+        let transport_identity = TransportPrivateIdentity::new_from_name(case);
+        let local_identity =
+            PrivateIdentity::from_private_key_bytes(&transport_identity.to_private_key_bytes())
+                .expect("matching core direct-stamp identity");
+        let local_lxmf_hash = lxmf_delivery_hash(&local_identity);
+        let local_lxmf_hash_hex = hex16_bytes(&local_lxmf_hash);
+        let peer = PythonLxmfDirectStampPeer::spawn(
+            &root.0,
+            port,
+            &local_lxmf_hash_hex,
+            rns_source_env,
+            lxmf_source_env,
+            expected_rns,
+            expected_lxmf,
+        );
+        assert_eq!(peer.ready["stamp_cost"], 1);
+        let python_destination = AddressHash::new_from_hex_string(
+            peer.ready["destination"]
+                .as_str()
+                .expect("Python direct-stamp delivery destination"),
+        )
+        .expect("valid Python direct-stamp destination");
+
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("direct-stamp Tokio runtime");
+        let (stamp_value, stamp_attempts, elapsed) = tokio.block_on(async {
+            let started = Instant::now();
+            let mut transport = Transport::new(TransportConfig::new(
+                format!("{case}-transport"),
+                &transport_identity,
+                true,
+            ));
+            let local_delivery = transport
+                .add_destination(
+                    transport_identity.clone(),
+                    rns_transport::destination::DestinationName::new("lxmf", "delivery"),
+                )
+                .await;
+            let transport = Arc::new(transport);
+            let mut announces = transport.recv_announces().await;
+
+            let (iface_address, iface_task) = {
+                let manager = transport.iface_manager();
+                let mut manager = manager.lock().await;
+                let client = IfacTcpClient::new(
+                    format!("127.0.0.1:{port}"),
+                    Some("omen-ifac-vector".into()),
+                    Some("public-test-fixture".into()),
+                    16,
+                )
+                .expect("direct-stamp IFAC client");
+                let context = manager.new_context(client);
+                let address = *context.channel.address();
+                (address, tokio::spawn(IfacTcpClient::spawn(context)))
+            };
+
+            assert!(
+                transport
+                    .await_path(
+                        &python_destination,
+                        Duration::from_secs(8),
+                        Some(iface_address),
+                    )
+                    .await,
+                "Rust path request did not yield Python direct-stamp announce"
+            );
+            let python_event = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let event = announces
+                        .recv()
+                        .await
+                        .expect("Python direct-stamp announce stream remains open");
+                    if event.destination.lock().await.desc.address_hash == python_destination {
+                        return event;
+                    }
+                }
+            })
+            .await
+            .expect("matching Python direct-stamp announce");
+            assert_eq!(
+                delivery_announce_stamp_cost(python_event.app_data.as_slice()),
+                Some(1),
+                "Rust did not parse the Python peer's authenticated direct-stamp cost"
+            );
+
+            let local_announce = local_delivery
+                .lock()
+                .await
+                .announce(rand_core::OsRng, None)
+                .expect("Rust direct-stamp source announce");
+            let dispatch = transport
+                .send_packet_broadcast_with_trace(local_announce)
+                .await
+                .dispatch;
+            assert!(
+                dispatch.sent_ifaces > 0 || dispatch.queued_ifaces > 0,
+                "Rust direct-stamp source announce was not dispatched"
+            );
+            peer.wait_for_source_announce();
+
+            let link = transport
+                .link(python_event.destination.lock().await.desc)
+                .await;
+            await_link_activation(&transport, &link, Duration::from_secs(8))
+                .await
+                .expect("Rust-to-Python direct-stamp link activation");
+
+            let stamped_envelope = MessageEnvelope {
+                peer_hash: python_destination.to_hex_string(),
+                title: STAMPED_TITLE.into(),
+                body: "Python must accept this bounded direct proof".into(),
+                delivery_mode: DeliveryMode::Direct,
+                include_ticket: false,
+                native_reply_ticket: None,
+                operation: None,
+                attachments: Vec::new(),
+            };
+            let stamped = crate::runtime::native_lxmf::client::build_sdk_wire_delivery_from_envelope_with_policy(
+                &stamped_envelope,
+                &local_lxmf_hash_hex,
+                local_identity.to_private_key_bytes().as_slice(),
+                Some(1),
+                None,
+                Some(1),
+                || false,
+            )
+            .expect("production SDK builder creates bounded direct stamp");
+            let direct_stamp = stamped
+                .direct_stamp
+                .as_ref()
+                .expect("bounded direct stamp metadata");
+            assert_eq!(direct_stamp.target_cost, 1);
+            assert!(direct_stamp.attempts <= CLEAN_DIRECT_STAMP_MAX_ATTEMPTS);
+            send_on_link_observed(
+                &transport,
+                &link,
+                stamped.wire_bytes.as_slice(),
+                |_| {},
+                |_| panic!("small stamped fixture unexpectedly used a Resource"),
+            )
+            .await
+            .expect("send stamped direct message");
+
+            let unstamped_envelope = MessageEnvelope {
+                peer_hash: python_destination.to_hex_string(),
+                title: UNSTAMPED_TITLE.into(),
+                body: "Python must reject this unstamped control".into(),
+                delivery_mode: DeliveryMode::Direct,
+                include_ticket: false,
+                native_reply_ticket: None,
+                operation: None,
+                attachments: Vec::new(),
+            };
+            let unstamped = crate::runtime::native_lxmf::client::build_sdk_wire_delivery_from_envelope(
+                &unstamped_envelope,
+                &local_lxmf_hash_hex,
+                local_identity.to_private_key_bytes().as_slice(),
+                Some(1),
+            )
+            .expect("production SDK builder creates unstamped control");
+            assert!(unstamped.direct_stamp.is_none());
+            send_on_link_observed(
+                &transport,
+                &link,
+                unstamped.wire_bytes.as_slice(),
+                |_| {},
+                |_| panic!("small unstamped fixture unexpectedly used a Resource"),
+            )
+            .await
+            .expect("send unstamped direct control");
+
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(transport.detach_interfaces().await, 1);
+            tokio::time::timeout(Duration::from_secs(1), iface_task)
+                .await
+                .expect("direct-stamp IFAC task shutdown")
+                .expect("direct-stamp IFAC task join");
+            (direct_stamp.stamp_value, direct_stamp.attempts, started.elapsed())
+        });
+
+        let result = peer.finish();
+        assert_eq!(result["passed"], true);
+        assert_eq!(result["received_count"], 1);
+        assert_eq!(result["stamped_accepted"], true);
+        assert_eq!(result["unstamped_rejected"], true);
+        eprintln!(
+            "direct-stamp admission interoperated: cost=1 value={stamp_value} attempts={stamp_attempts} elapsed_ms={}",
+            elapsed.as_millis()
+        );
     }
 
     fn unique_test_path(name: &str) -> std::path::PathBuf {
