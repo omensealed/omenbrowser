@@ -54,6 +54,16 @@ reproducible`, `superseded`, and `not yet inspected`.
 
 ## Supplemental hardening units
 
+- Hosted Python-interoperability environment correction: checked-out pinned
+  Reticulum/LXMF source paths are canonicalized before Cargo changes the test
+  process working directory, so every fixture verifies the intended immutable
+  commits instead of resolving a repository-relative path beneath its crate.
+  The explicitly versioned current-Python environment now installs
+  `msgpack==1.2.1`, which the propagation fixture imports directly rather than
+  relying on an incidental transitive package. Neither change alters product
+  dependencies, wire behavior, configuration, or state. Completion gate: the
+  release-blocking pinned lane passes, the informational drift lane emits its
+  report, and mixed 0.6/0.9 application interoperability completes.
 - Windows portable package boundary: after the native matrix passes, a read-only
   Windows 2025 MSVC job builds and identity-checks separate unsigned desktop and
   standalone omenchatd ZIPs with SHA-256 files. The browser package neither

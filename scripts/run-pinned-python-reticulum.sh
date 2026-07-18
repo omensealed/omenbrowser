@@ -55,6 +55,9 @@ case $# in
     ;;
 esac
 
+rns_source=$(realpath -- "$rns_source")
+lxmf_source=$(realpath -- "$lxmf_source")
+
 lxmf_revision=$(git -C "$lxmf_source" rev-parse HEAD)
 if [[ "$lxmf_revision" != "$pinned_lxmf_ref" ]]; then
   echo "Python LXMF source is not the release-blocking pinned revision: expected=$pinned_lxmf_ref actual=$lxmf_revision" >&2
