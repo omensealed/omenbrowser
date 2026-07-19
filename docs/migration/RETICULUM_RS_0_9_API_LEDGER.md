@@ -4354,3 +4354,21 @@ the Resource/interop matrix, and a compatible released Wayland scanner followed
 by audit, license/source, desktop, and native-platform gates. A private fork,
 local crates.io patch, floating Git dependency, ignored advisory, or weakened
 Resource test is not an acceptable rollback or release shortcut.
+
+## Release qualification unit 65: stamp-policy gap reconciliation
+
+The README still described direct peer stamp-cost negotiation without a
+remembered ticket as wholly missing, but that claim predates the bounded direct
+worker and first-send policy-discovery units. The integrated runtime now waits
+for matching authenticated policy before encoding the first direct send,
+generates admitted work through cost 8 under its attempt and blocking-job
+budgets, and passes both pinned and current Python cost-1 acceptance/control
+lanes. The release gap now names only the unimplemented boundaries:
+authoritative post-rejection refresh, user-approved higher costs, propagation
+tickets, and broader live issuer restart evidence.
+
+This is documentation reconciliation only. It changes no dependency, runtime,
+wire byte, ticket material, safety ceiling, worker budget, timeout,
+configuration, identity, schema, or state. Rollback restores a stale and overly
+broad limitation statement; the source, focused tests, detailed testing guide,
+and transport-gap matrix remain the implementation evidence.
