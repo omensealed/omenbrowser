@@ -440,8 +440,11 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when
-  the propagation node advertises a target cost. Direct peer stamp-cost
-  negotiation without a remembered ticket is still remaining work.
+  the propagation node advertises a target cost. Without a remembered ticket,
+  the integrated runtime discovers authenticated peer policy before the first
+  direct send and honors advertised costs through the bounded automatic ceiling
+  of 8. Authoritative post-rejection refresh, user-approved higher costs,
+  propagation tickets, and broader live restart evidence remain future work.
 - The compatible `.deb` has been tested on Linux Mint 21.3; broader
   Debian/Ubuntu derivative testing is still useful.
 - Some Reticulum behavior depends on what the Rust RNS/LXMF crates currently
