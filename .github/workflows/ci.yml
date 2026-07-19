@@ -50,20 +50,22 @@ jobs:
           cargo deny --locked --all-features check licenses bans sources
           cargo deny --manifest-path src/server/Cargo.toml --locked --all-features check licenses bans sources
 
-      - name: Accepted build-time advisory boundary
-        run: bash scripts/verify-accepted-advisories.sh
-
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            jq \
             pkg-config \
+            ripgrep \
             libxkbcommon-dev \
             libwayland-dev \
             libx11-dev \
             libxi-dev \
             libgl1-mesa-dev
+
+      - name: Accepted build-time advisory boundary
+        run: bash scripts/verify-accepted-advisories.sh
 
       - name: Release quick gate
         run: bash scripts/release-check.sh quick
