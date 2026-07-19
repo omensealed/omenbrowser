@@ -433,10 +433,14 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   workload passes under the optimized release profile. Native Windows MSVC,
   Intel macOS, and Apple Silicon checks pass. The Linux packages and Windows
   portable ZIP, unsigned NSIS setup, and unsigned WiX MSI also pass their
-  isolated install/upgrade/launch/uninstall qualification. Do not cut
-  v0.9.5-1 while the documented upstream UDP Resource transfer defect and the
-  two `quick-xml 0.39.2` audit findings remain unresolved. Historical 0.6 live
-  results remain migration baselines.
+  isolated install/upgrade/launch/uninstall qualification. The published
+  Reticulum 0.9.5 UDP worker cannot transmit maximum Resource packets; that
+  known upstream limitation remains visible and blocks a UDP Resource parity
+  claim, but does not block this version-aligned OMEN release. The two
+  `quick-xml 0.39.2` findings are accepted only on the machine-checked Linux
+  Wayland proc-macro build path and are absent from application runtime input
+  and standalone omenchatd. Historical 0.6 live results remain migration
+  baselines.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when

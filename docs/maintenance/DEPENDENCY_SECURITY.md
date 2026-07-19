@@ -68,7 +68,7 @@ range, runtime configuration, feature alias, storage format, or wire format
 changed. `src/server/Cargo.lock` is independent and none of these versions is
 present in omenchatd's enabled profiles.
 
-## Remaining audit failure
+## Accepted Wayland build-time audit findings
 
 `cargo audit --no-fetch` now fails only on:
 
@@ -86,7 +86,10 @@ Source inspection of the locked scanner shows it uses `quick_xml::Reader` and
 checked `Attributes`. Therefore the duplicate-attribute complexity path is
 reachable while compiling trusted Wayland protocol XML, while the
 namespace-aware `NsReader` allocation path is not called. This reduces runtime
-exposure but does not resolve the advisory.
+exposure but does not resolve the advisory. The maintainer accepts the two
+findings for v0.9.5-1 because neither path parses application or network input,
+the scanner is a compile-time proc macro, and the only reachable affected path
+processes fixed dependency-owned Wayland protocol XML.
 
 The required fixed version is `quick-xml >=0.41.0`, while
 `wayland-scanner 0.31.10` requires `quick-xml ^0.39`. A precise update was
@@ -104,6 +107,16 @@ dependency. Re-evaluate the next immutable registry release with a precise
 lockfile update, full native product matrix, `cargo audit`, and `cargo deny`;
 do not add a Git dependency or advisory exception to bridge the publication
 gap.
+
+`scripts/verify-accepted-advisories.sh` is the release boundary. It requires
+the raw audit to contain exactly RUSTSEC-2026-0194 and RUSTSEC-2026-0195, maps
+both to registry `quick-xml 0.39.2`, requires its only parent to be registry
+`wayland-scanner 0.31.10` with a proc-macro target, rejects any repository Rust
+import, and requires omenchatd to resolve no `quick-xml`. It then runs the
+filtered audit and the unfiltered standalone-server audit. `deny.toml` retains
+an empty advisory-ignore list. A new vulnerability, version, parent, runtime
+import, or server edge fails closed; a fixed scanner also fails until this
+temporary verifier and acceptance are deliberately removed.
 
 The audit also emits five allowed warning categories covering unmaintained and
 unsound transitive packages. They remain triage work and must not be
@@ -317,6 +330,7 @@ MSRV; no stored-data or wire migration is involved.
 ```sh
 cargo audit --no-fetch
 cargo audit --no-fetch --file src/server/Cargo.lock
+bash scripts/verify-accepted-advisories.sh --no-fetch
 
 cargo deny --locked --all-features check licenses bans sources
 cargo deny --manifest-path src/server/Cargo.toml --locked --all-features \
@@ -354,11 +368,12 @@ cargo tree --locked --target all --no-default-features \
 The last command is expected to print no active dependency path. Audit scans
 the complete lockfile rather than only enabled target/features.
 
-The repository policy in `deny.toml` has no advisory exceptions. CI installs
-the deliberate cargo-deny 0.20.2 tool version and applies its license, source,
-and version-requirement gates to both independent lockfiles. Advisory checks
-remain separate so the documented `quick-xml` findings stay visible instead of
-being ignored in policy.
+The repository policy in `deny.toml` has no persistent advisory exceptions. CI
+installs deliberate cargo-deny 0.20.2 and cargo-audit 0.22.2 tool versions.
+Cargo-deny applies its license, source, and version-requirement gates to both
+independent lockfiles. The advisory verifier records the raw failure before
+filtering only the exact accepted IDs, so the `quick-xml` findings remain
+visible and a broader vulnerability set cannot become green.
 
 The stamped direct-Resource interoperability unit adds no dependency or feature.
 It uses the already pinned `reticulum-rs-transport` 0.9.5 Resource selection and

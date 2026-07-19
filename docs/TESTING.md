@@ -1793,10 +1793,11 @@ visible warnings because the current Iced/platform graph legitimately contains
 parallel major versions; review any new warning rather than assuming it is
 accepted.
 
-Run both independent lockfile advisory checks without treating advisory
-warnings or a nonzero exit as success:
+Run the machine-checked accepted-advisory boundary plus both independent raw
+lockfile inspections:
 
 ```bash
+bash scripts/verify-accepted-advisories.sh
 cargo audit --no-fetch
 cargo audit --no-fetch --file src/server/Cargo.lock
 cargo deny --locked --all-features check advisories
@@ -1804,11 +1805,12 @@ cargo deny --manifest-path src/server/Cargo.toml --locked --all-features \
   check advisories
 ```
 
-The current root audit is expected to fail only on the two constrained
-`quick-xml` 0.39.2 advisories documented in
-`docs/maintenance/DEPENDENCY_SECURITY.md`. Any additional vulnerability is a
-regression. The server currently has no vulnerability-class finding or allowed
-warning.
+The verifier requires the current raw root audit to fail only on the two
+constrained `quick-xml` 0.39.2 advisories documented in
+`docs/maintenance/DEPENDENCY_SECURITY.md`, proves their exact proc-macro-only
+dependency boundary, and then applies only those two IDs to the accepted audit.
+Any additional vulnerability or dependency-path change is a regression. The
+server currently has no vulnerability-class finding or allowed warning.
 
 RUSTSEC-2026-0002 is resolved in both optional TUI profiles by Ratatui 0.30.2
 and `lru` 0.18.1. The dependency gate also aligns Crossterm 0.29.0, preserves

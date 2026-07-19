@@ -139,3 +139,9 @@ After adoption, rerun both explicit tests, the full desktop/server matrices,
 pinned Python UDP/Resource interoperability, dependency-source checks, and the
 Resource performance measurements. Do not mark UDP Resource parity complete
 from this temporary candidate alone.
+
+For v0.9.5-1, the maintainer classifies this unchanged published-0.9.5 defect
+as a documented upstream limitation rather than an OMEN release blocker. The
+known-red tests and this adoption gate remain unchanged, and release notes must
+not claim maximum UDP Resource parity. OMEN will wait for an immutable upstream
+release and will not submit, fork, or carry the candidate patch in production.

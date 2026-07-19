@@ -65,16 +65,17 @@ The follow-up dependency-security units precisely updated `anyhow` 1.0.103,
 from 0.9.10 to 0.9.11. Audit now fails only on `quick-xml` 0.39.2 through Linux
 build-time Wayland generation; its parent requires `^0.39` while both fixes
 require 0.41. Details and reachability evidence are in
-`docs/maintenance/DEPENDENCY_SECURITY.md`. This unresolved audit still blocks
-adding a new runtime crate.
+`docs/maintenance/DEPENDENCY_SECURITY.md`. The two findings are accepted only
+for the exact machine-checked Wayland proc-macro build path; they still block
+admission of any new runtime or untrusted-XML edge.
 
 The checked-in `deny.toml` now gates both independent lockfiles across the
 supported native target graphs. It explicitly admits the reviewed license set,
 denies wildcard requirements and unknown registry/Git sources, and retains
 duplicate versions as visible warnings. It contains no advisory suppressions;
-the constrained `quick-xml` findings remain a release blocker rather than a
-policy exception. The six Iced-adjacent package licenses above also pass the
-machine-enforced repository policy.
+the constrained `quick-xml` findings are filtered only after the release
+verifier proves their exact accepted build-time path. The six Iced-adjacent
+package licenses above also pass the machine-enforced repository policy.
 
 ## Rollback
 

@@ -42,10 +42,16 @@ jobs:
       - name: Install cargo-deny
         run: cargo install --locked --version 0.20.2 cargo-deny
 
+      - name: Install cargo-audit
+        run: cargo install --locked --version 0.22.2 cargo-audit
+
       - name: Dependency policy
         run: |
           cargo deny --locked --all-features check licenses bans sources
           cargo deny --manifest-path src/server/Cargo.toml --locked --all-features check licenses bans sources
+
+      - name: Accepted build-time advisory boundary
+        run: bash scripts/verify-accepted-advisories.sh
 
       - name: Install Linux build dependencies
         run: |
