@@ -280,11 +280,11 @@ function Test-GuiLaunch {
 
     $stdoutPath = Join-Path $AppRoot "installed-gui-stdout.log"
     $stderrPath = Join-Path $AppRoot "installed-gui-stderr.log"
-    $process = Start-Process -FilePath $Binary -ArgumentList @("--app-root", $AppRoot) `
+    $process = Start-Process -FilePath $Binary -ArgumentList @("--desktop", "--app-root", $AppRoot) `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru `
         -Environment @{
             RUST_BACKTRACE = "1"
-            RUST_LOG = "omenbrowser_rs=debug,iced_wgpu=debug,wgpu_core=info"
+            RUST_LOG = "omenbrowser_rs=info,iced_wgpu=info,wgpu_core=info"
         }
     Start-Sleep -Seconds 4
     if ($process.HasExited) {

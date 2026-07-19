@@ -4319,3 +4319,11 @@ launch gate remains fatal and now redirects stdout/stderr into the explicit
 isolated root, emits only the final 80 lines with that root redacted, and enables
 a bounded startup backtrace/log filter. This is diagnostic hardening, not an
 exception for headless runners or a relaxation of GUI launch qualification.
+
+That bounded output identified the failure before Iced initialization: the
+installed binary received `--app-root` without an explicit command, and the CLI
+correctly rejected it with `no command specified`. The lifecycle smoke now
+invokes the documented `--desktop --app-root <isolated-root>` form, and workflow
+policy asserts that frontend identity. The info-level diagnostic capture remains
+available for a genuine installed-GUI startup failure without requesting trace
+levels disabled by the release binary.

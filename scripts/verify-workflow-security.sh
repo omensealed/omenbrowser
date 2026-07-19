@@ -96,6 +96,8 @@ grep -q 'allowDowngrades = \$false' "$installer_script" \
   || fail "Windows installers do not reject downgrades"
 grep -q 'name = "omenbrowser-installer"' "$installer_script" \
   || fail "Windows installer config lacks an explicit package identity"
+grep -q 'ArgumentList @("--desktop", "--app-root", \$AppRoot)' "$installer_script" \
+  || fail "Windows installed-GUI smoke does not select the desktop frontend"
 grep -q 'Get-Content -LiteralPath \$logPath -Tail 80' "$installer_script" \
   || fail "Windows installed-GUI failure output is not bounded"
 
