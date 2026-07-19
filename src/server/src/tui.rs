@@ -6189,6 +6189,9 @@ mod tests {
 
         app.handle_click(5, 4).expect("click action");
 
+        assert!(app.pending_user_database.is_some());
+        complete_user_database(&mut app);
+        assert!(app.users[0].muted);
         let user = list_known_users(&app.config).expect("users").remove(0);
         assert!(user.muted);
         let _ = std::fs::remove_dir_all(root);
