@@ -127,7 +127,7 @@ jobs:
           if-no-files-found: error
 
   windows-portable:
-    name: Build Windows portable artifacts
+    name: Build Windows portable and installer artifacts
     needs: native
     runs-on: windows-2025
     timeout-minutes: 90
@@ -152,13 +152,25 @@ jobs:
         shell: pwsh
         run: ./scripts/package-windows-portable.ps1 -OutDir dist
 
-      - name: Upload Windows portable artifacts
+      - name: Install pinned cargo-packager
+        shell: pwsh
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Build and qualify unsigned installers
+        shell: pwsh
+        run: ./scripts/package-windows-installers.ps1 -OutDir dist -RunLifecycleSmoke
+
+      - name: Upload Windows portable and installer artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: omenbrowser-rs-windows-portable-artifacts
           path: |
             dist/*.zip
             dist/*.zip.sha256
+            dist/*-setup-unsigned.exe
+            dist/*-setup-unsigned.exe.sha256
+            dist/*-unsigned.msi
+            dist/*-unsigned.msi.sha256
           if-no-files-found: error
 
   publish:

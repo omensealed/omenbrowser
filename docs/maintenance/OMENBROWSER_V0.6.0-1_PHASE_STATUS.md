@@ -96,8 +96,11 @@ reproducible`, `superseded`, and `not yet inspected`.
   standalone omenchatd ZIPs with SHA-256 files. The browser package neither
   bundles nor starts the server, and the server package installs no service.
   Publication depends on both native Linux and Windows artifacts without
-  checking out repository code in the privileged job. NSIS/MSI and native
-  install/upgrade/uninstall/GUI-launch evidence remain release gates.
+  checking out repository code in the privileged job. A follow-on native job
+  now pins cargo-packager 0.11.8, pre-seeds its NSIS/WiX toolchain only after
+  SHA-256 verification, builds separate unsigned NSIS and MSI browser packages,
+  and qualifies install, prior-revision upgrade, isolated GUI launch, uninstall,
+  and user-data preservation. Hosted evidence for that new gate is pending.
 - Bounded quick-runner build storage: after dependency policy passed, the
   pull-request quick job exhausted the GitHub-hosted filesystem while the
   Actions runner wrote its own diagnostic log. The quick job now caches Cargo

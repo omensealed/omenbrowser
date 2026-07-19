@@ -69,8 +69,37 @@ grep -q '^    runs-on: windows-2025$' <<<"$windows_package_job" \
   || fail "Windows portable build does not use the native MSVC runner"
 grep -q 'scripts/package-windows-portable.ps1' <<<"$windows_package_job" \
   || fail "Windows portable build does not use the reviewed package script"
+grep -q 'cargo install cargo-packager --version 0\.11\.8 --locked' <<<"$windows_package_job" \
+  || fail "Windows installer builder does not pin cargo-packager 0.11.8"
+grep -q 'scripts/package-windows-installers.ps1 -OutDir dist -RunLifecycleSmoke' <<<"$windows_package_job" \
+  || fail "Windows installer build does not run the reviewed lifecycle gate"
+for installer_pattern in '-setup-unsigned.exe' '-unsigned.msi'; do
+  grep -q -- "$installer_pattern" <<<"$windows_package_job" \
+    || fail "Windows artifact upload lacks $installer_pattern"
+done
 grep -q 'contents: write' <<<"$windows_package_job" \
   && fail "Windows portable build job has contents: write"
+
+installer_script=scripts/package-windows-installers.ps1
+[[ -f "$installer_script" ]] || fail "Windows installer script is missing"
+for tool_hash in \
+  f5dc52eef1f3884230520199bac6f36b82d643d86b003ce51bd24b05c6ba7c91 \
+  1c2772b0edfb0f96a7524734d6c8fac1fc011f26221faf88f3ed2c950f0c06c0 \
+  0eed48313a7f904d7cc1977b70000ab3f11f18cadc8e6a69b807d288ca71f9db \
+  2c1888d5d1dba377fc7fa14444cf556963747ff9a0a289a3599cf09da03b9e2e; do
+  grep -q "$tool_hash" "$installer_script" \
+    || fail "Windows installer tool hash is missing: $tool_hash"
+done
+grep -q 'installMode = "currentUser"' "$installer_script" \
+  || fail "NSIS installer is not explicitly current-user scoped"
+grep -q 'allowDowngrades = \$false' "$installer_script" \
+  || fail "Windows installers do not reject downgrades"
+grep -q 'name = "omenbrowser-installer"' "$installer_script" \
+  || fail "Windows installer config lacks an explicit package identity"
+grep -q 'ArgumentList @("--desktop", "--app-root", \$AppRoot)' "$installer_script" \
+  || fail "Windows installed-GUI smoke does not select the desktop frontend"
+grep -q 'Get-Content -LiteralPath \$logPath -Tail 80' "$installer_script" \
+  || fail "Windows installed-GUI failure output is not bounded"
 
 publish_job="$(sed -n '/^  publish:$/,$p' .github/workflows/package.yml)"
 grep -q '^      - package$' <<<"$publish_job" \

@@ -4279,3 +4279,51 @@ The focused full-server test is repeated under the same feature identity before
 the native rerun. Rollback removes the single completion wait and this ledger
 entry, restoring nondeterministic observation of an accepted asynchronous
 operation.
+
+## Release qualification unit 63: native Windows installer boundary
+
+The Windows package job now pins cargo-packager 0.11.8 and produces browser-only
+unsigned NSIS setup and WiX MSI artifacts in addition to the separate browser
+and omenchatd portable ZIPs. The installer configuration explicitly retains
+omenchatd as a separately deployed package and never installs or starts it as a
+service. NSIS is current-user scoped; both formats reject downgrades. Cargo
+numeric revision `0.9.5-1` maps deterministically to MSI `0.9.5.1`.
+
+The reviewed script pre-seeds every downloaded NSIS/WiX executable archive and
+plugin from an immutable release URL after checking a repository-pinned SHA-256,
+including the ApplicationID plugin that cargo-packager 0.11.8 otherwise fetches
+without a strong hash. It creates a bounded prior-revision fixture from the same
+reviewed binary, installs it, upgrades to the current package, launches the GUI
+with an explicit temporary app root, uninstalls, and requires a user-data
+sentinel to survive for each format. Final artifacts must be unsigned and have
+individual SHA-256 files. Hosted Windows execution remains the completion gate;
+Linux can validate only script policy and workflow structure. Rollback removes
+the installer script, workflow steps/artifacts, verifier assertions, and these
+documents together without affecting portable packages.
+
+The first hosted run reached the native Windows packager and exposed a CLI
+configuration edge before creating an installer: cargo-packager 0.11.8 tries to
+discover nearby Cargo package metadata when a custom JSON config omits its
+logical `name`, passing the config file through a directory-oriented lookup and
+failing with Windows error 267. The generated config now supplies the explicit
+non-product identity `omenbrowser-installer`; the ignored `--release` argument
+is also removed because a custom config already owns the binary directory and
+profile. Product name, version, binaries, formats, and lifecycle policy remain
+unchanged.
+
+The second hosted run built both prior/current NSIS and WiX artifacts, then
+installed and upgraded the NSIS package successfully before the installed GUI
+exited with status 1 in the runner session. `Start-Process` did not forward the
+child's error text, so the application-level cause was not observable. The
+launch gate remains fatal and now redirects stdout/stderr into the explicit
+isolated root, emits only the final 80 lines with that root redacted, and enables
+a bounded startup backtrace/log filter. This is diagnostic hardening, not an
+exception for headless runners or a relaxation of GUI launch qualification.
+
+That bounded output identified the failure before Iced initialization: the
+installed binary received `--app-root` without an explicit command, and the CLI
+correctly rejected it with `no command specified`. The lifecycle smoke now
+invokes the documented `--desktop --app-root <isolated-root>` form, and workflow
+policy asserts that frontend identity. The info-level diagnostic capture remains
+available for a genuine installed-GUI startup failure without requesting trace
+levels disabled by the release binary.
