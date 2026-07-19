@@ -4327,3 +4327,30 @@ invokes the documented `--desktop --app-root <isolated-root>` form, and workflow
 policy asserts that frontend identity. The info-level diagnostic capture remains
 available for a genuine installed-GUI startup failure without requesting trace
 levels disabled by the release binary.
+
+## Release qualification unit 64: merged-candidate readiness audit
+
+Pull request 4 merged the qualified installer boundary into `main` at
+`8561f48`. Its PR quick gate and native Windows MSVC, Intel macOS, and Apple
+Silicon jobs passed. The preceding package run on the exact topic head passed
+the same native prerequisites, Linux artifact production, and the complete
+Windows portable/NSIS/WiX lifecycle; publication was correctly skipped for the
+manual non-tag run. This closes the previously pending native packaging gate.
+
+The release verdict remains **NOT READY** for two independently reproduced
+upstream blockers. Registry `reticulum-rs-transport 0.9.5` and current upstream
+source still use a 456-byte layout-derived UDP buffer that cannot serialize a
+483-byte maximum Resource packet; the explicit two-process Resource test still
+fails before baseline completion. Root `cargo audit --no-fetch` also still
+reports the two high-severity `quick-xml 0.39.2` findings. That package is
+build-time-only through `wayland-scanner 0.31.10`, and the standalone server
+audit is clean, but repository policy intentionally treats the findings as
+release blocking. Smithay merged its scanner update to `quick-xml 0.41`, while
+no compatible registry release exists yet.
+
+No tag or release was created. The approved next actions are narrow immutable
+upstream adoption units: a corrected Reticulum/LXMF registry train followed by
+the Resource/interop matrix, and a compatible released Wayland scanner followed
+by audit, license/source, desktop, and native-platform gates. A private fork,
+local crates.io patch, floating Git dependency, ignored advisory, or weakened
+Resource test is not an acceptable rollback or release shortcut.

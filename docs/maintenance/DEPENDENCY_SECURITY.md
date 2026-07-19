@@ -95,6 +95,16 @@ lockfile. Resolving this requires an upstream Wayland/Iced-compatible release
 or an explicitly reviewed patch; this program will not vendor or broadly
 upgrade Iced as collateral work.
 
+Upstream Smithay merged its `quick-xml 0.41` scanner update in [pull request
+938](https://github.com/Smithay/wayland-rs/pull/938) on 2026-07-08, but crates.io
+still reports `wayland-scanner 0.31.10` as the latest release and its published
+manifest still requires `quick-xml ^0.39`. The merged source is useful
+removal-path evidence, but an unpublished branch is not an approved production
+dependency. Re-evaluate the next immutable registry release with a precise
+lockfile update, full native product matrix, `cargo audit`, and `cargo deny`;
+do not add a Git dependency or advisory exception to bridge the publication
+gap.
+
 The audit also emits five allowed warning categories covering unmaintained and
 unsound transitive packages. They remain triage work and must not be
 silently converted into an audit pass. The standalone-server audit now reports
