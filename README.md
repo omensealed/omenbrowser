@@ -430,10 +430,13 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   cancellation also pass without automatic request replay. A bounded retained-
   link soak also passes across an idle interval and one forced link replacement
   without replay or concurrent link growth. The same exact one-link comparative
-  workload passes under the optimized release profile. Do not cut v0.9.5-1
-  until the remaining native-platform gates and the complete release checklist
-  pass. Historical
-  0.6 live results remain migration baselines.
+  workload passes under the optimized release profile. Native Windows MSVC,
+  Intel macOS, and Apple Silicon checks pass. The Linux packages and Windows
+  portable ZIP, unsigned NSIS setup, and unsigned WiX MSI also pass their
+  isolated install/upgrade/launch/uninstall qualification. Do not cut
+  v0.9.5-1 while the documented upstream UDP Resource transfer defect and the
+  two `quick-xml 0.39.2` audit findings remain unresolved. Historical 0.6 live
+  results remain migration baselines.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when
