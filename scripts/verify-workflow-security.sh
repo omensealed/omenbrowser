@@ -55,6 +55,18 @@ grep -q 'uses: \./\.github/workflows/native-checks\.yml' .github/workflows/ci.ym
   || fail "CI does not invoke native checks"
 grep -q 'uses: \./\.github/workflows/native-checks\.yml' .github/workflows/package.yml \
   || fail "packaging does not invoke native checks"
+grep -q 'cargo install --locked --version 0\.22\.2 cargo-audit' .github/workflows/ci.yml \
+  || fail "CI does not pin cargo-audit 0.22.2"
+grep -q 'bash scripts/verify-accepted-advisories.sh' .github/workflows/ci.yml \
+  || fail "CI does not enforce the accepted advisory boundary"
+grep -q 'cargo install --locked --version 0\.22\.2 cargo-audit' .github/workflows/package.yml \
+  || fail "tag packaging does not pin cargo-audit 0.22.2"
+grep -q 'bash scripts/verify-accepted-advisories.sh' .github/workflows/package.yml \
+  || fail "tag packaging does not enforce the accepted advisory boundary"
+grep -q 'scripts/verify-accepted-advisories.sh --no-fetch' scripts/release-check.sh \
+  || fail "local release check does not enforce the accepted advisory boundary"
+grep -Eq '^ignore[[:space:]]*=[[:space:]]*\[\][[:space:]]*$' deny.toml \
+  || fail "cargo-deny advisory ignores are not empty"
 
 package_job="$(sed -n '/^  package:$/,/^  publish:$/p' .github/workflows/package.yml)"
 grep -q '^    needs: native$' <<<"$package_job" \

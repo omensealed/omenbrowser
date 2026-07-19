@@ -42,6 +42,9 @@ jobs:
       - name: Install cargo-deny
         run: cargo install --locked --version 0.20.2 cargo-deny
 
+      - name: Install cargo-audit
+        run: cargo install --locked --version 0.22.2 cargo-audit
+
       - name: Dependency policy
         run: |
           cargo deny --locked --all-features check licenses bans sources
@@ -52,12 +55,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            jq \
             pkg-config \
+            ripgrep \
             libxkbcommon-dev \
             libwayland-dev \
             libx11-dev \
             libxi-dev \
             libgl1-mesa-dev
+
+      - name: Accepted build-time advisory boundary
+        run: bash scripts/verify-accepted-advisories.sh
 
       - name: Release quick gate
         run: bash scripts/release-check.sh quick

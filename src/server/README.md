@@ -307,13 +307,16 @@ active through bounded shutdown. Run it with the command documented in
 Post-cancel Resource completion and Python/mixed-version peers remain separate
 interop gates.
 
-The separate two-process completion/cancel/reuse gate is currently red and is
-release-blocking for live Resource parity. Its receiver obtains the baseline
+The separate two-process completion/cancel/reuse gate is currently red and
+blocks a claim of live UDP Resource parity, but the maintainer classifies the
+published upstream 0.9.5 limitation as non-blocking for the version-aligned
+OMEN release. Its receiver obtains the baseline
 advertisement and sends valid requests; its sender receives, decrypts, and
 hash-matches every request but sends no Resource parts before the receiver's
 retry budget expires. The explicit command and evidence boundary are recorded
-in `docs/TESTING.md`. The test remains ignored in fast suites but must pass
-before live OMENchat history/upload or NomadNet Resource completion is claimed.
+in `docs/TESTING.md`. The test remains ignored in fast suites and must pass
+before UDP Resource completion is claimed. Current OMENchat upload/history and
+NomadNet Resource paths retain their separate passing interoperability evidence.
 The failure is isolated to the published Reticulum UDP worker: its 456-byte
 layout-derived transmit buffer cannot serialize a 483-byte maximum Resource
 wire packet and silently drops the serialization error. This remains unchanged

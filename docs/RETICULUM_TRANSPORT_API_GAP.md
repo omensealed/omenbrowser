@@ -231,6 +231,15 @@ adds current-current Resource evidence without changing the context-zero wire
 path; pinned-Python OMENchat transport and interactive native-window soak remain
 pending.
 
+Maintainer release disposition (2026-07-19): the separate known-red
+two-process UDP Resource gate reflects the published Reticulum/LXMF 0.9.5
+implementation and remains visible as an upstream parity limitation. It blocks
+claims that maximum UDP Resource transfer works, but does not block the
+version-aligned OMEN v0.9.5-1 release. No fallback, local patch, fork, test
+weakening, or upstream coordination is introduced. The passing OMENchat,
+NomadNet, pinned/current Python, and mixed-version Resource cases remain scoped
+to their tested interfaces and primitives.
+
 Current-product NomadNet update (2026-07-18): the canonical `0.9.5-1` browser
 now passes a scheduled live page fetch against the standalone server's fixed
 `nomadnetwork.node` portal over an ephemeral loopback interface. The production

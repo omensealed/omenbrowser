@@ -228,6 +228,7 @@ bash -n scripts/measure-omenchatd-backpressure.sh
 bash -n scripts/measure-omenchatd-db.sh
 bash -n scripts/verify-release-version.sh
 bash -n scripts/verify-reticulum-train.sh
+bash -n scripts/verify-accepted-advisories.sh
 bash -n src/server/scripts/verify-standalone.sh
 bash -n scripts/verify-tui-dependencies.sh
 bash -n scripts/test-tui-lifecycle.sh
@@ -242,6 +243,9 @@ bash scripts/verify-release-version.sh
 
 echo "== Reticulum/LXMF dependency train =="
 bash scripts/verify-reticulum-train.sh
+
+echo "== Accepted build-time advisory boundary =="
+bash scripts/verify-accepted-advisories.sh --no-fetch
 
 echo "== Native release CLI identity smoke =="
 bash scripts/test-native-cli-identity.sh

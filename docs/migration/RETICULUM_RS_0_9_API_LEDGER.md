@@ -4372,3 +4372,42 @@ wire byte, ticket material, safety ceiling, worker budget, timeout,
 configuration, identity, schema, or state. Rollback restores a stale and overly
 broad limitation statement; the source, focused tests, detailed testing guide,
 and transport-gap matrix remain the implementation evidence.
+
+## Release qualification unit 66: bounded upstream-risk acceptance
+
+The maintainer supersedes unit 64's two-blocker verdict without claiming either
+upstream defect is fixed. The published Reticulum/LXMF 0.9.5 UDP worker's
+maximum-Resource failure remains a known-red parity limitation. It blocks a
+claim of live UDP Resource parity, while current OMENchat upload/history,
+NomadNet Resource, pinned/current Python, and mixed-version paths retain their
+separate passing evidence. OMEN remains on the exact reviewed 0.9.5 registry
+train and will not patch, fork, contact, or depend on unpublished upstream
+source for this release.
+
+RUSTSEC-2026-0194 and RUSTSEC-2026-0195 remain present in `quick-xml 0.39.2`.
+The former is reachable only while the Wayland scanner proc macro iterates
+attributes in fixed dependency-owned protocol XML; the latter requires
+`NsReader`, which the locked scanner does not call. Neither crate nor parser is
+an OMENbrowser runtime input surface, and omenchatd does not resolve the crate.
+The maintainer accepts this build-time availability risk for v0.9.5-1 while
+retaining the raw nonzero audit result and an explicit removal trigger.
+
+`scripts/verify-accepted-advisories.sh` fails unless the raw audit contains
+exactly those two IDs on registry `quick-xml 0.39.2`, its only parent is the
+registry `wayland-scanner 0.31.10` proc macro, repository Rust source has no
+direct import, omenchatd has no package edge, and `deny.toml` retains no
+persistent advisory ignore. It then runs the two-ID filtered audit and the
+unfiltered server audit. CI and tag packaging pin cargo-audit 0.22.2 and invoke
+the verifier; local quick release checks reuse the fetched advisory database.
+A new vulnerability, version, parent, runtime import, or server edge fails
+closed. A compatible scanner release also intentionally fails this temporary
+gate until the acceptance is removed with a precise lockfile update and the
+full native qualification matrix.
+
+This unit changes no runtime dependency, production source, binary feature,
+wire byte, Resource behavior, quota, identity, configuration, schema, state, or
+package format. It converts two documented upstream limitations from release
+blockers into explicit, narrowly bounded release limitations. Rollback removes
+the verifier/workflow gates and restores the earlier blocker wording; it must
+not leave an unguarded broad audit ignore. The candidate may proceed to final
+qualification, but no tag or release is created by this unit.

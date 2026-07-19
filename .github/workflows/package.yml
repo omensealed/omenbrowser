@@ -68,7 +68,14 @@ jobs:
             libx11-dev \
             libxi-dev \
             libgl1-mesa-dev \
-            pkg-config
+            pkg-config \
+            ripgrep
+
+      - name: Install cargo-audit
+        run: cargo install --locked --version 0.22.2 cargo-audit
+
+      - name: Verify accepted build-time advisory boundary
+        run: bash scripts/verify-accepted-advisories.sh
 
       - name: Install appimagetool
         env:
