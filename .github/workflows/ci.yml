@@ -68,6 +68,10 @@ jobs:
         run: bash scripts/verify-accepted-advisories.sh
 
       - name: Release quick gate
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/omen-release-quick-target
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: bash scripts/release-check.sh quick
 
       - name: Package script syntax

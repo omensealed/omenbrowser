@@ -4562,3 +4562,27 @@ not change application behavior, dependencies, configuration, protocols,
 schemas, identities, state, or package logic. Because the documentation is
 included in packaged content, the exact merge commit still requires one final
 non-publishing package qualification before tagging.
+
+## v0.9.5-2 unit 7: bounded Linux quick-gate build state
+
+Two otherwise healthy pull-request runs exhausted the GitHub-hosted Linux
+runner while the release quick gate compiled a root test artifact. In both
+runs the dependency/security steps and native Windows, Intel macOS, and Apple
+Silicon macOS matrices passed. The Linux gate had already accumulated separate
+root and standalone-server debug target trees for desktop, TUI, headless, and
+full-server identities before starting the focused root tests. The failure was
+`rustc-LLVM ERROR: IO failure on output stream: No space left on device`; it was
+not a source, test, advisory, or platform failure.
+
+Only the Linux `Release quick gate` step now places Cargo artifacts in one
+runner-temporary target directory shared by the root and independently
+manifested server builds. CI dev and test profiles omit debug symbols for this
+step. Command coverage, feature identities, test selection, lockfiles, compiler
+optimization, runtime assertions, security gates, native jobs, package builds,
+and release artifact symbols are unchanged. The tool-install steps do not use
+the shared target, so their build state cannot accumulate inside it.
+
+The completion gate is a full successful rerun of all four pull-request CI jobs,
+including the formerly failing Linux focused tests. Rollback removes the three
+step-local environment variables. It changes no application source, dependency,
+protocol, schema, identity, configuration, user state, or release artifact.
