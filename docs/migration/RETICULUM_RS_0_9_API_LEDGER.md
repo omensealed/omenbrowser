@@ -4586,3 +4586,12 @@ The completion gate is a full successful rerun of all four pull-request CI jobs,
 including the formerly failing Linux focused tests. Rollback removes the three
 step-local environment variables. It changes no application source, dependency,
 protocol, schema, identity, configuration, user state, or release artifact.
+
+The first bounded-target run completed native CLI identity compilation and both
+isolated TUI lifecycle tests without exhausting disk, then exposed that the
+Linux real-PTY helper hard-coded the repository-default `target` directory.
+That helper now honors absolute or repository-relative `CARGO_TARGET_DIR`, as
+the other current/mixed-version smoke helpers already do. This is path
+portability, not reduced coverage: the real PTY resize, signal, shutdown-latency,
+and terminal-restoration assertions still execute against the freshly built TUI
+binary. A replacement full CI run remains the completion gate.

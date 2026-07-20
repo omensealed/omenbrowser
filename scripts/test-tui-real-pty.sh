@@ -108,8 +108,12 @@ require_tool mktemp coreutils
 require_tool date coreutils
 
 cargo build --locked --no-default-features --features tui --bin omenbrowser_rs
-binary="$repo_root/target/debug/omenbrowser_rs"
-version="$($binary --version)"
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+if [[ "$target_dir" != /* ]]; then
+  target_dir="$repo_root/$target_dir"
+fi
+binary="$target_dir/debug/omenbrowser_rs"
+version="$("$binary" --version)"
 if ! grep -q 'tui:on' <<<"$version"; then
   echo "real PTY TUI smoke refuses a binary without the tui feature" >&2
   exit 1
