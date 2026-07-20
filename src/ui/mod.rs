@@ -727,6 +727,21 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         {
             app.save_selected_directory_entry();
         }
+        (_, KeyCode::Char('r'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
+        {
+            app.request_selected_directory_path();
+        }
+        (_, KeyCode::Char('p'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
+        {
+            app.use_selected_directory_propagation_node();
+        }
+        (_, KeyCode::Char('g'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
+        {
+            app.sync_propagation_messages_now();
+        }
         (_, KeyCode::Char('e'))
             if app.workspace.active_section == workspace::WorkspaceSection::Interfaces =>
         {

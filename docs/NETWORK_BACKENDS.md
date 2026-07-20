@@ -59,3 +59,20 @@ the integrated v0.9.5-1 runtime, select Managed and restart. Do not delete
 identity, configuration, history, or cache data. Rolling back this safety gate
 is source-only, but should not be done without a tested shared backend because
 the former behavior launched an integrated runtime while labeling it External.
+
+## Propagation-node operator view
+
+The desktop and TUI Directory surfaces consume the project-owned bounded
+propagation-node inventory. They show authenticated identity/name evidence,
+freshness, path state, advertised stamp cost, compatibility, and whether the
+node is selected. `unknown`, `stale`, and `not-known` remain distinct; the UI
+does not infer trust or reachability from an advertised name.
+
+Selection, path request, and propagation sync controls call the existing
+settings/runtime owners. Rendering the inventory performs no network work and
+adds no timer or polling subscription. The bounded projection is cached in the
+directory panel state and rebuilt only after directory or preferred-node state
+changes, so TUI redraws do not repeatedly clone and sort announce records. The
+current Request Path control retains its existing behavior; the stricter
+v0.9.5-2 refresh cooldown, coalescing, and cancellation owner is a separate
+follow-up unit.

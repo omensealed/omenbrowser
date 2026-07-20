@@ -5195,6 +5195,7 @@ pub struct WorkspaceState {
 #[derive(Clone, Debug, Default)]
 pub struct DirectoryPanelState {
     pub entries: Vec<DirectoryEntry>,
+    pub propagation_nodes: PropagationNodeInventory,
     pub selected: Option<usize>,
     pub remembered_selection_by_kind: BTreeMap<DirectoryKind, String>,
     pub filter: String,
@@ -6746,6 +6747,7 @@ impl App {
             active_conversation_autoread_enabled: true,
         };
         app.directory_state.entries = directory_entries;
+        app.refresh_propagation_node_inventory();
         for index in 0..app.workspace.browser_tabs.len() {
             app.restore_browser_form_state(index);
         }
@@ -13426,6 +13428,7 @@ impl App {
         }
 
         self.status.propagation = format!("propagation: {hash}");
+        self.refresh_propagation_node_inventory();
         self.status.task = format!("selected propagation node: {display_name}");
         self.logs.push_with_source(
             LogSeverity::Info,
@@ -13451,6 +13454,7 @@ impl App {
         }
 
         self.status.propagation = "propagation: none".into();
+        self.refresh_propagation_node_inventory();
         self.status.task = "cleared preferred propagation node".into();
         self.logs.push_with_source(
             LogSeverity::Info,
@@ -17105,6 +17109,7 @@ impl App {
                     );
                 match entry {
                     Ok(entry) => {
+                        self.refresh_propagation_node_inventory();
                         if self.workspace.active_section == WorkspaceSection::Directory {
                             let selected_hash = self
                                 .directory_state
@@ -20225,12 +20230,16 @@ impl App {
             .cloned()
     }
 
-    pub fn propagation_node_inventory(&self) -> PropagationNodeInventory {
-        self.directory_service.propagation_node_inventory(
+    pub fn propagation_node_inventory(&self) -> &PropagationNodeInventory {
+        &self.directory_state.propagation_nodes
+    }
+
+    fn refresh_propagation_node_inventory(&mut self) {
+        self.directory_state.propagation_nodes = self.directory_service.propagation_node_inventory(
             self.settings.preferred_propagation_node_hash.as_deref(),
             &BTreeMap::new(),
             current_epoch_ms() as f64 / 1_000.0,
-        )
+        );
     }
 
     pub fn selected_plugin_manifest(&self) -> Option<&PluginManifest> {
@@ -21235,6 +21244,7 @@ impl App {
             })
             .map(|entry| entry.destination_hash.clone());
         self.directory_state.entries = self.directory_service.list_entries();
+        self.refresh_propagation_node_inventory();
         self.directory_state.selected = selected_hash
             .as_deref()
             .and_then(|hash| {
@@ -25360,6 +25370,11 @@ side
             app.settings.preferred_propagation_node_hash.as_deref(),
             Some(FIXTURE_NODE_HASH)
         );
+        assert!(app
+            .propagation_node_inventory()
+            .nodes
+            .iter()
+            .any(|node| node.destination_hash == FIXTURE_NODE_HASH && node.selected));
         assert_eq!(
             app.runtime
                 .get_outbound_propagation_node()
@@ -25377,6 +25392,11 @@ side
         assert!(app.clear_preferred_propagation_node());
         tokio::task::yield_now().await;
         assert_eq!(app.settings.preferred_propagation_node_hash, None);
+        assert!(app
+            .propagation_node_inventory()
+            .nodes
+            .iter()
+            .all(|node| !node.selected));
         assert_eq!(
             app.runtime
                 .get_outbound_propagation_node()

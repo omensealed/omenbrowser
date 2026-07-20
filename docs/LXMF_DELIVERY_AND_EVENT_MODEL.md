@@ -541,6 +541,14 @@ The projection performs no path request, sync, selection, timer, or storage
 write. It is available to diagnostics and UI view models while the existing
 preferred-node and propagation-sync owners remain authoritative.
 
+Desktop and TUI Directory views consume a cached copy of this bounded
+projection. The cache is rebuilt after directory or preferred-node changes,
+not during redraw. Both views expose explicit selection, Request Path, and Sync
+Now controls through the existing application owners; rendering or merely
+highlighting a row never starts network work. Request Path retains its existing
+behavior until the separate refresh lifecycle unit adds a dedicated cooldown,
+single-flight/coalescing result, and shutdown cancellation boundary.
+
 ## Local identity announce policy
 
 The identity action sends the existing normal `lxmf.delivery` announce. It is

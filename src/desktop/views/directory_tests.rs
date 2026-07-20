@@ -1,5 +1,8 @@
 use super::*;
-use crate::directory::{DirectoryEntry, PreferredDelivery};
+use crate::directory::{
+    DirectoryEntry, PreferredDelivery, PropagationNodeCompatibility, PropagationNodeFreshness,
+    PropagationNodePathState, PropagationNodeRecord, TrustLevel,
+};
 
 const FIXTURE_LXMF_PEER_HASH: &str = "00112233445566778899aabbccddeeff";
 
@@ -182,6 +185,29 @@ fn directory_selected_state_lines_are_kind_specific() {
         .contains("server identity: 00112233445566778899aabbccddeeff (announce-verified)"));
     assert!(!omenchat_lines.contains("preferred LXMF delivery"));
     assert!(!omenchat_lines.contains("identify on connect"));
+}
+
+#[test]
+fn propagation_node_state_lines_keep_unknown_and_negative_evidence_distinct() {
+    let record = PropagationNodeRecord {
+        destination_hash: FIXTURE_LXMF_PEER_HASH.into(),
+        identity_hash: None,
+        display_name: FIXTURE_LXMF_PEER_HASH.into(),
+        display_name_authenticated: false,
+        selected: true,
+        saved: true,
+        trusted: false,
+        trust_level: TrustLevel::Unknown,
+        last_seen: 0.0,
+        freshness: PropagationNodeFreshness::Unknown,
+        path_state: PropagationNodePathState::NotKnown,
+        advertised_stamp_cost: None,
+        compatibility: PropagationNodeCompatibility::Unknown,
+    };
+    let lines = propagation_node_state_lines(&record).join("\n");
+    assert!(lines.contains("selected=true | freshness=unknown | path=not-known"));
+    assert!(lines.contains("compatibility=unknown | advertised stamp cost=unknown"));
+    assert!(lines.contains("identity: unknown | display name authenticated=false"));
 }
 
 #[test]

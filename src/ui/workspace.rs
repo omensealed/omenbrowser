@@ -555,6 +555,7 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(8), Constraint::Length(7)])
         .split(area);
+    let propagation_inventory = app.propagation_node_inventory();
     let rows = app
         .directory_state
         .entries
@@ -567,15 +568,36 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
                 " "
             };
             let micronplus = app.micronplus_status_for_directory_entry(entry);
+            let propagation_health = propagation_inventory
+                .nodes
+                .iter()
+                .find(|node| {
+                    node.destination_hash
+                        .eq_ignore_ascii_case(&entry.destination_hash)
+                })
+                .map(|node| {
+                    format!(
+                        " | selected={} freshness={:?} path={:?} cost={} compatibility={:?}",
+                        node.selected,
+                        node.freshness,
+                        node.path_state,
+                        node.advertised_stamp_cost
+                            .map(|cost| cost.to_string())
+                            .unwrap_or_else(|| "unknown".into()),
+                        node.compatibility
+                    )
+                })
+                .unwrap_or_default();
             let item = ListItem::new(format!(
-                "{marker} [open] [save] [trust] {} | {:?} | saved={} trusted={} | {:?} | {} | {}",
+                "{marker} [open] [save] [trust] {} | {:?} | saved={} trusted={} | {:?} | {} | {}{}",
                 entry.destination_hash,
                 entry.kind,
                 entry.saved,
                 entry.trusted,
                 entry.trust_level,
                 micronplus,
-                entry.display_name
+                entry.display_name,
+                propagation_health
             ));
             if app.directory_state.selected == Some(index) {
                 item.style(Style::default().fg(Color::Black).bg(Color::Cyan))
@@ -585,9 +607,13 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect::<Vec<_>>();
     let title = format!(
-        " Directory | filter: {} | entries: {} | click [open]/[save]/[trust] | Enter open | s save | t trust ",
+        " Directory | filter: {} | entries: {} | propagation={}/{} bytes={} truncated={} | Enter open | s save | t trust | r path | p use node | g sync ",
         app.directory_state.filter,
-        app.directory_state.entries.len()
+        app.directory_state.entries.len(),
+        propagation_inventory.nodes.len(),
+        propagation_inventory.total_candidates,
+        propagation_inventory.retained_bytes,
+        propagation_inventory.truncated
     );
     frame.render_widget(
         List::new(rows).block(Block::default().borders(Borders::ALL).title(title)),
@@ -610,6 +636,23 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
                     .into_iter()
                     .map(Line::from),
             );
+            if let Some(node) = propagation_inventory.nodes.iter().find(|node| {
+                node.destination_hash
+                    .eq_ignore_ascii_case(&entry.destination_hash)
+            }) {
+                lines.push(Line::from(format!(
+                    "propagation selected={} freshness={:?} path={:?} compatibility={:?}",
+                    node.selected, node.freshness, node.path_state, node.compatibility
+                )));
+                lines.push(Line::from(format!(
+                    "identity={} name_authenticated={} stamp_cost={}",
+                    node.identity_hash.as_deref().unwrap_or("unknown"),
+                    node.display_name_authenticated,
+                    node.advertised_stamp_cost
+                        .map(|cost| cost.to_string())
+                        .unwrap_or_else(|| "unknown".into())
+                )));
+            }
             lines
         })
         .unwrap_or_else(|| vec![Line::from("No directory entry selected")]);
