@@ -4511,3 +4511,18 @@ checks, the quick release gate, native CI, Python interop, and non-publishing
 package qualification. Rollback changes only both application package versions,
 their lock entries, and matching release/test labels back to `0.9.5-1`; no user
 data or network migration is involved.
+
+## v0.9.5-2 unit 5: portable aggregate checksum manifest
+
+The first non-tag `0.9.5-2` package audit found that every individual Linux and
+Windows checksum was valid, but the aggregate Linux manifest retained the
+runner-local `dist/` prefix. GitHub artifact download and release publication
+flatten those files into one directory, so a user running `sha256sum -c` beside
+the downloaded assets would receive missing-path errors despite correct bytes.
+
+The package job now creates the aggregate manifest from inside `dist`, yielding
+portable basename-only entries, and immediately verifies it with strict
+checksum parsing before upload. This changes no artifact bytes, application
+code, dependencies, protocols, schemas, signing policy, or publication
+permissions. Rollback restores the old working-directory-relative manifest;
+individual checksum files remain an independent recovery path.

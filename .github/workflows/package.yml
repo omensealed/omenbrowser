@@ -112,11 +112,15 @@ jobs:
 
       - name: Collect artifact checksums
         run: |
-          sha256sum \
-            dist/OMENbrowser_rs-latest.tar.gz \
-            dist/omenbrowser-rs_*.deb \
-            dist/OMENbrowser_rs-*.AppImage \
-            | tee dist/release-artifacts.sha256
+          (
+            cd dist
+            sha256sum \
+              OMENbrowser_rs-latest.tar.gz \
+              omenbrowser-rs_*.deb \
+              OMENbrowser_rs-*.AppImage \
+              | tee release-artifacts.sha256
+            sha256sum --check --strict release-artifacts.sha256
+          )
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
