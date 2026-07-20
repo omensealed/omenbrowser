@@ -4411,3 +4411,31 @@ blockers into explicit, narrowly bounded release limitations. Rollback removes
 the verifier/workflow gates and restores the earlier blocker wording; it must
 not leave an unguarded broad audit ignore. The candidate may proceed to final
 qualification, but no tag or release is created by this unit.
+
+## v0.9.5-2 unit 1: bounded propagation-node inventory projection
+
+The published `v0.9.5-1` product already owns preferred-node selection, manual
+and post-acceptance sync, authenticated announce metadata, path inspection, and
+typed propagation events. This unit does not duplicate those workers. It adds a
+project-owned read-only projection over the directory service so later desktop
+and TUI work can present node suitability without assembling unrelated state in
+view code.
+
+The projection retains at most 256 records and 512 KiB, reports total candidate
+count and truncation, and deterministically orders selected, saved, trusted,
+fresh, and destination-hash evidence. It never prunes the underlying directory.
+Names and stamp costs are admitted only with an announce-bound identity hash;
+otherwise the destination hash is displayed and compatibility remains unknown.
+Timestamp freshness and path evidence are tri-state. Diagnostics map only the
+matching selected runtime status to known/not-known path state; all other route
+state remains unknown.
+
+Focused tests cover authenticated metadata, unauthenticated name/policy
+rejection, case-insensitive selected/path matching, item/byte bounds,
+deterministic ordering, selected-node retention, non-destructive truncation,
+and redacted diagnostics serialization. The unit adds no runtime task, queue,
+timer, dependency, feature, storage field, protocol byte, identity behavior, or
+omenchatd coupling. Rollback removes the projection types, diagnostics field,
+and view-model accessor while retaining the existing directory, selection, and
+sync behavior. Desktop/TUI refresh and presentation are the next separate
+subunit.

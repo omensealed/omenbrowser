@@ -14,7 +14,8 @@ use crate::browser::{BrowserAddress, BrowserPage, BrowserSession, DownloadedFile
 use crate::config::{AppConfig, AppPaths};
 use crate::diagnostics::{DiagnosticsService, DiagnosticsSnapshot};
 use crate::directory::{
-    DirectoryEntry, DirectoryKind, DirectoryService, PreferredDelivery, TrustLevel,
+    DirectoryEntry, DirectoryKind, DirectoryService, PreferredDelivery, PropagationNodeInventory,
+    TrustLevel,
 };
 use crate::error::AppResult;
 use crate::identity::IdentityManager;
@@ -11243,6 +11244,7 @@ impl App {
                 "plugins": self.plugins_state.manifests.len(),
                 "recent_logs": self.logs.entries.len().min(50),
             },
+            "propagation_node_inventory": self.propagation_node_inventory(),
             "recent_logs": redacted_recent_log_entries(&self.logs, identity_path, 50),
             "plugins": {
                 "manifests": self.plugins_state.manifests,
@@ -20221,6 +20223,14 @@ impl App {
                 )
             })
             .cloned()
+    }
+
+    pub fn propagation_node_inventory(&self) -> PropagationNodeInventory {
+        self.directory_service.propagation_node_inventory(
+            self.settings.preferred_propagation_node_hash.as_deref(),
+            &BTreeMap::new(),
+            current_epoch_ms() as f64 / 1_000.0,
+        )
     }
 
     pub fn selected_plugin_manifest(&self) -> Option<&PluginManifest> {

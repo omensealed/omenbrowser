@@ -15,6 +15,9 @@ const TRANSIENT_ENTRY_RETENTION_SECONDS: f64 = 6.0 * 60.0 * 60.0;
 const TRANSIENT_ENTRY_MAXCOUNT: usize = 1024;
 const DUPLICATE_ANNOUNCE_SAVE_COOLDOWN_SECONDS: f64 = 5.0 * 60.0;
 const LIVE_ANNOUNCE_SAVE_DEBOUNCE_SECONDS: f64 = 30.0;
+pub const PROPAGATION_NODE_INVENTORY_MAX_ITEMS: usize = 256;
+pub const PROPAGATION_NODE_INVENTORY_MAX_BYTES: usize = 512 * 1024;
+pub const PROPAGATION_NODE_FRESH_SECONDS: f64 = 6.0 * 60.0 * 60.0;
 pub const DIRECTORY_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub const DIRECTORY_CORRUPT_BACKUP_MAX_FILES: usize = 4;
 pub const DIRECTORY_CORRUPT_BACKUP_MAX_TOTAL_BYTES: u64 =
@@ -138,6 +141,55 @@ pub struct DirectoryAnnounceMetadata {
     pub associated_hash: Option<String>,
     pub node_associated_hash: Option<String>,
     pub lxmf_stamp_cost: Option<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeFreshness {
+    Fresh,
+    Stale,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodePathState {
+    Known,
+    NotKnown,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeCompatibility {
+    Compatible,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PropagationNodeRecord {
+    pub destination_hash: String,
+    pub identity_hash: Option<String>,
+    pub display_name: String,
+    pub display_name_authenticated: bool,
+    pub selected: bool,
+    pub saved: bool,
+    pub trusted: bool,
+    pub trust_level: TrustLevel,
+    pub last_seen: f64,
+    pub freshness: PropagationNodeFreshness,
+    pub path_state: PropagationNodePathState,
+    pub advertised_stamp_cost: Option<u8>,
+    pub compatibility: PropagationNodeCompatibility,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct PropagationNodeInventory {
+    pub nodes: Vec<PropagationNodeRecord>,
+    pub total_candidates: usize,
+    pub retained_bytes: usize,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -478,6 +530,46 @@ impl DirectoryService {
         let mut entries = merged.into_values().collect::<Vec<_>>();
         entries.sort_by(sort_entries);
         entries
+    }
+
+    pub fn propagation_node_inventory(
+        &self,
+        selected_hash: Option<&str>,
+        path_evidence: &BTreeMap<String, PropagationNodePathState>,
+        now: f64,
+    ) -> PropagationNodeInventory {
+        let selected_hash = selected_hash.map(str::trim).filter(|hash| !hash.is_empty());
+        let mut nodes = self
+            .list_entries()
+            .into_iter()
+            .filter(|entry| entry.kind == DirectoryKind::Propagation)
+            .map(|entry| propagation_node_record(entry, selected_hash, path_evidence, now))
+            .collect::<Vec<_>>();
+        nodes.sort_by(propagation_node_record_order);
+
+        let total_candidates = nodes.len();
+        let mut retained =
+            Vec::with_capacity(nodes.len().min(PROPAGATION_NODE_INVENTORY_MAX_ITEMS));
+        let mut retained_bytes = 0_usize;
+        let mut truncated = false;
+        for node in nodes {
+            let node_bytes = propagation_node_record_bytes(&node);
+            if retained.len() == PROPAGATION_NODE_INVENTORY_MAX_ITEMS
+                || retained_bytes.saturating_add(node_bytes) > PROPAGATION_NODE_INVENTORY_MAX_BYTES
+            {
+                truncated = true;
+                continue;
+            }
+            retained_bytes = retained_bytes.saturating_add(node_bytes);
+            retained.push(node);
+        }
+
+        PropagationNodeInventory {
+            nodes: retained,
+            total_candidates,
+            retained_bytes,
+            truncated,
+        }
     }
 
     pub fn known_nodes(&self) -> Vec<DirectoryEntry> {
@@ -843,6 +935,89 @@ fn sort_entries(left: &DirectoryEntry, right: &DirectoryEntry) -> std::cmp::Orde
         .then_with(|| left.destination_hash.cmp(&right.destination_hash))
 }
 
+fn propagation_node_record(
+    entry: DirectoryEntry,
+    selected_hash: Option<&str>,
+    path_evidence: &BTreeMap<String, PropagationNodePathState>,
+    now: f64,
+) -> PropagationNodeRecord {
+    let metadata_authenticated = entry.identity_hash.is_some();
+    let display_name = if metadata_authenticated {
+        entry.display_name.clone()
+    } else {
+        entry.destination_hash.clone()
+    };
+    let freshness = if entry.last_seen <= 0.0 || !entry.last_seen.is_finite() || !now.is_finite() {
+        PropagationNodeFreshness::Unknown
+    } else if now.max(entry.last_seen) - entry.last_seen <= PROPAGATION_NODE_FRESH_SECONDS {
+        PropagationNodeFreshness::Fresh
+    } else {
+        PropagationNodeFreshness::Stale
+    };
+    let path_state = path_evidence
+        .iter()
+        .find(|(hash, _)| hash.eq_ignore_ascii_case(&entry.destination_hash))
+        .map(|(_, state)| *state)
+        .unwrap_or_default();
+    let selected =
+        selected_hash.is_some_and(|hash| hash.eq_ignore_ascii_case(&entry.destination_hash));
+
+    PropagationNodeRecord {
+        destination_hash: entry.destination_hash,
+        identity_hash: entry.identity_hash,
+        display_name,
+        display_name_authenticated: metadata_authenticated,
+        selected,
+        saved: entry.saved,
+        trusted: entry.trusted,
+        trust_level: entry.trust_level,
+        last_seen: entry.last_seen,
+        freshness,
+        path_state,
+        advertised_stamp_cost: metadata_authenticated
+            .then_some(entry.lxmf_stamp_cost)
+            .flatten(),
+        compatibility: if metadata_authenticated {
+            PropagationNodeCompatibility::Compatible
+        } else {
+            PropagationNodeCompatibility::Unknown
+        },
+    }
+}
+
+fn propagation_node_record_order(
+    left: &PropagationNodeRecord,
+    right: &PropagationNodeRecord,
+) -> std::cmp::Ordering {
+    right
+        .selected
+        .cmp(&left.selected)
+        .then_with(|| right.saved.cmp(&left.saved))
+        .then_with(|| right.trusted.cmp(&left.trusted))
+        .then_with(|| {
+            propagation_freshness_rank(left.freshness)
+                .cmp(&propagation_freshness_rank(right.freshness))
+        })
+        .then_with(|| right.last_seen.total_cmp(&left.last_seen))
+        .then_with(|| left.destination_hash.cmp(&right.destination_hash))
+}
+
+fn propagation_freshness_rank(freshness: PropagationNodeFreshness) -> u8 {
+    match freshness {
+        PropagationNodeFreshness::Fresh => 0,
+        PropagationNodeFreshness::Stale => 1,
+        PropagationNodeFreshness::Unknown => 2,
+    }
+}
+
+fn propagation_node_record_bytes(node: &PropagationNodeRecord) -> usize {
+    const FIXED_BYTES: usize = 128;
+    FIXED_BYTES
+        .saturating_add(node.destination_hash.len())
+        .saturating_add(node.identity_hash.as_ref().map_or(0, String::len))
+        .saturating_add(node.display_name.len())
+}
+
 fn preferred_display_name(
     incoming_name: Option<String>,
     existing_name: Option<&str>,
@@ -1201,7 +1376,231 @@ fn timestamp_nanos() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{publish_directory_bytes, PublishMode};
+    use std::collections::BTreeMap;
+
+    use super::{
+        publish_directory_bytes, timestamp_secs, DirectoryAnnounceMetadata, DirectoryKind,
+        DirectoryService, PropagationNodeCompatibility, PropagationNodeFreshness,
+        PropagationNodePathState, PublishMode, PROPAGATION_NODE_INVENTORY_MAX_BYTES,
+        PROPAGATION_NODE_INVENTORY_MAX_ITEMS,
+    };
+
+    fn isolated_directory(label: &str) -> (std::path::PathBuf, DirectoryService) {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-propagation-inventory-{label}-{}-{}",
+            std::process::id(),
+            super::timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create isolated root");
+        let service = DirectoryService::new(root.join("directory.json")).expect("directory");
+        (root, service)
+    }
+
+    #[test]
+    fn propagation_inventory_projects_authenticated_health_evidence() {
+        let (root, mut service) = isolated_directory("authenticated");
+        service
+            .ingest_announce_with_identity_metadata(
+                "aabbccdd",
+                "Authenticated Relay",
+                DirectoryKind::Propagation,
+                DirectoryAnnounceMetadata {
+                    identity_hash: Some("11".repeat(16)),
+                    associated_hash: Some("delivery-a".into()),
+                    node_associated_hash: Some("node-a".into()),
+                    lxmf_stamp_cost: Some(13),
+                },
+            )
+            .expect("ingest relay");
+        let path_evidence = BTreeMap::from([("AABBCCDD".into(), PropagationNodePathState::Known)]);
+
+        let inventory =
+            service.propagation_node_inventory(Some("AABBCCDD"), &path_evidence, timestamp_secs());
+
+        assert_eq!(inventory.total_candidates, 1);
+        assert!(!inventory.truncated);
+        let node = &inventory.nodes[0];
+        assert_eq!(node.display_name, "Authenticated Relay");
+        assert!(node.display_name_authenticated);
+        assert!(node.selected);
+        assert_eq!(node.freshness, PropagationNodeFreshness::Fresh);
+        assert_eq!(node.path_state, PropagationNodePathState::Known);
+        assert_eq!(node.advertised_stamp_cost, Some(13));
+        assert_eq!(node.compatibility, PropagationNodeCompatibility::Compatible);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn propagation_inventory_does_not_trust_unauthenticated_metadata() {
+        let (root, mut service) = isolated_directory("unauthenticated");
+        service
+            .ingest_announce_with_metadata(
+                "00112233",
+                "Unverified Friendly Name",
+                DirectoryKind::Propagation,
+                None,
+                None,
+                Some(7),
+            )
+            .expect("ingest relay");
+
+        let inventory =
+            service.propagation_node_inventory(None, &BTreeMap::new(), timestamp_secs());
+
+        let node = &inventory.nodes[0];
+        assert_eq!(node.display_name, "00112233");
+        assert!(!node.display_name_authenticated);
+        assert_eq!(node.advertised_stamp_cost, None);
+        assert_eq!(node.path_state, PropagationNodePathState::Unknown);
+        assert_eq!(node.compatibility, PropagationNodeCompatibility::Unknown);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn propagation_inventory_distinguishes_stale_and_unknown_time_evidence() {
+        let (root, mut service) = isolated_directory("freshness");
+        for (hash, identity) in [("stale-relay", "33"), ("unknown-relay", "44")] {
+            service
+                .ingest_announce_with_identity_metadata(
+                    hash,
+                    hash,
+                    DirectoryKind::Propagation,
+                    DirectoryAnnounceMetadata {
+                        identity_hash: Some(identity.repeat(16)),
+                        associated_hash: None,
+                        node_associated_hash: None,
+                        lxmf_stamp_cost: None,
+                    },
+                )
+                .expect("ingest relay");
+        }
+        let now = timestamp_secs();
+        service
+            .entries
+            .get_mut("stale-relay")
+            .expect("stale entry")
+            .last_seen = now - super::PROPAGATION_NODE_FRESH_SECONDS - 1.0;
+        service
+            .entries
+            .get_mut("unknown-relay")
+            .expect("unknown entry")
+            .last_seen = 0.0;
+        for entry in &mut service.announce_stream {
+            entry.last_seen = service
+                .entries
+                .get(&entry.destination_hash)
+                .expect("matching entry")
+                .last_seen;
+        }
+
+        let inventory = service.propagation_node_inventory(None, &BTreeMap::new(), now);
+
+        assert_eq!(
+            inventory
+                .nodes
+                .iter()
+                .find(|node| node.destination_hash == "stale-relay")
+                .expect("stale relay")
+                .freshness,
+            PropagationNodeFreshness::Stale
+        );
+        assert_eq!(
+            inventory
+                .nodes
+                .iter()
+                .find(|node| node.destination_hash == "unknown-relay")
+                .expect("unknown relay")
+                .freshness,
+            PropagationNodeFreshness::Unknown
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn propagation_inventory_is_bounded_deterministic_and_non_destructive() {
+        let (root, mut service) = isolated_directory("bounds");
+        for index in 0..(PROPAGATION_NODE_INVENTORY_MAX_ITEMS + 44) {
+            service
+                .ingest_announce_with_identity_metadata(
+                    format!("relay-{index:04}"),
+                    format!("Relay {index:04}"),
+                    DirectoryKind::Propagation,
+                    DirectoryAnnounceMetadata {
+                        identity_hash: Some(format!("{index:032x}")),
+                        associated_hash: None,
+                        node_associated_hash: None,
+                        lxmf_stamp_cost: Some(1),
+                    },
+                )
+                .expect("ingest relay");
+        }
+        let selected = "relay-0299";
+
+        let first =
+            service.propagation_node_inventory(Some(selected), &BTreeMap::new(), timestamp_secs());
+        let second =
+            service.propagation_node_inventory(Some(selected), &BTreeMap::new(), timestamp_secs());
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.total_candidates,
+            PROPAGATION_NODE_INVENTORY_MAX_ITEMS + 44
+        );
+        assert_eq!(first.nodes.len(), PROPAGATION_NODE_INVENTORY_MAX_ITEMS);
+        assert!(first.retained_bytes <= PROPAGATION_NODE_INVENTORY_MAX_BYTES);
+        assert!(first.truncated);
+        assert_eq!(first.nodes[0].destination_hash, selected);
+        assert!(first.nodes[0].selected);
+        assert_eq!(
+            service
+                .list_entries()
+                .into_iter()
+                .filter(|entry| entry.kind == DirectoryKind::Propagation)
+                .count(),
+            PROPAGATION_NODE_INVENTORY_MAX_ITEMS + 44
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn propagation_inventory_enforces_aggregate_byte_budget() {
+        let (root, mut service) = isolated_directory("byte-bounds");
+        for index in 0..40 {
+            service
+                .ingest_announce_with_identity_metadata(
+                    format!("large-relay-{index:04}"),
+                    format!("{index:04}-{}", "x".repeat(15_000)),
+                    DirectoryKind::Propagation,
+                    DirectoryAnnounceMetadata {
+                        identity_hash: Some(format!("{index:032x}")),
+                        associated_hash: None,
+                        node_associated_hash: None,
+                        lxmf_stamp_cost: None,
+                    },
+                )
+                .expect("ingest large relay");
+        }
+
+        let inventory = service.propagation_node_inventory(
+            Some("large-relay-0039"),
+            &BTreeMap::new(),
+            timestamp_secs(),
+        );
+
+        assert!(inventory.truncated);
+        assert!(inventory.nodes.len() < 40);
+        assert!(inventory.retained_bytes <= PROPAGATION_NODE_INVENTORY_MAX_BYTES);
+        assert_eq!(inventory.nodes[0].destination_hash, "large-relay-0039");
+        assert_eq!(
+            service
+                .list_entries()
+                .into_iter()
+                .filter(|entry| entry.kind == DirectoryKind::Propagation)
+                .count(),
+            40
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn failed_replace_preserves_prior_directory_and_removes_stage() {

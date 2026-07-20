@@ -520,6 +520,27 @@ those values come from current adapter-owned state. Per-destination path/hop
 inspection remains available through explicit path diagnostics rather than an
 invented aggregate table.
 
+### Propagation-node inventory projection
+
+The directory service derives one project-owned propagation-node inventory
+from its existing bounded announce and saved-entry state. The projection is
+read-only and capped at 256 records and 512 KiB; truncation is explicit and
+does not delete saved or transient directory records. Ordering keeps the
+selected node first, then saved/trusted and fresher evidence, with destination
+hash as the deterministic final key.
+
+A display name and advertised stamp cost are treated as authenticated only
+when the directory entry contains the announce-bound identity hash. An entry
+without that identity displays its destination hash, exposes no stamp policy,
+and reports compatibility as unknown. Fresh, stale, and unknown timestamps and
+known, not-known, and unknown path evidence remain distinct. Only a runtime
+status for the matching selected node can turn path state into known or
+not-known; passive directory presence never invents a route.
+
+The projection performs no path request, sync, selection, timer, or storage
+write. It is available to diagnostics and UI view models while the existing
+preferred-node and propagation-sync owners remain authoritative.
+
 ## Local identity announce policy
 
 The identity action sends the existing normal `lxmf.delivery` announce. It is

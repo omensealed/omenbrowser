@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::browser::cache::PageCache;
 use crate::config::AppPaths;
-use crate::directory::DirectoryService;
+use crate::directory::{DirectoryService, PropagationNodeInventory, PropagationNodePathState};
 use crate::error::AppResult;
 use crate::identity::IdentityProfile;
 use crate::interfaces::ReticulumInterfaceProfile;
@@ -28,6 +28,7 @@ pub struct DiagnosticsSnapshot {
     pub reticulum: ReticulumPathDiagnostics,
     pub interface_stats: InterfaceStats,
     pub propagation_status: PropagationStatus,
+    pub propagation_nodes: PropagationNodeInventory,
     pub native_lxmf_sdk_rpc_probe: LxmfSdkRpcProbeSnapshot,
     pub network: NetworkSnapshot,
     pub counts: DiagnosticsCounts,
@@ -113,6 +114,33 @@ impl DiagnosticsService {
         let interface_stats = self.runtime.interface_stats().await?;
         let network = self.runtime.network_snapshot().await?;
         let propagation_status = self.runtime.propagation_status().await?;
+        let selected_propagation_hash = propagation_status
+            .selected
+            .then_some(propagation_status.destination_hash.as_deref())
+            .flatten();
+        let propagation_path_evidence = propagation_status
+            .destination_hash
+            .as_ref()
+            .map(|hash| {
+                BTreeMap::from([(
+                    hash.clone(),
+                    if propagation_status.has_path {
+                        PropagationNodePathState::Known
+                    } else {
+                        PropagationNodePathState::NotKnown
+                    },
+                )])
+            })
+            .unwrap_or_default();
+        let propagation_nodes = directory
+            .map(|directory| {
+                directory.propagation_node_inventory(
+                    selected_propagation_hash,
+                    &propagation_path_evidence,
+                    current_epoch_seconds(),
+                )
+            })
+            .unwrap_or_default();
         let native_lxmf_sdk_rpc_probe = self
             .runtime
             .native_lxmf_sdk_rpc_probe()
@@ -149,6 +177,7 @@ impl DiagnosticsService {
             },
             interface_stats,
             propagation_status,
+            propagation_nodes,
             native_lxmf_sdk_rpc_probe,
             network,
             counts: DiagnosticsCounts {
@@ -237,12 +266,21 @@ fn identity_diagnostics(identity: &IdentityProfile) -> IdentityDiagnostics {
     }
 }
 
+fn current_epoch_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use crate::browser::cache::PageCache;
-    use crate::directory::{DirectoryKind, DirectoryService};
+    use crate::directory::{
+        DirectoryAnnounceMetadata, DirectoryKind, DirectoryService, PropagationNodePathState,
+    };
     use crate::messaging::MessageStore;
     use crate::runtime::{MockNetworkRuntime, NetworkRuntime};
 
@@ -273,11 +311,28 @@ mod tests {
             })
             .await
             .expect("attach");
+        runtime
+            .set_outbound_propagation_node(Some("fedcba9876543210".into()))
+            .await
+            .expect("select propagation node");
         let message_store = MessageStore::new(paths.messages_dir.clone()).expect("messages");
         let mut directory = DirectoryService::new(paths.directory_file.clone()).expect("directory");
         directory
             .ingest_announce("mock.node", "Mock Node", DirectoryKind::Node, None, None)
             .expect("announce");
+        directory
+            .ingest_announce_with_identity_metadata(
+                "fedcba9876543210",
+                "Mock Propagation Node",
+                DirectoryKind::Propagation,
+                DirectoryAnnounceMetadata {
+                    identity_hash: Some("22".repeat(16)),
+                    associated_hash: None,
+                    node_associated_hash: None,
+                    lxmf_stamp_cost: Some(1),
+                },
+            )
+            .expect("propagation announce");
         let cache = PageCache::new(paths.cache_dir.clone()).expect("cache");
         cache
             .store("key", "markup", 60, "title", BTreeMap::new())
@@ -298,9 +353,15 @@ mod tests {
             .expect("snapshot");
         let redacted = DiagnosticsService::redacted_export(&snapshot);
 
-        assert_eq!(snapshot.counts.directory_entries, 1);
+        assert_eq!(snapshot.counts.directory_entries, 2);
         assert_eq!(snapshot.counts.cache_files, 1);
         assert_eq!(snapshot.counts.browser_tabs, 2);
+        assert_eq!(snapshot.propagation_nodes.nodes.len(), 1);
+        assert!(snapshot.propagation_nodes.nodes[0].selected);
+        assert_eq!(
+            snapshot.propagation_nodes.nodes[0].path_state,
+            PropagationNodePathState::Known
+        );
         assert_eq!(
             snapshot.runtime_lifecycle.state,
             crate::runtime::RuntimeLifecycleState::Running
