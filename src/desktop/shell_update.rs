@@ -81,6 +81,7 @@ impl DesktopApp {
         if !self.ui.shutdown_phase.begin_draining() {
             return Task::none();
         }
+        self.app.cancel_propagation_node_refresh_for_shutdown();
         self.app.flush_pending_ui_preferences();
         self.app.flush_pending_directory_persistence();
         let runtime = self.app.runtime.clone();

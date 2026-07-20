@@ -85,7 +85,14 @@ pub(in crate::desktop) fn directory_selected_primary_action_labels(
     match kind {
         DirectoryKind::Node => vec!["Browse Node"],
         DirectoryKind::Peer => vec!["Message Peer", "Inspect Peer"],
-        DirectoryKind::Propagation => vec!["Use Propagation"],
+        DirectoryKind::Propagation => {
+            vec![
+                "Use Propagation",
+                "Refresh Node",
+                "Cancel Refresh",
+                "Sync Now",
+            ]
+        }
         DirectoryKind::OmenChat => vec!["Open Chat"],
         DirectoryKind::Unknown => vec!["Select"],
     }

@@ -87,8 +87,12 @@ pub(in crate::desktop) fn directory_selected_primary_actions(
                 Message::Directory(DirectoryMessage::UsePropagation(index))
             ),
             subtle_button(
-                "Request Path",
-                Message::Directory(DirectoryMessage::RequestPath(index))
+                "Refresh Node",
+                Message::Directory(DirectoryMessage::RefreshPropagation(index))
+            ),
+            subtle_button(
+                "Cancel Refresh",
+                Message::Directory(DirectoryMessage::CancelPropagationRefresh)
             ),
             subtle_button(
                 "Sync Now",
@@ -264,6 +268,15 @@ pub(in crate::desktop) fn directory_view(desktop: &DesktopApp) -> Element<'_, Me
                         propagation_inventory.total_candidates,
                         propagation_inventory.retained_bytes,
                         propagation_inventory.truncated
+                    ), 14),
+                    wrapped_text_owned(format!(
+                        "propagation refresh: {:?} | {}",
+                        desktop.app.directory_state.propagation_refresh.outcome,
+                        if desktop.app.directory_state.propagation_refresh.detail.is_empty() {
+                            "idle"
+                        } else {
+                            desktop.app.directory_state.propagation_refresh.detail.as_str()
+                        }
                     ), 14),
                     action_grid(
                         vec![subtle_button(
@@ -492,10 +505,12 @@ fn directory_selected_details_card(desktop: &DesktopApp) -> Element<'_, Message>
             Message::Directory(DirectoryMessage::CycleDelivery(index)),
         ));
     }
-    management_actions.push(subtle_button(
-        "Request Path",
-        Message::Directory(DirectoryMessage::RequestPath(index)),
-    ));
+    if entry.kind != DirectoryKind::Propagation {
+        management_actions.push(subtle_button(
+            "Request Path",
+            Message::Directory(DirectoryMessage::RequestPath(index)),
+        ));
+    }
     let selected_management = action_grid(management_actions, 3);
 
     section_card(

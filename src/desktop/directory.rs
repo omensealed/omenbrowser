@@ -63,6 +63,14 @@ impl DesktopApp {
                 self.update_request_directory_path(index);
                 Ok(Task::none())
             }
+            Message::Directory(DirectoryMessage::RefreshPropagation(index)) => {
+                self.update_refresh_directory_propagation(index);
+                Ok(Task::none())
+            }
+            Message::Directory(DirectoryMessage::CancelPropagationRefresh) => {
+                self.app.cancel_propagation_node_refresh();
+                Ok(Task::none())
+            }
             Message::Directory(DirectoryMessage::UsePropagation(index)) => {
                 self.update_use_directory_propagation(index);
                 Ok(Task::none())
@@ -160,6 +168,12 @@ impl DesktopApp {
     pub(super) fn update_request_directory_path(&mut self, index: usize) {
         if self.app.select_directory_entry(index) {
             self.app.request_selected_directory_path();
+        }
+    }
+
+    pub(super) fn update_refresh_directory_propagation(&mut self, index: usize) {
+        if self.app.select_directory_entry(index) {
+            self.app.refresh_selected_propagation_node();
         }
     }
 

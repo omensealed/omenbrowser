@@ -607,13 +607,14 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect::<Vec<_>>();
     let title = format!(
-        " Directory | filter: {} | entries: {} | propagation={}/{} bytes={} truncated={} | Enter open | s save | t trust | r path | p use node | g sync ",
+        " Directory | filter: {} | entries: {} | propagation={}/{} bytes={} truncated={} refresh={:?} | Enter open | s save | t trust | r refresh | x cancel | p use | g sync ",
         app.directory_state.filter,
         app.directory_state.entries.len(),
         propagation_inventory.nodes.len(),
         propagation_inventory.total_candidates,
         propagation_inventory.retained_bytes,
-        propagation_inventory.truncated
+        propagation_inventory.truncated,
+        app.directory_state.propagation_refresh.outcome
     );
     frame.render_widget(
         List::new(rows).block(Block::default().borders(Borders::ALL).title(title)),

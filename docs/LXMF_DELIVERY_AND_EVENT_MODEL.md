@@ -542,12 +542,18 @@ write. It is available to diagnostics and UI view models while the existing
 preferred-node and propagation-sync owners remain authoritative.
 
 Desktop and TUI Directory views consume a cached copy of this bounded
-projection. The cache is rebuilt after directory or preferred-node changes,
-not during redraw. Both views expose explicit selection, Request Path, and Sync
-Now controls through the existing application owners; rendering or merely
-highlighting a row never starts network work. Request Path retains its existing
-behavior until the separate refresh lifecycle unit adds a dedicated cooldown,
-single-flight/coalescing result, and shutdown cancellation boundary.
+projection. The cache is rebuilt after directory, path-evidence, or
+preferred-node changes, not during redraw. Both views expose explicit
+selection, Refresh Node, Cancel Refresh, and Sync Now controls through the
+existing application owners; rendering or merely highlighting a row never
+starts network work.
+
+Refresh Node has a 30-second monotonic cooldown, one global in-flight owner,
+six-second total timeout, at most three path candidates, explicit coalescing,
+and cooperative cancellation. Success, no path, timeout, cancellation, and
+failure remain typed visible outcomes. Desktop/TUI shutdown cancels the owner.
+Manual node selection no longer invokes the older generic path-request helper;
+it only persists the selected hash and notifies the runtime adapter.
 
 ## Local identity announce policy
 
