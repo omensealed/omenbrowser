@@ -58,7 +58,7 @@ current_version=$(python3 -c \
   'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' \
   "$repo_root/Cargo.toml")
 [[ "$old_version" == "0.6.0-1" ]]
-[[ "$current_version" == "0.9.5-1" ]]
+[[ "$current_version" == "0.9.5-2" ]]
 
 "$old_probe" seed-old "$database_root" >"$temporary_root/seed-old.json"
 "$current_probe" reopen-current "$database_root" >"$temporary_root/reopen-current.json"
@@ -122,4 +122,4 @@ if [[ -n "$report_path" ]]; then
   cp -- "$summary" "$report_path"
 fi
 cat "$summary"
-echo "mixed OMENchat 0.6.0-1/0.9.5-1 SQLite history reopening: pass"
+echo "mixed OMENchat 0.6.0-1/0.9.5-2 SQLite history reopening: pass"

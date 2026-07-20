@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-expected="${OMEN_RELEASE_VERSION:-0.9.5-1}"
+expected="${OMEN_RELEASE_VERSION:-0.9.5-2}"
 
 manifest_version() {
   awk '
