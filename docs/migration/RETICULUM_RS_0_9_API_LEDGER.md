@@ -4464,3 +4464,28 @@ shutdown ownership remain the next unit rather than being implied by this UI
 change. Rollback removes the cache/view fields and controls while retaining the
 unit-1 projection, diagnostics export, selected-node setting, and propagation
 workers.
+
+## v0.9.5-2 unit 3: bounded propagation refresh lifecycle
+
+Propagation-node refresh is now distinct from generic Directory path requests.
+One application owner admits at most one refresh, coalesces concurrent clicks,
+uses a 30-second monotonic cooldown, limits work to three normalized path
+candidates, and applies a six-second deadline to request, warm, and inspection
+work together. Cancelled, timed-out, failed, no-path, and refreshed outcomes
+are explicit. Matching path evidence updates the cached inventory; stale task
+generations cannot replace a newer result.
+
+The task carries a cooperative cancellation token. Explicit Cancel, TUI quit,
+internal shutdown, and desktop draining shutdown all cancel it. Manual node
+selection no longer starts path discovery as a side effect; it still atomically
+persists the preferred hash, saves the directory entry, and notifies the
+runtime adapter. The existing propagation-sync single-flight owner is reused
+unchanged.
+
+Focused tests cover coalescing, explicit cancellation, deterministic stalled
+runtime timeout, pre-cancellation, successful known-path projection, cooldown,
+selection without implicit discovery, and shutdown cancellation. The unit adds
+no polling subscription, recurring timer, unbounded task/queue/cache, runtime
+dependency, wire byte, storage schema, identity change, or omenchatd coupling.
+Rollback restores the generic Request Path presentation and implicit selection
+request while leaving inventory projection and propagation sync intact.

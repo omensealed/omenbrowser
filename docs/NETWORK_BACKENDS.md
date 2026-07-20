@@ -68,11 +68,17 @@ freshness, path state, advertised stamp cost, compatibility, and whether the
 node is selected. `unknown`, `stale`, and `not-known` remain distinct; the UI
 does not infer trust or reachability from an advertised name.
 
-Selection, path request, and propagation sync controls call the existing
+Selection, refresh, and propagation sync controls call the existing
 settings/runtime owners. Rendering the inventory performs no network work and
 adds no timer or polling subscription. The bounded projection is cached in the
-directory panel state and rebuilt only after directory or preferred-node state
-changes, so TUI redraws do not repeatedly clone and sort announce records. The
-current Request Path control retains its existing behavior; the stricter
-v0.9.5-2 refresh cooldown, coalescing, and cancellation owner is a separate
-follow-up unit.
+directory panel state and rebuilt only after directory, path-evidence, or
+preferred-node changes, so TUI redraws do not repeatedly clone and sort
+announce records.
+
+Propagation-node refresh is an explicit operator action. It admits one global
+in-flight refresh, coalesces concurrent attempts, enforces a 30-second
+monotonic cooldown, considers at most three destination/association path
+candidates, and has a six-second total deadline. Cancel, timeout, no-path,
+failure, and success are separate visible outcomes. Desktop and TUI shutdown
+cancel the owned operation. Selecting a node persists and notifies the runtime
+but does not silently start path discovery.

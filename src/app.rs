@@ -76,6 +76,8 @@ use crate::workspace::{FocusArea, WorkspaceSection};
 
 pub type TabId = u64;
 const LOCAL_LXMF_ANNOUNCE_COOLDOWN: Duration = Duration::from_secs(30);
+const PROPAGATION_NODE_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
+const PROPAGATION_NODE_REFRESH_TIMEOUT: Duration = Duration::from_secs(6);
 const UI_PREFERENCE_AUTOSAVE_DELAY_MS: u64 = 500;
 const STRUCTURED_LOG_DEFAULT_MAX_BYTES: u64 = 256 * 1024;
 const STRUCTURED_LOG_MESSAGE_BYTES: usize = 16 * 1024;
@@ -785,6 +787,37 @@ pub enum MessageTaskResult {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeRefreshOutcome {
+    #[default]
+    Idle,
+    Running,
+    Refreshed,
+    NoPath,
+    Cancelled,
+    TimedOut,
+    Failed,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PropagationNodeRefreshState {
+    pub outcome: PropagationNodeRefreshOutcome,
+    pub destination_hash: Option<String>,
+    pub detail: String,
+    pub started_epoch_ms: Option<u64>,
+    pub completed_epoch_ms: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct PropagationNodeRefreshResult {
+    generation: u64,
+    destination_hash: String,
+    outcome: PropagationNodeRefreshOutcome,
+    path_state: crate::directory::PropagationNodePathState,
+    detail: String,
+}
+
 #[derive(Debug)]
 pub enum DiagnosticsTaskResult {
     ExportBundle {
@@ -852,6 +885,7 @@ pub enum InternalAppEvent {
         operation_id: String,
     },
     MessageTask(MessageTaskResult),
+    PropagationNodeRefresh(PropagationNodeRefreshResult),
     DiagnosticsTask(DiagnosticsTaskResult),
     MicronPlusWidget {
         tab_id: TabId,
@@ -4382,6 +4416,111 @@ fn directory_entry_path_candidates(entry: &DirectoryEntry) -> Vec<String> {
     candidates
 }
 
+async fn run_propagation_node_refresh(
+    runtime: &dyn PropagationRefreshRuntime,
+    generation: u64,
+    destination_hash: String,
+    candidates: Vec<String>,
+    cancel: CancellationToken,
+    timeout: Duration,
+) -> PropagationNodeRefreshResult {
+    let refresh = async {
+        let mut queued = 0usize;
+        for candidate in candidates.iter().take(3) {
+            if runtime.request_path(candidate).await? {
+                queued = queued.saturating_add(1);
+            }
+        }
+        let warmed = runtime.warm_paths(&candidates).await?;
+        let inspection = runtime.inspect_destination(&destination_hash).await?;
+        Ok::<_, crate::error::AppError>((queued, warmed, inspection))
+    };
+
+    tokio::select! {
+        _ = cancel.cancelled() => PropagationNodeRefreshResult {
+            generation,
+            destination_hash,
+            outcome: PropagationNodeRefreshOutcome::Cancelled,
+            path_state: crate::directory::PropagationNodePathState::Unknown,
+            detail: "propagation node refresh cancelled".into(),
+        },
+        result = tokio::time::timeout(timeout, refresh) => match result {
+            Err(_) => PropagationNodeRefreshResult {
+                generation,
+                destination_hash,
+                outcome: PropagationNodeRefreshOutcome::TimedOut,
+                path_state: crate::directory::PropagationNodePathState::Unknown,
+                detail: format!("propagation node refresh timed out after {}s", timeout.as_secs()),
+            },
+            Ok(Err(error)) => PropagationNodeRefreshResult {
+                generation,
+                destination_hash,
+                outcome: PropagationNodeRefreshOutcome::Failed,
+                path_state: crate::directory::PropagationNodePathState::Unknown,
+                detail: format!("propagation node refresh failed: {error}"),
+            },
+            Ok(Ok((queued, warmed, inspection))) => {
+                let (outcome, path_state, path_label) = if inspection.has_path {
+                    (
+                        PropagationNodeRefreshOutcome::Refreshed,
+                        crate::directory::PropagationNodePathState::Known,
+                        "known",
+                    )
+                } else {
+                    (
+                        PropagationNodeRefreshOutcome::NoPath,
+                        crate::directory::PropagationNodePathState::NotKnown,
+                        "not known",
+                    )
+                };
+                PropagationNodeRefreshResult {
+                    generation,
+                    destination_hash,
+                    outcome,
+                    path_state,
+                    detail: format!(
+                        "propagation node refresh complete: path={path_label} queued={queued} warmed={warmed} hops={}",
+                        inspection
+                            .hops
+                            .map(|hops| hops.to_string())
+                            .unwrap_or_else(|| "unknown".into())
+                    ),
+                }
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+trait PropagationRefreshRuntime: Send + Sync {
+    async fn request_path(&self, destination_hash: &str) -> AppResult<bool>;
+    async fn warm_paths(&self, hashes: &[String]) -> AppResult<u32>;
+    async fn inspect_destination(&self, destination_hash: &str)
+        -> AppResult<DestinationInspection>;
+}
+
+struct NetworkPropagationRefreshRuntime(Arc<dyn NetworkRuntime>);
+
+#[async_trait::async_trait]
+impl PropagationRefreshRuntime for NetworkPropagationRefreshRuntime {
+    async fn request_path(&self, destination_hash: &str) -> AppResult<bool> {
+        self.0
+            .request_path(destination_hash, "propagation node refresh", true)
+            .await
+    }
+
+    async fn warm_paths(&self, hashes: &[String]) -> AppResult<u32> {
+        self.0.warm_paths(hashes, 3, 30).await
+    }
+
+    async fn inspect_destination(
+        &self,
+        destination_hash: &str,
+    ) -> AppResult<DestinationInspection> {
+        self.0.inspect_destination(destination_hash, true).await
+    }
+}
+
 fn propagation_sync_stage_hint(report: &serde_json::Value) -> String {
     if let Some(stage) = report
         .get("sync_events")
@@ -5196,6 +5335,7 @@ pub struct WorkspaceState {
 pub struct DirectoryPanelState {
     pub entries: Vec<DirectoryEntry>,
     pub propagation_nodes: PropagationNodeInventory,
+    pub propagation_refresh: PropagationNodeRefreshState,
     pub selected: Option<usize>,
     pub remembered_selection_by_kind: BTreeMap<DirectoryKind, String>,
     pub filter: String,
@@ -6389,6 +6529,9 @@ pub struct App {
     next_diagnostics_generation: u64,
     message_sync_pending: Option<u64>,
     propagation_sync_pending: Option<u64>,
+    propagation_refresh_pending: Option<(u64, String, CancellationToken)>,
+    last_propagation_refresh_started: Option<Instant>,
+    propagation_path_evidence: BTreeMap<String, crate::directory::PropagationNodePathState>,
     lxmf_peer_inspection: Option<LxmfPeerInspectionState>,
     local_lxmf_announce_pending: bool,
     last_local_lxmf_announce_started: Option<Instant>,
@@ -6698,6 +6841,9 @@ impl App {
             next_diagnostics_generation: 1,
             message_sync_pending: None,
             propagation_sync_pending: None,
+            propagation_refresh_pending: None,
+            last_propagation_refresh_started: None,
+            propagation_path_evidence: BTreeMap::new(),
             lxmf_peer_inspection: None,
             local_lxmf_announce_pending: false,
             last_local_lxmf_announce_started: None,
@@ -7346,6 +7492,7 @@ impl App {
     }
 
     pub fn quit(&mut self) {
+        self.cancel_propagation_node_refresh_for_shutdown();
         self.flush_pending_ui_preferences();
         self.flush_pending_directory_persistence();
         self.should_quit = true;
@@ -11247,6 +11394,7 @@ impl App {
                 "recent_logs": self.logs.entries.len().min(50),
             },
             "propagation_node_inventory": self.propagation_node_inventory(),
+            "propagation_node_refresh": &self.directory_state.propagation_refresh,
             "recent_logs": redacted_recent_log_entries(&self.logs, identity_path, 50),
             "plugins": {
                 "manifests": self.plugins_state.manifests,
@@ -13410,7 +13558,6 @@ impl App {
 
         let hash = entry.destination_hash.clone();
         let display_name = entry.display_name.clone();
-        self.request_directory_entry_paths(&entry, "propagation selection");
         let previous = self.settings.preferred_propagation_node_hash.clone();
         self.settings.preferred_propagation_node_hash = Some(hash.clone());
         if !self.save_settings_change("preferred propagation node") {
@@ -16499,6 +16646,9 @@ impl App {
                 &target,
                 requested_epoch_ms,
             ),
+            InternalAppEvent::PropagationNodeRefresh(result) => {
+                self.apply_propagation_node_refresh_result(result)
+            }
             InternalAppEvent::Runtime(event) => self.handle_runtime_bus_event(event),
             InternalAppEvent::Log(line) => {
                 self.logs
@@ -16514,6 +16664,7 @@ impl App {
                 true
             }
             InternalAppEvent::Shutdown => {
+                self.cancel_propagation_node_refresh_for_shutdown();
                 self.flush_pending_ui_preferences();
                 let runtime = self.runtime.clone();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -17381,6 +17532,28 @@ impl App {
                     .monitoring_state
                     .path_updates_received
                     .saturating_add(1);
+                if self
+                    .directory_service
+                    .find(&path.destination_hash)
+                    .is_some_and(|entry| entry.kind == DirectoryKind::Propagation)
+                {
+                    if self.propagation_path_evidence.len() >= 256
+                        && !self
+                            .propagation_path_evidence
+                            .contains_key(&path.destination_hash)
+                    {
+                        self.propagation_path_evidence.pop_first();
+                    }
+                    self.propagation_path_evidence.insert(
+                        path.destination_hash.clone(),
+                        if path.known {
+                            crate::directory::PropagationNodePathState::Known
+                        } else {
+                            crate::directory::PropagationNodePathState::NotKnown
+                        },
+                    );
+                    self.refresh_propagation_node_inventory();
+                }
                 self.status.destination = format!(
                     "destination: {} {}",
                     path.destination_hash,
@@ -19860,6 +20033,164 @@ impl App {
         self.request_directory_entry_paths(&entry, "directory path request")
     }
 
+    pub fn refresh_selected_propagation_node(&mut self) -> bool {
+        let Some(entry) = self.selected_directory_entry() else {
+            self.status.task = "no directory entry selected".into();
+            return false;
+        };
+        if entry.kind != DirectoryKind::Propagation {
+            self.status.task = "selected entry is not an LXMF propagation node".into();
+            return false;
+        }
+        if let Some((_, destination, _)) = &self.propagation_refresh_pending {
+            self.status.task = format!(
+                "propagation refresh already running for {}",
+                compact_hash(destination)
+            );
+            return false;
+        }
+        if let Some(started) = self.last_propagation_refresh_started {
+            let elapsed = started.elapsed();
+            if elapsed < PROPAGATION_NODE_REFRESH_COOLDOWN {
+                let remaining = PROPAGATION_NODE_REFRESH_COOLDOWN.saturating_sub(elapsed);
+                self.status.task = format!(
+                    "propagation refresh cooldown: retry in {}s",
+                    remaining.as_secs().saturating_add(1)
+                );
+                return false;
+            }
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            self.directory_state.propagation_refresh = PropagationNodeRefreshState {
+                outcome: PropagationNodeRefreshOutcome::Failed,
+                destination_hash: Some(entry.destination_hash.clone()),
+                detail: "refresh requires an active async runtime".into(),
+                started_epoch_ms: None,
+                completed_epoch_ms: Some(current_epoch_ms()),
+            };
+            self.status.task = "propagation refresh requires an active async runtime".into();
+            return false;
+        };
+
+        let generation = self.next_diagnostics_generation;
+        self.next_diagnostics_generation = self.next_diagnostics_generation.saturating_add(1);
+        let destination_hash = entry.destination_hash.clone();
+        let candidates = directory_entry_path_candidates(&entry);
+        let cancel = CancellationToken::new();
+        let started_epoch_ms = current_epoch_ms();
+        self.last_propagation_refresh_started = Some(Instant::now());
+        self.propagation_refresh_pending =
+            Some((generation, destination_hash.clone(), cancel.clone()));
+        self.directory_state.propagation_refresh = PropagationNodeRefreshState {
+            outcome: PropagationNodeRefreshOutcome::Running,
+            destination_hash: Some(destination_hash.clone()),
+            detail: format!("requesting {} bounded path candidate(s)", candidates.len()),
+            started_epoch_ms: Some(started_epoch_ms),
+            completed_epoch_ms: None,
+        };
+        self.status.task = format!(
+            "refreshing propagation node {}",
+            compact_hash(&destination_hash)
+        );
+        self.monitoring_state.outbound_path_requests = self
+            .monitoring_state
+            .outbound_path_requests
+            .saturating_add(candidates.len() as u64);
+        self.monitoring_state.note_outbound(
+            candidates
+                .iter()
+                .map(|candidate| 128 + candidate.len() as u64)
+                .sum(),
+        );
+        let runtime = self.runtime.clone();
+        let tx = self.event_tx.clone();
+        handle.spawn(async move {
+            let runtime = NetworkPropagationRefreshRuntime(runtime);
+            let result = run_propagation_node_refresh(
+                &runtime,
+                generation,
+                destination_hash,
+                candidates,
+                cancel,
+                PROPAGATION_NODE_REFRESH_TIMEOUT,
+            )
+            .await;
+            let _ = tx
+                .send(InternalAppEvent::PropagationNodeRefresh(result))
+                .await;
+        });
+        true
+    }
+
+    pub fn cancel_propagation_node_refresh(&mut self) -> bool {
+        let Some((_, destination, cancel)) = &self.propagation_refresh_pending else {
+            self.status.task = "no propagation refresh is running".into();
+            return false;
+        };
+        cancel.cancel();
+        self.status.task = format!(
+            "cancelling propagation refresh for {}",
+            compact_hash(destination)
+        );
+        true
+    }
+
+    pub fn cancel_propagation_node_refresh_for_shutdown(&mut self) {
+        if let Some((_, _, cancel)) = &self.propagation_refresh_pending {
+            cancel.cancel();
+        }
+    }
+
+    fn apply_propagation_node_refresh_result(
+        &mut self,
+        result: PropagationNodeRefreshResult,
+    ) -> bool {
+        let matches_pending = self.propagation_refresh_pending.as_ref().is_some_and(
+            |(generation, destination, _)| {
+                *generation == result.generation
+                    && destination.eq_ignore_ascii_case(&result.destination_hash)
+            },
+        );
+        if !matches_pending {
+            return false;
+        }
+        self.propagation_refresh_pending = None;
+        if self.propagation_path_evidence.len() >= 256
+            && !self
+                .propagation_path_evidence
+                .contains_key(&result.destination_hash)
+        {
+            self.propagation_path_evidence.pop_first();
+        }
+        self.propagation_path_evidence
+            .insert(result.destination_hash.clone(), result.path_state);
+        self.directory_state.propagation_refresh = PropagationNodeRefreshState {
+            outcome: result.outcome,
+            destination_hash: Some(result.destination_hash.clone()),
+            detail: result.detail.clone(),
+            started_epoch_ms: self.directory_state.propagation_refresh.started_epoch_ms,
+            completed_epoch_ms: Some(current_epoch_ms()),
+        };
+        self.refresh_propagation_node_inventory();
+        self.status.task = result.detail.clone();
+        self.logs.push_with_source(
+            if matches!(
+                result.outcome,
+                PropagationNodeRefreshOutcome::Failed | PropagationNodeRefreshOutcome::TimedOut
+            ) {
+                LogSeverity::Warn
+            } else {
+                LogSeverity::Info
+            },
+            LogSource::Directory,
+            format!(
+                "propagation refresh destination={} outcome={:?}: {}",
+                result.destination_hash, result.outcome, result.detail
+            ),
+        );
+        true
+    }
+
     fn request_directory_entry_paths(&mut self, entry: &DirectoryEntry, reason: &str) -> bool {
         let destination = entry.destination_hash.clone();
         let associated = entry.associated_hash.clone();
@@ -20237,7 +20568,7 @@ impl App {
     fn refresh_propagation_node_inventory(&mut self) {
         self.directory_state.propagation_nodes = self.directory_service.propagation_node_inventory(
             self.settings.preferred_propagation_node_hash.as_deref(),
-            &BTreeMap::new(),
+            &self.propagation_path_evidence,
             current_epoch_ms() as f64 / 1_000.0,
         );
     }
@@ -22813,6 +23144,26 @@ mod tests {
     const FIXTURE_KNOWN_PATH_HASH: &str = "0123456789abcdef0123456789abcdef";
     const FIXTURE_PROPAGATION_PEER: &str = "prop.peer";
 
+    struct StalledPropagationRefreshRuntime;
+
+    #[async_trait::async_trait]
+    impl PropagationRefreshRuntime for StalledPropagationRefreshRuntime {
+        async fn request_path(&self, _destination_hash: &str) -> AppResult<bool> {
+            std::future::pending().await
+        }
+
+        async fn warm_paths(&self, _hashes: &[String]) -> AppResult<u32> {
+            std::future::pending().await
+        }
+
+        async fn inspect_destination(
+            &self,
+            _destination_hash: &str,
+        ) -> AppResult<DestinationInspection> {
+            std::future::pending().await
+        }
+    }
+
     fn fixture_node_url() -> String {
         format!("{FIXTURE_NODE_HASH}:/page/index.mu")
     }
@@ -25363,6 +25714,7 @@ side
             .expect("propagation entry");
 
         assert!(app.select_directory_entry(index));
+        let path_requests_before = app.monitoring_state.outbound_path_requests;
         assert!(app.use_selected_directory_propagation_node());
         tokio::task::yield_now().await;
 
@@ -25388,6 +25740,10 @@ side
             .find(FIXTURE_NODE_HASH)
             .expect("saved propagation entry");
         assert!(saved.saved);
+        assert_eq!(
+            app.monitoring_state.outbound_path_requests, path_requests_before,
+            "manual selection must not silently start path discovery"
+        );
 
         assert!(app.clear_preferred_propagation_node());
         tokio::task::yield_now().await;
@@ -25404,6 +25760,143 @@ side
                 .expect("mock propagation node cleared"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn propagation_refresh_is_single_flight_cancellable_and_shutdown_owned() {
+        let mut app = App::new(test_config("propagation-refresh-cancel"));
+        app.directory_service
+            .ingest_announce(
+                FIXTURE_KNOWN_PATH_HASH,
+                "Relay",
+                DirectoryKind::Propagation,
+                None,
+                None,
+            )
+            .expect("propagation announce");
+        app.refresh_panels_from_services();
+        let index = app
+            .directory_state
+            .entries
+            .iter()
+            .position(|entry| entry.destination_hash == FIXTURE_KNOWN_PATH_HASH)
+            .expect("propagation entry");
+        assert!(app.select_directory_entry(index));
+
+        assert!(app.refresh_selected_propagation_node());
+        assert!(!app.refresh_selected_propagation_node());
+        assert!(app.status.task.contains("already running"));
+        let cancellation = app
+            .propagation_refresh_pending
+            .as_ref()
+            .expect("pending refresh")
+            .2
+            .clone();
+        let (generation, destination_hash) = app
+            .propagation_refresh_pending
+            .as_ref()
+            .map(|(generation, destination, _)| (*generation, destination.clone()))
+            .expect("pending refresh identity");
+        assert!(app.cancel_propagation_node_refresh());
+        assert!(
+            app.apply_propagation_node_refresh_result(PropagationNodeRefreshResult {
+                generation,
+                destination_hash,
+                outcome: PropagationNodeRefreshOutcome::Cancelled,
+                path_state: crate::directory::PropagationNodePathState::Unknown,
+                detail: "propagation node refresh cancelled".into(),
+            })
+        );
+        assert_eq!(
+            app.directory_state.propagation_refresh.outcome,
+            PropagationNodeRefreshOutcome::Cancelled
+        );
+        assert!(cancellation.is_cancelled());
+
+        app.last_propagation_refresh_started = None;
+        assert!(app.refresh_selected_propagation_node());
+        let shutdown_cancellation = app
+            .propagation_refresh_pending
+            .as_ref()
+            .expect("second pending refresh")
+            .2
+            .clone();
+        app.quit();
+        assert!(shutdown_cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn propagation_refresh_completion_updates_path_and_enforces_cooldown() {
+        let mut app = App::new(test_config("propagation-refresh-complete"));
+        app.directory_service
+            .ingest_announce(
+                FIXTURE_KNOWN_PATH_HASH,
+                "Relay",
+                DirectoryKind::Propagation,
+                None,
+                None,
+            )
+            .expect("propagation announce");
+        app.refresh_panels_from_services();
+        let index = app
+            .directory_state
+            .entries
+            .iter()
+            .position(|entry| entry.destination_hash == FIXTURE_KNOWN_PATH_HASH)
+            .expect("propagation entry");
+        assert!(app.select_directory_entry(index));
+        assert!(app.refresh_selected_propagation_node());
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            app.drain_internal_events();
+            if app.directory_state.propagation_refresh.outcome
+                != PropagationNodeRefreshOutcome::Running
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            app.directory_state.propagation_refresh.outcome,
+            PropagationNodeRefreshOutcome::Refreshed
+        );
+        assert_eq!(
+            app.propagation_node_inventory().nodes[0].path_state,
+            crate::directory::PropagationNodePathState::Known
+        );
+        assert!(!app.refresh_selected_propagation_node());
+        assert!(app.status.task.contains("cooldown"));
+    }
+
+    #[tokio::test]
+    async fn propagation_refresh_timeout_and_precancel_are_explicit() {
+        let runtime = StalledPropagationRefreshRuntime;
+        let timeout = run_propagation_node_refresh(
+            &runtime,
+            7,
+            FIXTURE_KNOWN_PATH_HASH.into(),
+            vec![FIXTURE_KNOWN_PATH_HASH.into()],
+            CancellationToken::new(),
+            Duration::from_millis(5),
+        )
+        .await;
+        assert_eq!(timeout.outcome, PropagationNodeRefreshOutcome::TimedOut);
+        assert_eq!(
+            timeout.path_state,
+            crate::directory::PropagationNodePathState::Unknown
+        );
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let result = run_propagation_node_refresh(
+            &runtime,
+            8,
+            FIXTURE_KNOWN_PATH_HASH.into(),
+            vec![FIXTURE_KNOWN_PATH_HASH.into()],
+            cancelled,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(result.outcome, PropagationNodeRefreshOutcome::Cancelled);
     }
 
     #[test]

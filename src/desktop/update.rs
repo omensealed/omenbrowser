@@ -659,6 +659,8 @@ mod tests {
             DirectoryMessage::ToggleIdentify(0),
             DirectoryMessage::CycleDelivery(0),
             DirectoryMessage::RequestPath(0),
+            DirectoryMessage::RefreshPropagation(0),
+            DirectoryMessage::CancelPropagationRefresh,
             DirectoryMessage::UsePropagation(0),
             DirectoryMessage::ClearPropagation,
         ] {

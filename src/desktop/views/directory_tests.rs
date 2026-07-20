@@ -126,7 +126,12 @@ fn directory_selected_details_primary_actions_are_kind_specific() {
     );
     assert_eq!(
         directory_selected_primary_action_labels(&DirectoryKind::Propagation),
-        vec!["Use Propagation"]
+        vec![
+            "Use Propagation",
+            "Refresh Node",
+            "Cancel Refresh",
+            "Sync Now"
+        ]
     );
     assert_eq!(
         directory_selected_primary_action_labels(&DirectoryKind::OmenChat),

@@ -155,6 +155,8 @@ pub(in crate::desktop) enum DirectoryMessage {
     ToggleIdentify(usize),
     CycleDelivery(usize),
     RequestPath(usize),
+    RefreshPropagation(usize),
+    CancelPropagationRefresh,
     UsePropagation(usize),
     ClearPropagation,
 }

@@ -98,7 +98,7 @@ must not be bundled with the required propagation-manager unit.
 
 ## First implementation unit
 
-Status: **bounded projection implemented and validated; desktop/TUI inventory presentation and existing-owner controls implemented; refresh lifecycle hardening pending**.
+Status: **bounded projection, desktop/TUI presentation, and refresh lifecycle ownership implemented and under validation**.
 The directory owner now derives a deterministic, read-only inventory capped at
 256 records and 512 KiB. Diagnostics include authoritative selected-node path
 state when the runtime supplies it; synchronous UI projections leave path state

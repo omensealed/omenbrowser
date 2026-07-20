@@ -730,7 +730,12 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         (_, KeyCode::Char('r'))
             if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
         {
-            app.request_selected_directory_path();
+            app.refresh_selected_propagation_node();
+        }
+        (_, KeyCode::Char('x'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
+        {
+            app.cancel_propagation_node_refresh();
         }
         (_, KeyCode::Char('p'))
             if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
