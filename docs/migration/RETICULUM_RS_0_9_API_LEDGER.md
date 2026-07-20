@@ -4526,3 +4526,39 @@ checksum parsing before upload. This changes no artifact bytes, application
 code, dependencies, protocols, schemas, signing policy, or publication
 permissions. Rollback restores the old working-directory-relative manifest;
 individual checksum files remain an independent recovery path.
+
+## v0.9.5-2 unit 6: isolated desktop idle comparison
+
+The published `v0.9.5-1` Linux product and the `0.9.5-2` product from successful
+non-publishing package run `29756591192` were measured with the same repository
+harness and explicit isolated roots. Each run used an Xvfb/i3 session, a
+15-second warmup, and 60 one-second samples. Both applications reached a window,
+closed normally, and reported the canonical `desktop-product` feature identity.
+
+Median CPU changed from 0.976% to 0.486% and p95 CPU from 2.954% to 1.970%.
+Median RSS changed from 222,192 KiB to 225,660 KiB (1.56%), median private-dirty
+memory from 42,480 KiB to 42,768 KiB (0.68%), and median file descriptors
+remained 60. `perf` task clock changed from 555.58 ms to 538.38 ms. The desktop
+idle CPU/memory gate therefore passes without approaching the plan's ten-percent
+investigation threshold.
+
+The scheduler context-switch proxy rose from 48.814 to 91.525 per minute. It is
+not an application-message counter, so it remains a disclosed observation and
+is not relabeled as UI/event wakeups. Direct recurring application-message
+instrumentation and hardware/network-dependent refresh-to-path and propagation
+sync latency remain pending live evidence. Deterministic tests already cover
+the 256-item/512-KiB inventory limits, six-second refresh deadline, coalescing,
+cancellation, and shutdown ownership; the feature adds no recurring timer or
+polling subscription.
+
+The compared binary SHA-256 values are
+`24534e5efff6cad9a25d37cf03928e96a567c818adb7618cddbb45becaf7a74e`
+for published `v0.9.5-1` and
+`a7303d78a93f637bd225cdbfc6cab14f43c05a186e409eb08e0826277a0c4525`
+for candidate commit `8ed3c9cf5444de0e72bc228513f583086fdd149b`. Raw results remain in the
+ignored local measurement directory rather than becoming release assets. This
+unit changes documentation only. Rollback removes this evidence record; it does
+not change application behavior, dependencies, configuration, protocols,
+schemas, identities, state, or package logic. Because the documentation is
+included in packaged content, the exact merge commit still requires one final
+non-publishing package qualification before tagging.

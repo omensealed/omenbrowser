@@ -98,7 +98,9 @@ must not be bundled with the required propagation-manager unit.
 
 ## First implementation unit
 
-Status: **bounded projection, desktop/TUI presentation, refresh lifecycle ownership, and release identity alignment are accepted; final artifact qualification is under validation**.
+Status: **bounded projection, desktop/TUI presentation, refresh lifecycle
+ownership, release identity alignment, and the isolated desktop idle comparison
+are accepted; exact-final-commit artifact qualification remains**.
 The directory owner now derives a deterministic, read-only inventory capped at
 256 records and 512 KiB. Diagnostics include authoritative selected-node path
 state when the runtime supplies it; synchronous UI projections leave path state
@@ -167,6 +169,41 @@ Record before/after:
 No fixed polling subscription is admitted. A greater than ten-percent
 unexplained idle CPU, RSS, task, or link regression requires investigation.
 
+#### Recorded desktop idle comparison
+
+On 2026-07-20, the published `v0.9.5-1` Linux product binary and the qualified
+`0.9.5-2` Linux product binary from package run `29756591192` were measured with
+the same `scripts/measure-desktop-idle.sh` harness, isolated temporary roots,
+Xvfb/i3 session, 15-second warmup, and 60 one-second samples. Both binaries
+closed normally after the sample window.
+
+| Metric | `v0.9.5-1` | `0.9.5-2` | Result |
+| --- | ---: | ---: | --- |
+| CPU median | 0.976% | 0.486% | 50.20% reduction |
+| CPU p95 | 2.954% | 1.970% | 33.31% reduction |
+| RSS median | 222,192 KiB | 225,660 KiB | 1.56% increase |
+| Private-dirty median | 42,480 KiB | 42,768 KiB | 0.68% increase |
+| File descriptors median | 60 | 60 | unchanged |
+| `perf` task clock | 555.58 ms | 538.38 ms | 3.10% reduction |
+
+The idle CPU and memory review gate passes: neither memory measure approaches
+the ten-percent investigation threshold, and CPU does not regress. The
+scheduler context-switch proxy increased from 48.814 to 91.525 per minute, but
+that process counter is not an application-message count and is not represented
+as one. Direct recurring application-message instrumentation remains pending.
+The feature adds no recurring subscription or timer; its inventory is cached
+and refreshed only by explicit user action or existing authoritative events.
+
+Deterministic tests establish the 256-item/512-KiB inventory ceilings, the
+six-second refresh deadline, coalescing, cancellation, and shutdown ownership.
+Hardware/network-specific refresh-to-path and propagation-sync latency remain
+live-test evidence rather than invented local values. Raw local evidence is
+kept under ignored `target/v0.9.5-2-idle-comparison/`; the immutable binary
+SHA-256 values are `24534e5efff6cad9a25d37cf03928e96a567c818adb7618cddbb45becaf7a74e`
+for `v0.9.5-1` and
+`a7303d78a93f637bd225cdbfc6cab14f43c05a186e409eb08e0826277a0c4525`
+for the measured `0.9.5-2` candidate.
+
 ### Completion gate
 
 - Focused tests and strict Clippy pass for affected profiles.
@@ -187,7 +224,11 @@ paths. No state conversion or destructive cleanup is permitted.
 ## Later release gate
 
 After all accepted units, run the non-publishing package workflow on the exact
-merged `main` commit. Only after Linux artifacts, Windows portable/NSIS/WiX
-lifecycle checks, and all native prerequisites pass may `v0.9.5-2` be created.
-Tag publication must remain isolated behind the existing least-privilege
-tag-only workflow.
+merged `main` commit. Package run `29756591192` qualified the code and portable
+checksum fix on commit `8ed3c9cf5444de0e72bc228513f583086fdd149b` across Linux, native Windows,
+Intel macOS, and Apple Silicon macOS, but this evidence-recording documentation
+unit changes packaged bytes. One final non-publishing run on its merge commit is
+therefore still required. Only after Linux artifacts, Windows
+portable/NSIS/WiX lifecycle checks, and all native prerequisites pass may
+`v0.9.5-2` be created. Tag publication must remain isolated behind the existing
+least-privilege tag-only workflow.
