@@ -1,5 +1,8 @@
 use crate::app::DirectoryScope;
-use crate::directory::{DirectoryEntry, DirectoryKind};
+use crate::directory::{
+    DirectoryEntry, DirectoryKind, PropagationNodeCompatibility, PropagationNodeFreshness,
+    PropagationNodePathState, PropagationNodeRecord,
+};
 
 pub(in crate::desktop) fn directory_kind_title(kind: &DirectoryKind) -> &'static str {
     match kind {
@@ -132,6 +135,55 @@ pub(in crate::desktop) fn directory_selected_state_lines(entry: &DirectoryEntry)
         }
     }
     lines
+}
+
+pub(in crate::desktop) fn propagation_node_state_lines(
+    node: &PropagationNodeRecord,
+) -> Vec<String> {
+    let identity = node.identity_hash.as_deref().unwrap_or("unknown");
+    let stamp_cost = node
+        .advertised_stamp_cost
+        .map(|cost| cost.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    vec![
+        format!(
+            "selected={} | freshness={} | path={}",
+            node.selected,
+            propagation_freshness_label(node.freshness),
+            propagation_path_label(node.path_state)
+        ),
+        format!(
+            "compatibility={} | advertised stamp cost={stamp_cost}",
+            propagation_compatibility_label(node.compatibility)
+        ),
+        format!(
+            "identity: {identity} | display name authenticated={}",
+            node.display_name_authenticated
+        ),
+    ]
+}
+
+fn propagation_freshness_label(value: PropagationNodeFreshness) -> &'static str {
+    match value {
+        PropagationNodeFreshness::Fresh => "fresh",
+        PropagationNodeFreshness::Stale => "stale",
+        PropagationNodeFreshness::Unknown => "unknown",
+    }
+}
+
+fn propagation_path_label(value: PropagationNodePathState) -> &'static str {
+    match value {
+        PropagationNodePathState::Known => "known",
+        PropagationNodePathState::NotKnown => "not-known",
+        PropagationNodePathState::Unknown => "unknown",
+    }
+}
+
+fn propagation_compatibility_label(value: PropagationNodeCompatibility) -> &'static str {
+    match value {
+        PropagationNodeCompatibility::Compatible => "compatible",
+        PropagationNodeCompatibility::Unknown => "unknown",
+    }
 }
 
 pub(in crate::desktop) fn directory_kind_supports_identify_toggle(kind: &DirectoryKind) -> bool {

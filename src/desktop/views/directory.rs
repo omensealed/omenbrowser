@@ -9,13 +9,13 @@ use super::super::{
     action_grid, app_scrollable, card_container_style, format_epoch_secs, omen_button,
     omen_button_owned, relative_time, section_card, status_container_style, subtle_button,
     subtle_button_owned, ui_size, wrapped_panel_text, wrapped_text_owned, DesktopApp,
-    DirectoryMessage, Message, DIRECTORY_RENDER_LIMIT,
+    DiagnosticsMessage, DirectoryMessage, Message, DIRECTORY_RENDER_LIMIT,
 };
 use super::directory_model::{
     directory_empty_text, directory_empty_text_for_scope, directory_entry_matches_view,
     directory_kind_supports_delivery_preference, directory_kind_supports_identify_toggle,
     directory_kind_title, directory_selected_kind_note, directory_selected_primary_action_labels,
-    directory_selected_state_lines, short_destination_hash,
+    directory_selected_state_lines, propagation_node_state_lines, short_destination_hash,
 };
 
 pub(in crate::desktop) fn directory_tab_button(
@@ -81,10 +81,20 @@ pub(in crate::desktop) fn directory_selected_primary_actions(
         .spacing(8)
         .wrap()
         .into(),
-        DirectoryKind::Propagation => row![omen_button(
-            "Use Propagation",
-            Message::Directory(DirectoryMessage::UsePropagation(index))
-        )]
+        DirectoryKind::Propagation => row![
+            omen_button(
+                "Use Propagation",
+                Message::Directory(DirectoryMessage::UsePropagation(index))
+            ),
+            subtle_button(
+                "Request Path",
+                Message::Directory(DirectoryMessage::RequestPath(index))
+            ),
+            subtle_button(
+                "Sync Now",
+                Message::Diagnostics(DiagnosticsMessage::SyncPropagationNow)
+            ),
+        ]
         .spacing(8)
         .wrap()
         .into(),
@@ -115,6 +125,7 @@ pub(in crate::desktop) fn directory_selected_primary_actions(
 }
 
 pub(in crate::desktop) fn directory_view(desktop: &DesktopApp) -> Element<'_, Message> {
+    let propagation_inventory = desktop.app.propagation_node_inventory();
     let active_kind = desktop.app.directory_state.active_kind.clone();
     let active_scope = desktop.app.directory_state.active_scope.clone();
     let filter = desktop.app.directory_state.filter.trim();
@@ -246,6 +257,13 @@ pub(in crate::desktop) fn directory_view(desktop: &DesktopApp) -> Element<'_, Me
                             .preferred_propagation_node_hash
                             .as_deref()
                             .unwrap_or("none")
+                    ), 14),
+                    wrapped_text_owned(format!(
+                        "propagation inventory: retained={}/{} bytes={} truncated={}",
+                        propagation_inventory.nodes.len(),
+                        propagation_inventory.total_candidates,
+                        propagation_inventory.retained_bytes,
+                        propagation_inventory.truncated
                     ), 14),
                     action_grid(
                         vec![subtle_button(
@@ -420,6 +438,21 @@ fn directory_selected_details_card(desktop: &DesktopApp) -> Element<'_, Message>
         .fold(column![].spacing(3), |column, line| {
             column.push(wrapped_text_owned(line, 14))
         });
+    let propagation_state_lines = desktop
+        .app
+        .propagation_node_inventory()
+        .nodes
+        .iter()
+        .find(|node| {
+            node.destination_hash
+                .eq_ignore_ascii_case(&entry.destination_hash)
+        })
+        .map(propagation_node_state_lines)
+        .unwrap_or_default()
+        .into_iter()
+        .fold(column![].spacing(3), |column, line| {
+            column.push(wrapped_text_owned(line, 14))
+        });
     let micronplus_warning_lines = desktop
         .app
         .micronplus_warning_lines_for_directory_entry(&entry)
@@ -482,6 +515,7 @@ fn directory_selected_details_card(desktop: &DesktopApp) -> Element<'_, Message>
             wrapped_text_owned(format!("associated: {associated}"), 14),
             wrapped_text_owned(format!("node associated: {node_associated}"), 14),
             state_lines,
+            propagation_state_lines,
             wrapped_text_owned(
                 format!(
                     "last seen: {} ({})",

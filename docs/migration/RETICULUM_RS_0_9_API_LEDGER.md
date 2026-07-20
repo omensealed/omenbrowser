@@ -4439,3 +4439,28 @@ omenchatd coupling. Rollback removes the projection types, diagnostics field,
 and view-model accessor while retaining the existing directory, selection, and
 sync behavior. Desktop/TUI refresh and presentation are the next separate
 subunit.
+
+## v0.9.5-2 unit 2: propagation inventory presentation
+
+Desktop and TUI Directory surfaces now present the bounded inventory's
+selected state, authenticated identity/name evidence, freshness, path state,
+advertised stamp cost, compatibility, retained item/byte counts, and explicit
+truncation. Unknown, stale, and not-known evidence remain distinct. Visible Use
+Propagation, Request Path, and Sync Now controls route to the pre-existing
+settings, runtime, path, and single-flight propagation-sync owners; view code
+does not import Reticulum/LXMF implementation types.
+
+The application caches the already-bounded projection in directory panel state
+and rebuilds it only after announce/directory or preferred-node changes. Normal
+desktop/TUI redraw therefore performs no network work and does not repeatedly
+clone or sort the directory inventory. Focused tests cover evidence labels and
+selection/clear cache updates. This unit adds no timer, polling subscription,
+queue, dependency, storage schema, protocol byte, identity change, or
+omenchatd coupling.
+
+The existing Request Path behavior is deliberately labeled as such. Dedicated
+refresh cooldown, in-flight coalescing, cancellation, timeout outcome, and
+shutdown ownership remain the next unit rather than being implied by this UI
+change. Rollback removes the cache/view fields and controls while retaining the
+unit-1 projection, diagnostics export, selected-node setting, and propagation
+workers.
