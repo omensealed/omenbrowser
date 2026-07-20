@@ -65,8 +65,8 @@ if ((reverse)); then
   browser_bin="$old_target/debug/omenbrowser_rs"
   server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
   expected_client_version="0.6.0-1"
-  expected_server_version="0.9.5-1"
-  direction="0.6.0-1_client_to_0.9.5-1_server"
+  expected_server_version="0.9.5-2"
+  direction="0.6.0-1_client_to_0.9.5-2_server"
   message="mixed hardened old client to current server"
 else
   CARGO_TARGET_DIR="$old_target" cargo build --locked \
@@ -76,9 +76,9 @@ else
     --no-default-features --features desktop-product --bin omenbrowser_rs
   browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
   server_bin="$old_target/debug/omenchatd"
-  expected_client_version="0.9.5-1"
+  expected_client_version="0.9.5-2"
   expected_server_version="0.6.0-1"
-  direction="0.9.5-1_client_to_0.6.0-1_server"
+  direction="0.9.5-2_client_to_0.6.0-1_server"
   message="mixed current client to hardened old server"
 fi
 

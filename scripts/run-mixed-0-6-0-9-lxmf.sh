@@ -107,7 +107,7 @@ if [[ "$old_version" != "0.6.0-1" ]]; then
   echo "mixed LXMF old application version mismatch: $old_version" >&2
   exit 1
 fi
-if [[ "$current_version" != "0.9.5-1" ]]; then
+if [[ "$current_version" != "0.9.5-2" ]]; then
   echo "mixed LXMF current application version mismatch: $current_version" >&2
   exit 1
 fi
@@ -301,7 +301,7 @@ def combine(version, sender, receiver):
     return sender
 
 old = combine("0.6.0-1", load("old-sender"), load("old-receiver"))
-current = combine("0.9.5-1", load("current-sender"), load("current-receiver"))
+current = combine("0.9.5-2", load("current-sender"), load("current-receiver"))
 (root / f"{prefix}-old-report.json").write_text(
     json.dumps(old), encoding="utf-8"
 )
@@ -397,7 +397,7 @@ def validate(label, report):
 def validate_round(label, old, current):
     old_summary, old_sent, old_received, old_destination = validate(f"{label} 0.6.0-1", old)
     current_summary, current_sent, current_received, current_destination = validate(
-        f"{label} 0.9.5-1", current
+        f"{label} 0.9.5-2", current
     )
     if not all((old_sent, old_received, current_sent, current_received)):
         raise RuntimeError(f"{label} did not expose message identifiers for correlation")
@@ -472,7 +472,7 @@ if [[ -n "$report_path" ]]; then
 fi
 cat "$summary"
 if [[ "$restart_fixture" == true ]]; then
-  echo "mixed OMENbrowser 0.6.0-1/0.9.5-1 restart/state reopening: pass"
+  echo "mixed OMENbrowser 0.6.0-1/0.9.5-2 restart/state reopening: pass"
 else
-  echo "mixed OMENbrowser 0.6.0-1/0.9.5-1 direct LXMF $transfer_fixture interoperability: pass"
+  echo "mixed OMENbrowser 0.6.0-1/0.9.5-2 direct LXMF $transfer_fixture interoperability: pass"
 fi

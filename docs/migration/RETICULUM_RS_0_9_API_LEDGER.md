@@ -4489,3 +4489,25 @@ no polling subscription, recurring timer, unbounded task/queue/cache, runtime
 dependency, wire byte, storage schema, identity change, or omenchatd coupling.
 Rollback restores the generic Request Path presentation and implicit selection
 request while leaving inventory projection and propagation sync intact.
+
+## v0.9.5-2 unit 4: application release identity alignment
+
+The root OMENbrowser_rs package and independently rooted omenchatd package now
+report `0.9.5-2`; their lockfiles move in the same unit. Release-version
+verification, current-product smoke assertions, mixed `0.6.0-1` compatibility
+labels, Python-interoperability job identity, quick-start guidance, backend
+guidance, and user-facing version documentation use the same application
+revision.
+
+The Reticulum/LXMF family remains exactly pinned to the reviewed `0.9.5`
+registry train. The private protocol-neutral `omen-ifac-tcp` support crate
+retains its independent `0.9.5-1` package identity because no API or wire
+behavior changed. OMENchat protocol version 1, SQLite/config/cache schema
+versions, destinations, identities, user roots, and state formats remain
+unchanged. No tag or release is created by this unit.
+
+The completion gate is exact version verification, locked root/server product
+checks, the quick release gate, native CI, Python interop, and non-publishing
+package qualification. Rollback changes only both application package versions,
+their lock entries, and matching release/test labels back to `0.9.5-1`; no user
+data or network migration is involved.
