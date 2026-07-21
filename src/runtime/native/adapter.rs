@@ -12189,6 +12189,14 @@ mod tests {
         AppPaths::from_root(root)
     }
 
+    struct TestTreeCleanup(PathBuf);
+
+    impl Drop for TestTreeCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[cfg(not(all(feature = "native-rns-net", any())))]
     #[tokio::test]
     async fn propagation_sync_waits_for_path_restore_completion() {
@@ -16715,6 +16723,7 @@ enable_transport = No
 
         let paths = temp_paths(case);
         paths.ensure().expect("isolated stamped propagation paths");
+        let _test_tree_cleanup = TestTreeCleanup(paths.root.clone());
         let identity = IdentityManager::new(
             paths.identities_dir.clone(),
             paths.identity_backups_dir.clone(),

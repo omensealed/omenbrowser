@@ -141,7 +141,15 @@ profiles compile and their unit/component tests pass with strict Clippy.
 Status: in progress. The maximum UDP Resource sentinel was run explicitly on
 0.9.6 and remains known-red: upstream buffer 456 bytes versus a 483-byte maximum
 type-one wire packet. It remains an accurately scoped upstream limitation, not
-a reason for a local fork or weakened test.
+a reason for a local fork or weakened test. The complete immutable pinned-Python
+lane passed on 2026-07-21 after its standalone relocation build was isolated
+from canonical Cargo artifacts. One preceding run intermittently timed out in
+the second network propagation stamp admission; the same case passed on the
+immediate full rerun, so the flake remains disclosed and is not counted as two
+independent clean qualifications. TCP IFAC, forged/stale proof handling,
+propagation sync, deterministic stamp boundaries, ticket policy, direct stamp,
+and 64-KiB direct Resource cases passed in both runs before or after that point
+as applicable.
 
 Run focused before/after tests for:
 

@@ -4703,3 +4703,45 @@ The test annotation and transport gap document now scope the limitation through
 or feature changed. Rollback is documentation/test-label only. The gap blocks a
 maximum-UDP-Resource support claim, not the version-aligned release as a whole;
 OMEN retains the upstream behavior without a fork or local workaround.
+
+## v0.9.6-1 unit 3b: pinned-Python qualification and test isolation
+
+The dedicated pinned-reference runner initially failed before live socket
+execution because the standalone relocation check had compiled a temporary
+server source copy into the canonical server target. Rust integration-test
+binaries embed `CARGO_MANIFEST_DIR`; after the source copy was removed, Cargo
+reused the otherwise-fresh binary and fixture discovery addressed a deleted
+`/tmp/omenchatd-standalone.*` path. The relocation harness now owns a unique
+target directory beneath the configured target parent and removes that target
+together with the source copy. Its full locked offline check, compile-only
+headless test build, and four IFAC unit regressions pass, with zero relocation
+target directories retained after exit.
+
+A deliberately fresh Cargo target then filled the host's 32-GiB tmpfs while
+linking the desktop test binary and `ld` exited with `SIGBUS`. Inspection found
+156 prior browser-cache byte-budget fixtures of roughly 61 MiB each and more
+than 161,000 `omenbrowser-rs-*` test directories accumulated across historical
+runs. These were isolated project test artifacts, not user/application state.
+The browser-cache integration fixture now owns its directory through an RAII
+guard, including assertion-panic paths; one focused suite leaves the directory
+count unchanged at zero. The live stamped-propagation fixture likewise owns a
+cleanup guard so an interoperability assertion cannot strand its isolated
+identity/config/storage tree.
+
+After removing only those project-prefixed artifacts and rebuilding the two
+contaminated server integration tests, the complete pinned lane reached every
+live case. TCP split/coalesced/reconnect and wrong-credential checks, forged and
+stale proof ordering, propagation enqueue/get/ack, deterministic stamp
+boundaries, ticket issue/use/expiry/reuse, first-send direct stamp-policy
+discovery, 65,536-byte stamped direct Resource transfer, direct stamp
+accept/reject, and live ticket roundtrip passed. The network propagation
+accepted/under-cost-rejected case timed out once after the first accepted
+message; its immediate complete rerun passed in 32.32 seconds. This intermittent
+failure remains a disclosed qualification flake and must not be relabelled as a
+deterministic 0.9.6 incompatibility or silently retried by the gate.
+
+No production protocol, identity, storage, retry, queue, link, or wire behavior
+changed. Rollback restores shared relocation artifacts and non-owning test
+fixtures, which would reintroduce false fixture failures and unbounded test
+disk retention. Current-Python drift, mixed 0.9.5/0.9.6 peers, native packaging,
+and performance comparison remain Unit 4 gates.
