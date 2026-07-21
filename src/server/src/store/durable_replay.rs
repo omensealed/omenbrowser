@@ -1,8 +1,8 @@
 use rusqlite::OptionalExtension;
 
 use super::{
-    append_event_in_transaction, ensure_user_on, join_room_on, OmenchatStore, ServerRoomEvent,
-    ServerRoomEventKind, ServerUser,
+    append_event_in_transaction, ensure_user_on, join_room_on, room_from_row, OmenchatStore,
+    ServerRoom, ServerRoomEvent, ServerRoomEventKind, ServerUser,
 };
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::codec::decode_frame;
@@ -69,6 +69,12 @@ pub enum DurableRoomEventPlan<A> {
         kind: ServerRoomEventKind,
         admission: A,
     },
+    EventWithResult {
+        actor_user_id: Option<UserId>,
+        kind: ServerRoomEventKind,
+        admission: A,
+        result_frame: Vec<u8>,
+    },
     Response {
         result_frame: Vec<u8>,
     },
@@ -124,10 +130,38 @@ impl OmenchatStore {
         join_room_on(transaction, room_id, user_id)
     }
 
+    pub(crate) fn durable_room(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+    ) -> ServerResult<Option<ServerRoom>> {
+        transaction
+            .query_row(
+                "SELECT room_id, name, topic, room_revision
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                room_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn leave_durable_room(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        user_id: UserId,
+    ) -> ServerResult<()> {
+        transaction.execute(
+            "DELETE FROM room_members WHERE room_id = ?1 AND user_id = ?2",
+            (room_id, user_id),
+        )?;
+        Ok(())
+    }
+
     /// Appends a room event and retains its exact encoded origin response in
-    /// one SQLite transaction. Preparation may produce either a room event
-    /// with an owned admission guard or a terminal origin response without an
-    /// event. Neither callback may cause irreversible external side effects.
+    /// one SQLite transaction. Preparation may produce a room event whose
+    /// result is derived after insertion, an event with a pre-encoded result,
+    /// or a terminal origin response without an event. Neither callback may
+    /// cause irreversible external side effects.
     pub fn commit_durable_room_event_result<P, F, A>(
         &self,
         key: DurableMutationKey<'_>,
@@ -152,6 +186,18 @@ impl OmenchatStore {
                     let event =
                         append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
                     let result_frame = encode_result(&event)?;
+                    stored_event = Some(event);
+                    stored_admission = Some(admission);
+                    Ok(result_frame)
+                }
+                DurableRoomEventPlan::EventWithResult {
+                    actor_user_id,
+                    kind,
+                    admission,
+                    result_frame,
+                } => {
+                    let event =
+                        append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
                     stored_event = Some(event);
                     stored_admission = Some(admission);
                     Ok(result_frame)
@@ -848,6 +894,47 @@ mod tests {
             .expect_err("invalid origin response must roll back event");
         assert!(error.to_string().contains("valid bounded OMENchat frame"));
         assert_eq!(drops.get(), 1, "rollback must release admission guard");
+        assert!(store
+            .latest_events(room.room_id, 10)
+            .expect("events")
+            .is_empty());
+    }
+
+    #[test]
+    fn preencoded_room_result_failure_rolls_back_membership_and_event() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("part-rollback", None).expect("room");
+        let user = store
+            .ensure_user(&[7; 16], "Part User", None)
+            .expect("user");
+        store.join_room(room.room_id, user.user_id).expect("join");
+        let identity = [7; 16];
+
+        let error = store
+            .commit_durable_room_event_result(
+                key(&identity, 2),
+                request_hash(2),
+                room.room_id,
+                |transaction| {
+                    OmenchatStore::leave_durable_room(transaction, room.room_id, user.user_id)?;
+                    Ok(DurableRoomEventPlan::EventWithResult {
+                        actor_user_id: Some(user.user_id),
+                        kind: ServerRoomEventKind::System {
+                            body: "must rollback".into(),
+                        },
+                        admission: (),
+                        result_frame: vec![0; MAX_DURABLE_RESULT_BYTES + 1],
+                    })
+                },
+                |_| -> ServerResult<Vec<u8>> {
+                    panic!("pre-encoded result must not call the event encoder")
+                },
+            )
+            .expect_err("oversized origin response must roll back part");
+        assert!(error.to_string().contains("must contain 1..="));
+        assert!(store
+            .room_has_member(room.room_id, user.user_id)
+            .expect("membership must roll back"));
         assert!(store
             .latest_events(room.room_id, 10)
             .expect("events")

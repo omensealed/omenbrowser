@@ -741,8 +741,8 @@ stored origin bytes without repeating policy, rate accounting, membership,
 event insertion, or broadcast. Tests prove one event/one fan-out, exact replay,
 rate isolation, hash conflict, malformed hash, stable permission rejection
 after policy change, and server/store restart replay. The executor is not
-called by live frame dispatch and the server still does not advertise the
-capability.
+reachable from a negotiated production Link and the server still does not
+advertise the capability.
 
 The complete headless profile passed 227 tests and the full server/TUI profile
 passed 349 tests, each with eight explicit long-running, hardware,
@@ -768,5 +768,27 @@ use, uncertain-mutation retry, and automatic resend remain disabled.
 
 The complete standalone headless profile passed 229 tests and the full
 server/TUI profile passed 351 tests, with eight explicit soak, hardware,
+upstream-regression, or interoperability tests ignored in each profile. Strict
+Clippy passed for both profiles and formatting passed.
+
+## Durable part-room transaction
+
+The staged durable executor now also covers `PartRoom`. On a replay miss, room
+lookup, user policy, membership removal, departure-event insertion, exact
+`CommandResult` encoding, and replay publication occur in one immediate SQLite
+transaction. A retained-response validation failure rolls back both membership
+and event changes. Exact replay returns the original response without another
+event, room cleanup, or user-list fan-out.
+
+Live dispatch marks the Link as parted only when the first committed durable
+part or its retained successful replay is observed. User-list publication only
+occurs when stale live room ownership was actually removed, so replay can
+repair an origin-delivery failure without duplicating fan-out. Focused session,
+live routing, delivery-failure recovery, and rollback tests pass. Capability
+acceptance remains disabled because `RoomNotice` and mutating command coverage
+are still incomplete.
+
+The complete standalone headless profile passed 233 tests and the full
+server/TUI profile passed 355 tests, with eight explicit soak, hardware,
 upstream-regression, or interoperability tests ignored in each profile. Strict
 Clippy passed for both profiles and formatting passed.

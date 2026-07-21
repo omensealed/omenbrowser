@@ -180,7 +180,7 @@ pub struct SessionEngine {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DurableRoomTextDispatch {
+pub struct DurableMutationDispatch {
     pub origin: Frame,
     pub broadcast: Option<Frame>,
     pub pruned: usize,
@@ -1035,9 +1035,35 @@ impl SessionEngine {
         ])
     }
 
-    /// Executes one already-negotiated durable room message or action. Live
-    /// dispatch does not call this boundary until capability acceptance is
-    /// enabled and bound to an authenticated Link.
+    /// Executes one already-negotiated durable mutation. Capability acceptance
+    /// remains disabled until every operation promised by the capability has a
+    /// durable implementation.
+    pub fn handle_durable_mutation(
+        &self,
+        peer: &ServerPeer,
+        seq: u32,
+        room_id: Option<RoomId>,
+        op: ChatOp,
+        client_instance_id: ClientInstanceId,
+        envelope: DurableMutationEnvelope,
+    ) -> ServerResult<DurableMutationDispatch> {
+        match op {
+            ChatOp::RoomMessage | ChatOp::RoomAction => {
+                self.handle_durable_room_text(peer, seq, room_id, op, client_instance_id, envelope)
+            }
+            ChatOp::PartRoom => {
+                self.handle_durable_part_room(peer, seq, room_id, client_instance_id, envelope)
+            }
+            _ => Ok(self.durable_error_dispatch(
+                seq,
+                room_id,
+                ChatErrorCode::DurableMutationMalformed,
+                "durable room operation is unsupported",
+            )),
+        }
+    }
+
+    /// Executes one already-negotiated durable room message or action.
     pub fn handle_durable_room_text(
         &self,
         peer: &ServerPeer,
@@ -1046,7 +1072,7 @@ impl SessionEngine {
         op: ChatOp,
         client_instance_id: ClientInstanceId,
         envelope: DurableMutationEnvelope,
-    ) -> ServerResult<DurableRoomTextDispatch> {
+    ) -> ServerResult<DurableMutationDispatch> {
         if !matches!(op, ChatOp::RoomMessage | ChatOp::RoomAction) {
             return Ok(self.durable_error_dispatch(
                 seq,
@@ -1197,7 +1223,7 @@ impl SessionEngine {
                 if let Some(admission) = admission {
                     admission.commit();
                 }
-                Ok(DurableRoomTextDispatch {
+                Ok(DurableMutationDispatch {
                     origin: decode_durable_result(&result_frame)?,
                     broadcast: Some(Frame::new(
                         ChatOp::RoomEvent,
@@ -1211,12 +1237,174 @@ impl SessionEngine {
             DurableRoomEventCommit::StoredResponse {
                 result_frame,
                 pruned,
-            } => Ok(DurableRoomTextDispatch {
+            } => Ok(DurableMutationDispatch {
                 origin: decode_durable_result(&result_frame)?,
                 broadcast: None,
                 pruned,
             }),
-            DurableRoomEventCommit::Replayed { result_frame } => Ok(DurableRoomTextDispatch {
+            DurableRoomEventCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
+                origin: decode_durable_result(&result_frame)?,
+                broadcast: None,
+                pruned: 0,
+            }),
+            DurableRoomEventCommit::Conflict => Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationConflict,
+                "durable mutation id was reused with different content",
+            )),
+            DurableRoomEventCommit::Expired => Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationResultExpired,
+                "durable client instance has expired replay state",
+            )),
+        }
+    }
+
+    fn handle_durable_part_room(
+        &self,
+        peer: &ServerPeer,
+        seq: u32,
+        room_id: Option<RoomId>,
+        client_instance_id: ClientInstanceId,
+        envelope: DurableMutationEnvelope,
+    ) -> ServerResult<DurableMutationDispatch> {
+        let Some(room_id) = room_id else {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                None,
+                ChatErrorCode::DurableMutationMalformed,
+                "durable part has no room id",
+            ));
+        };
+        let canonical_hash = match canonical_mutation_request_hash(
+            ChatOp::PartRoom,
+            Some(room_id),
+            &envelope.body,
+        ) {
+            Ok(hash) => hash,
+            Err(_) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationMalformed,
+                    "durable request body exceeds canonical bounds",
+                ))
+            }
+        };
+        if canonical_hash != envelope.request_hash || envelope.body != FrameBody::Empty {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationMalformed,
+                "durable part request is malformed",
+            ));
+        }
+        let key = DurableMutationKey {
+            identity_hash: &peer.identity_hash,
+            client_instance_id,
+            mutation_id: envelope.mutation_id,
+        };
+        let commit = self.store.commit_durable_room_event_result(
+            key,
+            envelope.request_hash,
+            room_id,
+            |transaction| {
+                let Some(room) = OmenchatStore::durable_room(transaction, room_id)? else {
+                    return Ok(DurableRoomEventPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::RoomNotFound,
+                            "room not found",
+                        ))?,
+                    });
+                };
+                let Some(user) = OmenchatStore::ensure_durable_room_user(
+                    transaction,
+                    room_id,
+                    &peer.identity_hash,
+                    &peer.display_name,
+                    peer.lxmf_destination.as_deref(),
+                )?
+                else {
+                    return Err(ServerError::Message(
+                        "durable part room disappeared during transaction".into(),
+                    ));
+                };
+                if user.status_bits & STATUS_BANNED != 0 {
+                    return Ok(DurableRoomEventPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::PermissionDenied,
+                            "user is banned",
+                        ))?,
+                    });
+                }
+                OmenchatStore::leave_durable_room(transaction, room_id, user.user_id)?;
+                let result_frame = self.encode_durable_result(Frame::new(
+                    ChatOp::CommandResult,
+                    seq,
+                    Some(room_id),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("part".into()),
+                        room_to_value(&room),
+                    ]),
+                ))?;
+                Ok(DurableRoomEventPlan::EventWithResult {
+                    actor_user_id: Some(user.user_id),
+                    kind: ServerRoomEventKind::System {
+                        body: format!("{} left #{}", user.display_name, room.name),
+                    },
+                    admission: (),
+                    result_frame,
+                })
+            },
+            |_| {
+                Err(ServerError::Message(
+                    "durable part unexpectedly requested event-derived result encoding".into(),
+                ))
+            },
+        );
+        let commit = match commit {
+            Ok(commit) => commit,
+            Err(ServerError::Sqlite(error)) if sqlite_is_busy(&error) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationStoreBusy,
+                    "durable mutation store is busy",
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        match commit {
+            DurableRoomEventCommit::Stored {
+                result_frame,
+                event,
+                pruned,
+                ..
+            } => Ok(DurableMutationDispatch {
+                origin: decode_durable_result(&result_frame)?,
+                broadcast: Some(Frame::new(
+                    ChatOp::RoomEvent,
+                    seq,
+                    Some(room_id),
+                    FrameBody::Fields(vec![event_to_value(&event)]),
+                )),
+                pruned,
+            }),
+            DurableRoomEventCommit::StoredResponse {
+                result_frame,
+                pruned,
+            } => Ok(DurableMutationDispatch {
+                origin: decode_durable_result(&result_frame)?,
+                broadcast: None,
+                pruned,
+            }),
+            DurableRoomEventCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
                 origin: decode_durable_result(&result_frame)?,
                 broadcast: None,
                 pruned: 0,
@@ -1248,8 +1436,8 @@ impl SessionEngine {
         room_id: Option<RoomId>,
         code: ChatErrorCode,
         message: &str,
-    ) -> DurableRoomTextDispatch {
-        DurableRoomTextDispatch {
+    ) -> DurableMutationDispatch {
+        DurableMutationDispatch {
             origin: self.error_frame(seq, room_id, code, message),
             broadcast: None,
             pruned: 0,
@@ -2802,7 +2990,15 @@ mod tests {
         mutation_marker: u8,
         body: &str,
     ) -> DurableMutationEnvelope {
-        let body = FrameBody::Text(body.into());
+        durable_envelope_body(op, room_id, mutation_marker, FrameBody::Text(body.into()))
+    }
+
+    fn durable_envelope_body(
+        op: ChatOp,
+        room_id: RoomId,
+        mutation_marker: u8,
+        body: FrameBody,
+    ) -> DurableMutationEnvelope {
         DurableMutationEnvelope {
             mutation_id: crate::protocol::MutationId::new([mutation_marker; 16]),
             request_hash: canonical_mutation_request_hash(op, Some(room_id), &body)
@@ -4790,6 +4986,71 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(candidate);
         }
+    }
+
+    #[test]
+    fn durable_part_removes_membership_and_replays_without_second_event() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let user = store
+            .ensure_user(&peer().identity_hash, "Alice", None)
+            .expect("user");
+        store.join_room(room.room_id, user.user_id).expect("join");
+        let engine = SessionEngine::new(store);
+        let client_instance_id = ClientInstanceId::new([12; 16]);
+        let envelope = durable_envelope_body(ChatOp::PartRoom, room.room_id, 7, FrameBody::Empty);
+
+        let stored = engine
+            .handle_durable_mutation(
+                &peer(),
+                51,
+                Some(room.room_id),
+                ChatOp::PartRoom,
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("stored durable part");
+        assert_eq!(stored.origin.op, ChatOp::CommandResult);
+        assert_eq!(stored.origin.seq, 51);
+        assert_eq!(
+            stored.origin.body,
+            FrameBody::Fields(vec![
+                FrameValue::String("part".into()),
+                room_to_value(&room),
+            ])
+        );
+        assert_eq!(
+            stored.broadcast.as_ref().map(|frame| frame.op),
+            Some(ChatOp::RoomEvent)
+        );
+        assert!(!engine
+            .store
+            .room_has_member(room.room_id, user.user_id)
+            .expect("membership"));
+
+        let replayed = engine
+            .handle_durable_mutation(
+                &peer(),
+                52,
+                Some(room.room_id),
+                ChatOp::PartRoom,
+                client_instance_id,
+                envelope,
+            )
+            .expect("replayed durable part");
+        assert_eq!(replayed.origin, stored.origin);
+        assert!(replayed.broadcast.is_none());
+        assert_eq!(
+            engine
+                .store
+                .latest_events(room.room_id, 10)
+                .expect("events")
+                .len(),
+            1
+        );
     }
 
     #[test]

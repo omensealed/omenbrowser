@@ -422,3 +422,13 @@ has no broadcast. Tests cover duplicate delivery under a different sequence,
 malformed and unbound requests, and legacy isolation. Production capability
 acceptance remains off, so this is still an unreachable staged route rather
 than a wire feature exposed to clients.
+
+`PartRoom` now uses the same durable replay authority. Its membership deletion,
+departure event, exact legacy-compatible `CommandResult`, and replay record are
+one transaction. The store accepts a pre-encoded origin result for event-backed
+mutations and validates it before commit; a validation failure rolls back both
+membership and event changes. First execution performs live room cleanup and
+one user-list update. If origin delivery failed after commit, replay returns the
+original result and repairs stale live room ownership; fan-out occurs only when
+that ownership was still present. Capability activation remains blocked on durable
+`RoomNotice` and mutating-command semantics.

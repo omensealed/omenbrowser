@@ -225,7 +225,7 @@ continues to return the legacy accept, so well-formed durable requests remain
 unbound and cannot send durable envelopes.
 
 An inactive session executor now implements the negotiated semantics for room
-messages and actions without connecting them to live Link dispatch. It checks
+messages, actions, and part-room operations behind the staged live Link gate. It checks
 the canonical hash, stores mutation and exact origin result transactionally,
 returns a broadcast event only for first execution, preserves terminal policy
 rejections, avoids a second rate charge, and replays across server restart.
@@ -240,6 +240,11 @@ binding returns 1011. With a binding, the durable replay record is authoritative
 the first execution can broadcast one room event and exact replay returns only
 the originally encoded origin acknowledgement. Capability acceptance is still
 disabled, so production peers cannot create that binding yet.
+
+For durable `PartRoom`, membership deletion, the departure event, the exact
+legacy-compatible `CommandResult`, and replay publication commit atomically.
+Only first execution changes live room ownership and emits a refreshed user
+list. Replay returns the retained result without repeating those effects.
 
 ## Operation correlation and same-link replay
 
