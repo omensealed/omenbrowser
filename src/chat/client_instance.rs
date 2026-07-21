@@ -268,7 +268,9 @@ fn ensure_private_directory(path: &Path) -> std::io::Result<()> {
                     "OMENchat identity storage root must be a directory",
                 ));
             }
-            let mut builder = fs::DirBuilder::new();
+            let builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            let mut builder = builder;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;
