@@ -822,10 +822,32 @@ command result without another revision increment, rate charge, or delta.
 Focused session tests cover topic revision stability, one-time room creation,
 and replay after moderator/admin roles change. A live test proves one observer
 delta under duplicate delivery. Capability acceptance remains disabled while
-`kick`, `ban`, `mute`, `unmute`, `role`, and `unban` lack durable execution.
+`kick`, `ban`, `mute`, and `unmute` lack durable execution.
 
 The complete standalone headless profile passed 239 tests and the full
 server/TUI profile passed 361 tests, with eight explicit soak, hardware,
 upstream-regression, or interoperability tests ignored in each profile. Strict
 Clippy passed for both profiles and formatting passed. The matrix includes the
 effect-rollback fault test.
+
+## Durable role and unban commands
+
+The staged executor now covers `role` and `unban` without weakening their
+existing administrator checks or self-target protection. The target user
+mutation, optional room audit event, and exact `CommandResult` are committed in
+one immediate SQLite transaction. First execution returns a bounded pair of
+live effects (`UserDelta` plus an optional room-scoped `RoomEvent`); exact replay
+returns neither and does not consume another command-rate admission.
+
+Session tests prove that replay cannot reapply a role change or unban after
+administrator policy and target state subsequently change. A live routing test
+proves both observable effects fan out exactly once under duplicate delivery.
+The internal durable dispatch changed from one optional broadcast to a bounded
+vector so legacy multi-frame command behavior is preserved rather than
+silently dropping an effect. It is not a queue and retains no frames after the
+synchronous dispatch completes.
+
+The complete standalone headless profile passed 242 tests and the full
+server/TUI profile passed 364 tests, with eight explicit soak, hardware,
+upstream-regression, or interoperability tests ignored in each profile. Strict
+Clippy passed for both profiles and formatting passed.

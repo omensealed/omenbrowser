@@ -2,7 +2,7 @@ use rusqlite::OptionalExtension;
 
 use super::{
     append_event_in_transaction, current_unix_seconds, ensure_user_on, join_room_on,
-    normalize_room_name, room_from_row, OmenchatStore, ServerRoom, ServerRoomEvent,
+    normalize_room_name, room_from_row, user_from_row, OmenchatStore, ServerRoom, ServerRoomEvent,
     ServerRoomEventKind, ServerUser,
 };
 use crate::error::{ServerError, ServerResult};
@@ -233,6 +233,77 @@ impl OmenchatStore {
             )
             .optional()?
             .ok_or_else(|| ServerError::Message("room was not created".into()))
+    }
+
+    pub(crate) fn durable_users(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> ServerResult<Vec<ServerUser>> {
+        let mut statement = transaction.prepare(
+            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+             FROM users
+             ORDER BY display_name, user_id",
+        )?;
+        let rows = statement.query_map([], user_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn set_durable_user_role_bits(
+        transaction: &rusqlite::Transaction<'_>,
+        user_id: UserId,
+        role_bits: u64,
+    ) -> ServerResult<ServerUser> {
+        transaction.execute(
+            "UPDATE users SET role_bits = ?1 WHERE user_id = ?2",
+            (role_bits as i64, user_id as i64),
+        )?;
+        Self::durable_user(transaction, user_id)
+    }
+
+    pub(crate) fn set_durable_user_status_flag(
+        transaction: &rusqlite::Transaction<'_>,
+        user_id: UserId,
+        flag: u32,
+        enabled: bool,
+    ) -> ServerResult<ServerUser> {
+        let current = transaction.query_row(
+            "SELECT status_bits FROM users WHERE user_id = ?1",
+            [user_id as i64],
+            |row| row.get::<_, i64>(0),
+        )? as u32;
+        let next = if enabled {
+            current | flag
+        } else {
+            current & !flag
+        };
+        transaction.execute(
+            "UPDATE users SET status_bits = ?1 WHERE user_id = ?2",
+            (next as i64, user_id as i64),
+        )?;
+        Self::durable_user(transaction, user_id)
+    }
+
+    fn durable_user(
+        transaction: &rusqlite::Transaction<'_>,
+        user_id: UserId,
+    ) -> ServerResult<ServerUser> {
+        transaction
+            .query_row(
+                "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+                 FROM users WHERE user_id = ?1",
+                [user_id as i64],
+                user_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| ServerError::Message("user was not found".into()))
+    }
+
+    pub(crate) fn append_durable_room_event(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        actor_user_id: Option<UserId>,
+        kind: ServerRoomEventKind,
+    ) -> ServerResult<ServerRoomEvent> {
+        append_event_in_transaction(transaction, room_id, actor_user_id, kind)
     }
 
     pub fn commit_durable_mutation_effect_result<P, E>(

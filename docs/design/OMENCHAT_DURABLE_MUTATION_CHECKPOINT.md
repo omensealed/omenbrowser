@@ -444,4 +444,8 @@ associates an exact retained origin result with one in-memory first-execution
 effect, allowing the room mutation and replay result to commit atomically while
 keeping `RoomDelta` fan-out outside SQLite. Replay returns no effect, so room
 revisions, creation, rate admission, and observer deltas cannot repeat. Durable
-moderation and role commands remain the activation blocker.
+`role` and `unban` now atomically update the target user, append an optional
+room audit event, retain the exact origin result, and return a bounded list of
+live effects only on first execution. The internal dispatch list is bounded by
+command semantics rather than a queue. Active-peer moderation commands remain
+the activation blocker.
