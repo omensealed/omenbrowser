@@ -4745,3 +4745,30 @@ changed. Rollback restores shared relocation artifacts and non-owning test
 fixtures, which would reintroduce false fixture failures and unbounded test
 disk retention. Current-Python drift, mixed 0.9.5/0.9.6 peers, native packaging,
 and performance comparison remain Unit 4 gates.
+
+## v0.9.6-1 unit 4a: current-Python drift alignment
+
+Official PyPI JSON metadata was rechecked on 2026-07-21. The separately
+versioned informational lane advanced from RNS 1.3.8/LXMF 1.0.1 to exact RNS
+1.4.0/LXMF 1.1.0; NomadNet remains exact 1.2.7 and msgpack remains exact 1.2.1.
+The packages co-resolve and import under Python 3.14.6. Current-only fixture
+expectations and mixed-version Python gateway pins moved together; the
+release-blocking Python source commits remain immutable and unchanged.
+
+The full current lane passed all 18 reported checks: Reticulum vectors, IFAC
+TCP/reconnect/wrong-credential handling, proof ordering, reciprocal direct LXMF,
+propagation sync/ack and stamp admission, direct stamp/ticket behavior, a
+65,536-byte stamped direct Resource, NomadNet exact-byte primitives,
+timeout/cancellation without replay, active-link reuse, and a 32-request
+keepalive/recovery soak. The soak observed two deliberate link generations,
+at most one active link, 1,043-ms recovery, and 4,400-ms total exchange time.
+The release-profile eight-sample comparison used one link and measured direct
+requests at 39,929-us median/41,585-us p95 and request Resources at 86,281-us
+median/88,252-us p95. The ignored local report records the exact resolved Python
+distribution set without becoming a committed release artifact.
+
+This is test/evidence alignment only. It changes no Rust production dependency,
+wire protocol, schema, identity, runtime policy, queue, retry, or user state.
+Rollback restores the former current-lane pins but would cease testing the
+current published Python stack. Mixed 0.9.5/0.9.6 execution, native packaging,
+and product/server before-after resource measurements remain pending.

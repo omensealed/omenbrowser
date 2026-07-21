@@ -13,7 +13,7 @@ import threading
 import time
 
 
-RNS_VERSION = "1.3.8"
+RNS_VERSION = "1.4.0"
 NOMADNET_VERSION = "1.2.7"
 NETWORK_NAME = "omen-ifac-vector"
 PASSPHRASE = "public-test-fixture"

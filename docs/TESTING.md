@@ -2672,7 +2672,7 @@ acknowledgement remain outside this case.
 ## Current Python drift lane
 
 The current-Python lane is deliberately separate from the immutable pinned
-reference above. As of 2026-07-17 it installs exactly RNS 1.3.8, LXMF 1.0.1,
+reference above. As of 2026-07-21 it installs exactly RNS 1.4.0, LXMF 1.1.0,
 and NomadNet 1.2.7 into a disposable virtual environment, records the resolved
 Python and pip versions, and verifies that all three packages import. It then
 reuses the bounded compatibility-vector, IFAC TCP, and link/proof tests against

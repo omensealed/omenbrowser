@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
 readonly old_commit=5ba6683055fb6c59111919fbad1ac37f56a4c203
-readonly gateway_rns_version=1.3.8
+readonly gateway_rns_version=1.4.0
 readonly network_name=omen-mixed-version
 
 report_path=""

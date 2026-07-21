@@ -1775,8 +1775,8 @@ mod tests {
             );
             assert_eq!(ready["ready"], true);
             assert_eq!(ready["port"], port);
-            assert_eq!(ready["rns"], "1.3.8");
-            assert_eq!(ready["lxmf"], "1.0.1");
+            assert_eq!(ready["rns"], "1.4.0");
+            assert_eq!(ready["lxmf"], "1.1.0");
             Self {
                 child,
                 json_lines,
@@ -1872,8 +1872,8 @@ mod tests {
             );
             assert_eq!(ready["ready"], true);
             assert_eq!(ready["port"], port);
-            assert_eq!(ready["rns"], "1.3.8");
-            assert_eq!(ready["lxmf"], "1.0.1");
+            assert_eq!(ready["rns"], "1.4.0");
+            assert_eq!(ready["lxmf"], "1.1.0");
             Self {
                 child,
                 json_lines,
@@ -3715,7 +3715,7 @@ mod tests {
     #[ignore = "explicit current-Python LXMF direct-delivery interoperability test"]
     fn current_python_lxmf_router_accepts_rust_direct_signed_message() {
         const TITLE: &str = "OMEN Rust direct LXMF";
-        const CONTENT: &str = "current Python LXMF 1.0.1 received this signed message";
+        const CONTENT: &str = "current Python LXMF 1.1.0 received this signed message";
 
         let root = CurrentLxmfRoot::new();
         let port = current_lxmf_port();
@@ -4037,8 +4037,8 @@ mod tests {
             "current-python-lxmf-live-ticket",
             "OMEN_PYTHON_RNS_SOURCE",
             None,
-            "1.3.8",
-            "1.0.1",
+            "1.4.0",
+            "1.1.0",
         );
     }
 
@@ -4286,8 +4286,8 @@ mod tests {
             "current-python-lxmf-live-direct-stamp",
             "OMEN_PYTHON_RNS_SOURCE",
             None,
-            "1.3.8",
-            "1.0.1",
+            "1.4.0",
+            "1.1.0",
         );
     }
 

@@ -168,6 +168,12 @@ retained, or superseded. No workaround is removed from release notes alone.
 
 ### Unit 4 — interoperability, performance, and release qualification
 
+Status: in progress. The separately versioned current-Python drift lane was
+advanced to the 2026-07-21 PyPI snapshot (RNS 1.4.0, LXMF 1.1.0, NomadNet
+1.2.7) and passed its complete informational matrix. This does not replace the
+immutable pinned-reference gate. Mixed-version, state-reopen, native packaging,
+and before/after desktop/server resource measurements remain.
+
 - Keep the pinned Python lane at the immutable upstream references used by
   0.9.6 (`RNS 15320e4...`, `LXMF 727830c...`, conformance `0319444...`).
 - Run the separately versioned current-Python drift lane.
