@@ -1,5 +1,10 @@
 # Reticulum-rs/LXMF 0.9 API Migration Ledger
 
+The entries below describe the current 0.9.5 implementation. Upstream 0.9.6 is
+now the approved next train; `RETICULUM_RS_0_9_6_PLAN.md` defines the assessment
+and migration gates. Add 0.9.6 evidence here during compiler/API migration
+rather than rewriting prior 0.9.5 results.
+
 Status date: 2026-07-16. Starting application commit:
 `d0c147391e89427b3e309ecfaa8de6e95b561df8`.
 

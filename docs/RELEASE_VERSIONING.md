@@ -6,13 +6,15 @@ base version followed by a numeric OMEN release revision:
 ```text
 Cargo package version: 0.9.5-2
 Git tag:              v0.9.5-2
-Next revisions:       0.9.5-3, 0.9.5-4
+Planned next release: 0.9.6-1 / v0.9.6-1
 ```
 
 The leading `v` belongs only in Git tags. Cargo interprets the hyphen suffix as
 a SemVer prerelease identifier; numeric identifiers retain the intended
 ordering. When the upstream base changes, the OMEN revision resets, for example
-from `0.9.5-3` to `0.9.6-1`.
+from `0.9.5-2` to `0.9.6-1`. The previously planned `0.9.5-3` release was
+superseded when the reviewed upstream 0.9.6 train became available; the
+0.9.5 improvement commits remain the rollback baseline.
 
 Both application packages normally carry the same release version, but their
 Cargo roots and lockfiles remain independent. Packaging scripts derive the
@@ -38,7 +40,7 @@ tests, and rollback documentation. `scripts/verify-release-version.sh` checks
 the two package manifests and lockfiles without treating protocol or storage
 schema numbers as application versions.
 
-No tag is created by the migration work itself. A `v0.9.5-2` tag is permitted
-only after the native, functional, interoperability, security, performance,
-documentation, and packaging gates pass and the maintainer explicitly requests
-the release operation.
+No tag is created by migration work itself. A `v0.9.6-1` tag is permitted only
+after the dependency/API, native functional, interoperability, security,
+performance, documentation, and packaging gates pass and the maintainer
+explicitly requests the release operation.

@@ -6,7 +6,9 @@ Branch at capture: `main`, equal to `origin/main`
 Host: Linux 7.1.3-2-cachyos, x86_64  
 Toolchain: rustc 1.97.0, Cargo 1.97.0, stable; declared MSRV 1.85
 
-This audit records the repository before the v0.9.5-3 improvement work. The
+This audit records the repository before the improvement work originally
+planned for v0.9.5-3. Upstream 0.9.6 subsequently superseded that application
+release target with v0.9.6-1; this file remains the 0.9.5 rollback evidence. The
 review artifact in `official-sources/` is guidance; the implementation and
 locked dependency trees described here are the source of truth. No application
 or protocol behavior was changed before these results were recorded.
@@ -331,8 +333,10 @@ Already solved or materially narrower than the supplied review suggests:
    contract or SQLite schema.
 4. Only after that checkpoint is approved, implement one bounded compatibility
    slice with mixed-version and crash-boundary tests.
-5. Re-run the same resource commands and version the application as v0.9.5-3
-   only after the behavioral unit and release gates are complete.
+5. Re-run the same resource commands and follow
+   `docs/migration/RETICULUM_RS_0_9_6_PLAN.md`; version the application as
+   v0.9.6-1 only after its dependency, behavior, interoperability, and release
+   gates are complete.
 
 ## First maintainability slice (post-baseline)
 
