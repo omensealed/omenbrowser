@@ -438,3 +438,10 @@ message-rate admission, returns the original room event to the sender, and
 fans out only the first committed event. Replay remains stable after a role
 change and cannot charge or broadcast again. Capability activation remains
 blocked on mutating-command semantics.
+
+The command executor now covers `topic` and `create`. A small store primitive
+associates an exact retained origin result with one in-memory first-execution
+effect, allowing the room mutation and replay result to commit atomically while
+keeping `RoomDelta` fan-out outside SQLite. Replay returns no effect, so room
+revisions, creation, rate admission, and observer deltas cannot repeat. Durable
+moderation and role commands remain the activation blocker.

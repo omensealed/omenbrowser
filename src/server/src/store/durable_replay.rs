@@ -1,8 +1,9 @@
 use rusqlite::OptionalExtension;
 
 use super::{
-    append_event_in_transaction, ensure_user_on, join_room_on, room_from_row, OmenchatStore,
-    ServerRoom, ServerRoomEvent, ServerRoomEventKind, ServerUser,
+    append_event_in_transaction, current_unix_seconds, ensure_user_on, join_room_on,
+    normalize_room_name, room_from_row, OmenchatStore, ServerRoom, ServerRoomEvent,
+    ServerRoomEventKind, ServerUser,
 };
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::codec::decode_frame;
@@ -40,6 +41,29 @@ pub enum DurableReplayCommit {
     },
     Conflict,
     Expired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DurableMutationEffectCommit<E> {
+    Stored {
+        result_frame: Vec<u8>,
+        effect: E,
+        pruned: usize,
+    },
+    StoredResponse {
+        result_frame: Vec<u8>,
+        pruned: usize,
+    },
+    Replayed {
+        result_frame: Vec<u8>,
+    },
+    Conflict,
+    Expired,
+}
+
+pub enum DurableMutationEffectPlan<E> {
+    Effect { result_frame: Vec<u8>, effect: E },
+    Response { result_frame: Vec<u8> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,6 +128,15 @@ const PRODUCTION_LIMITS: RetentionLimits = RetentionLimits {
 };
 
 impl OmenchatStore {
+    pub(crate) fn ensure_durable_user(
+        transaction: &rusqlite::Transaction<'_>,
+        identity_hash: &[u8],
+        display_name: &str,
+        lxmf_destination: Option<&str>,
+    ) -> ServerResult<ServerUser> {
+        ensure_user_on(transaction, identity_hash, display_name, lxmf_destination)
+    }
+
     pub(crate) fn ensure_durable_room_user(
         transaction: &rusqlite::Transaction<'_>,
         room_id: RoomId,
@@ -155,6 +188,96 @@ impl OmenchatStore {
             (room_id, user_id),
         )?;
         Ok(())
+    }
+
+    pub(crate) fn update_durable_room_topic(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        topic: Option<&str>,
+    ) -> ServerResult<Option<ServerRoom>> {
+        transaction.execute(
+            "UPDATE rooms
+             SET topic = ?1, room_revision = room_revision + 1
+             WHERE room_id = ?2 AND archived = 0",
+            (topic, room_id),
+        )?;
+        Self::durable_room(transaction, room_id)
+    }
+
+    pub(crate) fn create_durable_room(
+        transaction: &rusqlite::Transaction<'_>,
+        name: &str,
+        topic: Option<&str>,
+    ) -> ServerResult<ServerRoom> {
+        let room_name = normalize_room_name(name);
+        if room_name.is_empty() {
+            return Err(ServerError::Message(
+                "room name must contain at least one ASCII letter, digit, '_' or '-'".into(),
+            ));
+        }
+        let now = current_unix_seconds();
+        transaction.execute(
+            "INSERT INTO rooms(name, topic, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET
+               topic = COALESCE(excluded.topic, rooms.topic),
+               archived = 0,
+               room_revision = room_revision + 1",
+            (&room_name, topic, now),
+        )?;
+        transaction
+            .query_row(
+                "SELECT room_id, name, topic, room_revision
+                 FROM rooms WHERE name = ?1 AND archived = 0",
+                [&room_name],
+                room_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| ServerError::Message("room was not created".into()))
+    }
+
+    pub fn commit_durable_mutation_effect_result<P, E>(
+        &self,
+        key: DurableMutationKey<'_>,
+        request_hash: RequestHash,
+        prepare: P,
+    ) -> ServerResult<DurableMutationEffectCommit<E>>
+    where
+        P: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<DurableMutationEffectPlan<E>>,
+    {
+        let mut stored_effect = None;
+        let commit = self.commit_durable_mutation_result(key, request_hash, |transaction| {
+            match prepare(transaction)? {
+                DurableMutationEffectPlan::Effect {
+                    result_frame,
+                    effect,
+                } => {
+                    stored_effect = Some(effect);
+                    Ok(result_frame)
+                }
+                DurableMutationEffectPlan::Response { result_frame } => Ok(result_frame),
+            }
+        })?;
+        match commit {
+            DurableReplayCommit::Stored {
+                result_frame,
+                pruned,
+            } => match stored_effect {
+                Some(effect) => Ok(DurableMutationEffectCommit::Stored {
+                    result_frame,
+                    effect,
+                    pruned,
+                }),
+                None => Ok(DurableMutationEffectCommit::StoredResponse {
+                    result_frame,
+                    pruned,
+                }),
+            },
+            DurableReplayCommit::Replayed { result_frame } => {
+                Ok(DurableMutationEffectCommit::Replayed { result_frame })
+            }
+            DurableReplayCommit::Conflict => Ok(DurableMutationEffectCommit::Conflict),
+            DurableReplayCommit::Expired => Ok(DurableMutationEffectCommit::Expired),
+        }
     }
 
     /// Appends a room event and retains its exact encoded origin response in
@@ -939,6 +1062,50 @@ mod tests {
             .latest_events(room.room_id, 10)
             .expect("events")
             .is_empty());
+    }
+
+    #[test]
+    fn invalid_effect_result_rolls_back_mutation_and_releases_effect() {
+        #[derive(Debug)]
+        struct DropMarker(Rc<Cell<usize>>);
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let store = OmenchatStore::in_memory().expect("store");
+        let identity = [8; 16];
+        let drops = Rc::new(Cell::new(0));
+        let effect_drops = Rc::clone(&drops);
+        let error = store
+            .commit_durable_mutation_effect_result(
+                key(&identity, 3),
+                request_hash(3),
+                |transaction| {
+                    transaction.execute(
+                        "INSERT INTO server_config(key, value) VALUES ('effect-rollback', 'no')",
+                        [],
+                    )?;
+                    Ok(DurableMutationEffectPlan::Effect {
+                        result_frame: vec![0xc0],
+                        effect: DropMarker(effect_drops),
+                    })
+                },
+            )
+            .expect_err("invalid result must roll back effect transaction");
+        assert!(error.to_string().contains("valid bounded OMENchat frame"));
+        assert_eq!(drops.get(), 1);
+        let stored: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM server_config WHERE key = 'effect-rollback'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("config count");
+        assert_eq!(stored, 0);
     }
 
     #[test]

@@ -1044,7 +1044,7 @@ fn current_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-fn normalize_room_name(name: &str) -> String {
+pub(crate) fn normalize_room_name(name: &str) -> String {
     name.trim()
         .trim_start_matches('#')
         .chars()

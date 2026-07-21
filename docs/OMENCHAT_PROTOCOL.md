@@ -252,6 +252,12 @@ event in the same transaction as event insertion. Only first execution is
 fanned out to other room Links; replay returns the retained origin event
 without another rate charge or broadcast.
 
+Durable `topic` and `create` commands atomically retain their exact
+`CommandResult` with the room update. Their `RoomDelta` is a one-use live effect
+returned only for first execution. Exact replay cannot increment a room
+revision, recreate a room, consume another command-rate slot, or repeat the
+delta. Other mutating commands remain unaccepted staged work.
+
 ## Operation correlation and same-link replay
 
 The existing 32-bit frame `seq` is the request/response correlation identifier.

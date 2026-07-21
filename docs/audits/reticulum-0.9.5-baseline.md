@@ -809,3 +809,23 @@ The complete standalone headless profile passed 235 tests and the full
 server/TUI profile passed 357 tests, with eight explicit soak, hardware,
 upstream-regression, or interoperability tests ignored in each profile. Strict
 Clippy passed for both profiles and formatting passed.
+
+## Durable topic and room creation commands
+
+The staged durable command executor now covers `topic` and `create`. A replay
+miss performs identity/policy checks, reversible command-rate admission, the
+room mutation, exact `CommandResult` encoding, and replay publication in one
+immediate SQLite transaction. The resulting `RoomDelta` is retained only as a
+first-execution effect for live fan-out; exact replay returns the original
+command result without another revision increment, rate charge, or delta.
+
+Focused session tests cover topic revision stability, one-time room creation,
+and replay after moderator/admin roles change. A live test proves one observer
+delta under duplicate delivery. Capability acceptance remains disabled while
+`kick`, `ban`, `mute`, `unmute`, `role`, and `unban` lack durable execution.
+
+The complete standalone headless profile passed 239 tests and the full
+server/TUI profile passed 361 tests, with eight explicit soak, hardware,
+upstream-regression, or interoperability tests ignored in each profile. Strict
+Clippy passed for both profiles and formatting passed. The matrix includes the
+effect-rollback fault test.
