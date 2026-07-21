@@ -163,6 +163,11 @@ Missing trailing fields mean no capabilities; application version and
 descriptor metadata never imply acceptance. The current server deliberately
 returns its six-field legacy `SessionAccept` even when a test client sends the
 well-formed extension, so no durable envelope can become active prematurely.
+Unknown well-formed capabilities receive the same legacy response. A malformed
+trailing negotiation receives error 1012 and never marks the Link handshake
+complete; the client may correct the request and retry `SessionOpen` on that
+Link. Handshake completion requires an actual `SessionAccept`, not merely an
+inbound frame carrying the `SessionOpen` operation number.
 
 The browser now persists the future client-instance value under its active
 identity-scoped application storage and retains it in live client state. It is

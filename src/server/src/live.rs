@@ -143,6 +143,7 @@ enum ReplayLookup {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct FrameDispatchOutcome {
+    session_accepted: bool,
     part_succeeded: bool,
     moderation_disconnect_succeeded: bool,
 }
@@ -537,10 +538,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                         return Ok(());
                     }
                 };
-                if frame
-                    .as_ref()
-                    .is_some_and(|frame| frame.op == ChatOp::SessionOpen)
-                {
+                if dispatch.session_accepted {
                     self.session_open_links.insert(link_id);
                     self.refresh_active_links();
                 }
@@ -754,6 +752,10 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             self.engine
                 .handle_frame_with_active_peers(peer, frame, active_room_peers)?;
         let dispatch = FrameDispatchOutcome {
+            session_accepted: request_op == ChatOp::SessionOpen
+                && responses
+                    .iter()
+                    .any(|response| response.op == ChatOp::SessionAccept),
             part_succeeded: request_op == ChatOp::PartRoom
                 && responses.iter().any(is_successful_part_response),
             moderation_disconnect_succeeded: request_op == ChatOp::Command
@@ -2329,6 +2331,70 @@ mod tests {
                 && decode_frame(&captured.bytes)
                     .map(|frame| frame.op == ChatOp::JoinAccept)
                     .unwrap_or(false)
+        }));
+    }
+
+    #[test]
+    fn malformed_negotiation_does_not_complete_handshake_and_valid_retry_can_recover() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let link_id = [10u8; 16];
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: peer(),
+        })
+        .expect("open identified link");
+
+        let malformed = FrameBody::Fields(vec![
+            FrameValue::String(crate::protocol::PROTOCOL_NAME.into()),
+            FrameValue::String("Live Peer".into()),
+            FrameValue::Nil,
+            FrameValue::Array(vec![FrameValue::String(
+                crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+            )]),
+            FrameValue::Bytes(vec![7; 15]),
+        ]);
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::SessionOpen, 1, None, malformed))
+                .expect("malformed session frame"),
+        })
+        .expect("malformed session response");
+        assert!(!live.handshake_complete(link_id));
+        assert_eq!(live.pending_handshake_count(), 1);
+        assert!(live.transport().frames.iter().any(|captured| {
+            decode_frame(&captured.bytes).is_ok_and(|frame| {
+                frame.op == ChatOp::Error
+                    && matches!(
+                        frame.body,
+                        FrameBody::Fields(ref fields)
+                            if fields.first()
+                                == Some(&FrameValue::U64(
+                                    ChatErrorCode::DurableMutationMalformed as u16 as u64
+                                ))
+                    )
+            })
+        }));
+
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::SessionOpen,
+                2,
+                None,
+                FrameBody::Text("Live Peer".into()),
+            ))
+            .expect("valid session frame"),
+        })
+        .expect("valid session retry");
+        assert!(live.handshake_complete(link_id));
+        assert_eq!(live.pending_handshake_count(), 0);
+        assert!(live.transport().frames.iter().any(|captured| {
+            decode_frame(&captured.bytes)
+                .is_ok_and(|frame| frame.op == ChatOp::SessionAccept && frame.seq == 2)
         }));
     }
 

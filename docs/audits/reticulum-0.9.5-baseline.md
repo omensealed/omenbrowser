@@ -634,3 +634,14 @@ client instances were retired, and all client intents were recovered and
 pruned in 32 bounded calls. Server/client databases were
 1,282,048/1,388,544 bytes; server commit p95 was 1,390 µs, replay p95 was
 40 µs, client prepare p95 was 360 µs, and client recovery was 139,768 µs.
+
+## Fail-closed live negotiation parsing
+
+The server session engine now validates optional trailing capability fields
+before accepting a session. Valid durable and unknown capabilities remain
+unsupported and receive the six-field legacy `SessionAccept`; malformed fields
+receive durable error 1012. The live server now records handshake completion
+only when the engine actually produced `SessionAccept`, rather than for every
+inbound `SessionOpen` opcode. Focused tests prove malformed negotiation remains
+pending and a corrected legacy request can recover on the same Link. No client
+instance is retained and no durable envelope, retry, or mutation path is live.

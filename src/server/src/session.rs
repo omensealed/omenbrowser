@@ -9,7 +9,8 @@ use crate::protocol::batch::{
     ResourceOffer,
 };
 use crate::protocol::{
-    ChatErrorCode, ChatOp, Compression, Frame, FrameBody, FrameValue, RoomId, PROTOCOL_NAME,
+    parse_session_open_negotiation, ChatErrorCode, ChatOp, Compression, Frame, FrameBody,
+    FrameValue, RoomId, PROTOCOL_NAME,
 };
 use crate::store::{OmenchatStore, ServerRoom, ServerRoomEvent, ServerRoomEventKind, ServerUser};
 use crate::upload::{
@@ -292,7 +293,7 @@ impl SessionEngine {
         active_room_peers: &[ServerPeer],
     ) -> ServerResult<Vec<Frame>> {
         match frame.op {
-            ChatOp::SessionOpen => self.handle_session_open(peer, frame.seq),
+            ChatOp::SessionOpen => self.handle_session_open(peer, frame.seq, frame.body),
             ChatOp::JoinRoom => {
                 self.handle_join_room(peer, frame.seq, frame.body, active_room_peers)
             }
@@ -400,9 +401,22 @@ impl SessionEngine {
         ))
     }
 
-    fn handle_session_open(&self, peer: &ServerPeer, seq: u32) -> ServerResult<Vec<Frame>> {
+    fn handle_session_open(
+        &self,
+        peer: &ServerPeer,
+        seq: u32,
+        body: FrameBody,
+    ) -> ServerResult<Vec<Frame>> {
         if let Some(error) = self.reject_if_banned(peer, seq, None)? {
             return Ok(vec![error]);
+        }
+        if parse_session_open_negotiation(&body).is_err() {
+            return Ok(vec![self.error_frame(
+                seq,
+                None,
+                ChatErrorCode::DurableMutationMalformed,
+                "invalid session capability negotiation",
+            )]);
         }
         let rooms = self
             .store
@@ -3191,6 +3205,58 @@ mod tests {
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn unknown_capability_request_keeps_legacy_session_accept() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec!["future-unknown-capability".into()],
+                client_instance_id: None,
+            },
+        )
+        .expect("extended session open");
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 2, None, request))
+            .expect("session open");
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0].op, ChatOp::SessionAccept);
+        assert_eq!(response[0].seq, 2);
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn malformed_capability_request_is_rejected_without_session_accept() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let request = FrameBody::Fields(vec![
+            FrameValue::String(PROTOCOL_NAME.into()),
+            FrameValue::String("Alice".into()),
+            FrameValue::Nil,
+            FrameValue::Array(vec![FrameValue::String(
+                crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+            )]),
+            FrameValue::Bytes(vec![9; 15]),
+        ]);
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 3, None, request))
+            .expect("malformed negotiation response");
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0].op, ChatOp::Error);
+        assert_eq!(response[0].seq, 3);
+        assert_eq!(
+            response[0].body,
+            FrameBody::Fields(vec![
+                FrameValue::U64(ChatErrorCode::DurableMutationMalformed as u16 as u64),
+                FrameValue::String("invalid session capability negotiation".into()),
+            ])
         );
     }
 

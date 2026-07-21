@@ -127,7 +127,9 @@ The shared protocol crate reserves these stable protocol-v1 errors:
 - `1015`: `durable_mutation_store_busy`.
 
 The client can label these codes, but dormant sessions neither emit nor act on
-them yet.
+most of them yet. The server now uses 1012 only to reject malformed capability
+negotiation. A valid durable or unknown request still receives the unchanged
+legacy `SessionAccept` without accepted capabilities.
 
 ## Implemented dormant omenchatd schema v3
 
@@ -354,3 +356,11 @@ piece still requires its tests to be green before the next piece begins:
 
 Until resolved, preserve uncertain mutations, surface them to the user, and do
 not silently resend them.
+
+Malformed negotiation is now fail-closed at the session boundary. The engine
+parses optional trailing fields before returning `SessionAccept`; malformed
+fields receive error 1012. The live Link is marked session-open only when the
+origin response actually contains `SessionAccept`, so an error cannot satisfy
+the handshake. A corrected legacy request can recover on the same Link. This
+does not store a client instance, accept the capability, decode an envelope, or
+enable retry.
