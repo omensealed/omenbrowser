@@ -4688,3 +4688,18 @@ material and message-ID encoding failures now fail closed rather than aborting.
 It changes no successful wire bytes, message ID, identity hash, protocol,
 schema, configuration, path, queue, retry, or storage format. Rollback restores
 the prior compatibility calls; no state migration is required.
+
+## v0.9.6-1 unit 3a: maximum UDP Resource gap requalification
+
+The explicit ignored
+`reticulum_udp_tx_buffer_covers_max_resource_wire_packet` sentinel was run
+against the locked 0.9.6 transport. It remains known-red: the upstream buffer is
+456 bytes while the maximum type-one Resource packet is 483 bytes. Normal
+headless/full suites continue to ignore this one deliberately failing boundary,
+and their smaller Resource/terminal tests pass.
+
+The test annotation and transport gap document now scope the limitation through
+0.9.6. No runtime code, buffer, packet, retry, protocol, schema, configuration,
+or feature changed. Rollback is documentation/test-label only. The gap blocks a
+maximum-UDP-Resource support claim, not the version-aligned release as a whole;
+OMEN retains the upstream behavior without a fork or local workaround.

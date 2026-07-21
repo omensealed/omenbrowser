@@ -240,6 +240,15 @@ weakening, or upstream coordination is introduced. The passing OMENchat,
 NomadNet, pinned/current Python, and mixed-version Resource cases remain scoped
 to their tested interfaces and primitives.
 
+Reticulum 0.9.6 requalification (2026-07-21): the same deterministic sentinel
+still fails with a 456-byte upstream UDP buffer and a 483-byte maximum type-one
+Resource wire packet. The limitation therefore remains in parity with the
+published 0.9.6 train. OMEN continues to keep the test explicit and ignored in
+normal suites, rejects any claim that the maximum UDP Resource boundary works,
+and does not add a fork, local transport patch, larger application buffer, or
+unbounded retry. Smaller Resource cases retain only their separately tested
+interface and payload scopes.
+
 Current-product NomadNet update (2026-07-18): the canonical `0.9.5-1` browser
 now passes a scheduled live page fetch against the standalone server's fixed
 `nomadnetwork.node` portal over an ephemeral loopback interface. The production
