@@ -387,3 +387,17 @@ the session owner for explicit finalization. This closes the double-charge and
 failed-transaction leak in the inactive boundary. Live capability acceptance,
 authenticated Link/client-instance binding, and envelope dispatch remain the
 next gates.
+
+The authenticated binding gate is now staged without accepting the capability.
+`SessionOpen` display/LXMF metadata remains provisional until the engine emits
+`SessionAccept`; malformed negotiation cannot mutate the Link's retained peer.
+A durable binding requires a valid request, explicit durable capability in the
+accept response, and an already authenticated Link. It is keyed by Link,
+retains the authenticated identity plus fixed-size client instance, and is
+removed on every Link/identity retirement path. Because production still emits
+the legacy six-field accept, no current client can create this binding.
+
+The next gate is the inactive session-level envelope executor: canonical hash
+verification, permission and membership validation, transactional room-event
+commit, reversible rate admission, exact origin response, and one-time fan-out.
+Only after that passes may the server advertise acceptance.

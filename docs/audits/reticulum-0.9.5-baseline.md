@@ -676,6 +676,30 @@ and doc tests passed. No remote CI was dispatched for this server-only inactive
 unit; it is being batched with the next checkpoint to avoid a low-value
 15-minute workflow.
 
+## Authenticated Link/client-instance ownership boundary
+
+Live session metadata is now staged as a candidate and committed to the Link's
+peer record only after the engine returns `SessionAccept`. Malformed capability
+negotiation therefore cannot change the retained display name or LXMF
+destination. A corrected request on the same Link can still be accepted and
+apply its metadata, preserving recovery behavior.
+
+The live server also derives a durable client-instance binding only when a
+valid `SessionOpen` requests `durable-mutations-v1` and the corresponding
+`SessionAccept` explicitly lists that exact capability. It installs such a
+binding only for an authenticated Link and scopes the value to the authenticated
+identity. Identity replacement, capability downgrade, Link close, duplicate
+replacement, administrative disconnect, and handshake retirement remove the
+binding. Storage is bounded by the existing 256-active-Link ceiling. The
+current server still returns a legacy accept, so a well-formed durable request
+creates no binding and the capability remains inactive.
+
+Focused malformed/recovery, unaccepted capability, explicit two-sided
+acceptance, identity-change, and Link-close tests passed. The complete headless
+profile passed 223 tests and the full server/TUI profile passed 345 tests, each
+with eight explicit long-running, hardware, upstream-regression, or
+interoperability tests ignored. Strict headless Clippy and formatting passed.
+
 ## Reversible rate admission (inactive durable handoff)
 
 The existing per-identity message/command limiter now represents an admitted

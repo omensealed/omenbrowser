@@ -215,6 +215,15 @@ reservation with a successful first commit, and releases it automatically on
 rollback. This mechanism is inactive until the Link has negotiated and bound a
 client-instance identifier.
 
+The live server now stages session display/LXMF metadata until a real
+`SessionAccept` is produced, so malformed negotiation cannot mutate the
+retained peer record. A future durable client-instance binding requires both a
+valid request and explicit capability acceptance on an authenticated Link. The
+binding is Link-scoped, bounded by active-Link admission, identity-bound, and
+cleared on identity replacement or every Link retirement path. Production
+continues to return the legacy accept, so well-formed durable requests remain
+unbound and cannot send durable envelopes.
+
 ## Operation correlation and same-link replay
 
 The existing 32-bit frame `seq` is the request/response correlation identifier.
