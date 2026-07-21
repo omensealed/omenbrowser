@@ -259,8 +259,13 @@ revision, recreate a room, consume another command-rate slot, or repeat the
 delta. Durable `role` and `unban` commands use the same transaction boundary for
 the user mutation, optional audit event, and retained result. Their bounded
 first-execution effects contain a `UserDelta` and, when room-scoped, a
-`RoomEvent`; replay emits neither. Active-peer moderation commands remain
-unaccepted staged work.
+`RoomEvent`; replay emits neither. Durable `kick`, `ban`, `mute`, and `unmute`
+resolve only active room peers and commit the target status change, audit event,
+and exact result together. First execution emits the bounded deltas; `kick` and
+`ban` additionally carry a one-use target-identity disconnect effect that runs
+immediately after commit and before response I/O. Replay cannot disconnect a
+replacement Link. Capability acceptance remains disabled until the browser's
+persistent intent owner and negotiated send/recovery path are live.
 
 ## Operation correlation and same-link replay
 

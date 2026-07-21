@@ -436,8 +436,9 @@ that ownership was still present.
 retains moderator/admin authorization decisions, uses reversible bounded
 message-rate admission, returns the original room event to the sender, and
 fans out only the first committed event. Replay remains stable after a role
-change and cannot charge or broadcast again. Capability activation remains
-blocked on mutating-command semantics.
+change and cannot charge or broadcast again. At that checkpoint, capability
+activation remained blocked on mutating-command semantics; the later command
+sections record their completion.
 
 The command executor now covers `topic` and `create`. A small store primitive
 associates an exact retained origin result with one in-memory first-execution
@@ -447,5 +448,16 @@ revisions, creation, rate admission, and observer deltas cannot repeat. Durable
 `role` and `unban` now atomically update the target user, append an optional
 room audit event, retain the exact origin result, and return a bounded list of
 live effects only on first execution. The internal dispatch list is bounded by
-command semantics rather than a queue. Active-peer moderation commands remain
-the activation blocker.
+command semantics rather than a queue.
+
+The command executor now also covers active-peer `kick`, `ban`, `mute`, and
+`unmute`. Target resolution retains the existing room-presence, self-target,
+moderator/admin, and protected-admin rules. Target status mutation, room audit
+event, exact result, and replay publication share one transaction. First
+execution owns the bounded user/event broadcasts. `kick` and `ban` also own one
+target-identity disconnect, which live orchestration applies immediately after
+commit and before response I/O; replay has no disconnect identity and therefore
+cannot close a replacement Link. The server-side operation set proposed by the
+capability is staged, but capability acceptance remains blocked on activating
+the browser's bounded persistent-intent owner and negotiated send/recovery
+path, followed by mixed-version and failure-boundary validation.

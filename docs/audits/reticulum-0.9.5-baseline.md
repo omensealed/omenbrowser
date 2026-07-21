@@ -821,8 +821,9 @@ command result without another revision increment, rate charge, or delta.
 
 Focused session tests cover topic revision stability, one-time room creation,
 and replay after moderator/admin roles change. A live test proves one observer
-delta under duplicate delivery. Capability acceptance remains disabled while
-`kick`, `ban`, `mute`, and `unmute` lack durable execution.
+delta under duplicate delivery. At this checkpoint, capability acceptance
+remained disabled while `kick`, `ban`, `mute`, and `unmute` lacked durable
+execution; the later moderation section records their completion.
 
 The complete standalone headless profile passed 239 tests and the full
 server/TUI profile passed 361 tests, with eight explicit soak, hardware,
@@ -851,3 +852,29 @@ The complete standalone headless profile passed 242 tests and the full
 server/TUI profile passed 364 tests, with eight explicit soak, hardware,
 upstream-regression, or interoperability tests ignored in each profile. Strict
 Clippy passed for both profiles and formatting passed.
+
+## Durable active-peer moderation commands
+
+The staged executor now covers `kick`, `ban`, `mute`, and `unmute` while
+preserving active-room target resolution, self-target rejection, role checks,
+and moderator protection for administrators. The target mutation, system audit
+event, exact `CommandResult`, and replay row commit together. First execution
+returns the legacy-compatible bounded `UserDelta` and `RoomEvent`; replay
+returns neither and does not repeat command-rate admission.
+
+Committed `kick` and `ban` results carry a one-use target identity rather than
+deriving disconnect behavior from a replayed success frame. Live orchestration
+disconnects that identity immediately after commit and before origin-response
+I/O. A focused lost-response/replacement-Link test proves the committed target
+is disconnected even when the origin result is lost, the retained result is
+returned on retry, and replay after the target reconnects does not disconnect
+the new Link or repeat fan-out. A table-driven session test covers all four
+actions and proves target state, audit events, broadcasts, and disconnect
+ownership do not repeat after policy or target state changes.
+
+The complete standalone headless profile passed 244 tests and the full
+server/TUI profile passed 366 tests, with eight explicit soak, hardware,
+upstream-regression, or interoperability tests ignored in each profile. Strict
+Clippy passed for both profiles and formatting passed. Capability acceptance
+remains disabled: the browser persistent-intent actor and negotiated
+send/recovery path are not yet production-active.

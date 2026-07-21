@@ -7,7 +7,7 @@ use crate::protocol::{
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
     DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG,
 };
-use crate::session::{ServerPeer, SessionEngine};
+use crate::session::{DurableMutationPeerContext, ServerPeer, SessionEngine};
 use crate::transport::{
     release_response_resource, send_response_frame_with_context, LinkId, OmenchatTransport,
     OMENCHAT_LINK_CONTEXT,
@@ -145,7 +145,7 @@ enum ReplayLookup {
     Collision,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct FrameDispatchOutcome {
     session_accepted: bool,
     accepted_client_instance_id: Option<ClientInstanceId>,
@@ -743,7 +743,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         let request_op = frame.op;
         let request_seq = frame.seq;
         if is_durable_mutation_envelope(&frame.body) {
-            return self.handle_durable_mutation_frame(link_id, peer, frame);
+            return self.handle_durable_mutation_frame(link_id, peer, frame, active_room_peers);
         }
         let requested_client_instance_id = requested_durable_client_instance(&frame);
         let replay_candidate = is_replay_guarded_request(&frame);
@@ -850,6 +850,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         link_id: LinkId,
         peer: &ServerPeer,
         frame: Frame,
+        active_room_peers: &[ServerPeer],
     ) -> ServerResult<FrameDispatchOutcome> {
         let envelope = match DurableMutationEnvelope::from_frame_body(&frame.body) {
             Ok(envelope) => envelope,
@@ -886,8 +887,11 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         };
 
         let request_op = frame.op;
-        let dispatch = self.engine.handle_durable_mutation(
-            peer,
+        let dispatch = self.engine.handle_durable_mutation_with_active_peers(
+            DurableMutationPeerContext {
+                peer,
+                active_room_peers,
+            },
             frame.seq,
             frame.room_id,
             request_op,
@@ -896,6 +900,9 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         )?;
         let part_succeeded =
             request_op == ChatOp::PartRoom && is_successful_part_response(&dispatch.origin);
+        if let Some(identity_hash) = dispatch.disconnect_identity.as_deref() {
+            self.disconnect_identity(identity_hash);
+        }
         self.stats.count_outbound_op(&dispatch.origin);
         self.send_response_frame(link_id, &dispatch.origin)?;
         for broadcast in dispatch.broadcasts {
@@ -1702,6 +1709,7 @@ mod tests {
     struct FailOnceTransport {
         captured: CapturedTransport,
         reject_next_frame: bool,
+        reject_next_command_result: bool,
     }
 
     impl OmenchatTransport for FailOnceTransport {
@@ -1715,8 +1723,11 @@ mod tests {
             frame_bytes: Vec<u8>,
             context: u8,
         ) -> ServerResult<()> {
-            if self.reject_next_frame {
+            let reject_command_result = self.reject_next_command_result
+                && decode_frame(&frame_bytes).is_ok_and(|frame| frame.op == ChatOp::CommandResult);
+            if self.reject_next_frame || reject_command_result {
                 self.reject_next_frame = false;
+                self.reject_next_command_result = false;
                 return Err(crate::error::ServerError::Message(
                     "injected frame delivery failure".into(),
                 ));
@@ -3681,6 +3692,164 @@ mod tests {
                 1
             );
         }
+        assert!(live.replay_cache.entries.is_empty());
+    }
+
+    #[test]
+    fn durable_kick_commit_survives_lost_response_without_disconnecting_replacement() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let administrator = store
+            .ensure_user(b"Admin", "Admin", None)
+            .expect("administrator");
+        store
+            .set_user_role_bits(administrator.user_id, 1 << 2)
+            .expect("administrator role");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, FailOnceTransport::default());
+        let admin_link = [36u8; 16];
+        let original_bob_link = [37u8; 16];
+        let observer_link = [39u8; 16];
+
+        for (link_id, name) in [
+            (admin_link, "Admin"),
+            (original_bob_link, "Bob"),
+            (observer_link, "Charlie"),
+        ] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+        live.durable_sessions.insert(
+            admin_link,
+            DurableSessionBinding {
+                identity_hash: b"Admin".to_vec(),
+                client_instance_id: ClientInstanceId::new([44; 16]),
+            },
+        );
+        let body = FrameBody::Text("kick Bob".into());
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([45; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::Command,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+
+        live.transport_mut().reject_next_command_result = true;
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: admin_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 15, Some(1), envelope.clone()))
+                .expect("kick"),
+        })
+        .expect("durable kick");
+        assert_eq!(
+            live.transport().captured.closed_links,
+            vec![original_bob_link]
+        );
+
+        let replacement_bob_link = [38u8; 16];
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id: replacement_bob_link,
+            peer: ServerPeer {
+                identity_hash: b"Bob".to_vec(),
+                display_name: "Bob".into(),
+                lxmf_destination: None,
+            },
+        })
+        .expect("open replacement link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_bob_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                2,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("replacement join"),
+        })
+        .expect("join replacement");
+
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: admin_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 16, Some(1), envelope))
+                .expect("kick replay"),
+        })
+        .expect("replayed durable kick");
+        assert_eq!(
+            live.transport().captured.closed_links,
+            vec![original_bob_link]
+        );
+        assert!(live.peers.contains_key(&replacement_bob_link));
+        assert_eq!(
+            live.transport()
+                .captured
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == admin_link)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .filter(|frame| { command_result_name(frame) == Some("kick") && frame.seq == 15 })
+                .count(),
+            1
+        );
+        assert_eq!(
+            live.transport()
+                .captured
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == original_bob_link)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .filter(|frame| frame.op == ChatOp::RoomEvent)
+                .count(),
+            0
+        );
+        assert_eq!(
+            live.transport()
+                .captured
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == observer_link)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .filter(|frame| frame.op == ChatOp::RoomEvent)
+                .count(),
+            0
+        );
+        assert_eq!(
+            live.transport()
+                .captured
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == replacement_bob_link)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .filter(|frame| frame.op == ChatOp::RoomEvent)
+                .count(),
+            0
+        );
         assert!(live.replay_cache.entries.is_empty());
     }
 
