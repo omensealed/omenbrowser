@@ -17,6 +17,17 @@ omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test
 Each root owns identities, Reticulum config/storage, messages, caches, plugin
 state, and pane layout.
 
+When the native OMENchat client is compiled, desktop startup owns one random
+16-byte client-instance identifier per active identity-scoped storage root at
+`omenchat/client-instance-id`. It is created through a same-directory,
+create-without-replacement atomic publication and stored in an owner-only file
+inside an owner-only directory on Unix. Concurrent first starts converge on the
+same published identifier. A wrong-size file, symbolic link, special file, or
+permissive Unix mode fails closed and remains untouched; the application does
+not silently regenerate it. The identifier is groundwork for negotiated
+durable mutations, not an authentication secret or a capability by itself, and
+the current release does not transmit it or advertise that capability.
+
 Application settings are stored in `settings.json`. The file must be a regular,
 non-symbolic-link file no larger than 8 MiB; the loader reads at most 8 MiB plus
 one detection byte before JSON parsing. Missing settings use defaults, and a
@@ -245,6 +256,18 @@ Retention recognizes only names in the current `omen-identity.backup.*.bak`
 namespace. Legacy, custom-export, symlink, and otherwise ambiguous entries are
 never removed automatically. If retention cannot be completed, the newly
 published backup is preserved and the replacement or deletion is aborted.
+
+The durable OMENchat foundation reserves identity-scoped state under
+`omenchat/`. `client-instance-id` is the existing owner-only 16-byte random
+client identity. A separate owner-only `mutation-intents.sqlite` store is now
+defined for future negotiated mutations, but current startup and send paths do
+not open or populate it. Its isolated API caps admission at 4,096 intents,
+16 MiB total, and 64 KiB per intent without deleting pending or uncertain work.
+On Unix it refuses symlinked or group/world-readable storage.
+The inactive storage owner uses one named thread and a 32-request/2-MiB bounded
+queue. Oversized payloads and queue saturation are rejected before admission;
+shutdown drains admitted requests and joins the owner. This worker is not
+started by the application yet.
 
 ## IFAC Secret Input
 

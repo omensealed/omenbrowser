@@ -224,6 +224,7 @@ bash -n scripts/test-desktop-shutdown.sh
 bash -n scripts/measure-desktop-idle.sh
 bash -n scripts/compare-desktop-idle.sh
 bash -n scripts/measure-pane-stress.sh
+bash -n scripts/measure-durable-mutation-retention.sh
 bash -n scripts/measure-omenchatd-backpressure.sh
 bash -n scripts/measure-omenchatd-db.sh
 bash -n scripts/verify-release-version.sh

@@ -5,6 +5,47 @@ use crate::storage::settings::{
     AppSettings, DesktopWorkspaceLayoutNode, DesktopWorkspacePaneKind, DesktopWorkspacePaneSettings,
 };
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[test]
+fn desktop_startup_persists_and_retains_identity_scoped_client_instance() {
+    let root = std::env::temp_dir().join(format!(
+        "omenbrowser-rs-desktop-client-instance-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let paths = crate::config::AppPaths::from_root(root.clone());
+    paths.ensure().expect("paths");
+    let instance_path = paths
+        .identity_storage_root()
+        .join("omenchat")
+        .join("client-instance-id");
+
+    let first = DesktopApp::new(App::new(crate::config::AppConfig {
+        paths: paths.clone(),
+        settings: AppSettings::default(),
+    }));
+    let first_id = first
+        .omenchat
+        .omenchat_live_state
+        .client_instance_id()
+        .expect("startup client instance");
+    drop(first);
+    assert_eq!(
+        std::fs::read(&instance_path).expect("persisted client instance"),
+        first_id.as_bytes()
+    );
+
+    let second = DesktopApp::new(App::new(crate::config::AppConfig {
+        paths,
+        settings: AppSettings::default(),
+    }));
+    assert_eq!(
+        second.omenchat.omenchat_live_state.client_instance_id(),
+        Some(first_id)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn desktop_omenchat_sessions_restore_from_plugin_store() {
     let root = std::env::temp_dir().join(format!(

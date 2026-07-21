@@ -3164,6 +3164,37 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_durable_capability_request_keeps_legacy_session_accept() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::String("Alice".into()),
+                FrameValue::String("lxmf-a".into()),
+            ]),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
+                client_instance_id: Some(crate::protocol::ClientInstanceId::new([9; 16])),
+            },
+        )
+        .expect("extended session open");
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 1, None, request))
+            .expect("session open");
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0].op, ChatOp::SessionAccept);
+        let FrameBody::Fields(fields) = &response[0].body else {
+            panic!("session accept fields");
+        };
+        assert_eq!(fields.len(), 6);
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(None)
+        );
+    }
+
+    #[test]
     fn history_before_requires_room_membership() {
         let store = OmenchatStore::in_memory().expect("store");
         let room = store

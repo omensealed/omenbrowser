@@ -66,6 +66,10 @@ pub enum LiveResourceOutcome {
 #[path = "live_link_soak_tests.rs"]
 mod link_soak_tests;
 
+#[cfg(test)]
+#[path = "live_retry_safety_tests.rs"]
+mod retry_safety_tests;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveServerStats {
     pub active_links: usize,

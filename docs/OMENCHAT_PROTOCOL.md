@@ -34,6 +34,15 @@ prove deterministic codec compatibility in both directions, but do not replace
 the pending multi-process v0.6/v0.9 link, resource, restart, and reconnect
 matrix.
 
+The protocol v1 enums, operation/error numbers, frame body/value types, and
+public compatibility fixture are owned by the private `omenchat-protocol`
+crate under `src/server/crates/`. Both browser and server re-export those types
+through their existing module paths, so application code does not depend on a
+new API surface. Their bounded codec implementations remain separate and both
+must pass the same shared fixture bytes. The crate contains no transport,
+runtime, storage, GUI, TUI, or server policy and remains part of the relocatable
+standalone omenchatd source tree.
+
 The standalone server's quiet NomadNet portal is a separate Reticulum request
 surface. It accepts direct request-context packets for requests within packet
 MDU and request Resources for oversized requests. Its established path request
@@ -137,6 +146,55 @@ The destination hash identifies the chat server.
 5. Client joins a room.
 6. Server replies with room state, userlist, topic, and recent history.
 7. Client and server exchange room events.
+
+### Capability negotiation boundary
+
+The shared protocol crate defines a bounded optional negotiation extension but
+the current product does not yet advertise or accept any durable-mutation
+capability. Existing `SessionOpen` fields remain protocol name, display name,
+and optional client LXMF destination at indexes 0 through 2. Requested
+capabilities and a 16-byte client-instance ID, when a future negotiated client
+uses them, occupy trailing indexes 3 and 4. Accepted capabilities occupy
+trailing `SessionAccept` index 6.
+
+Capability lists are limited to 64 unique ASCII names of at most 128 bytes.
+Requesting `durable-mutations-v1` requires an exact 16-byte client-instance ID.
+Missing trailing fields mean no capabilities; application version and
+descriptor metadata never imply acceptance. The current server deliberately
+returns its six-field legacy `SessionAccept` even when a test client sends the
+well-formed extension, so no durable envelope can become active prematurely.
+
+The browser now persists the future client-instance value under its active
+identity-scoped application storage and retains it in live client state. It is
+not placed in `SessionOpen` yet. Invalid, unsafe, or overly permissive stored
+state disables this future capability instead of generating a replacement;
+ordinary legacy OMENchat remains available.
+
+An inactive persistent-intent boundary now records a future mutation's server
+destination, authenticated identity binding, stable client/mutation IDs,
+canonical request hash and body, expiry, state, and local correlation before it
+can be handed to a transport owner. Recovery length-preflights SQLite values
+before allocation and then revalidates frame metadata, canonical hashing, and
+retained-byte accounting. No production send path calls this boundary yet.
+Prepared intents can move only to uncertain, expired, or abandoned; uncertain
+intents can move only to acknowledged, conflict, expired, or abandoned.
+Terminal states cannot regress. Recovery returns only prepared/uncertain rows,
+and incremental maintenance removes at most 128 terminal rows older than 30
+days. A dedicated 32-request/2-MiB storage owner exists but is not started yet.
+
+The dormant server store also has deterministic post-retention behavior. Before
+pruning any durable result, it permanently retires that authenticated
+identity/client-instance pair. Any later operation under the retired instance
+returns `Expired` before mutation execution, even after server restart.
+Remembered active and retired instances are bounded (100,000 globally and
+1,024 per authenticated identity), and admission fails closed at capacity.
+The inactive intent store can rotate the owner-only instance file only while an
+immediate SQLite transaction proves there are no prepared or uncertain intents.
+It never rewrites terminal historical intents. Protocol-v1 codes 1011 through
+1015 are reserved respectively for not-negotiated, malformed, conflict,
+result-expired, and store-busy durable outcomes. This is still not live
+protocol behavior: production does not invoke rotation, advertise the
+capability, emit these errors, or automatically retry uncertain work.
 
 ## Operation correlation and same-link replay
 

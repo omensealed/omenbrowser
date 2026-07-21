@@ -3,6 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::error::ServerResult;
 use crate::protocol::{EventId, RoomId, UserId};
 
+pub mod durable_replay;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerRoom {
     pub room_id: RoomId,
@@ -112,7 +114,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 
 impl OmenchatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -1318,7 +1320,7 @@ mod tests {
             .expect("version one schema");
         drop(connection);
 
-        let store = OmenchatStore::open(&path).expect("version two migration");
+        let store = OmenchatStore::open(&path).expect("current-schema migration");
         let row_count: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM upload_files", [], |row| row.get(0))
@@ -1343,6 +1345,130 @@ mod tests {
 
         let backup_path = migration_backup_path(&path, 1);
         assert!(backup_path.is_file());
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn version_two_database_adds_durable_replay_schema_without_losing_rows() {
+        let path = isolated_database_path("v2-durable-replay");
+        let connection = rusqlite::Connection::open(&path).expect("version two database");
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .expect("version two base schema");
+        connection
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_durable_mutation_clients_retired;
+                 DROP TABLE IF EXISTS durable_mutation_clients;
+                 DROP INDEX IF EXISTS idx_durable_mutation_results_created;
+                 DROP TABLE IF EXISTS durable_mutation_results;
+                 INSERT INTO rooms(name, topic, created_at)
+                 VALUES ('preserved-v2-room', 'must survive migration', 1);
+                 INSERT INTO upload_files(
+                   resource_id, room_id, actor_user_id, filename, byte_len, path, created_at
+                 ) VALUES ('preserved-v2-upload', 1, 9, 'file.bin', 3, '/isolated/file.bin', 1);
+                 PRAGMA user_version = 2;",
+            )
+            .expect("version two fixture");
+        drop(connection);
+
+        let store = OmenchatStore::open(&path).expect("version three migration");
+        let room_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM rooms WHERE name = 'preserved-v2-room'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved room");
+        let upload_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM upload_files WHERE resource_id = 'preserved-v2-upload'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved upload");
+        let table_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'durable_mutation_results'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable replay table");
+        let index_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_durable_mutation_results_created'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable replay index");
+        let client_table_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'durable_mutation_clients'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable client table");
+        let client_index_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_durable_mutation_clients_retired'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable client index");
+        let schema_version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+
+        assert_eq!(room_count, 1);
+        assert_eq!(upload_count, 1);
+        assert_eq!(table_count, 1);
+        assert_eq!(index_count, 1);
+        assert_eq!(client_table_count, 1);
+        assert_eq!(client_index_count, 1);
+        assert_eq!(schema_version, SCHEMA_VERSION);
+
+        let backup_path = migration_backup_path(&path, 2);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version two migration backup");
+        let backup_version: i64 = backup
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("backup schema version");
+        let backup_replay_table_count: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'durable_mutation_results'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backup replay table count");
+        let backup_client_table_count: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'durable_mutation_clients'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backup durable client table count");
+        assert_eq!(backup_version, 2);
+        assert_eq!(backup_replay_table_count, 0);
+        assert_eq!(backup_client_table_count, 0);
+
+        drop(backup);
         drop(store);
         std::fs::remove_file(backup_path).expect("remove migration backup");
         remove_database_files(&path);

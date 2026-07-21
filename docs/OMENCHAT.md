@@ -45,14 +45,16 @@ five-second caches; moderation mutations and transactional stale-user pruning
 complete asynchronously through the same worker. The command-driven line
 console waits synchronously on that same bounded owner. Upload-ledger repair
 still uses its existing synchronous maintenance path.
-The current schema is recorded as SQLite `user_version = 2`; it adds an
-actor/time index for upload quota planning. Existing version-0/version-1
-databases migrate in one immediate transaction. A database from a
+The current schema is recorded as SQLite `user_version = 3`. Version 2 adds an
+actor/time index for upload quota planning. Version 3 adds the dormant
+durable-mutation replay table and creation-order index; the live protocol does
+not use them until explicit capability activation. Existing version-0 through
+version-2 databases migrate in one immediate transaction. A database from a
 newer omenchatd version is refused without modification instead of being
 silently downgraded.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
-`omenchat.sqlite.pre-v2-from-v<old>.bak`. It never overwrites an existing backup;
+`omenchat.sqlite.pre-v3-from-v<old>.bak`. It never overwrites an existing backup;
 backup failure aborts migration, and a successful backup is retained for
 operator recovery.
 Schema statements and the version update share one immediate transaction, so a

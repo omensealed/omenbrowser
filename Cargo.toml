@@ -71,6 +71,7 @@ hkdf = { version = "0.12", optional = true }
 lxmf = { version = "=0.9.5", optional = true, default-features = false, features = ["wire"] }
 lxmf_sdk = { package = "lxmf-sdk", version = "=0.9.5", optional = true, default-features = false, features = ["std", "sdk-async", "rpc-backend"] }
 omen-ifac-tcp = { path = "src/server/crates/omen-ifac-tcp", version = "=0.9.5-1", optional = true }
+omenchat-protocol = { path = "src/server/crates/omenchat-protocol", version = "=0.1.0" }
 ratatui = { version = "0.30.2", optional = true, default-features = false, features = ["crossterm_0_29", "layout-cache"] }
 rand_core = { version = "0.6.4", optional = true, features = ["getrandom"] }
 reticulum-rs = { version = "=0.9.5", optional = true, default-features = false, features = ["core", "transport"] }
