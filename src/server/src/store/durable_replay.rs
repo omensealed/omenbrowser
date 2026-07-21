@@ -1,6 +1,9 @@
 use rusqlite::OptionalExtension;
 
-use super::{append_event_in_transaction, OmenchatStore, ServerRoomEvent, ServerRoomEventKind};
+use super::{
+    append_event_in_transaction, ensure_user_on, join_room_on, OmenchatStore, ServerRoomEvent,
+    ServerRoomEventKind, ServerUser,
+};
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::codec::decode_frame;
 use crate::protocol::{ClientInstanceId, MutationId, RequestHash, RoomId, UserId};
@@ -52,8 +55,23 @@ pub enum DurableRoomEventCommit<A> {
     Replayed {
         result_frame: Vec<u8>,
     },
+    StoredResponse {
+        result_frame: Vec<u8>,
+        pruned: usize,
+    },
     Conflict,
     Expired,
+}
+
+pub enum DurableRoomEventPlan<A> {
+    Event {
+        actor_user_id: Option<UserId>,
+        kind: ServerRoomEventKind,
+        admission: A,
+    },
+    Response {
+        result_frame: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -80,50 +98,86 @@ const PRODUCTION_LIMITS: RetentionLimits = RetentionLimits {
 };
 
 impl OmenchatStore {
+    pub(crate) fn ensure_durable_room_user(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        identity_hash: &[u8],
+        display_name: &str,
+        lxmf_destination: Option<&str>,
+    ) -> ServerResult<Option<ServerUser>> {
+        let room_exists = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM rooms WHERE room_id = ?1 AND archived = 0)",
+            [room_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !room_exists {
+            return Ok(None);
+        }
+        ensure_user_on(transaction, identity_hash, display_name, lxmf_destination).map(Some)
+    }
+
+    pub(crate) fn join_durable_room(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        user_id: UserId,
+    ) -> ServerResult<()> {
+        join_room_on(transaction, room_id, user_id)
+    }
+
     /// Appends a room event and retains its exact encoded origin response in
-    /// one SQLite transaction. The finisher must be deterministic apart from
-    /// acquiring its returned cancellation-safe admission guard, and must not
-    /// cause irreversible external side effects. Live permission, rate, and
-    /// broadcast policy remain outside this dormant persistence boundary.
-    pub fn commit_durable_room_event_result<F, A>(
+    /// one SQLite transaction. Preparation may produce either a room event
+    /// with an owned admission guard or a terminal origin response without an
+    /// event. Neither callback may cause irreversible external side effects.
+    pub fn commit_durable_room_event_result<P, F, A>(
         &self,
         key: DurableMutationKey<'_>,
         request_hash: RequestHash,
         room_id: RoomId,
-        actor_user_id: Option<UserId>,
-        kind: ServerRoomEventKind,
-        finish_result: F,
+        prepare: P,
+        encode_result: F,
     ) -> ServerResult<DurableRoomEventCommit<A>>
     where
-        F: FnOnce(&ServerRoomEvent) -> ServerResult<(A, Vec<u8>)>,
+        P: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<DurableRoomEventPlan<A>>,
+        F: FnOnce(&ServerRoomEvent) -> ServerResult<Vec<u8>>,
     {
         let mut stored_event = None;
         let mut stored_admission = None;
         let commit = self.commit_durable_mutation_result(key, request_hash, |transaction| {
-            let event = append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
-            let (admission, result_frame) = finish_result(&event)?;
-            stored_event = Some(event);
-            stored_admission = Some(admission);
-            Ok(result_frame)
+            match prepare(transaction)? {
+                DurableRoomEventPlan::Event {
+                    actor_user_id,
+                    kind,
+                    admission,
+                } => {
+                    let event =
+                        append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
+                    let result_frame = encode_result(&event)?;
+                    stored_event = Some(event);
+                    stored_admission = Some(admission);
+                    Ok(result_frame)
+                }
+                DurableRoomEventPlan::Response { result_frame } => Ok(result_frame),
+            }
         })?;
         match commit {
             DurableReplayCommit::Stored {
                 result_frame,
                 pruned,
-            } => Ok(DurableRoomEventCommit::Stored {
-                result_frame,
-                event: stored_event.ok_or_else(|| {
-                    ServerError::Message(
-                        "durable room event committed without its stored event".into(),
-                    )
-                })?,
-                admission: stored_admission.ok_or_else(|| {
-                    ServerError::Message(
-                        "durable room event committed without its admission guard".into(),
-                    )
-                })?,
-                pruned,
-            }),
+            } => match (stored_event, stored_admission) {
+                (Some(event), Some(admission)) => Ok(DurableRoomEventCommit::Stored {
+                    result_frame,
+                    event,
+                    admission,
+                    pruned,
+                }),
+                (None, None) => Ok(DurableRoomEventCommit::StoredResponse {
+                    result_frame,
+                    pruned,
+                }),
+                _ => Err(ServerError::Message(
+                    "durable room event committed with incomplete execution ownership".into(),
+                )),
+            },
             DurableReplayCommit::Replayed { result_frame } => {
                 Ok(DurableRoomEventCommit::Replayed { result_frame })
             }
@@ -693,11 +747,16 @@ mod tests {
                 key(&identity, 1),
                 request_hash(1),
                 room.room_id,
-                Some(user.user_id),
-                ServerRoomEventKind::Message {
-                    body: "exactly once".into(),
+                |_| {
+                    Ok(DurableRoomEventPlan::Event {
+                        actor_user_id: Some(user.user_id),
+                        kind: ServerRoomEventKind::Message {
+                            body: "exactly once".into(),
+                        },
+                        admission: (),
+                    })
                 },
-                |event| Ok(((), room_event_result(17, event)?)),
+                |event| room_event_result(17, event),
             )
             .expect("stored room event");
         let (stored_result, stored_event) = match stored {
@@ -719,12 +778,11 @@ mod tests {
                 key(&identity, 1),
                 request_hash(1),
                 room.room_id,
-                Some(user.user_id),
-                ServerRoomEventKind::Message {
-                    body: "exactly once".into(),
+                |_| -> ServerResult<DurableRoomEventPlan<()>> {
+                    panic!("an exact replay must not prepare another event")
                 },
-                |_| -> ServerResult<((), Vec<u8>)> {
-                    panic!("an exact replay must not append or encode another event")
+                |_| -> ServerResult<Vec<u8>> {
+                    panic!("an exact replay must not encode another event")
                 },
             )
             .expect("replayed room event");
@@ -742,13 +800,10 @@ mod tests {
                 key(&identity, 1),
                 request_hash(2),
                 room.room_id,
-                Some(user.user_id),
-                ServerRoomEventKind::Message {
-                    body: "different content".into(),
+                |_| -> ServerResult<DurableRoomEventPlan<()>> {
+                    panic!("a conflicting replay must not prepare")
                 },
-                |_| -> ServerResult<((), Vec<u8>)> {
-                    panic!("a conflicting replay must not execute")
-                },
+                |_| -> ServerResult<Vec<u8>> { panic!("a conflicting replay must not encode") },
             )
             .expect("conflicting room event");
         assert_eq!(conflict, DurableRoomEventCommit::Conflict);
@@ -779,11 +834,16 @@ mod tests {
                 key(&identity, 1),
                 request_hash(1),
                 room.room_id,
-                None,
-                ServerRoomEventKind::Action {
-                    body: "must rollback".into(),
+                |_| {
+                    Ok(DurableRoomEventPlan::Event {
+                        actor_user_id: None,
+                        kind: ServerRoomEventKind::Action {
+                            body: "must rollback".into(),
+                        },
+                        admission: DropMarker(marker_drops),
+                    })
                 },
-                |_| Ok((DropMarker(marker_drops), vec![0xc0])),
+                |_| Ok(vec![0xc0]),
             )
             .expect_err("invalid origin response must roll back event");
         assert!(error.to_string().contains("valid bounded OMENchat frame"));

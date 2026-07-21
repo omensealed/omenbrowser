@@ -401,3 +401,13 @@ The next gate is the inactive session-level envelope executor: canonical hash
 verification, permission and membership validation, transactional room-event
 commit, reversible rate admission, exact origin response, and one-time fan-out.
 Only after that passes may the server advertise acceptance.
+
+That inactive session-level executor is now implemented for room messages and
+actions. Canonical hash and body validation occurs before replay admission.
+Only a replay miss enters the immediate transaction and evaluates room/user
+policy, reversible rate admission, membership, event insertion, exact
+acknowledgement encoding, and replay publication. Stored terminal rejections
+remain stable even if policy later changes. A first commit returns one event
+for fan-out; replay returns no event. Restart, conflict, malformed hash,
+permission change, rate, and duplicate cases pass. Live dispatch and capability
+advertisement remain disabled pending envelope-routing tests.

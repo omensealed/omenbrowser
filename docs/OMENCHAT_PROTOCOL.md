@@ -224,6 +224,14 @@ cleared on identity replacement or every Link retirement path. Production
 continues to return the legacy accept, so well-formed durable requests remain
 unbound and cannot send durable envelopes.
 
+An inactive session executor now implements the negotiated semantics for room
+messages and actions without connecting them to live Link dispatch. It checks
+the canonical hash, stores mutation and exact origin result transactionally,
+returns a broadcast event only for first execution, preserves terminal policy
+rejections, avoids a second rate charge, and replays across server restart.
+Errors 1012 through 1015 have executor mappings, although only negotiation error
+1012 remains reachable from current live peers.
+
 ## Operation correlation and same-link replay
 
 The existing 32-bit frame `seq` is the request/response correlation identifier.

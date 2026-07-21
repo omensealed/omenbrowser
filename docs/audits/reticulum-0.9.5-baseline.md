@@ -722,3 +722,29 @@ passed. The complete headless profile passed 220 tests and the full server/TUI
 profile passed 342 tests, each with eight explicit long-running, hardware,
 upstream-regression, or interoperability tests ignored. Strict headless Clippy
 and formatting passed. This remains part of the local CI batch.
+
+## Inactive durable room-message executor
+
+The session engine now exposes a non-live executor for already-negotiated
+durable `RoomMessage` and `RoomAction` envelopes. It verifies the canonical
+operation/room/body hash and body bounds before storage. A replay miss evaluates
+room existence, user policy, rate admission, membership, event insertion,
+acknowledgement encoding, and replay publication inside one immediate SQLite
+transaction. Permission and rate rejections are retained as the terminal
+original result. SQLite busy/locked maps to error 1015 without a mutation;
+malformed hash/body uses 1012; key conflict and retired instance use 1013 and
+1014.
+
+First execution returns the exact origin `MessageAck`, a one-use `RoomEvent`
+for future fan-out, and the bounded prune count. Exact replay returns only the
+stored origin bytes without repeating policy, rate accounting, membership,
+event insertion, or broadcast. Tests prove one event/one fan-out, exact replay,
+rate isolation, hash conflict, malformed hash, stable permission rejection
+after policy change, and server/store restart replay. The executor is not
+called by live frame dispatch and the server still does not advertise the
+capability.
+
+The complete headless profile passed 227 tests and the full server/TUI profile
+passed 349 tests, each with eight explicit long-running, hardware,
+upstream-regression, or interoperability tests ignored. Strict headless Clippy
+and formatting passed.

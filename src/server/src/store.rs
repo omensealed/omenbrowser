@@ -331,19 +331,12 @@ impl OmenchatStore {
         display_name: &str,
         lxmf_destination: Option<&str>,
     ) -> ServerResult<ServerUser> {
-        let now = current_unix_seconds();
-        self.connection.execute(
-            "INSERT INTO users(
-               rns_identity_hash, display_name, lxmf_destination, first_seen_at, last_seen_at
-             ) VALUES (?1, ?2, ?3, ?4, ?4)
-             ON CONFLICT(rns_identity_hash) DO UPDATE SET
-               display_name = excluded.display_name,
-               lxmf_destination = COALESCE(excluded.lxmf_destination, users.lxmf_destination),
-               last_seen_at = excluded.last_seen_at",
-            (identity_hash, display_name, lxmf_destination, now),
-        )?;
-        self.user_by_identity(identity_hash)?
-            .ok_or_else(|| crate::error::ServerError::Message("user was not created".into()))
+        ensure_user_on(
+            &self.connection,
+            identity_hash,
+            display_name,
+            lxmf_destination,
+        )
     }
 
     pub fn user_by_identity(&self, identity_hash: &[u8]) -> ServerResult<Option<ServerUser>> {
@@ -447,14 +440,7 @@ impl OmenchatStore {
     }
 
     pub fn join_room(&self, room_id: RoomId, user_id: UserId) -> ServerResult<()> {
-        let now = current_unix_seconds();
-        self.connection.execute(
-            "INSERT INTO room_members(room_id, user_id, joined_at, last_seen_at)
-             VALUES (?1, ?2, ?3, ?3)
-             ON CONFLICT(room_id, user_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
-            (room_id, user_id, now),
-        )?;
-        Ok(())
+        join_room_on(&self.connection, room_id, user_id)
     }
 
     pub fn leave_room(&self, room_id: RoomId, user_id: UserId) -> ServerResult<()> {
@@ -873,6 +859,49 @@ fn next_event_id(
         |row| row.get::<_, i64>(0),
     )?;
     Ok(event_id as EventId)
+}
+
+fn ensure_user_on(
+    connection: &rusqlite::Connection,
+    identity_hash: &[u8],
+    display_name: &str,
+    lxmf_destination: Option<&str>,
+) -> ServerResult<ServerUser> {
+    let now = current_unix_seconds();
+    connection.execute(
+        "INSERT INTO users(
+           rns_identity_hash, display_name, lxmf_destination, first_seen_at, last_seen_at
+         ) VALUES (?1, ?2, ?3, ?4, ?4)
+         ON CONFLICT(rns_identity_hash) DO UPDATE SET
+           display_name = excluded.display_name,
+           lxmf_destination = COALESCE(excluded.lxmf_destination, users.lxmf_destination),
+           last_seen_at = excluded.last_seen_at",
+        (identity_hash, display_name, lxmf_destination, now),
+    )?;
+    connection
+        .query_row(
+            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+             FROM users WHERE rns_identity_hash = ?1",
+            [identity_hash],
+            user_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| crate::error::ServerError::Message("user was not created".into()))
+}
+
+fn join_room_on(
+    connection: &rusqlite::Connection,
+    room_id: RoomId,
+    user_id: UserId,
+) -> ServerResult<()> {
+    let now = current_unix_seconds();
+    connection.execute(
+        "INSERT INTO room_members(room_id, user_id, joined_at, last_seen_at)
+         VALUES (?1, ?2, ?3, ?3)
+         ON CONFLICT(room_id, user_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+        (room_id, user_id, now),
+    )?;
+    Ok(())
 }
 
 fn append_event_in_transaction(
