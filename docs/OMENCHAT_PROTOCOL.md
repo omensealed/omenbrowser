@@ -229,8 +229,17 @@ messages and actions without connecting them to live Link dispatch. It checks
 the canonical hash, stores mutation and exact origin result transactionally,
 returns a broadcast event only for first execution, preserves terminal policy
 rejections, avoids a second rate charge, and replays across server restart.
-Errors 1012 through 1015 have executor mappings, although only negotiation error
-1012 remains reachable from current live peers.
+Errors 1012 through 1015 have executor mappings. Current live peers can receive
+1011 for an unnegotiated durable envelope or 1012 for malformed negotiation or
+envelope data, but cannot activate successful durable execution.
+
+Live dispatch recognizes the durable envelope marker before applying the
+protocol-v1 same-Link sequence replay cache. A tagged malformed envelope returns
+1012, while a valid envelope without an authenticated, identity-matched durable
+binding returns 1011. With a binding, the durable replay record is authoritative:
+the first execution can broadcast one room event and exact replay returns only
+the originally encoded origin acknowledgement. Capability acceptance is still
+disabled, so production peers cannot create that binding yet.
 
 ## Operation correlation and same-link replay
 

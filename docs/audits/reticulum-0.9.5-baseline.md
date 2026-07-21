@@ -748,3 +748,25 @@ The complete headless profile passed 227 tests and the full server/TUI profile
 passed 349 tests, each with eight explicit long-running, hardware,
 upstream-regression, or interoperability tests ignored. Strict headless Clippy
 and formatting passed.
+
+## Authenticated durable live-routing gate
+
+Live dispatch now recognizes the exact durable-envelope tag before the legacy
+same-Link sequence replay cache. A structurally invalid tagged envelope returns
+1012. A valid envelope without an authenticated, identity-matched durable Link
+binding returns 1011. Only a matching binding reaches the transactional room
+executor; its origin result is sent once per request, while its room event is
+broadcast only for the first committed execution. An exact duplicate under a
+new sequence number therefore returns the originally retained acknowledgement
+and cannot repeat room fan-out.
+
+Focused live tests cover authenticated routing, replay fan-out suppression,
+malformed and unnegotiated failures, and continued legacy room messaging. The
+production server still emits no durable capability acceptance, so this route
+cannot be activated by a current peer. Client advertisement, outbound intent
+use, uncertain-mutation retry, and automatic resend remain disabled.
+
+The complete standalone headless profile passed 229 tests and the full
+server/TUI profile passed 351 tests, with eight explicit soak, hardware,
+upstream-regression, or interoperability tests ignored in each profile. Strict
+Clippy passed for both profiles and formatting passed.

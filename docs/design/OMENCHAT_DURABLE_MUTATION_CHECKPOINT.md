@@ -410,4 +410,15 @@ acknowledgement encoding, and replay publication. Stored terminal rejections
 remain stable even if policy later changes. A first commit returns one event
 for fan-out; replay returns no event. Restart, conflict, malformed hash,
 permission change, rate, and duplicate cases pass. Live dispatch and capability
-advertisement remain disabled pending envelope-routing tests.
+advertisement remained disabled pending envelope-routing tests.
+
+The live envelope-routing gate is now implemented behind the authenticated
+binding. Tagged malformed envelopes fail with 1012; valid envelopes without a
+matching negotiated binding fail with 1011. Bound requests bypass the legacy
+Link-local sequence cache and use the durable transaction as their replay
+authority. First execution sends the retained acknowledgement to the origin
+and broadcasts its event; exact replay sends the original acknowledgement and
+has no broadcast. Tests cover duplicate delivery under a different sequence,
+malformed and unbound requests, and legacy isolation. Production capability
+acceptance remains off, so this is still an unreachable staged route rather
+than a wire feature exposed to clients.
