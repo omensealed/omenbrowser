@@ -412,15 +412,15 @@ length alone. These are local cache limits and do not change event IDs, frames,
 history page sizes, or deduplication keys.
 
 Mixed application-store compatibility is exercised independently of the live
-transport. Hardened `0.6.0-1` seeds an isolated `chat.sqlite`; `0.9.5-2`
+transport. Hardened `0.6.0-1` seeds an isolated `chat.sqlite`; `0.9.6-1`
 reopens it and appends; `0.6.0-1` reopens that current write and appends; and
-`0.9.5-2` performs the final reopen. Server metadata, room metadata, active
+`0.9.6-1` performs the final reopen. Server metadata, room metadata, active
 room, ordered event identifiers, and event content must remain exact at every
 stage. This proves bidirectional store-format reopening only. It does not yet
 prove a history Resource transfer.
 
 Live mixed-version compatibility is gated separately in both directions. The
-current `0.9.5-2` desktop client connects to the immutable hardened `0.6.0-1`
+current `0.9.6-1` desktop client connects to the immutable hardened `0.6.0-1`
 standalone server, and the hardened old client separately connects to the
 current standalone server. Each isolated ephemeral-loopback case opens its
 link and OMENchat session, joins a room, sends one message, and observes the

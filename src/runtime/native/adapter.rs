@@ -3247,6 +3247,15 @@ fn spawn_announce_listener(
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
+fn parse_restored_destination_identity(
+    public_key: &[u8],
+    verifying_key: &[u8],
+) -> Result<rns_transport::identity::Identity, String> {
+    rns_transport::identity::Identity::try_new_from_slices(public_key, verifying_key)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
 fn spawn_reticulum_path_table_restore(
     transport: Arc<reticulum_rs::runtime::Transport>,
     storage_path: std::path::PathBuf,
@@ -3265,14 +3274,22 @@ fn spawn_reticulum_path_table_restore(
                         .lock()
                         .expect("native clean destination identity cache lock");
                     for restored in &report.restored_identities {
-                        insert_bounded_destination_cache(
-                            &mut guard,
-                            restored.destination.to_hex_string(),
-                            rns_transport::identity::Identity::new_from_slices(
-                                &restored.public_key,
-                                &restored.verifying_key,
+                        match parse_restored_destination_identity(
+                            &restored.public_key,
+                            &restored.verifying_key,
+                        ) {
+                            Ok(identity) => insert_bounded_destination_cache(
+                                &mut guard,
+                                restored.destination.to_hex_string(),
+                                identity,
                             ),
-                        );
+                            Err(error) => {
+                                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                    "native Reticulum 0.9 ignored invalid restored identity destination={} error={error}",
+                                    restored.destination.to_hex_string()
+                                )));
+                            }
+                        }
                     }
                 }
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
@@ -9303,14 +9320,24 @@ async fn clean_wait_for_destination_identity(
                         .lock()
                         .expect("native clean destination identity cache lock");
                     for restored in &report.restored_identities {
-                        insert_bounded_destination_cache(
-                            &mut guard,
-                            restored.destination.to_hex_string(),
-                            rns_transport::identity::Identity::new_from_slices(
-                                &restored.public_key,
-                                &restored.verifying_key,
+                        match parse_restored_destination_identity(
+                            &restored.public_key,
+                            &restored.verifying_key,
+                        ) {
+                            Ok(identity) => insert_bounded_destination_cache(
+                                &mut guard,
+                                restored.destination.to_hex_string(),
+                                identity,
                             ),
-                        );
+                            Err(error) => {
+                                if let Some(event_tx) = event_tx {
+                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native Reticulum 0.9 ignored invalid restored identity destination={} error={error}",
+                                        restored.destination.to_hex_string()
+                                    )));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -12140,6 +12167,18 @@ mod tests {
     use std::sync::mpsc;
     use std::thread::JoinHandle;
     use std::time::Instant;
+
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    #[test]
+    fn restored_destination_identity_rejects_malformed_keys_without_panicking() {
+        let invalid_verifying_key = (0_u8..=u8::MAX)
+            .map(|byte| [byte; 32])
+            .find(|bytes| parse_restored_destination_identity(&[0x11; 32], bytes).is_err())
+            .expect("at least one compressed point encoding must be invalid");
+
+        assert!(parse_restored_destination_identity(&[0x11; 32], &invalid_verifying_key).is_err());
+        assert!(parse_restored_destination_identity(&[0x11; 31], &[0x22; 32]).is_err());
+    }
 
     fn temp_paths(name: &str) -> AppPaths {
         let root = std::env::temp_dir().join(format!(

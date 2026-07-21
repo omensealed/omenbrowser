@@ -312,7 +312,10 @@ fn pack_identity_salted_propagation_transient(
     recipient_public_key: [u8; 64],
 ) -> AppResult<(Vec<u8>, [u8; 32])> {
     let recipient =
-        Identity::new_from_slices(&recipient_public_key[..32], &recipient_public_key[32..]);
+        Identity::try_new_from_slices(&recipient_public_key[..32], &recipient_public_key[32..])
+            .map_err(|err| {
+                AppError::Runtime(format!("LXMF recipient identity is invalid: {err}"))
+            })?;
     wire.pack_propagation_transient_with_rng(&recipient, rand_core::OsRng)
         .map_err(|err| {
             AppError::Runtime(format!("LXMF propagation transient encode failed: {err}"))
@@ -613,7 +616,8 @@ fn lxmf_message_id(message: &mut lxmf::Message) -> AppResult<[u8; 32]> {
         None,
     );
     let wire = lxmf::WireMessage::new(destination, source, payload);
-    Ok(wire.message_id())
+    wire.try_message_id()
+        .map_err(|err| AppError::Runtime(format!("LXMF message ID encode failed: {err}")))
 }
 
 pub fn ticket_entry_from_fields(fields: Option<&rmpv::Value>) -> Option<(f64, Vec<u8>)> {
@@ -724,7 +728,9 @@ fn decode_wire_message_inner(
         }
     }
     let peer_hash = hex16(&wire.source);
-    let message_id = hex32(&wire.message_id());
+    let message_id = hex32(&wire.try_message_id().map_err(|err| {
+        AppError::Runtime(format!("LXMF decoded message ID encode failed: {err}"))
+    })?);
     let attachments = if let Some(attachments_dir) = attachments_dir {
         store_attachments_from_fields(message.fields.as_ref(), attachments_dir, &message_id)?
     } else {
@@ -3386,6 +3392,27 @@ mod tests {
         assert_eq!(std::fs::read(&path).expect("previous remains"), b"previous");
         assert_eq!(std::fs::read_dir(&root).expect("list fixture").count(), 1);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn propagation_transient_rejects_invalid_recipient_identity_without_panicking() {
+        let wire = lxmf::WireMessage::new(
+            [0x11; 16],
+            [0x22; 16],
+            lxmf::Payload::new(42.0, Some(b"body".to_vec()), None, None, None),
+        );
+        let invalid_verifying_key = (0_u8..=u8::MAX)
+            .map(|byte| [byte; 32])
+            .find(|bytes| Identity::try_new_from_slices(&[0x11; 32], bytes).is_err())
+            .expect("at least one compressed point encoding must be invalid");
+        let mut invalid_recipient = [0u8; 64];
+        invalid_recipient[..32].fill(0x11);
+        invalid_recipient[32..].copy_from_slice(&invalid_verifying_key);
+
+        let error = pack_identity_salted_propagation_transient(&wire, invalid_recipient)
+            .expect_err("invalid verifying key must fail closed");
+
+        assert!(error.to_string().contains("recipient identity is invalid"));
     }
 
     #[test]

@@ -91,7 +91,7 @@ current_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
 old_version=$($old_bin --version | awk '{print $2}')
 current_version=$($current_bin --version | awk '{print $2}')
 [[ "$old_version" == "0.6.0-1" ]]
-[[ "$current_version" == "0.9.5-2" ]]
+[[ "$current_version" == "0.9.6-1" ]]
 
 python3 -m venv "$temporary_root/venv"
 python="$temporary_root/venv/bin/python"
@@ -182,7 +182,7 @@ if [[ "$reverse" == true ]]; then
   recipient_bin=$current_bin
   recipient_label=current
   recipient_common=("${common_current[@]}")
-  direction="0.6.0-1_to_0.9.5-2"
+  direction="0.6.0-1_to_0.9.6-1"
 else
   sender_bin=$current_bin
   sender_label=current
@@ -191,7 +191,7 @@ else
   recipient_bin=$old_bin
   recipient_label=old
   recipient_common=("${common_old[@]}")
-  direction="0.9.5-2_to_0.6.0-1"
+  direction="0.9.6-1_to_0.6.0-1"
 fi
 
 # Put the sender online before the recipient announces. This warms only the

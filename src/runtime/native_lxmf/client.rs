@@ -514,9 +514,13 @@ fn build_sdk_wire_delivery_with_policy(
         ))
     })?;
 
+    let message_id = wire.try_message_id().map_err(|error| {
+        AppError::Runtime(format!("LXMF SDK bridge message ID encode failed: {error}"))
+    })?;
+
     Ok(NativeLxmfSdkWireDelivery {
         wire_bytes,
-        message_id: hex_bytes(&wire.message_id()),
+        message_id: hex_bytes(&message_id),
         destination_hash: record.destination.clone(),
         method: options.method.clone(),
         include_ticket: options.include_ticket,
@@ -813,7 +817,11 @@ fn sdk_message_id(message: &lxmf::Message) -> AppResult<[u8; 32]> {
         message.fields.clone(),
         None,
     );
-    Ok(lxmf::WireMessage::new(destination, source, payload).message_id())
+    lxmf::WireMessage::new(destination, source, payload)
+        .try_message_id()
+        .map_err(|error| {
+            AppError::Runtime(format!("LXMF SDK bridge message ID encode failed: {error}"))
+        })
 }
 
 #[cfg(feature = "native-lxmf-sdk")]

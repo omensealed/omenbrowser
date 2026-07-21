@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "omenchatd"
-version = "0.9.5-2"
+version = "0.9.6-1"
 dependencies = [
  "bzip2 0.5.2",
  "crossterm",
@@ -1052,9 +1052,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6f8d1b059a822763d55803fc0240e64b23a7b0d53208aa0873561938870fc84"
+checksum = "1de4ac11623f7f99cdbb2651071c738824fd9d8f7c931ed2006325d1512b89f8"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -1062,9 +1062,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-core"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec4f1b0d2d20a30dc35787cfff8a063086ef320f6ef0dede344a13fc1a96be56"
+checksum = "2984682e71b22a83c1e1598a98bb37991cc218a5c3f87c4652933e7e32f90e18"
 dependencies = [
  "aes",
  "cbc",
@@ -1083,9 +1083,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-transport"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abc5932f474eb853508b1cee9ac2b66f8c82e70f6d4669b8aeef172514d84a2f"
+checksum = "149873f10b5c575718976ceb6be2dfc25a6adb0d4df012b7b80b135af40c788e"
 dependencies = [
  "aes",
  "base64",
@@ -1109,6 +1109,7 @@ dependencies = [
  "sha2",
  "shlex 2.0.1",
  "socket2 0.5.10",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-serial",
  "tokio-util",

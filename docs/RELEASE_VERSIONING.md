@@ -4,9 +4,8 @@ OMENbrowser_rs and the standalone omenchatd use the upstream Reticulum/LXMF
 base version followed by a numeric OMEN release revision:
 
 ```text
-Cargo package version: 0.9.5-2
-Git tag:              v0.9.5-2
-Planned next release: 0.9.6-1 / v0.9.6-1
+Cargo package version: 0.9.6-1
+Git tag when released: v0.9.6-1
 ```
 
 The leading `v` belongs only in Git tags. Cargo interprets the hyphen suffix as
@@ -22,8 +21,9 @@ version from the root package manifest. Runtime and diagnostic displays use
 `env!("CARGO_PKG_VERSION")` rather than another hard-coded copy.
 
 The private, protocol-neutral `omen-ifac-tcp` support crate has its own package
-identity and remains at `0.9.5-1`; changing the application release revision
-does not change its API or IFAC wire behavior.
+identity and remains at `0.9.5-1`; its Reticulum transport dependency follows
+the coherent 0.9.6 train, while changing the application release revision does
+not change the adapter's API or IFAC wire behavior.
 
 Application release versions do not change these independent compatibility
 domains:

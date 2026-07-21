@@ -81,6 +81,10 @@ These remain open until an OMEN regression proves otherwise:
 
 ### Unit 0 — freeze the 0.9.5 rollback point
 
+Status: complete on 2026-07-21. The rollback baseline is commit `d484724`, and
+CI run `29871754030` completed successfully. The planning-only successor commit
+is `4e1c048`; it changes no product behavior or dependency resolution.
+
 1. Record the final durable-mutation commit and passing CI URL.
 2. Save root/server metadata and dependency trees under ignored evidence.
 3. Run the canonical 0.9.5 desktop/server checks needed to distinguish migration
@@ -92,6 +96,11 @@ Gate: clean tree, known-good commit, independent lockfiles, and explicit tests
 not run.
 
 ### Unit 1 — exact dependency and application-version alignment
+
+Status: complete locally on 2026-07-21; CI qualification remains pending until
+the compiler-guided Unit 2 validation is batched with it. Both lockfiles resolve
+one registry-sourced 0.9.6 train, active release/mixed-version checks identify
+`0.9.6-1`, and canonical desktop plus both standalone-server profiles compile.
 
 1. Set root and server application versions to `0.9.6-1` together.
 2. Change only the five direct upstream family pins listed above to `=0.9.6`.
@@ -105,6 +114,12 @@ Gate: both roots resolve one registry-sourced 0.9.6 train. Compilation failures
 may remain only when recorded in the API ledger.
 
 ### Unit 2 — compiler-guided API migration
+
+Status: complete locally on 2026-07-21. Canonical desktop, TUI, mock-runtime,
+standalone headless, and standalone full suites pass; strict desktop, TUI, and
+headless Clippy pass. Fallible 0.9.6 identity and message-ID APIs are used at
+persisted/untrusted boundaries, with malformed-key regressions. Native-platform
+CI and interop remain Unit 4 gates, not local compilation claims.
 
 1. Run narrow checks from identity/core through transport, runtime, LXMF wire,
    SDK/RPC, omenchatd, GUI, and TUI.
@@ -170,4 +185,3 @@ manifest/lock/API unit and continue safe non-network work on the known-good
 - <https://github.com/FreeTAKTeam/LXMF-rs/blob/v0.9.6/docs/release-notes-v0.9.6.md>
 - <https://github.com/FreeTAKTeam/LXMF-rs/blob/v0.9.6/docs/status/v0.9.6-hardening-audit.md>
 - <https://github.com/FreeTAKTeam/LXMF-rs/compare/v0.9.5...v0.9.6>
-

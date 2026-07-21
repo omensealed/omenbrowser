@@ -4600,3 +4600,91 @@ the other current/mixed-version smoke helpers already do. This is path
 portability, not reduced coverage: the real PTY resize, signal, shutdown-latency,
 and terminal-restoration assertions still execute against the freshly built TUI
 binary. A replacement full CI run remains the completion gate.
+
+## v0.9.6-1 units 0–1: rollback freeze and coherent dependency train
+
+The known-good behavioral rollback point is commit `d484724`; GitHub Actions CI
+run `29871754030` passed for that commit. Planning commit `4e1c048` followed
+without changing product behavior. OMENbrowser and independently manifested
+omenchatd now report `0.9.6-1`. Their direct Reticulum/LXMF dependencies and the
+private IFAC adapter's transport dependency use exact registry `=0.9.6` pins.
+The adapter's own package identity remains `0.9.5-1` because its API and IFAC
+wire contract did not change.
+
+Root and server lockfiles were resolved independently with `cargo update -p
+reticulum-rs --precise 0.9.6`. The root train contains `lxmf`, `lxmf-sdk`,
+`lxmf-wire`, `reticulum-rs`, `reticulum-rs-core`, `reticulum-rs-rpc`, and
+`reticulum-rs-transport` 0.9.6. The server train contains `reticulum-rs`, core,
+and transport 0.9.6. All resolve from crates.io, no 0.9.5 family package remains
+in either production tree, and the only new upstream transitive requirement is
+`thiserror 1.0.69` in transport 0.9.6; it was already resolved elsewhere in both
+lockfiles.
+
+Validation passed for the release-version and dependency-train scripts, shell
+syntax for every edited harness, `git diff --check`, canonical
+`desktop-product`, and standalone `server-headless` and `server-full` checks.
+`cargo tree -d` was reviewed for both roots; existing non-family duplicate
+versions remain, with no duplicate Reticulum/LXMF identity or source split.
+Unit 2 tests, strict Clippy, native-platform CI, Python interoperability, and
+packaging are deliberately batched after compiler/API qualification rather than
+dispatching a documentation-and-lockfile-only 15-minute workflow.
+
+No protocol, schema, configuration, destination/aspect, identity, state-path,
+queue, timeout, or runtime behavior changed. Rollback restores the two product
+versions, five direct root pins, two direct server pins, the IFAC transport pin,
+both lockfiles, and active release/test labels to the `d484724` state. No user
+data migration or cache deletion is involved.
+
+## v0.9.6-1 unit 2: fallible identity and LXMF message-ID boundaries
+
+The 0.9.6 compatibility constructors `Identity::new_from_slices` and
+`WireMessage::message_id` intentionally call `expect` after invoking their new
+fallible counterparts. They remain appropriate only where OMEN converts an
+already validated upstream identity. They are unsafe at persisted/untrusted
+boundaries because corrupt key material or an encoding failure could terminate
+the process.
+
+Path-table restore now validates every restored public/verifying-key pair with
+`try_new_from_slices`. Invalid entries are omitted from OMEN's bounded identity
+cache and produce a destination-only diagnostic; other valid restored entries
+continue loading. Propagation transient construction rejects an invalid remote
+recipient identity as a structured application error. LXMF stamp computation,
+decoded-message attachment routing, and SDK send/correlation paths use
+`try_message_id` and preserve the upstream encoding error instead of panicking.
+Validated in-memory conversions from an existing upstream `Identity` retain the
+compatibility constructor because its length and point-validity invariants have
+already been established.
+
+Two focused regressions prove malformed compressed-point and wrong-length key
+material return errors without panicking, including the propagation-recipient
+path. Full local validation passed:
+
+- `cargo test --locked --no-default-features --features desktop-product`;
+- desktop all-target strict Clippy;
+- `cargo test` and strict all-target Clippy with the `tui` profile;
+- `cargo test` with the isolated `mock-runtime` profile;
+- standalone `server-headless` tests (244 passed, 8 explicit soaks/live tests
+  ignored), `server-full` tests (366 passed, 8 ignored), and headless all-target
+  strict Clippy;
+- both formatting checks, release-version/train verification, shell syntax,
+  dependency-tree/source checks, and `git diff --check`.
+
+`bash scripts/release-check.sh quick` also passed end to end, including accepted
+advisory-boundary verification, native release CLI identity, isolated and real
+PTY TUI lifecycle, product-feature identity, focused browser/server OMENchat
+tests, standalone omenchatd relocation, and the local IFAC vector/negative
+tests. The quick gate intentionally leaves its pinned-Python tests ignored for
+the dedicated interoperability workflow.
+
+The ignored server cases remain explicit 60-second soak, multi-process Resource,
+UDP maximum-Resource, and cancellation/hardware-like live gates; they were not
+relabelled as passes. Pinned/current Python interoperability, mixed 0.6/0.9
+process tests, native Windows/macOS CI, live Reticulum peers, package builds,
+and resource measurements have not run for this commit yet. They are Unit 3/4
+qualification gates.
+
+This unit changes failure behavior only: malformed restored/remote identity
+material and message-ID encoding failures now fail closed rather than aborting.
+It changes no successful wire bytes, message ID, identity hash, protocol,
+schema, configuration, path, queue, retry, or storage format. Rollback restores
+the prior compatibility calls; no state migration is required.

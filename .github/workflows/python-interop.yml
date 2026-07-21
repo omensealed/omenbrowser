@@ -119,7 +119,7 @@ jobs:
           retention-days: 14
 
   mixed-application-lxmf:
-    name: OMENbrowser 0.6.0-1 ↔ 0.9.5-2 LXMF and OMENchat compatibility
+    name: OMENbrowser 0.6.0-1 ↔ 0.9.6-1 LXMF and OMENchat compatibility
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:

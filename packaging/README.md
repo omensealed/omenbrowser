@@ -11,7 +11,7 @@ Public release packages must use the canonical `desktop-product` feature with
 this through the browser `--version` output. Server packages must report
 `live-reticulum:on` from `omenchatd --version`.
 
-Do not cut the next public package release until the Reticulum/LXMF 0.9.5
+Do not cut the next public package release until the Reticulum/LXMF 0.9.6
 migration's live, interoperability, security, and installer gates pass. The
 packaging scripts can build local artifacts before then, but a GitHub release
 tag must wait for the complete release checklist.
@@ -155,8 +155,8 @@ dist/OMENbrowser_rs-<version>-windows-x86_64-unsigned.msi
 ```
 
 The setup executable uses current-user NSIS installation. The MSI uses WiX and
-maps the Cargo numeric revision deterministically: `0.9.5-1` becomes MSI
-`0.9.5.1`. Both reject downgrades. Neither package contains, installs, or starts
+maps the Cargo numeric revision deterministically: `0.9.6-1` becomes MSI
+`0.9.6.1`. Both reject downgrades. Neither package contains, installs, or starts
 omenchatd; the standalone server remains the separate ZIP above.
 
 Before artifact upload, the job creates a prior-revision installer fixture from
