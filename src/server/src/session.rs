@@ -88,6 +88,41 @@ struct RateBucket {
 type RateKey = (Vec<u8>, RateKind);
 type RateBuckets = Arc<Mutex<BTreeMap<RateKey, RateBucket>>>;
 
+struct RateReservation {
+    buckets: RateBuckets,
+    key: RateKey,
+    window_start: u64,
+    active: bool,
+}
+
+impl RateReservation {
+    fn commit(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RateReservation {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let Ok(mut buckets) = self.buckets.lock() else {
+            return;
+        };
+        let Some(bucket) = buckets.get_mut(&self.key) else {
+            return;
+        };
+        if bucket.window_start == self.window_start {
+            bucket.count = bucket.count.saturating_sub(1);
+        }
+    }
+}
+
+enum RateAdmission {
+    Admitted(Option<RateReservation>),
+    Rejected,
+}
+
 #[derive(Debug, Default)]
 struct PendingResourceStore {
     entries: BTreeMap<String, Vec<u8>>,
@@ -1789,12 +1824,35 @@ impl SessionEngine {
         room_id: Option<RoomId>,
         kind: RateKind,
     ) -> ServerResult<Option<Frame>> {
+        match self.reserve_rate(peer, kind)? {
+            RateAdmission::Admitted(reservation) => {
+                if let Some(reservation) = reservation {
+                    reservation.commit();
+                }
+                Ok(None)
+            }
+            RateAdmission::Rejected => {
+                let message = match kind {
+                    RateKind::Message => "message rate limit exceeded",
+                    RateKind::Command => "command rate limit exceeded",
+                };
+                Ok(Some(self.error_frame(
+                    seq,
+                    room_id,
+                    ChatErrorCode::RateLimited,
+                    message,
+                )))
+            }
+        }
+    }
+
+    fn reserve_rate(&self, peer: &ServerPeer, kind: RateKind) -> ServerResult<RateAdmission> {
         let limit = match kind {
             RateKind::Message => self.limits.rate_messages_per_minute,
             RateKind::Command => self.limits.rate_commands_per_minute,
         };
         if limit == 0 {
-            return Ok(None);
+            return Ok(RateAdmission::Admitted(None));
         }
 
         let now = unix_seconds();
@@ -1802,30 +1860,27 @@ impl SessionEngine {
             .rate_buckets
             .lock()
             .map_err(|_| ServerError::Message("rate limiter lock poisoned".into()))?;
-        let bucket = buckets
-            .entry((peer.identity_hash.clone(), kind))
-            .or_insert_with(|| RateBucket {
-                window_start: now,
-                count: 0,
-            });
+        let key = (peer.identity_hash.clone(), kind);
+        let bucket = buckets.entry(key.clone()).or_insert_with(|| RateBucket {
+            window_start: now,
+            count: 0,
+        });
         if now.saturating_sub(bucket.window_start) >= 60 {
             bucket.window_start = now;
             bucket.count = 0;
         }
         if bucket.count >= limit {
-            let message = match kind {
-                RateKind::Message => "message rate limit exceeded",
-                RateKind::Command => "command rate limit exceeded",
-            };
-            return Ok(Some(self.error_frame(
-                seq,
-                room_id,
-                ChatErrorCode::RateLimited,
-                message,
-            )));
+            return Ok(RateAdmission::Rejected);
         }
         bucket.count += 1;
-        Ok(None)
+        let window_start = bucket.window_start;
+        drop(buckets);
+        Ok(RateAdmission::Admitted(Some(RateReservation {
+            buckets: Arc::clone(&self.rate_buckets),
+            key,
+            window_start,
+            active: true,
+        })))
     }
 
     fn error_frame(
@@ -4185,6 +4240,59 @@ mod tests {
                 FrameValue::String("message rate limit exceeded".into()),
             ])
         );
+    }
+
+    #[test]
+    fn rate_reservation_rolls_back_uncommitted_admission() {
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                rate_messages_per_minute: 1,
+                ..SessionLimits::default()
+            },
+        );
+        let peer = peer();
+
+        let reservation = match engine
+            .reserve_rate(&peer, RateKind::Message)
+            .expect("first admission")
+        {
+            RateAdmission::Admitted(Some(reservation)) => reservation,
+            _ => panic!("limited admission must return a reservation"),
+        };
+        drop(reservation);
+
+        let replacement = match engine
+            .reserve_rate(&peer, RateKind::Message)
+            .expect("replacement admission")
+        {
+            RateAdmission::Admitted(Some(reservation)) => reservation,
+            _ => panic!("rolled-back admission must release its capacity"),
+        };
+        replacement.commit();
+        assert!(matches!(
+            engine
+                .reserve_rate(&peer, RateKind::Message)
+                .expect("admission after commit"),
+            RateAdmission::Rejected
+        ));
+    }
+
+    #[test]
+    fn disabled_rate_limit_needs_no_reservation() {
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                rate_messages_per_minute: 0,
+                ..SessionLimits::default()
+            },
+        );
+        assert!(matches!(
+            engine
+                .reserve_rate(&peer(), RateKind::Message)
+                .expect("unlimited admission"),
+            RateAdmission::Admitted(None)
+        ));
     }
 
     #[test]

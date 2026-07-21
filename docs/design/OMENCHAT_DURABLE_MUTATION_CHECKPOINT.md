@@ -378,3 +378,12 @@ orchestration rule that (a) validates permission and membership, (b) reserves
 rate capacity without double-charging replay or leaking a charge on rollback,
 (c) binds the negotiated client instance to the authenticated Link, and (d)
 broadcasts only a newly stored event.
+
+Rate admission is now cancellation-safe without changing legacy behavior. A
+new durable mutation may acquire an opaque reservation only from the store
+finisher that runs after replay lookup; a replay or conflict never invokes it.
+Rollback drops the reservation, while a successful first commit returns it to
+the session owner for explicit finalization. This closes the double-charge and
+failed-transaction leak in the inactive boundary. Live capability acceptance,
+authenticated Link/client-instance binding, and envelope dispatch remain the
+next gates.

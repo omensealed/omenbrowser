@@ -208,6 +208,12 @@ only the retained response. Invalid response encoding rolls back the event.
 No live handler calls this primitive yet because authorization, membership,
 rate reservation, negotiated client-instance ownership, and broadcast timing
 must be composed and tested without double accounting or duplicate fan-out.
+The rate limiter now exposes an internal owned reservation for that future
+composition. Existing protocol-v1 handlers commit it immediately and behave as
+before. The durable store finisher runs only on a replay miss, returns the
+reservation with a successful first commit, and releases it automatically on
+rollback. This mechanism is inactive until the Link has negotiated and bound a
+client-instance identifier.
 
 ## Operation correlation and same-link replay
 

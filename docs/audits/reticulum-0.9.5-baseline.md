@@ -675,3 +675,26 @@ standalone relocation check, compile-only test build, four IFAC fixture tests,
 and doc tests passed. No remote CI was dispatched for this server-only inactive
 unit; it is being batched with the next checkpoint to avoid a low-value
 15-minute workflow.
+
+## Reversible rate admission (inactive durable handoff)
+
+The existing per-identity message/command limiter now represents an admitted
+slot with an owned reservation. Legacy handlers immediately commit that
+reservation, preserving their prior behavior. Dropping an uncommitted
+reservation restores the count only in the same active time window, so an
+aborted database operation does not leak capacity or decrement a newer window.
+Disabled limits allocate no reservation.
+
+The dormant durable room-event transaction now returns an opaque admission
+guard supplied by its completion callback. That callback runs only for a new
+mutation after the replay lookup and while the SQLite transaction is active.
+Exact replay and conflict never reserve another rate slot; invalid response or
+transaction failure drops the guard and rolls back the event; successful first
+execution returns the guard for explicit commit before any network fan-out.
+No live handler calls this composition yet.
+
+Focused reservation, legacy rate-limit, durable replay, and rollback tests
+passed. The complete headless profile passed 220 tests and the full server/TUI
+profile passed 342 tests, each with eight explicit long-running, hardware,
+upstream-regression, or interoperability tests ignored. Strict headless Clippy
+and formatting passed. This remains part of the local CI batch.
