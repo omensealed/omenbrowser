@@ -1048,7 +1048,7 @@ impl SessionEngine {
         envelope: DurableMutationEnvelope,
     ) -> ServerResult<DurableMutationDispatch> {
         match op {
-            ChatOp::RoomMessage | ChatOp::RoomAction => {
+            ChatOp::RoomMessage | ChatOp::RoomAction | ChatOp::RoomNotice => {
                 self.handle_durable_room_text(peer, seq, room_id, op, client_instance_id, envelope)
             }
             ChatOp::PartRoom => {
@@ -1063,7 +1063,7 @@ impl SessionEngine {
         }
     }
 
-    /// Executes one already-negotiated durable room message or action.
+    /// Executes one already-negotiated durable room message, action, or notice.
     pub fn handle_durable_room_text(
         &self,
         peer: &ServerPeer,
@@ -1073,7 +1073,10 @@ impl SessionEngine {
         client_instance_id: ClientInstanceId,
         envelope: DurableMutationEnvelope,
     ) -> ServerResult<DurableMutationDispatch> {
-        if !matches!(op, ChatOp::RoomMessage | ChatOp::RoomAction) {
+        if !matches!(
+            op,
+            ChatOp::RoomMessage | ChatOp::RoomAction | ChatOp::RoomNotice
+        ) {
             return Ok(self.durable_error_dispatch(
                 seq,
                 room_id,
@@ -1127,10 +1130,18 @@ impl SessionEngine {
         }
         let mutation_id = envelope.mutation_id;
         let request_hash = envelope.request_hash;
-        let event_kind = if op == ChatOp::RoomMessage {
-            ServerRoomEventKind::Message { body }
-        } else {
-            ServerRoomEventKind::Action { body }
+        let event_kind = match op {
+            ChatOp::RoomMessage => ServerRoomEventKind::Message { body },
+            ChatOp::RoomAction => ServerRoomEventKind::Action { body },
+            ChatOp::RoomNotice => ServerRoomEventKind::Notice { body },
+            _ => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationMalformed,
+                    "durable room operation is unsupported",
+                ))
+            }
         };
         let key = DurableMutationKey {
             identity_hash: &peer.identity_hash,
@@ -1179,6 +1190,16 @@ impl SessionEngine {
                         ))?,
                     });
                 }
+                if op == ChatOp::RoomNotice && user.role_bits & (ROLE_MODERATOR | ROLE_ADMIN) == 0 {
+                    return Ok(DurableRoomEventPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::PermissionDenied,
+                            "room notices require moderator or admin role",
+                        ))?,
+                    });
+                }
                 let admission = match self.reserve_rate(peer, RateKind::Message)? {
                     RateAdmission::Admitted(admission) => admission,
                     RateAdmission::Rejected => {
@@ -1199,7 +1220,19 @@ impl SessionEngine {
                     admission,
                 })
             },
-            |event| self.encode_durable_result(message_ack_for_event(seq, event)),
+            |event| {
+                let result = if op == ChatOp::RoomNotice {
+                    Frame::new(
+                        ChatOp::RoomEvent,
+                        seq,
+                        Some(room_id),
+                        FrameBody::Fields(vec![event_to_value(event)]),
+                    )
+                } else {
+                    message_ack_for_event(seq, event)
+                };
+                self.encode_durable_result(result)
+            },
         );
         let commit = match commit {
             Ok(commit) => commit,
@@ -5043,6 +5076,92 @@ mod tests {
             .expect("replayed durable part");
         assert_eq!(replayed.origin, stored.origin);
         assert!(replayed.broadcast.is_none());
+        assert_eq!(
+            engine
+                .store
+                .latest_events(room.room_id, 10)
+                .expect("events")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn durable_notice_replays_once_and_preserves_moderator_decision() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let user = store
+            .ensure_user(&peer().identity_hash, "Alice", None)
+            .expect("user");
+        store
+            .set_user_role_bits(user.user_id, ROLE_MODERATOR)
+            .expect("moderator");
+        let engine = SessionEngine::with_limits(
+            store,
+            SessionLimits {
+                rate_messages_per_minute: 1,
+                ..SessionLimits::default()
+            },
+        );
+        let client_instance_id = ClientInstanceId::new([13; 16]);
+        let envelope = durable_envelope(ChatOp::RoomNotice, room.room_id, 8, "maintenance soon");
+
+        let stored = engine
+            .handle_durable_mutation(
+                &peer(),
+                61,
+                Some(room.room_id),
+                ChatOp::RoomNotice,
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("stored durable notice");
+        assert_eq!(stored.origin.op, ChatOp::RoomEvent);
+        assert_eq!(
+            stored
+                .broadcast
+                .as_ref()
+                .map(encode_frame)
+                .transpose()
+                .expect("broadcast encode"),
+            Some(encode_frame(&stored.origin).expect("origin encode"))
+        );
+
+        engine
+            .store
+            .set_user_role_bits(user.user_id, 0)
+            .expect("remove moderator role");
+        let replayed = engine
+            .handle_durable_mutation(
+                &peer(),
+                62,
+                Some(room.room_id),
+                ChatOp::RoomNotice,
+                client_instance_id,
+                envelope,
+            )
+            .expect("replayed durable notice");
+        assert_eq!(replayed.origin, stored.origin);
+        assert!(replayed.broadcast.is_none());
+
+        let denied = engine
+            .handle_durable_mutation(
+                &peer(),
+                63,
+                Some(room.room_id),
+                ChatOp::RoomNotice,
+                client_instance_id,
+                durable_envelope(ChatOp::RoomNotice, room.room_id, 9, "second notice"),
+            )
+            .expect("denied durable notice");
+        assert_eq!(
+            frame_error_code(&denied.origin),
+            Some(ChatErrorCode::PermissionDenied as u16 as u64)
+        );
+        assert!(denied.broadcast.is_none());
         assert_eq!(
             engine
                 .store

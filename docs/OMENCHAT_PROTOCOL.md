@@ -225,7 +225,8 @@ continues to return the legacy accept, so well-formed durable requests remain
 unbound and cannot send durable envelopes.
 
 An inactive session executor now implements the negotiated semantics for room
-messages, actions, and part-room operations behind the staged live Link gate. It checks
+messages, actions, notices, and part-room operations behind the staged live
+Link gate. It checks
 the canonical hash, stores mutation and exact origin result transactionally,
 returns a broadcast event only for first execution, preserves terminal policy
 rejections, avoids a second rate charge, and replays across server restart.
@@ -245,6 +246,11 @@ For durable `PartRoom`, membership deletion, the departure event, the exact
 legacy-compatible `CommandResult`, and replay publication commit atomically.
 Only first execution changes live room ownership and emits a refreshed user
 list. Replay returns the retained result without repeating those effects.
+
+Durable `RoomNotice` retains the moderator/admin decision and exact origin room
+event in the same transaction as event insertion. Only first execution is
+fanned out to other room Links; replay returns the retained origin event
+without another rate charge or broadcast.
 
 ## Operation correlation and same-link replay
 

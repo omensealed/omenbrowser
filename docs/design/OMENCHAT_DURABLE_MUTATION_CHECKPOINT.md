@@ -430,5 +430,11 @@ mutations and validates it before commit; a validation failure rolls back both
 membership and event changes. First execution performs live room cleanup and
 one user-list update. If origin delivery failed after commit, replay returns the
 original result and repairs stale live room ownership; fan-out occurs only when
-that ownership was still present. Capability activation remains blocked on durable
-`RoomNotice` and mutating-command semantics.
+that ownership was still present.
+
+`RoomNotice` is now covered by the transaction-backed room-event executor. It
+retains moderator/admin authorization decisions, uses reversible bounded
+message-rate admission, returns the original room event to the sender, and
+fans out only the first committed event. Replay remains stable after a role
+change and cannot charge or broadcast again. Capability activation remains
+blocked on mutating-command semantics.

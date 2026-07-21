@@ -784,11 +784,28 @@ Live dispatch marks the Link as parted only when the first committed durable
 part or its retained successful replay is observed. User-list publication only
 occurs when stale live room ownership was actually removed, so replay can
 repair an origin-delivery failure without duplicating fan-out. Focused session,
-live routing, delivery-failure recovery, and rollback tests pass. Capability
-acceptance remains disabled because `RoomNotice` and mutating command coverage
-are still incomplete.
+live routing, delivery-failure recovery, and rollback tests pass.
 
 The complete standalone headless profile passed 233 tests and the full
 server/TUI profile passed 355 tests, with eight explicit soak, hardware,
+upstream-regression, or interoperability tests ignored in each profile. Strict
+Clippy passed for both profiles and formatting passed.
+
+## Durable room notices
+
+The staged room-event executor now covers `RoomNotice` with the same canonical
+hash, body-size, banned/muted, bounded rate-admission, and transactional replay
+rules as messages and actions, plus moderator/admin authorization. First
+execution returns the legacy-compatible room event to the origin and fans it
+out once. Exact replay returns the retained origin event without another rate
+charge or room fan-out, even if the sender's role later changes.
+
+Focused session and live-routing tests cover retained authorization, exact
+origin replay, and one-time observer delivery. Capability acceptance remains
+disabled because the negotiated contract's mutating commands are not yet
+durable.
+
+The complete standalone headless profile passed 235 tests and the full
+server/TUI profile passed 357 tests, with eight explicit soak, hardware,
 upstream-regression, or interoperability tests ignored in each profile. Strict
 Clippy passed for both profiles and formatting passed.
