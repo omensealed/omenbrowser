@@ -1,9 +1,9 @@
 use rusqlite::OptionalExtension;
 
-use super::OmenchatStore;
+use super::{append_event_in_transaction, OmenchatStore, ServerRoomEvent, ServerRoomEventKind};
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::codec::decode_frame;
-use crate::protocol::{ClientInstanceId, MutationId, RequestHash};
+use crate::protocol::{ClientInstanceId, MutationId, RequestHash, RoomId, UserId};
 
 /// Maximum encoded origin response retained for one durable mutation.
 pub const MAX_DURABLE_RESULT_BYTES: usize = 64 * 1024;
@@ -39,6 +39,22 @@ pub enum DurableReplayCommit {
     Expired,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Result of atomically appending one room event and retaining its origin reply.
+/// Replays intentionally omit the event so callers cannot broadcast it twice.
+pub enum DurableRoomEventCommit {
+    Stored {
+        result_frame: Vec<u8>,
+        event: ServerRoomEvent,
+        pruned: usize,
+    },
+    Replayed {
+        result_frame: Vec<u8>,
+    },
+    Conflict,
+    Expired,
+}
+
 #[derive(Clone, Copy)]
 struct RetentionLimits {
     age_seconds: i64,
@@ -63,6 +79,50 @@ const PRODUCTION_LIMITS: RetentionLimits = RetentionLimits {
 };
 
 impl OmenchatStore {
+    /// Appends a room event and retains its exact encoded origin response in
+    /// one SQLite transaction. The encoder must be deterministic and must not
+    /// cause external side effects. Live permission, rate, and broadcast
+    /// policy deliberately remain outside this dormant persistence boundary.
+    pub fn commit_durable_room_event_result<F>(
+        &self,
+        key: DurableMutationKey<'_>,
+        request_hash: RequestHash,
+        room_id: RoomId,
+        actor_user_id: Option<UserId>,
+        kind: ServerRoomEventKind,
+        encode_result: F,
+    ) -> ServerResult<DurableRoomEventCommit>
+    where
+        F: FnOnce(&ServerRoomEvent) -> ServerResult<Vec<u8>>,
+    {
+        let mut stored_event = None;
+        let commit = self.commit_durable_mutation_result(key, request_hash, |transaction| {
+            let event = append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
+            let result_frame = encode_result(&event)?;
+            stored_event = Some(event);
+            Ok(result_frame)
+        })?;
+        match commit {
+            DurableReplayCommit::Stored {
+                result_frame,
+                pruned,
+            } => Ok(DurableRoomEventCommit::Stored {
+                result_frame,
+                event: stored_event.ok_or_else(|| {
+                    ServerError::Message(
+                        "durable room event committed without its stored event".into(),
+                    )
+                })?,
+                pruned,
+            }),
+            DurableReplayCommit::Replayed { result_frame } => {
+                Ok(DurableRoomEventCommit::Replayed { result_frame })
+            }
+            DurableReplayCommit::Conflict => Ok(DurableRoomEventCommit::Conflict),
+            DurableReplayCommit::Expired => Ok(DurableRoomEventCommit::Expired),
+        }
+    }
+
     /// Runs a future durable mutation and publishes its exact encoded response
     /// in the same SQLite transaction. The callback must perform SQLite work
     /// only through the supplied transaction and must not cause external side
@@ -481,7 +541,7 @@ mod tests {
 
     use super::*;
     use crate::protocol::codec::encode_frame;
-    use crate::protocol::{ChatOp, Frame, FrameBody};
+    use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
     fn key_with_client<'a>(
         identity_hash: &'a [u8],
@@ -511,6 +571,34 @@ mod tests {
             FrameBody::Text(marker.into()),
         ))
         .expect("encoded result")
+    }
+
+    fn room_event_result(seq: u32, event: &ServerRoomEvent) -> ServerResult<Vec<u8>> {
+        let kind = match event.kind {
+            ServerRoomEventKind::Message { .. } => 1,
+            ServerRoomEventKind::Action { .. } => 2,
+            _ => return Err(ServerError::Message("unexpected test event kind".into())),
+        };
+        encode_frame(&Frame::new(
+            ChatOp::MessageAck,
+            seq,
+            Some(event.room_id),
+            FrameBody::Fields(vec![
+                FrameValue::U64(event.event_id),
+                FrameValue::U64(kind),
+                event
+                    .actor_user_id
+                    .map(|user_id| FrameValue::U64(user_id as u64))
+                    .unwrap_or(FrameValue::Nil),
+                FrameValue::I64(event.at_unix),
+                event
+                    .actor_display_name
+                    .clone()
+                    .map(FrameValue::String)
+                    .unwrap_or(FrameValue::Nil),
+            ]),
+        ))
+        .map_err(|error| ServerError::Message(error.to_string()))
     }
 
     fn percentile_micros(samples: &mut [u128], percentile: usize) -> u128 {
@@ -579,6 +667,104 @@ mod tests {
             .expect("conflict result");
         assert_eq!(conflict, DurableReplayCommit::Conflict);
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn durable_room_event_is_atomic_and_replay_cannot_be_rebroadcast() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("durable", None).expect("room");
+        let user = store
+            .ensure_user(&[9; 16], "Durable User", None)
+            .expect("user");
+        let identity = [4; 16];
+
+        let stored = store
+            .commit_durable_room_event_result(
+                key(&identity, 1),
+                request_hash(1),
+                room.room_id,
+                Some(user.user_id),
+                ServerRoomEventKind::Message {
+                    body: "exactly once".into(),
+                },
+                |event| room_event_result(17, event),
+            )
+            .expect("stored room event");
+        let (stored_result, stored_event) = match stored {
+            DurableRoomEventCommit::Stored {
+                result_frame,
+                event,
+                pruned: 0,
+            } => (result_frame, event),
+            other => panic!("unexpected first result: {other:?}"),
+        };
+        assert_eq!(
+            stored_event.actor_display_name.as_deref(),
+            Some("Durable User")
+        );
+
+        let replayed = store
+            .commit_durable_room_event_result(
+                key(&identity, 1),
+                request_hash(1),
+                room.room_id,
+                Some(user.user_id),
+                ServerRoomEventKind::Message {
+                    body: "exactly once".into(),
+                },
+                |_| panic!("an exact replay must not append or encode another event"),
+            )
+            .expect("replayed room event");
+        assert_eq!(
+            replayed,
+            DurableRoomEventCommit::Replayed {
+                result_frame: stored_result
+            }
+        );
+        let events = store.latest_events(room.room_id, 10).expect("events");
+        assert_eq!(events, vec![stored_event]);
+
+        let conflict = store
+            .commit_durable_room_event_result(
+                key(&identity, 1),
+                request_hash(2),
+                room.room_id,
+                Some(user.user_id),
+                ServerRoomEventKind::Message {
+                    body: "different content".into(),
+                },
+                |_| panic!("a conflicting replay must not execute"),
+            )
+            .expect("conflicting room event");
+        assert_eq!(conflict, DurableRoomEventCommit::Conflict);
+        assert_eq!(
+            store.latest_events(room.room_id, 10).expect("events").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn durable_room_event_rolls_back_when_origin_response_cannot_be_retained() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("rollback", None).expect("room");
+        let identity = [6; 16];
+        let error = store
+            .commit_durable_room_event_result(
+                key(&identity, 1),
+                request_hash(1),
+                room.room_id,
+                None,
+                ServerRoomEventKind::Action {
+                    body: "must rollback".into(),
+                },
+                |_| Ok(vec![0xc0]),
+            )
+            .expect_err("invalid origin response must roll back event");
+        assert!(error.to_string().contains("valid bounded OMENchat frame"));
+        assert!(store
+            .latest_events(room.room_id, 10)
+            .expect("events")
+            .is_empty());
     }
 
     #[test]

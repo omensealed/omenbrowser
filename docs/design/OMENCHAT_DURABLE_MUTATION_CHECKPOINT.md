@@ -1,6 +1,6 @@
 # OMENchat durable mutation checkpoint
 
-Status: checkpoint accepted for staged implementation; no live wire or database migration implemented  
+Status: checkpoint accepted; inactive schema, stores, and negotiation parsing implemented; no live capability activation
 Baseline: OMENbrowser/omenchatd v0.9.5-2, OMENchat protocol v1  
 Proposed capability: `durable-mutations-v1`
 
@@ -364,3 +364,17 @@ origin response actually contains `SessionAccept`, so an error cannot satisfy
 the handshake. A corrected legacy request can recover on the same Link. This
 does not store a client instance, accept the capability, decode an envelope, or
 enable retry.
+
+The inactive server persistence layer can now append a room event and retain
+the exact encoded origin reply in one SQLite transaction. First execution
+returns both reply and event; replay returns only the original reply, so a
+future caller cannot fan out the event twice. Conflict, expiry, invalid reply,
+and transaction failure do not append an event. This is deliberately below the
+live session boundary: permissions, membership, in-memory rate accounting,
+broadcast policy, negotiated Link ownership, and retry remain unchanged.
+
+The next activation gate is not another schema change. It is a tested live
+orchestration rule that (a) validates permission and membership, (b) reserves
+rate capacity without double-charging replay or leaking a charge on rollback,
+(c) binds the negotiated client instance to the authenticated Link, and (d)
+broadcasts only a newly stored event.

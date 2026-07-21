@@ -645,3 +645,33 @@ only when the engine actually produced `SessionAccept`, rather than for every
 inbound `SessionOpen` opcode. Focused tests prove malformed negotiation remains
 pending and a corrected legacy request can recover on the same Link. No client
 instance is retained and no durable envelope, retry, or mutation path is live.
+
+## Transactional durable room-event boundary (inactive)
+
+The server store now has a narrowly scoped persistence boundary that appends
+one room event and retains its exact encoded origin response in the same
+`BEGIN IMMEDIATE` SQLite transaction. The existing ordinary append path uses
+the same internal event allocator, so event IDs, timestamps, actor names, and
+payload encoding retain one implementation. A first execution returns the
+stored event for future one-time fan-out; an exact replay returns only the
+retained response bytes, making accidental rebroadcast structurally harder.
+Hash conflicts and retired client instances execute no event work, and an
+invalid or oversized origin response rolls back both the event and replay row.
+
+This boundary remains dormant. It does not perform authorization, membership,
+rate accounting, broadcasting, capability acceptance, or automatic retry.
+Before live activation, rate admission must be arranged so an exact replay is
+not charged twice and a rolled-back database mutation does not permanently
+consume an in-memory rate slot. The live Link must also bind the negotiated
+client instance to its authenticated identity and broadcast only the event
+returned by a `Stored` result.
+
+Local validation used the isolated standalone server root: the two focused
+durable room-event tests passed; the headless suite passed 218 tests with eight
+explicit hardware/soak/interoperability tests ignored; headless all-target
+Clippy passed with `-D warnings`; the full server/TUI profile passed 340 tests
+with the same eight explicit ignores; formatting passed; and the copied
+standalone relocation check, compile-only test build, four IFAC fixture tests,
+and doc tests passed. No remote CI was dispatched for this server-only inactive
+unit; it is being batched with the next checkpoint to avoid a low-value
+15-minute workflow.

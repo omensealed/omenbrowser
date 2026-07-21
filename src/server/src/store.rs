@@ -1,5 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rusqlite::OptionalExtension;
+
 use crate::error::ServerResult;
 use crate::protocol::{EventId, RoomId, UserId};
 
@@ -497,32 +499,9 @@ impl OmenchatStore {
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let event_id = next_event_id(&transaction, room_id)?;
-        let at_unix = current_unix_seconds();
-        let (kind_code, payload) = encode_event_kind(&kind);
-        transaction.execute(
-            "INSERT INTO room_events(room_id, event_id, event_kind, actor_user_id, at, payload)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            (
-                room_id,
-                event_id,
-                kind_code,
-                actor_user_id,
-                at_unix,
-                payload,
-            ),
-        )?;
+        let event = append_event_in_transaction(&transaction, room_id, actor_user_id, kind)?;
         transaction.commit()?;
-        Ok(ServerRoomEvent {
-            room_id,
-            event_id,
-            kind,
-            actor_user_id,
-            actor_display_name: actor_user_id
-                .and_then(|user_id| self.user_by_id(user_id).ok().flatten())
-                .map(|user| user.display_name),
-            at_unix,
-        })
+        Ok(event)
     }
 
     pub fn record_upload_file(&self, upload: RecordUploadFile<'_>) -> ServerResult<()> {
@@ -894,6 +873,49 @@ fn next_event_id(
         |row| row.get::<_, i64>(0),
     )?;
     Ok(event_id as EventId)
+}
+
+fn append_event_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    actor_user_id: Option<UserId>,
+    kind: ServerRoomEventKind,
+) -> ServerResult<ServerRoomEvent> {
+    let event_id = next_event_id(transaction, room_id)?;
+    let at_unix = current_unix_seconds();
+    let (kind_code, payload) = encode_event_kind(&kind);
+    transaction.execute(
+        "INSERT INTO room_events(room_id, event_id, event_kind, actor_user_id, at, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        (
+            room_id,
+            event_id,
+            kind_code,
+            actor_user_id,
+            at_unix,
+            payload,
+        ),
+    )?;
+    let actor_display_name = actor_user_id
+        .map(|user_id| {
+            transaction
+                .query_row(
+                    "SELECT display_name FROM users WHERE user_id = ?1",
+                    [user_id as i64],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+        })
+        .transpose()?
+        .flatten();
+    Ok(ServerRoomEvent {
+        room_id,
+        event_id,
+        kind,
+        actor_user_id,
+        actor_display_name,
+        at_unix,
+    })
 }
 
 fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRoom> {

@@ -201,6 +201,14 @@ result-expired, and store-busy durable outcomes. This is still not live
 protocol behavior: production does not invoke rotation, advertise the
 capability, emit these errors, or automatically retry uncertain work.
 
+The dormant store additionally has an atomic room-event primitive: event
+insertion and the exact encoded origin response are committed together. A new
+result carries the event for one-time future fan-out; an exact replay carries
+only the retained response. Invalid response encoding rolls back the event.
+No live handler calls this primitive yet because authorization, membership,
+rate reservation, negotiated client-instance ownership, and broadcast timing
+must be composed and tested without double accounting or duplicate fan-out.
+
 ## Operation correlation and same-link replay
 
 The existing 32-bit frame `seq` is the request/response correlation identifier.
