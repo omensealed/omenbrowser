@@ -4800,9 +4800,37 @@ for why recovery is required.
 
 No product retry, protocol, schema, identity, queue, or storage behavior
 changed. Rollback removes harness parameterization but discards adjacent-release
-evidence. Adjacent OMENchat client/server execution, propagation-node
-restart/crash/stamp-ticket variants, packaging, and resource comparisons remain
-pending. The Python interoperability workflow now runs the locally proven five
+evidence. Propagation-node restart/crash/stamp-ticket variants, packaging, and
+resource comparisons remain pending. The Python interoperability workflow now
+runs the locally proven five
 adjacent cases in the existing bounded mixed-release job, with a distinct old
 Cargo target so its 0.9.5 artifacts cannot contaminate the long-range 0.6
-fixtures. Hosted completion remains the unit's final gate.
+fixtures.
+
+Hosted run `29884168183` passed all pinned, current-drift, long-range, and
+adjacent cases at commit `8d9bcd5`.
+
+## v0.9.6-1 unit 4c: adjacent v0.9.5-2 OMENchat compatibility
+
+The OMENchat history and live-process harnesses now accept the same immutable
+old commit/version selection while retaining their `0.6.0-1` defaults. The
+published `v0.9.5-2` commit and its committed lockfile were used for every old
+binary. An explicit old-server stop-mode assertion preserves the long-range
+SIGTERM expectation and records that the adjacent server shuts down orderly.
+
+The isolated SQLite store passed bidirectional reopening: `0.9.6-1` read the
+old release's event and metadata, then `0.9.5-2` reopened the current release's
+additional event with order, room state, and server metadata intact. Live
+loopback tests passed in both directions for session establishment, room join,
+message send, and echo. Both client/server arrangements passed server restart
+with stable destination identity, reused client state, reconnection, rejoin,
+and post-restart echo. Both arrangements also decoded Resource-backed history
+through an isolated one-byte large-batch threshold and a second client.
+
+This changes only test selection and assertions. It does not change OMENchat's
+wire version, SQLite schema, identity ownership, retry policy, runtime queues,
+or production shutdown behavior. Rollback removes the environment-driven old
+peer selection and loses adjacent evidence. The cases remain local until the
+next meaningful interoperability checkpoint; repeatedly dispatching the full
+hosted matrix for harness-only commits would add cost and latency without
+additional platform coverage.

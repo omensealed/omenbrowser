@@ -3,7 +3,9 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
-readonly old_commit=5ba6683055fb6c59111919fbad1ac37f56a4c203
+readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a4c203}
+readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
+readonly current_expected_version=0.9.6-1
 
 report_path=""
 while (($#)); do
@@ -57,8 +59,8 @@ old_version=$(python3 -c \
 current_version=$(python3 -c \
   'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["package"]["version"])' \
   "$repo_root/Cargo.toml")
-[[ "$old_version" == "0.6.0-1" ]]
-[[ "$current_version" == "0.9.6-1" ]]
+[[ "$old_version" == "$old_expected_version" ]]
+[[ "$current_version" == "$current_expected_version" ]]
 
 "$old_probe" seed-old "$database_root" >"$temporary_root/seed-old.json"
 "$current_probe" reopen-current "$database_root" >"$temporary_root/reopen-current.json"
@@ -122,4 +124,4 @@ if [[ -n "$report_path" ]]; then
   cp -- "$summary" "$report_path"
 fi
 cat "$summary"
-echo "mixed OMENchat 0.6.0-1/0.9.6-1 SQLite history reopening: pass"
+echo "mixed OMENchat $old_version/$current_version SQLite history reopening: pass"

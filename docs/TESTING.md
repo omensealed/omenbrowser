@@ -3460,7 +3460,8 @@ peer-bound message in each process, and exact 32-byte-title/102-byte-content
 shape metadata. It retains no raw application report containing paths or
 identity material.
 
-For adjacent-release qualification, the direct and propagation harnesses also
+For adjacent-release qualification, the direct, propagation, and OMENchat
+harnesses also
 accept an explicit immutable old commit and expected version without changing
 their legacy defaults. The published `v0.9.5-2` cases use:
 
@@ -3468,6 +3469,7 @@ their legacy defaults. The published `v0.9.5-2` cases use:
 export OMEN_MIXED_OLD_COMMIT=c6ad96d3e083425a62e6713abe8598c4d494bde0
 export OMEN_MIXED_OLD_VERSION=0.9.5-2
 export OMEN_MIXED_OLD_TARGET_DIR="$PWD/target/mixed-v0.9.5-2"
+export OMEN_MIXED_OLD_SERVER_STOP_MODE=orderly
 
 bash scripts/run-mixed-0-6-0-9-lxmf.sh
 bash scripts/run-mixed-0-6-0-9-lxmf.sh --resource
@@ -3475,7 +3477,19 @@ bash scripts/run-mixed-0-6-0-9-lxmf.sh --restart
 bash scripts/run-mixed-0-6-0-9-propagation.sh --reverse
 OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
   bash scripts/run-mixed-0-6-0-9-propagation.sh
+bash scripts/run-mixed-0-6-0-9-omenchat-history.sh
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --restart
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --restart
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --history-resource
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --history-resource
 ```
+
+The stop-mode override records a real release difference: the long-range
+`0.6.0-1` server default still expects SIGTERM, while `0.9.5-2` participates in
+the harness's orderly server shutdown. It changes only the assertion for the
+selected immutable old peer.
 
 The recovery option does not resend the logical message. It requires an initial
 sync to retain exactly one transient and request the unknown authenticated

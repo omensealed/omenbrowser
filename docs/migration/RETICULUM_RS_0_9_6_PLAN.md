@@ -177,9 +177,16 @@ and before/after desktop/server resource measurements remain. The published
 Resources, restart/state reopening, and both propagation directions. The
 `0.9.6-1` sender to `0.9.5-2` recipient direction requires the documented
 two-sync unknown-sender recovery without resending the logical mutation.
-GitHub runs `29877719914` and `29877720971` pass at commit `5905d0b`, covering
+Adjacent OMENchat qualification also passes SQLite state reopening, live room
+traffic, orderly server restart, and Resource-backed history in both client and
+server directions. GitHub runs `29877719914` and `29877720971` pass at commit
+`5905d0b`, covering
 Linux quick checks, native Windows/Intel macOS/Apple Silicon macOS matrices,
 pinned and current Python lanes, and the existing full `0.6.0-1` mixed matrix.
+The expanded adjacent LXMF hosted matrix passes in Python interoperability run
+`29884168183` at commit `8d9bcd5`. The adjacent OMENchat additions remain local
+until the next interoperability checkpoint so ordinary development does not
+dispatch the roughly half-hour workflow for each small commit.
 
 - Keep the pinned Python lane at the immutable upstream references used by
   0.9.6 (`RNS 15320e4...`, `LXMF 727830c...`, conformance `0319444...`).
