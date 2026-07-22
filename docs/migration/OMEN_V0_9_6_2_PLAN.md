@@ -142,6 +142,14 @@ preserve uncertain state and do not trigger retry. Focused tests cover both
 terminal codes, nonterminal/uncorrelated preservation, persistent transition,
 and truthful session status.
 
+The remaining deterministic matrix is consolidated in
+`OMENCHAT_DURABLE_V0_9_6_2_EVIDENCE.md`. Reconnect now removes the retired
+durable optimistic echo while preserving legacy uncertain echoes, resets Link-
+local correlation, and requires capability renegotiation before explicit
+retry. The intent worker's joined shutdown drains every admitted write before
+closing its SQLite owner. Hosted native, mixed-version, Python, soak, and
+package jobs remain grouped into the single release checkpoint.
+
 The server transaction/replay executor and browser intent store are active only
 for explicitly negotiated room-text operations. Client intent ownership,
 advertisement/acceptance, durable envelope send, acknowledgement resolution,

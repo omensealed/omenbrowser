@@ -226,11 +226,21 @@ impl LiveChatClientState {
             .retain(|_, download| download.session_id != session_id);
     }
 
-    pub fn retire_session_link_state(&mut self, session_id: ChatSessionId) {
+    pub fn retire_session_link_state(
+        &mut self,
+        session_id: ChatSessionId,
+    ) -> BTreeSet<(RoomId, u64)> {
+        let retired_echoes = self
+            .pending_local_echoes
+            .values()
+            .filter(|echo| echo.session_id == session_id && echo.mutation_id.is_some())
+            .map(|echo| (echo.room_id, echo.temp_event_id))
+            .collect();
         self.cancel_session_transfers(session_id);
         self.next_seq_by_session.remove(&session_id);
         self.durable_requests.remove(&session_id);
         self.durable_sessions.remove(&session_id);
+        retired_echoes
     }
 }
 
@@ -397,10 +407,13 @@ pub fn reconnect_live_server<T: ChatLinkTransport>(
             message: "OMENchat reconnect destination changed".into(),
         }];
     }
-    state.retire_session_link_state(session_id);
+    let retired_echoes = state.retire_session_link_state(session_id);
     let session = client
         .session_mut(session_id)
         .expect("reconnect session was validated above");
+    session
+        .events
+        .retain(|event| !retired_echoes.contains(&(event.room_id, event.event_id)));
     session.status = "live link connected; reopening OMENchat session".into();
 
     let mut events = vec![ChatClientEvent::ServerOpened {
@@ -4154,6 +4167,20 @@ mod tests {
             inline_chunk_frame("download", 64, 1, vec![2; 16]),
             &mut events,
         );
+        assert!(matches!(
+            handle_live_request(
+                &mut client,
+                &mut state,
+                &mut transport,
+                ChatClientRequest::SendMessage {
+                    session_id,
+                    room: "lobby".into(),
+                    body: "legacy uncertain".into(),
+                },
+            )
+            .as_slice(),
+            [ChatClientEvent::EventAppended { .. }]
+        ));
 
         let reconnect_events = reconnect_live_server(
             &mut client,
@@ -4172,6 +4199,7 @@ mod tests {
         ));
         assert_eq!(state.pending_upload_metrics().items, 0);
         assert_eq!(state.inline_download_metrics().items, 0);
+        assert_eq!(client.session(session_id).expect("session").events.len(), 1);
         let reconnect_sequences = transport
             .sent_frames
             .iter()
@@ -4180,6 +4208,69 @@ mod tests {
             .map(|bytes| decode_frame(bytes).expect("reconnect frame").seq)
             .collect::<Vec<_>>();
         assert_eq!(reconnect_sequences, vec![2, 1]);
+    }
+
+    #[test]
+    fn live_reconnect_removes_retired_durable_echo_and_requires_renegotiation() {
+        let (mut client, session_id) = live_test_client();
+        let client_instance_id = ClientInstanceId::new([55; 16]);
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        let intent =
+            durable_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        let mut transport = CapturedChatTransport::default();
+
+        let sent = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert!(matches!(
+            sent.as_slice(),
+            [ChatClientEvent::EventAppended { .. }]
+        ));
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+        assert_eq!(client.session(session_id).expect("session").events.len(), 1);
+
+        let reconnect_events = reconnect_live_server(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            OmenChatDescriptor {
+                server_destination: "abcd".into(),
+                ..OmenChatDescriptor::default()
+            },
+        );
+
+        assert!(matches!(
+            reconnect_events.first(),
+            Some(ChatClientEvent::ServerOpened { .. })
+        ));
+        assert!(client
+            .session(session_id)
+            .expect("session")
+            .events
+            .is_empty());
+        assert!(!state.durable_mutation_is_pending(session_id, intent.mutation_id));
+        assert!(!state.durable_mutations_negotiated(session_id));
+        assert!(state.durable_requests.contains(&session_id));
+        let frames_before_retry = transport.sent_frames.len();
+        assert!(matches!(
+            send_uncertain_durable_room_text(
+                &mut client,
+                &mut state,
+                &mut transport,
+                session_id,
+                &intent,
+            )
+            .as_slice(),
+            [ChatClientEvent::Error { .. }]
+        ));
+        assert_eq!(transport.sent_frames.len(), frames_before_retry);
     }
 
     #[test]
@@ -4872,7 +4963,7 @@ mod tests {
         assert_eq!(state.reserve_seq(33), Ok(u32::MAX));
         assert!(state.reserve_seq(33).is_err());
 
-        state.retire_session_link_state(11);
+        let _ = state.retire_session_link_state(11);
         assert_eq!(state.reserve_seq_pair(11), Ok([1, 2]));
     }
 

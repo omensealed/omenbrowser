@@ -30,7 +30,8 @@ impl DesktopApp {
                 session_id,
                 crate::chat::ChatConnectionState::Draining,
             );
-            self.omenchat
+            let _ = self
+                .omenchat
                 .omenchat_live_state
                 .retire_session_link_state(session_id);
             self.omenchat.omenchat_live_opening.remove(&session_id);

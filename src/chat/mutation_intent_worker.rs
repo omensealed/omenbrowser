@@ -459,6 +459,43 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_drains_admitted_intents_before_joining() {
+        let root = isolated_root("shutdown-drain");
+        let worker = MutationIntentWorker::start(&root).expect("worker");
+        let (entered, release) = worker.pause();
+        entered.recv().expect("worker paused");
+        let replies = (0..4)
+            .map(|index| {
+                let mut request = request();
+                request.body = FrameBody::Text(format!("queued-{index}"));
+                worker.try_prepare(request).expect("prepare admitted")
+            })
+            .collect::<Vec<_>>();
+        let shutdown = std::thread::spawn(move || worker.shutdown());
+
+        release.send(()).expect("release worker");
+        shutdown
+            .join()
+            .expect("shutdown thread")
+            .expect("draining shutdown");
+        for reply in replies {
+            assert_eq!(
+                reply
+                    .recv()
+                    .expect("prepare reply")
+                    .expect("prepare result")
+                    .state,
+                OutboundMutationState::Prepared
+            );
+        }
+
+        let reopened = MutationIntentStore::open_for_identity_storage_root(&root).expect("reopen");
+        assert_eq!(reopened.recover_nonterminal().expect("recover").len(), 4);
+        drop(reopened);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn oversized_prepare_is_rejected_before_queue_admission() {
         let root = isolated_root("oversized");
         let worker = MutationIntentWorker::start(&root).expect("worker");

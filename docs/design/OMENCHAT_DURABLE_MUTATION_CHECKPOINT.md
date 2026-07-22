@@ -275,6 +275,14 @@ uncorrelated errors remain uncertain; they cannot fabricate a delivery or
 terminal result. A persistence failure leaves the durable intent recoverable
 and is reported instead of being hidden.
 
+On Link retirement, transient pending correlations are discarded. Durable
+optimistic echoes owned by that Link are removed from the timeline because the
+persistent uncertain intent is the recovery authority; legacy uncertain echoes
+remain visible and are not resent. A replacement Link must negotiate the
+capability again before a confirmed retry. Intent-worker shutdown places its
+sentinel after already admitted bounded commands and joins only after those
+SQLite operations complete.
+
 ## Server retention
 
 Initial ceilings, subject to soak evidence:
