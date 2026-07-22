@@ -359,15 +359,22 @@ fn omenchat_recovered_mutations_panel(
             .omenchat_mutation_resolution_confirmation
             .filter(|confirmation| confirmation.mutation_id == intent.mutation_id);
         let actions = if let Some(confirmation) = confirming {
+            let confirmation_label = match confirmation.next {
+                crate::chat::mutation_intents::OutboundMutationState::SentUncertain => {
+                    if confirmation.expected
+                        == crate::chat::mutation_intents::OutboundMutationState::Prepared
+                    {
+                        "Confirm Send"
+                    } else {
+                        "Confirm Retry"
+                    }
+                }
+                crate::chat::mutation_intents::OutboundMutationState::Expired => "Confirm Expired",
+                _ => "Confirm Stop Tracking",
+            };
             row![
                 warning_button(
-                    if confirmation.next
-                        == crate::chat::mutation_intents::OutboundMutationState::Expired
-                    {
-                        "Confirm Expired"
-                    } else {
-                        "Confirm Stop Tracking"
-                    },
+                    confirmation_label,
                     Message::OmenChat(OmenChatMessage::ConfirmMutationResolution),
                 ),
                 subtle_button(
@@ -377,18 +384,39 @@ fn omenchat_recovered_mutations_panel(
             ]
             .spacing(6)
         } else {
-            let (button_label, action) = if past_expiry {
-                ("Finalize Expired", OmenChatMutationResolutionAction::Expire)
+            if past_expiry {
+                row![warning_button(
+                    "Finalize Expired",
+                    Message::OmenChat(OmenChatMessage::BeginMutationResolution {
+                        mutation_id: intent.mutation_id,
+                        action: OmenChatMutationResolutionAction::Expire,
+                    }),
+                )]
             } else {
-                ("Stop Tracking", OmenChatMutationResolutionAction::Abandon)
-            };
-            row![warning_button(
-                button_label,
-                Message::OmenChat(OmenChatMessage::BeginMutationResolution {
-                    mutation_id: intent.mutation_id,
-                    action,
-                }),
-            )]
+                row![
+                    warning_button(
+                        if intent.state
+                            == crate::chat::mutation_intents::OutboundMutationState::Prepared
+                        {
+                            "Send Prepared"
+                        } else {
+                            "Retry Safely"
+                        },
+                        Message::OmenChat(OmenChatMessage::BeginMutationResolution {
+                            mutation_id: intent.mutation_id,
+                            action: OmenChatMutationResolutionAction::Retry,
+                        }),
+                    ),
+                    subtle_button(
+                        "Stop Tracking",
+                        Message::OmenChat(OmenChatMessage::BeginMutationResolution {
+                            mutation_id: intent.mutation_id,
+                            action: OmenChatMutationResolutionAction::Abandon,
+                        }),
+                    ),
+                ]
+                .spacing(6)
+            }
         };
         content = content.push(column![text(label).size(ui_size(12)), actions].spacing(4));
     }

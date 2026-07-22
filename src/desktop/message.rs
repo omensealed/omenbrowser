@@ -27,6 +27,7 @@ pub(in crate::desktop) enum OmenChatDraftCommandResult {
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::desktop) enum OmenChatMutationResolutionAction {
+    Retry,
     Abandon,
     Expire,
 }

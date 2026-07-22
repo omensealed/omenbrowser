@@ -70,9 +70,9 @@ build `906.2`; protocol and database versions remain independent.
 
 ## Unit 2 — durable mutation live activation
 
-Status: negotiated room-text activation, conservative restart recovery, and
-non-network terminal resolution are locally complete; deliberate durable retry
-remains pending. Startup owns the bounded
+Status: negotiated room-text activation, conservative restart recovery,
+non-network terminal resolution, and deliberate user-confirmed retry are
+locally complete. Startup owns the bounded
 intent worker only when the persistent client instance and authenticated active
 identity are both available. Only then does the browser advertise the bounded
 capability extension. omenchatd accepts only that known capability and binds the
@@ -115,12 +115,23 @@ the persisted deadline and transitions the record to `expired`. Both use the
 bounded intent worker and emit no frame. Concurrent acknowledgement or another
 terminal transition wins safely and removes the stale recovery row from the UI.
 
-The server transaction/replay executors and browser intent store remain staged
-but production capability acceptance is off in v0.9.6-1. Connect them in the
-smallest order: client intent ownership, negotiated advertisement/acceptance,
-durable envelope send, acknowledgement resolution, reconnect/restart recovery,
-and explicit uncertain-state actions. A legacy or downgraded peer must retain
-the current no-automatic-resend behavior.
+Before expiry, `Send Prepared` and `Retry Safely` require confirmation and
+revalidate the active authenticated identity, persistent client instance,
+original server and room, live transport, and current negotiated capability.
+A prepared record is persisted as `sent_uncertain` before transport. An
+uncertain record reuses its existing mutation ID, canonical hash, and body;
+retry never creates a replacement operation. A mutation already awaiting a
+response in the same process is rejected, recovered retries do not clear a
+newer composer draft, and acknowledgement removes the recovered row. Nothing
+is retried automatically.
+
+The server transaction/replay executor and browser intent store are active only
+for explicitly negotiated room-text operations. Client intent ownership,
+advertisement/acceptance, durable envelope send, acknowledgement resolution,
+restart recovery, and explicit uncertain-state actions now form one guarded
+path. Room actions, commands, and other mutation types remain on their current
+legacy paths. A legacy or downgraded peer retains the no-automatic-resend
+behavior.
 
 ## Unit 3 — release qualification
 

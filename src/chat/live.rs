@@ -122,6 +122,16 @@ impl LiveChatClientState {
         self.durable_sessions.contains(&session_id)
     }
 
+    pub fn durable_mutation_is_pending(
+        &self,
+        session_id: ChatSessionId,
+        mutation_id: MutationId,
+    ) -> bool {
+        self.pending_local_echoes.values().any(|pending| {
+            pending.session_id == session_id && pending.mutation_id == Some(mutation_id)
+        })
+    }
+
     fn reserve_sequence_range(
         &mut self,
         session_id: ChatSessionId,

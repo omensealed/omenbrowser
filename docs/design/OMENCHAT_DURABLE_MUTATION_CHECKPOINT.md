@@ -1,6 +1,6 @@
 # OMENchat durable mutation checkpoint
 
-Status: checkpoint accepted; negotiated room-text durable transmission and conservative restart recovery active
+Status: checkpoint accepted; negotiated room-text durable transmission, conservative restart recovery, and explicit retry active
 Baseline: OMENbrowser/omenchatd v0.9.5-2, OMENchat protocol v1  
 Proposed capability: `durable-mutations-v1`
 
@@ -43,7 +43,8 @@ owner-only on Unix, synchronized, concurrency-safe, and rejects symlinks,
 special files, wrong lengths, and permissive modes without rewriting them. The
 value is retained in live client state and transmitted only in a bounded
 `SessionOpen` capability request. Negotiated room-text sends use it as part of
-their persistent replay key; uncertain intents are not automatically replayed.
+their persistent replay key; uncertain intents are retried only after an
+explicit, confirmed action.
 
 `mutation_id` is a fresh random 128-bit value generated before each logical
 mutation is persisted and remains stable only for retries of that intent.
@@ -249,9 +250,18 @@ confirmation. `Stop Tracking` records `abandoned` without asserting whether an
 uncertain server commit occurred. `Finalize Expired` rechecks the persisted
 deadline before recording `expired`. Both operations use the bounded owner and
 send no frame. Missing records and concurrent terminal transitions are handled
-as stale local recovery state rather than overwritten. Deliberate durable retry
-and conflict-specific actions remain a separate later unit because they must
-revalidate the live authenticated server, room, capability, and client instance.
+as stale local recovery state rather than overwritten.
+
+Deliberate durable retry is active only through a separate confirmed action.
+It revalidates the live authenticated identity, persistent client instance,
+original server and active room, negotiated capability, expiry, transport, and
+absence of an in-process pending echo. A prepared intent is transactionally
+advanced to `sent_uncertain` before transmission. An uncertain intent reuses
+the original mutation ID, request hash, and canonical body so the server replay
+record remains authoritative across replacement Links and restarts. A retry
+never creates a second logical operation, never runs automatically, and never
+clears unrelated composer text. Conflict-specific remediation remains a later
+unit.
 
 ## Server retention
 
@@ -348,7 +358,8 @@ construction and parsing enforce canonical scalar/container/value/depth limits
 before the extension can be connected to either live codec. Only a client with
 a persistent instance identity advertises the capability, and only an explicit
 matching `SessionAccept` activates it for that Link. Legacy frames remain
-unchanged. Durable mutation envelopes are still not sent by the client.
+unchanged. Negotiated room-text sends and explicit retries use the durable
+envelope; legacy and downgraded sessions do not.
 
 ## Required test matrix
 
