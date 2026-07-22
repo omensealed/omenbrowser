@@ -203,6 +203,10 @@ The local Linux quick gate, canonical package build, archive extraction,
 checksum verification, collector redaction, isolated server initialization,
 and two-client OMENchat package smoke also pass. Native Windows and macOS
 packaging remain hosted release gates rather than Linux cross-build claims.
+The final full local gate passes 1,554 desktop-product tests (33 explicit
+ignored/live measurements), 366 server-full tests (eight explicit
+ignored/live measurements), and strict Clippy for both roots. This is the
+checkpoint at which one bundled hosted CI/interop/package run becomes useful.
 
 - Keep the pinned Python lane at the immutable upstream references used by
   0.9.6 (`RNS 15320e4...`, `LXMF 727830c...`, conformance `0319444...`).

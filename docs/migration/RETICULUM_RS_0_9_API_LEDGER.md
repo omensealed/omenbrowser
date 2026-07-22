@@ -4964,5 +4964,33 @@ This changes release-test evidence ownership only. It does not change packaged
 binaries, dependencies, runtime behavior, protocols, schemas, identities,
 queues, or user state. Rollback removes the path anchoring and documentation,
 but again discards relative-path smoke evidence after successful checks. Native
-Windows/macOS packaging, final full local lint/test gates, and the next bundled
-hosted checkpoint remain pending.
+Windows/macOS packaging and the next bundled hosted checkpoint remain pending.
+
+## v0.9.6-1 unit 4h: full local gate and bundled hosted scope
+
+`bash scripts/release-check.sh full` passed after the retained-evidence fix.
+The canonical desktop matrix passed 1,554 tests with 33 explicit ignored
+hardware/live/measurement cases, and strict desktop-product Clippy passed with
+warnings denied. The independent `server-full` matrix passed 366 tests with
+eight explicit ignored interoperability/soak/upstream-limit cases, and strict
+server-full Clippy passed with warnings denied. The gate also repeated the
+quick feature, identity, advisory, TUI, focused behavior, and standalone
+relocation checks successfully.
+
+This is the first checkpoint after the local adjacent-release, resource, soak,
+and package units where hosted work adds distinct evidence. The existing
+Python job already covers pinned/current Python, long-range `0.6.0-1`, and the
+adjacent direct/Resource/restart/propagation matrix. Its single bounded
+mixed-release job now also includes the locally proven adjacent propagation
+restart/crash/stamp-ticket cases and adjacent OMENchat state/live/restart/
+Resource cases. They share the existing immutable `v0.9.5-2` Cargo target so
+the job does not rebuild the old dependency train independently for every
+case.
+
+This changes hosted test coverage only. It does not change product code,
+dependencies, protocols, schemas, identity ownership, queue limits, or user
+state. Rollback removes the two added hosted steps but loses reproducible
+adjacent durability and OMENchat evidence. One CI run, one Python interop run,
+and one native package run are the intended bundled checkpoint; ordinary
+follow-up commits should not dispatch them again unless they affect those
+gates.
