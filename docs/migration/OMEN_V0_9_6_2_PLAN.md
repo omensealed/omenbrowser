@@ -125,6 +125,15 @@ response in the same process is rejected, recovered retries do not clear a
 newer composer draft, and acknowledgement removes the recovered row. Nothing
 is retried automatically.
 
+Failure-boundary review found that the retained reply included the original
+transient sequence. A retry on a replacement Link uses a new sequence, so the
+browser could not correlate a successful replay acknowledgement. omenchatd now
+preserves the retained operation, room, and body but emits it under the current
+request sequence. Focused tests cover every durable executor plus room-text
+replay after Link replacement: the acknowledgement correlates to the retry and
+no second room event is fanned out. The stored replay result and protocol frame
+shape are unchanged.
+
 The server transaction/replay executor and browser intent store are active only
 for explicitly negotiated room-text operations. Client intent ownership,
 advertisement/acceptance, durable envelope send, acknowledgement resolution,

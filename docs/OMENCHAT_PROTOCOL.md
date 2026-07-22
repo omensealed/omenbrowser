@@ -149,43 +149,54 @@ The destination hash identifies the chat server.
 
 ### Capability negotiation boundary
 
-The shared protocol crate defines a bounded optional negotiation extension but
-the current product does not yet advertise or accept any durable-mutation
-capability. Existing `SessionOpen` fields remain protocol name, display name,
-and optional client LXMF destination at indexes 0 through 2. Requested
-capabilities and a 16-byte client-instance ID, when a future negotiated client
-uses them, occupy trailing indexes 3 and 4. Accepted capabilities occupy
-trailing `SessionAccept` index 6.
+Current activation note: the paragraphs below retain the staged design history,
+but negotiated room-text durable transmission is now active. The browser
+advertises only when the authenticated identity owns a healthy persistent
+intent worker and client-instance ID. omenchatd accepts only on the
+authenticated Link that requested it. Legacy, downgraded, unknown, and
+unsolicited capability paths remain unchanged, and restart recovery never
+retries automatically.
+
+The replay store retains the exact bounded origin frame. On replay, omenchatd
+preserves its operation, room, and body but replaces the transient sequence
+with the current request sequence. This is required for a client to correlate
+the acknowledgement after Link replacement or restart and does not repeat the
+mutation, rate accounting, or fan-out.
+
+The shared protocol crate defines the bounded optional negotiation extension.
+Existing `SessionOpen` fields remain protocol name, display name, and optional
+client LXMF destination at indexes 0 through 2. Requested capabilities and a
+16-byte client-instance ID occupy trailing indexes 3 and 4. Accepted
+capabilities occupy trailing `SessionAccept` index 6.
 
 Capability lists are limited to 64 unique ASCII names of at most 128 bytes.
 Requesting `durable-mutations-v1` requires an exact 16-byte client-instance ID.
 Missing trailing fields mean no capabilities; application version and
-descriptor metadata never imply acceptance. The current server deliberately
-returns its six-field legacy `SessionAccept` even when a test client sends the
-well-formed extension, so no durable envelope can become active prematurely.
-Unknown well-formed capabilities receive the same legacy response. A malformed
+descriptor metadata never imply acceptance. Unknown well-formed capabilities
+receive the unchanged legacy response. A malformed
 trailing negotiation receives error 1012 and never marks the Link handshake
 complete; the client may correct the request and retry `SessionOpen` on that
 Link. Handshake completion requires an actual `SessionAccept`, not merely an
 inbound frame carrying the `SessionOpen` operation number.
 
-The browser now persists the future client-instance value under its active
-identity-scoped application storage and retains it in live client state. It is
-not placed in `SessionOpen` yet. Invalid, unsafe, or overly permissive stored
-state disables this future capability instead of generating a replacement;
-ordinary legacy OMENchat remains available.
+The browser persists the client-instance value under its active identity-scoped
+application storage and retains it in live client state. Invalid, unsafe, or
+overly permissive stored state disables durable negotiation instead of
+generating a replacement; ordinary legacy OMENchat remains available.
 
-An inactive persistent-intent boundary now records a future mutation's server
+The persistent-intent boundary records a negotiated mutation's server
 destination, authenticated identity binding, stable client/mutation IDs,
 canonical request hash and body, expiry, state, and local correlation before it
 can be handed to a transport owner. Recovery length-preflights SQLite values
 before allocation and then revalidates frame metadata, canonical hashing, and
-retained-byte accounting. No production send path calls this boundary yet.
+retained-byte accounting. Negotiated room-text sends call this boundary before
+transport; other mutation types retain their current legacy path.
 Prepared intents can move only to uncertain, expired, or abandoned; uncertain
 intents can move only to acknowledged, conflict, expired, or abandoned.
 Terminal states cannot regress. Recovery returns only prepared/uncertain rows,
 and incremental maintenance removes at most 128 terminal rows older than 30
-days. A dedicated 32-request/2-MiB storage owner exists but is not started yet.
+days. A dedicated 32-request/2-MiB storage owner starts only when its identity
+and persistent client-instance prerequisites are satisfied.
 
 The dormant server store also has deterministic post-retention behavior. Before
 pruning any durable result, it permanently retires that authenticated

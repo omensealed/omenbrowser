@@ -1348,7 +1348,7 @@ impl SessionEngine {
                 pruned,
             }),
             DurableRoomEventCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
-                origin: decode_durable_result(&result_frame)?,
+                origin: decode_durable_replay_result(&result_frame, seq)?,
                 broadcasts: Vec::new(),
                 disconnect_identity: None,
                 pruned: 0,
@@ -1513,7 +1513,7 @@ impl SessionEngine {
                 pruned,
             }),
             DurableRoomEventCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
-                origin: decode_durable_result(&result_frame)?,
+                origin: decode_durable_replay_result(&result_frame, seq)?,
                 broadcasts: Vec::new(),
                 disconnect_identity: None,
                 pruned: 0,
@@ -1990,7 +1990,7 @@ impl SessionEngine {
                 pruned,
             }),
             DurableMutationEffectCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
-                origin: decode_durable_result(&result_frame)?,
+                origin: decode_durable_replay_result(&result_frame, seq)?,
                 broadcasts: Vec::new(),
                 disconnect_identity: None,
                 pruned: 0,
@@ -3543,6 +3543,12 @@ fn decode_durable_result(bytes: &[u8]) -> ServerResult<Frame> {
     })
 }
 
+fn decode_durable_replay_result(bytes: &[u8], request_seq: u32) -> ServerResult<Frame> {
+    let mut frame = decode_durable_result(bytes)?;
+    frame.seq = request_seq;
+    Ok(frame)
+}
+
 fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
     matches!(
         error,
@@ -3557,6 +3563,12 @@ fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_replayed_response(replayed: &Frame, stored: &Frame, request_seq: u32) {
+        let mut expected = stored.clone();
+        expected.seq = request_seq;
+        assert_eq!(replayed, &expected);
+    }
     use crate::protocol::batch::{
         decode_compressed_values_body, decode_compressed_values_payload, decode_resource_offer_body,
     };
@@ -5386,7 +5398,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable message");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 12);
         assert!(replayed.broadcasts.is_empty());
 
         let rate_limited = engine
@@ -5523,7 +5535,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed rejection");
-        assert_eq!(replayed.origin, rejected.origin);
+        assert_replayed_response(&replayed.origin, &rejected.origin, 32);
         assert!(replayed.broadcasts.is_empty());
         assert!(engine
             .store
@@ -5566,7 +5578,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed after restart");
-        assert_eq!(replayed.origin, original);
+        assert_replayed_response(&replayed.origin, &original, 42);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -5639,7 +5651,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable part");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 52);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -5709,7 +5721,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable notice");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 62);
         assert!(replayed.broadcasts.is_empty());
 
         let denied = engine
@@ -5796,7 +5808,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable topic");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 72);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -5864,7 +5876,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable create");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 82);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -5955,7 +5967,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable role");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 92);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -6049,7 +6061,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable unban");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 102);
         assert!(replayed.broadcasts.is_empty());
         assert_ne!(
             engine
@@ -6186,7 +6198,9 @@ mod tests {
                     envelope,
                 )
                 .expect("replayed durable moderation");
-            assert_eq!(replayed.origin, stored.origin, "{action}");
+            let mut expected = stored.origin.clone();
+            expected.seq = 120 + index as u32;
+            assert_eq!(replayed.origin, expected, "{action}");
             assert!(replayed.broadcasts.is_empty(), "{action}");
             assert!(replayed.disconnect_identity.is_none(), "{action}");
             assert_eq!(

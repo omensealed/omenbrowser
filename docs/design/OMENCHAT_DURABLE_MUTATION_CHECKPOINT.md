@@ -115,7 +115,8 @@ Lookup semantics:
 
 - missing: execute and atomically store the terminal origin result;
 - exact request hash: return that original result without repeating rate
-  accounting, mutation, fan-out, or moderation side effects;
+  accounting, mutation, fan-out, or moderation side effects; the transient
+  response sequence is replaced with the current request sequence;
 - different hash: return a machine-readable conflict;
 - known expired/pruned identity: return an explicit expired result and never
   execute automatically.
@@ -166,8 +167,10 @@ CREATE TABLE durable_mutation_clients (
 ```
 
 The table and index exist, but no live request path reads or writes them yet.
-`result_frame` will be the exact bounded encoded origin response, validated
-before reuse. Mutation lookup/execution, event-ID allocation, room-event insertion,
+`result_frame` retains the exact bounded encoded origin response and is
+validated before reuse. Replay preserves its operation, room, and body while
+replacing only the transient sequence with the current request sequence.
+Mutation lookup/execution, event-ID allocation, room-event insertion,
 response construction/encoding, and replay insertion share one
 `BEGIN IMMEDIATE` transaction. It commits before fan-out. Failure of any step
 rolls back both mutation and replay result. Concurrent duplicates serialize on
@@ -315,7 +318,8 @@ approval before implementation.
   queried/retried only after capability re-negotiation.
 - Server failure before SQLite commit: neither mutation nor replay exists.
 - Server failure after commit, before response/fan-out: duplicate returns the
-  stored result and history reconciliation supplies the event.
+  stored result under the retry's response sequence and history reconciliation
+  supplies the event.
 - Client persistence failure after response: exact retry returns stored result.
 - Replay insert failure rolls back the mutation.
 - Stored-result corruption fails closed and never executes again.
