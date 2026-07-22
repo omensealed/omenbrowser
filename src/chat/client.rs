@@ -218,6 +218,10 @@ pub enum ChatClientEvent {
         session_id: ChatSessionId,
         event: ChatEvent,
     },
+    DurableMutationAcknowledged {
+        session_id: ChatSessionId,
+        mutation_id: super::protocol::MutationId,
+    },
     HistoryPrepended {
         session_id: ChatSessionId,
         events: Vec<ChatEvent>,

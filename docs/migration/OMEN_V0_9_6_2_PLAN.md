@@ -29,8 +29,8 @@ with unrelated UI or Reticulum restructuring.
 
 ## Unit 1 — native macOS packages
 
-Status: locally complete; native package requalification pending. The repository-owned
-script uses only macOS system tools and adds no runtime or build dependency.
+Status: complete. The repository-owned script uses only macOS system tools and
+adds no runtime or build dependency.
 Shell syntax, workflow security assertions, `actionlint`, `git diff --check`,
 and the complete local quick release gate pass. A manual `macos` package scope
 runs only the Intel and Apple Silicon package jobs during this development
@@ -43,6 +43,13 @@ even though runner cleanup found the live `omenbrowser_rs` process. The smoke
 now records pre-existing exact-name processes and owns only the newly launched
 process. The redundant Intel job was cancelled rather than spending another
 runner cycle on the known-bad assertion.
+
+Focused package run `29946984584` then passed on both native runners. Apple
+Silicon completed build, qualification, and upload in 11m53s; Intel completed
+the same gates in 27m37s. Both mounted images passed exact version, bundle,
+architecture, unsigned-state, isolated-root launch, normal-quit, sentinel, and
+checksum checks. No Linux, Windows, Python-interoperability, or general native
+CI job was run for this package-only checkpoint.
 
 Required outputs per native runner:
 
@@ -70,6 +77,14 @@ binds the instance to the authenticated Link. The browser records acceptance
 only when it has a matching outstanding request; legacy, downgraded, unsolicited,
 reconnected, and retired sessions remain inactive. Normal room mutations still
 use the legacy no-automatic-resend path.
+
+The next client boundary is also locally staged but remains unreachable from
+ordinary UI actions. It accepts only an already-persisted `sent_uncertain`
+intent, validates its negotiated client/server/room ownership, emits the
+canonical durable envelope within existing pending-echo bounds, and returns the
+mutation identifier on acknowledgement. Desktop intent-worker orchestration and
+acknowledgement persistence remain pending; therefore production UI sends have
+not switched to this path.
 
 The server transaction/replay executors and browser intent store remain staged
 but production capability acceptance is off in v0.9.6-1. Connect them in the

@@ -426,6 +426,16 @@ only legacy mutations. The route therefore remains unreachable from normal
 client mutation actions until persisted intent and durable envelope dispatch
 are connected.
 
+The live client now has a deliberately unreachable durable-send boundary for
+room messages and actions. It accepts only an intent already persisted in the
+`sent_uncertain` state and verifies negotiated session, persistent client
+instance, server destination, active room, operation, body shape, sequence, and
+pending-echo budgets before sending the canonical envelope. A matching
+`MessageAck` reports the fixed mutation identifier so the future desktop owner
+can transition the intent to `acknowledged`. Missing negotiation and merely
+`prepared` intents fail before transport output. Ordinary UI sends do not call
+this boundary yet, and no uncertain intent is automatically replayed.
+
 `PartRoom` now uses the same durable replay authority. Its membership deletion,
 departure event, exact legacy-compatible `CommandResult`, and replay record are
 one transaction. The store accepts a pre-encoded origin result for event-backed
