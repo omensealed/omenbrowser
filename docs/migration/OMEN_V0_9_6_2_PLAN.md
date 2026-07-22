@@ -160,7 +160,12 @@ behavior.
 
 ## Unit 3 — release qualification
 
-Status: pending.
+Status: in progress. Root and standalone-server application metadata, lockfile
+entries, active version assertions, current-version interoperability report
+names, and current user documentation now identify `0.9.6-2`. The Reticulum/
+LXMF dependency train remains exactly `0.9.6`; OMENchat protocol version 1,
+SQLite schema versions, configuration formats, destination aspects, and the
+private IFAC adapter version remain independent.
 
 Use focused local tests during development. Run the long Python/mixed-version
 and native package workflows once after the protocol/storage behavior and
@@ -168,6 +173,9 @@ package graph are stable. The known upstream maximum UDP Resource boundary,
 physical-radio/public-network tests, hardware-specific GPU measurements, and
 unsigned macOS tester requirements remain explicit support boundaries rather
 than hidden release claims.
+
+The release checkpoint and its still-open evidence are tracked in
+`V0_9_6_2_RELEASE_CHECKLIST.md`.
 
 ## Rollback
 

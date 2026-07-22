@@ -352,7 +352,7 @@ approval before implementation.
 | new | new, rejected | current v1 |
 | new | new, accepted | persisted intent and durable envelope |
 
-Mixed v0.9.5-2/v0.9.6-1 fixtures must prove byte-identical legacy frames and
+Mixed v0.9.5-2/v0.9.6-2 fixtures must prove byte-identical legacy frames and
 that neither side infers capability from application version.
 
 ## Shared protocol crate decision

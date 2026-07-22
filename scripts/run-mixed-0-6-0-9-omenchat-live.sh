@@ -6,7 +6,7 @@ readonly repo_root
 readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a4c203}
 readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
 readonly old_server_stop_mode=${OMEN_MIXED_OLD_SERVER_STOP_MODE:-sigterm}
-readonly current_expected_version=0.9.6-1
+readonly current_expected_version=0.9.6-2
 
 case "$old_server_stop_mode" in
   orderly|sigterm) ;;

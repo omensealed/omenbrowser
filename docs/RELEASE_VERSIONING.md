@@ -4,8 +4,8 @@ OMENbrowser_rs and the standalone omenchatd use the upstream Reticulum/LXMF
 base version followed by a numeric OMEN release revision:
 
 ```text
-Cargo package version: 0.9.6-1
-Git tag when released: v0.9.6-1
+Cargo package version: 0.9.6-2
+Git tag when released: v0.9.6-2
 ```
 
 The leading `v` belongs only in Git tags. Cargo interprets the hyphen suffix as
@@ -40,7 +40,7 @@ tests, and rollback documentation. `scripts/verify-release-version.sh` checks
 the two package manifests and lockfiles without treating protocol or storage
 schema numbers as application versions.
 
-No tag is created by migration work itself. A `v0.9.6-1` tag is permitted only
+No tag is created by migration work itself. A `v0.9.6-2` tag is permitted only
 after the dependency/API, native functional, interoperability, security,
 performance, documentation, and packaging gates pass and the maintainer
 explicitly requests the release operation.
