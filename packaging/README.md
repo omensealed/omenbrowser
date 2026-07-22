@@ -167,6 +167,30 @@ tool archives and plugins come from immutable release URLs and are verified
 against repository-pinned SHA-256 values before extraction. The final artifacts
 are explicitly checked as unsigned and receive separate SHA-256 files.
 
+## macOS DMGs
+
+The native package workflow builds separately named unsigned Intel and Apple
+Silicon DMGs after the full native prerequisite matrix passes:
+
+```text
+dist/OMENbrowser_rs-<version>-macos-x86_64-unsigned.dmg
+dist/OMENbrowser_rs-<version>-macos-aarch64-unsigned.dmg
+```
+
+`scripts/package-macos.sh` builds and smoke-tests each `.app` on its matching
+native runner before creating the DMG. It then mounts the DMG read-only,
+launches the mounted application against an explicit isolated application root,
+verifies version/product/architecture identity and normal shutdown, unmounts
+it, and generates a separate SHA-256 file. It also produces a separate native
+omenchatd `.tar.gz`; the browser DMG does not install or auto-start it.
+The bundle's numeric build mapping is deterministic: `0.9.6-2` becomes
+`CFBundleShortVersionString=0.9.6` and `CFBundleVersion=906.2`.
+
+Do not claim a universal binary, signing, notarization, or normal Gatekeeper
+acceptance until those paths are deliberately implemented and tested. Release
+notes and filenames identify these as unsigned tester packages and must
+document the required macOS tester action.
+
 ## GitHub Actions
 
 Two workflows are included:
@@ -178,9 +202,13 @@ Two workflows are included:
   - syntax-checks package and installer scripts.
 - `.github/workflows/package.yml`
   - runs manually or for `v*` tags;
+  - allows a manual `macos` scope to qualify only the two native DMG jobs,
+    while tag builds still require the complete release graph;
   - builds the Linux release tarball, `.deb`, and AppImage;
   - builds separate Windows desktop and omenchatd portable ZIPs on Windows;
   - builds and lifecycle-tests unsigned browser NSIS and WiX installers;
+  - builds separate native Intel and Apple Silicon unsigned DMGs and omenchatd
+    archives, then mounts and lifecycle-tests each DMG with isolated state;
   - can run the packaged local OMENchat smoke;
   - uploads package artifacts and checksums from a read-only build job;
   - publishes tag artifacts only from a dependent `release` environment job

@@ -240,6 +240,7 @@ bash -n scripts/verify-tui-dependencies.sh
 bash -n scripts/test-tui-lifecycle.sh
 bash -n scripts/test-tui-real-pty.sh
 bash -n scripts/test-native-cli-identity.sh
+bash -n scripts/package-macos.sh
 
 echo "== TUI dependency check =="
 bash scripts/verify-tui-dependencies.sh
