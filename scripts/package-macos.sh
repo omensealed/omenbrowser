@@ -230,7 +230,7 @@ if codesign -dvv "$mounted_app" >/dev/null 2>"$signature_report"; then
 fi
 
 if [[ "$lifecycle_smoke" == "--run-lifecycle-smoke" ]]; then
-  for tool in open osascript pgrep seq; do
+  for tool in grep open osascript pgrep seq; do
     command -v "$tool" >/dev/null 2>&1 \
       || fail "$tool is required for lifecycle smoke"
   done
@@ -238,11 +238,18 @@ if [[ "$lifecycle_smoke" == "--run-lifecycle-smoke" ]]; then
   mkdir -p "$app_root"
   sentinel="$app_root/preserve-after-dmg-smoke.txt"
   printf '%s\n' "DMG lifecycle smoke must preserve isolated user data" > "$sentinel"
+  preexisting_pids="$(pgrep -x omenbrowser_rs || true)"
   open -n "$mounted_app" --args --desktop --app-root "$app_root"
 
   app_pid=""
   for _ in $(seq 1 40); do
-    app_pid="$(pgrep -f "$mounted_binary" | head -n 1 || true)"
+    while IFS= read -r candidate_pid; do
+      [[ -n "$candidate_pid" ]] || continue
+      if ! grep -qx "$candidate_pid" <<<"$preexisting_pids"; then
+        app_pid="$candidate_pid"
+        break
+      fi
+    done < <(pgrep -x omenbrowser_rs || true)
     [[ -n "$app_pid" ]] && break
     sleep 0.25
   done

@@ -29,12 +29,20 @@ with unrelated UI or Reticulum restructuring.
 
 ## Unit 1 — native macOS packages
 
-Status: locally complete; native package execution pending. The repository-owned
+Status: locally complete; native package requalification pending. The repository-owned
 script uses only macOS system tools and adds no runtime or build dependency.
 Shell syntax, workflow security assertions, `actionlint`, `git diff --check`,
 and the complete local quick release gate pass. A manual `macos` package scope
 runs only the Intel and Apple Silicon package jobs during this development
 checkpoint; tag builds continue to require the full native and artifact graph.
+
+The first Apple Silicon hosted run built and mounted the image and launched the
+application, but the smoke test looked for the mounted path in the process
+command line. LaunchServices normalized that path, producing a false failure
+even though runner cleanup found the live `omenbrowser_rs` process. The smoke
+now records pre-existing exact-name processes and owns only the newly launched
+process. The redundant Intel job was cancelled rather than spending another
+runner cycle on the known-bad assertion.
 
 Required outputs per native runner:
 
