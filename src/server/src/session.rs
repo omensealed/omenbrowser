@@ -10,9 +10,10 @@ use crate::protocol::batch::{
 };
 use crate::protocol::codec::{decode_frame, encode_frame};
 use crate::protocol::{
-    canonical_mutation_request_hash, parse_session_open_negotiation, ChatErrorCode, ChatOp,
-    ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
-    PROTOCOL_NAME,
+    canonical_mutation_request_hash, parse_session_open_negotiation,
+    with_session_accept_negotiation, ChatErrorCode, ChatOp, ClientInstanceId, Compression,
+    DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId, SessionAcceptNegotiation,
+    DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -473,35 +474,57 @@ impl SessionEngine {
         if let Some(error) = self.reject_if_banned(peer, seq, None)? {
             return Ok(vec![error]);
         }
-        if parse_session_open_negotiation(&body).is_err() {
-            return Ok(vec![self.error_frame(
-                seq,
-                None,
-                ChatErrorCode::DurableMutationMalformed,
-                "invalid session capability negotiation",
-            )]);
-        }
+        let negotiation = match parse_session_open_negotiation(&body) {
+            Ok(negotiation) => negotiation,
+            Err(_) => {
+                return Ok(vec![self.error_frame(
+                    seq,
+                    None,
+                    ChatErrorCode::DurableMutationMalformed,
+                    "invalid session capability negotiation",
+                )]);
+            }
+        };
         let rooms = self
             .store
             .list_rooms()?
             .into_iter()
             .map(|room| room_to_value(&room))
             .collect::<Vec<_>>();
+        let mut response_body = FrameBody::Fields(vec![
+            FrameValue::String(PROTOCOL_NAME.into()),
+            FrameValue::Array(rooms),
+            self.server_motd
+                .clone()
+                .map(FrameValue::String)
+                .unwrap_or(FrameValue::Nil),
+            FrameValue::U64(self.limits.upload_quota_bytes),
+            FrameValue::U64(self.limits.ping_interval_seconds.clamp(5, 600)),
+            FrameValue::U64(self.limits.upload_max_file_bytes),
+        ]);
+        let durable_requested = negotiation.as_ref().is_some_and(|negotiation| {
+            negotiation.client_instance_id.is_some()
+                && negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
+        });
+        if durable_requested {
+            response_body = with_session_accept_negotiation(
+                response_body,
+                &SessionAcceptNegotiation {
+                    accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                },
+            )
+            .map_err(|error| {
+                ServerError::Message(format!("session capability response failed: {error}"))
+            })?;
+        }
         Ok(vec![Frame::new(
             ChatOp::SessionAccept,
             seq,
             None,
-            FrameBody::Fields(vec![
-                FrameValue::String(PROTOCOL_NAME.into()),
-                FrameValue::Array(rooms),
-                self.server_motd
-                    .clone()
-                    .map(FrameValue::String)
-                    .unwrap_or(FrameValue::Nil),
-                FrameValue::U64(self.limits.upload_quota_bytes),
-                FrameValue::U64(self.limits.ping_interval_seconds.clamp(5, 600)),
-                FrameValue::U64(self.limits.upload_max_file_bytes),
-            ]),
+            response_body,
         )])
     }
 
@@ -4308,7 +4331,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_durable_capability_request_keeps_legacy_session_accept() {
+    fn durable_capability_request_is_explicitly_accepted() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(
             FrameBody::Fields(vec![
@@ -4331,10 +4354,12 @@ mod tests {
         let FrameBody::Fields(fields) = &response[0].body else {
             panic!("session accept fields");
         };
-        assert_eq!(fields.len(), 6);
+        assert_eq!(fields.len(), 7);
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
-            Ok(None)
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
+            }))
         );
     }
 

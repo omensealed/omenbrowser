@@ -14,8 +14,9 @@ use super::model::{
     CHAT_USER_DISPLAY_MAX_BYTES,
 };
 use super::protocol::{
-    ChatErrorCode, ChatOp, ClientInstanceId, Frame, FrameBody, FrameValue, RoomId,
-    DEFAULT_JOIN_BACKLOG_EVENTS, PROTOCOL_NAME,
+    parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
+    ClientInstanceId, Frame, FrameBody, FrameValue, RoomId, SessionOpenNegotiation,
+    DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -54,6 +55,8 @@ pub struct LivePendingLocalEchoMetrics {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveChatClientState {
     client_instance_id: Option<ClientInstanceId>,
+    durable_requests: BTreeSet<ChatSessionId>,
+    durable_sessions: BTreeSet<ChatSessionId>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
     pending_uploads: BTreeMap<(ChatSessionId, u32), PendingLiveUpload>,
@@ -99,6 +102,10 @@ impl LiveChatClientState {
 
     pub fn client_instance_id(&self) -> Option<ClientInstanceId> {
         self.client_instance_id
+    }
+
+    pub fn durable_mutations_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.durable_sessions.contains(&session_id)
     }
 
     fn reserve_sequence_range(
@@ -198,6 +205,8 @@ impl LiveChatClientState {
     pub fn retire_session_link_state(&mut self, session_id: ChatSessionId) {
         self.cancel_session_transfers(session_id);
         self.next_seq_by_session.remove(&session_id);
+        self.durable_requests.remove(&session_id);
+        self.durable_sessions.remove(&session_id);
     }
 }
 
@@ -529,7 +538,10 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         Ok(sequences) => sequences,
         Err(_) => return vec![sequence_space_exhausted_event(session_id)],
     };
-    let session_open_body = local_display_name
+    state.durable_sessions.remove(&session_id);
+    state.durable_requests.remove(&session_id);
+    let mut durable_requested = false;
+    let mut session_open_body = local_display_name
         .map(|name| {
             FrameBody::Fields(vec![
                 FrameValue::String(PROTOCOL_NAME.into()),
@@ -537,6 +549,24 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
             ])
         })
         .unwrap_or(FrameBody::Empty);
+    if let Some(client_instance_id) = state.client_instance_id {
+        session_open_body = match with_session_open_negotiation(
+            session_open_body,
+            &SessionOpenNegotiation {
+                requested_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                client_instance_id: Some(client_instance_id),
+            },
+        ) {
+            Ok(body) => body,
+            Err(error) => {
+                return vec![ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: format!("OMENchat capability negotiation failed: {error}"),
+                }];
+            }
+        };
+        durable_requested = true;
+    }
     if let Err(error) = send_chat_frame(
         transport,
         &Frame::new(
@@ -551,6 +581,9 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
             message: format!("OMENchat live session open failed: {error}"),
         });
         return events;
+    }
+    if durable_requested {
+        state.durable_requests.insert(session_id);
     }
 
     let room_name = client
@@ -1227,6 +1260,27 @@ fn apply_frame_with_state(
 ) {
     match frame.op {
         ChatOp::SessionAccept => {
+            let durable_accepted = parse_session_accept_negotiation(&frame.body)
+                .ok()
+                .flatten()
+                .is_some_and(|negotiation| {
+                    negotiation
+                        .accepted_capabilities
+                        .iter()
+                        .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
+                });
+            if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
+                let request_pending = state.durable_requests.remove(&session_id);
+                let already_accepted = state.durable_sessions.contains(&session_id);
+                if durable_accepted
+                    && state.client_instance_id.is_some()
+                    && (request_pending || already_accepted)
+                {
+                    state.durable_sessions.insert(session_id);
+                } else {
+                    state.durable_sessions.remove(&session_id);
+                }
+            }
             let policy = body_values(&frame.body).map(|values| {
                 let upload_quota_bytes = values.get(3)?.as_u64()?;
                 let ping_interval_seconds = values.get(4)?.as_u64()?.clamp(5, 600);
@@ -2887,6 +2941,11 @@ mod tests {
         );
 
         assert_eq!(transport.sent_frames.len(), 2);
+        let session_open = decode_frame(&transport.sent_frames[0]).expect("session open");
+        assert_eq!(
+            crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
+            Ok(None)
+        );
         assert!(matches!(
             events.first(),
             Some(ChatClientEvent::ServerOpened { session_id: 1, .. })
@@ -2897,6 +2956,114 @@ mod tests {
         assert_eq!(session.rooms[0].name, "lobby");
         assert_eq!(session.users[0].display_name, "Operator");
         assert_eq!(session.events.len(), 1);
+    }
+
+    #[test]
+    fn live_open_advertises_durable_mutations_only_with_persistent_client_identity() {
+        let client_instance_id = ClientInstanceId::new([7; 16]);
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        let mut transport = CapturedChatTransport::default();
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::OpenServer(OmenChatDescriptor {
+                server_destination: "abcd".into(),
+                local_display_name: Some("Alice".into()),
+                ..OmenChatDescriptor::default()
+            }),
+        );
+
+        assert!(matches!(
+            events.first(),
+            Some(ChatClientEvent::ServerOpened { session_id: 1, .. })
+        ));
+        let session_open = decode_frame(&transport.sent_frames[0]).expect("session open");
+        assert_eq!(session_open.op, ChatOp::SessionOpen);
+        assert_eq!(
+            crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
+            Ok(Some(SessionOpenNegotiation {
+                requested_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                client_instance_id: Some(client_instance_id),
+            }))
+        );
+        assert!(state.durable_requests.contains(&1));
+        assert!(!state.durable_mutations_negotiated(1));
+    }
+
+    #[test]
+    fn durable_session_activation_requires_acceptance_and_is_cleared_on_downgrade() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: Vec::new(),
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "opening".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(ClientInstanceId::new([8; 16])));
+        state.durable_requests.insert(session_id);
+        let mut transport = NoopChatTransport;
+        let mut events = Vec::new();
+        let accepted_body = crate::chat::protocol::with_session_accept_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::Array(Vec::new()),
+            ]),
+            &crate::chat::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+            },
+        )
+        .expect("negotiated accept");
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 1, None, accepted_body.clone()),
+            &mut events,
+        );
+        assert!(state.durable_mutations_negotiated(session_id));
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::SessionAccept,
+                2,
+                None,
+                FrameBody::Fields(vec![
+                    FrameValue::String(PROTOCOL_NAME.into()),
+                    FrameValue::Array(Vec::new()),
+                ]),
+            ),
+            &mut events,
+        );
+        assert!(!state.durable_mutations_negotiated(session_id));
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 3, None, accepted_body),
+            &mut events,
+        );
+        assert!(!state.durable_mutations_negotiated(session_id));
     }
 
     #[test]

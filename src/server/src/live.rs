@@ -2649,7 +2649,7 @@ mod tests {
     }
 
     #[test]
-    fn unaccepted_durable_request_never_binds_client_instance_to_link() {
+    fn accepted_durable_request_binds_client_instance_to_identified_link() {
         let store = OmenchatStore::in_memory().expect("store");
         let engine = SessionEngine::new(store);
         let link_id = [18u8; 16];
@@ -2677,7 +2677,12 @@ mod tests {
         .expect("session response");
 
         assert!(live.handshake_complete(link_id));
-        assert!(live.durable_sessions.is_empty());
+        let binding = live
+            .durable_sessions
+            .get(&link_id)
+            .expect("accepted durable session binding");
+        assert_eq!(binding.client_instance_id, client_instance_id);
+        assert_eq!(binding.identity_hash, peer().identity_hash);
         assert_eq!(
             live.peers
                 .get(&link_id)

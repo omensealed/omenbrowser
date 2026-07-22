@@ -1,6 +1,6 @@
 # OMENchat durable mutation checkpoint
 
-Status: checkpoint accepted; inactive schema, stores, and negotiation parsing implemented; no live capability activation
+Status: checkpoint accepted; capability negotiation active; durable mutation transmission remains inactive
 Baseline: OMENbrowser/omenchatd v0.9.5-2, OMENchat protocol v1  
 Proposed capability: `durable-mutations-v1`
 
@@ -41,8 +41,9 @@ creates the raw 16-byte value at the active identity-scoped
 `omenchat/client-instance-id` path. Publication is create-without-replacement,
 owner-only on Unix, synchronized, concurrency-safe, and rejects symlinks,
 special files, wrong lengths, and permissive modes without rewriting them. The
-value is retained in live client state but is not yet transmitted or used to
-activate a capability.
+value is retained in live client state and transmitted only in a bounded
+`SessionOpen` capability request. It is not yet used to transmit or replay a
+durable mutation.
 
 `mutation_id` is a fresh random 128-bit value generated before each logical
 mutation is persisted and remains stable only for retries of that intent.
@@ -126,10 +127,11 @@ The shared protocol crate reserves these stable protocol-v1 errors:
 - `1014`: `durable_mutation_result_expired`;
 - `1015`: `durable_mutation_store_busy`.
 
-The client can label these codes, but dormant sessions neither emit nor act on
-most of them yet. The server now uses 1012 only to reject malformed capability
-negotiation. A valid durable or unknown request still receives the unchanged
-legacy `SessionAccept` without accepted capabilities.
+The client can label these codes, but dormant mutation sending neither emits nor
+acts on most of them yet. The server uses 1012 to reject malformed capability
+negotiation. A valid durable request carrying a persistent client instance now
+receives explicit acceptance; unknown requests retain the unchanged legacy
+`SessionAccept` without accepted capabilities.
 
 ## Implemented dormant omenchatd schema v3
 
@@ -321,9 +323,10 @@ non-activating contract unit added fixed-size client-instance, mutation, and
 request-hash types; the proposed durable envelope shape; and bounded canonical
 SHA-256 hashing. Its fixed vector is locked by a crate-local test. Envelope
 construction and parsing enforce canonical scalar/container/value/depth limits
-before the extension can be connected to either live codec. No handshake
-advertises the capability, no legacy frame changes shape, and no client or
-server path consumes the new types yet.
+before the extension can be connected to either live codec. Only a client with
+a persistent instance identity advertises the capability, and only an explicit
+matching `SessionAccept` activates it for that Link. Legacy frames remain
+unchanged. Durable mutation envelopes are still not sent by the client.
 
 ## Required test matrix
 
@@ -349,8 +352,7 @@ The checkpoint is approved in principle. Each irreversible or wire-visible
 piece still requires its tests to be green before the next piece begins:
 
 1. schema v3 and its guarded-backup rollback requirement;
-2. live activation of `durable-mutations-v1` after persistent client-instance
-   storage exists (the bounded trailing-field contract is complete);
+2. durable envelope transmission after the now-active negotiated Link binding;
 3. measured retention ceilings; and
 4. live integration of the now-defined protocol-crate durable contract.
 
@@ -362,8 +364,7 @@ parses optional trailing fields before returning `SessionAccept`; malformed
 fields receive error 1012. The live Link is marked session-open only when the
 origin response actually contains `SessionAccept`, so an error cannot satisfy
 the handshake. A corrected legacy request can recover on the same Link. This
-does not store a client instance, accept the capability, decode an envelope, or
-enable retry.
+does not by itself transmit an envelope or enable retry.
 
 The inactive server persistence layer can now append a room event and retain
 the exact encoded origin reply in one SQLite transaction. First execution
@@ -384,18 +385,18 @@ new durable mutation may acquire an opaque reservation only from the store
 finisher that runs after replay lookup; a replay or conflict never invokes it.
 Rollback drops the reservation, while a successful first commit returns it to
 the session owner for explicit finalization. This closes the double-charge and
-failed-transaction leak in the inactive boundary. Live capability acceptance,
-authenticated Link/client-instance binding, and envelope dispatch remain the
-next gates.
+failed-transaction leak in the inactive boundary. Live capability acceptance
+and authenticated Link/client-instance binding are now active; client envelope
+dispatch remains the next gate.
 
-The authenticated binding gate is now staged without accepting the capability.
+The authenticated binding gate is active only after explicit acceptance.
 `SessionOpen` display/LXMF metadata remains provisional until the engine emits
 `SessionAccept`; malformed negotiation cannot mutate the Link's retained peer.
 A durable binding requires a valid request, explicit durable capability in the
 accept response, and an already authenticated Link. It is keyed by Link,
 retains the authenticated identity plus fixed-size client instance, and is
-removed on every Link/identity retirement path. Because production still emits
-the legacy six-field accept, no current client can create this binding.
+removed on every Link/identity retirement path. Legacy and downgraded sessions
+never create this binding.
 
 The next gate is the inactive session-level envelope executor: canonical hash
 verification, permission and membership validation, transactional room-event
@@ -409,8 +410,8 @@ policy, reversible rate admission, membership, event insertion, exact
 acknowledgement encoding, and replay publication. Stored terminal rejections
 remain stable even if policy later changes. A first commit returns one event
 for fan-out; replay returns no event. Restart, conflict, malformed hash,
-permission change, rate, and duplicate cases pass. Live dispatch and capability
-advertisement remained disabled pending envelope-routing tests.
+permission change, rate, and duplicate cases pass. Client envelope dispatch
+remains disabled pending persisted-intent integration.
 
 The live envelope-routing gate is now implemented behind the authenticated
 binding. Tagged malformed envelopes fail with 1012; valid envelopes without a
@@ -420,8 +421,10 @@ authority. First execution sends the retained acknowledgement to the origin
 and broadcasts its event; exact replay sends the original acknowledgement and
 has no broadcast. Tests cover duplicate delivery under a different sequence,
 malformed and unbound requests, and legacy isolation. Production capability
-acceptance remains off, so this is still an unreachable staged route rather
-than a wire feature exposed to clients.
+acceptance is now on for a valid negotiated request, but the browser still sends
+only legacy mutations. The route therefore remains unreachable from normal
+client mutation actions until persisted intent and durable envelope dispatch
+are connected.
 
 `PartRoom` now uses the same durable replay authority. Its membership deletion,
 departure event, exact legacy-compatible `CommandResult`, and replay record are

@@ -63,7 +63,13 @@ build `906.2`; protocol and database versions remain independent.
 
 ## Unit 2 — durable mutation live activation
 
-Status: pending.
+Status: negotiation slice locally complete; durable envelope sending remains
+pending. A browser with a persisted client-instance identity advertises the
+bounded capability extension. omenchatd accepts only that known capability and
+binds the instance to the authenticated Link. The browser records acceptance
+only when it has a matching outstanding request; legacy, downgraded, unsolicited,
+reconnected, and retired sessions remain inactive. Normal room mutations still
+use the legacy no-automatic-resend path.
 
 The server transaction/replay executors and browser intent store remain staged
 but production capability acceptance is off in v0.9.6-1. Connect them in the
