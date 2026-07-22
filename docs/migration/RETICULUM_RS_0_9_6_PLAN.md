@@ -199,6 +199,10 @@ The current release also passes the explicit 60-second link/reconnect and
 slow-filesystem logging soaks plus the two-core runtime-thread policy fixture.
 The link soak ends with zero active/pending links and no FD/task growth; the
 logger remains bounded and preserves priority records.
+The local Linux quick gate, canonical package build, archive extraction,
+checksum verification, collector redaction, isolated server initialization,
+and two-client OMENchat package smoke also pass. Native Windows and macOS
+packaging remain hosted release gates rather than Linux cross-build claims.
 
 - Keep the pinned Python lane at the immutable upstream references used by
   0.9.6 (`RNS 15320e4...`, `LXMF 727830c...`, conformance `0319444...`).
@@ -209,7 +213,8 @@ logger remains bounded and preserves priority records.
   hardware-dependent measurements; the equivalent short desktop, SQLite, and
   backpressure comparisons and the current 60-second link/logging soaks pass.
 - Run native packaging only after Linux product and standalone gates pass;
-  native Windows/macOS CI remains authoritative for those platforms.
+  the local Linux package gate passes, while native Windows/macOS CI remains
+  authoritative for those platforms.
 - Update README claims only from collected OMEN evidence.
 
 Gate: release checklist names every unavailable live/hardware test and no

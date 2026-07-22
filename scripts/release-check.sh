@@ -6,6 +6,11 @@ package_archive="${2:-}"
 package_smoke_out="${3:-/tmp/omenbrowser-rs-test-package-check}"
 browser_features="${OMENBROWSER_BROWSER_FEATURES:-desktop-product}"
 
+case "$package_smoke_out" in
+  /*) ;;
+  *) package_smoke_out="$PWD/$package_smoke_out" ;;
+esac
+
 if [[ -z "$package_archive" ]]; then
   if [[ -f "dist/OMENbrowser_rs-latest.tar.gz" ]]; then
     package_archive="dist/OMENbrowser_rs-latest.tar.gz"

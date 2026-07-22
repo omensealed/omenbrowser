@@ -4928,3 +4928,41 @@ protocol, schema, identity, queue, or retention setting changed. Rollback
 removes this documentation only. Longer database/backpressure runs, physical
 GPU and network/hardware measurements, native packaging, and the next bundled
 hosted checkpoint remain pending.
+
+## v0.9.6-1 unit 4g: local package readiness and retained evidence
+
+`bash scripts/release-check.sh quick` passed at commit `afb0aea`, including
+format and script syntax, version consistency, exact Reticulum/LXMF 0.9.6
+dependency trains, the accepted build-time advisory boundary, native CLI
+product identities, TUI lifecycle and real-PTY shutdown, canonical desktop
+feature checks, focused OMENchat behavior, standalone omenchatd relocation,
+headless/full server feature checks, and focused server history/config tests.
+The explicitly pinned Python tests remained ignored in this local quick gate;
+their most recent hosted lanes are recorded separately.
+
+The non-publishing Linux package build then rebuilt canonical `desktop-product`
+and `server-full` binaries, staged version `0.9.6-1`, created and re-extracted
+the archive, and passed binary help/version, isolated omenchatd
+init/status/doctor, root separation, script syntax, and collector redaction
+checks. The browser reports commit
+`afb0aeaaf3c64cd7d26c6f2c6dfa5ea1e512fa2d` and the complete production
+feature identity; omenchatd reports headless, full, live Reticulum, and TUI
+enabled. The ignored local archive SHA-256 is
+`c4c801978765c6d8ef4a91661bf7569d06ee3a70a83ecd8db8e77e58ae0f9fcc`.
+It is qualification evidence, not a release asset.
+
+The extracted package passed the two-client OMENchat smoke with distinct
+browser roots and a separate server home. Inspection found that a relative
+caller-supplied smoke-output directory was previously interpreted after the
+gate changed into the temporary extracted package, so the successful evidence
+was deleted during cleanup. `release-check.sh` now anchors that argument to the
+invocation directory before extraction. Repeating the complete package gate
+passed and left the requested report directory in place with `outcome: pass`
+and `multi_client: 1`.
+
+This changes release-test evidence ownership only. It does not change packaged
+binaries, dependencies, runtime behavior, protocols, schemas, identities,
+queues, or user state. Rollback removes the path anchoring and documentation,
+but again discards relative-path smoke evidence after successful checks. Native
+Windows/macOS packaging, final full local lint/test gates, and the next bundled
+hosted checkpoint remain pending.

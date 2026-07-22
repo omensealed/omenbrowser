@@ -30,6 +30,20 @@ bash scripts/release-check.sh quick
 
 This runs the fast repository checks used before sharing a build.
 
+For a locally staged archive, the package gate accepts an optional third
+argument for retained OMENchat smoke evidence:
+
+```bash
+bash scripts/release-check.sh package \
+  target/local-package/OMENbrowser_rs-latest.tar.gz \
+  target/local-package-smoke
+```
+
+A relative smoke-output path is anchored to the directory from which the gate
+was invoked. It therefore remains available after the temporary extracted
+package is removed. The smoke itself continues to use distinct temporary
+browser and server identity/storage roots.
+
 ## CLI product identity
 
 The compatibility binary delegates its stable `--version` output to the
