@@ -25,6 +25,13 @@ pub(in crate::desktop) enum OmenChatDraftCommandResult {
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) enum OmenChatMutationResolutionAction {
+    Abandon,
+    Expire,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 #[derive(Clone, Debug)]
 pub(in crate::desktop) struct OmenChatLiveOpenCompletion {
     pub(in crate::desktop) descriptor: OmenChatDescriptor,
@@ -406,6 +413,15 @@ pub(in crate::desktop) enum OmenChatMessage {
         room_id: RoomId,
     },
     SendDraft(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    BeginMutationResolution {
+        mutation_id: crate::chat::protocol::MutationId,
+        action: OmenChatMutationResolutionAction,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ConfirmMutationResolution,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    CancelMutationResolution,
     ResendLocalEcho {
         session_id: ChatSessionId,
         room_id: RoomId,
@@ -461,6 +477,11 @@ pub(in crate::desktop) enum OmenChatMutationCompletionMessage {
     Acknowledged {
         session_id: ChatSessionId,
         mutation_id: crate::chat::protocol::MutationId,
+        result: Result<crate::chat::mutation_intents::IntentTransition, String>,
+    },
+    Resolved {
+        mutation_id: crate::chat::protocol::MutationId,
+        next: crate::chat::mutation_intents::OutboundMutationState,
         result: Result<crate::chat::mutation_intents::IntentTransition, String>,
     },
 }

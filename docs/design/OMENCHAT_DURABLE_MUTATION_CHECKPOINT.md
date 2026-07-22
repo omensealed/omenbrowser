@@ -241,8 +241,17 @@ persistent client instance before retention in desktop state; records belonging
 to another identity are counted without exposing their request bodies or
 identifiers. Redacted session diagnostics report prepared, uncertain,
 past-expiry, and worker-queue counts. Recovery failure is visible and does not
-fall back to automatic resend. Explicit abandon, retry, and conflict actions
-remain a later guarded UI unit.
+fall back to automatic resend.
+
+The guarded terminal-resolution UI is active for recovered room-text intents.
+It renders no more than four entries per server, bounds each preview, and requires
+confirmation. `Stop Tracking` records `abandoned` without asserting whether an
+uncertain server commit occurred. `Finalize Expired` rechecks the persisted
+deadline before recording `expired`. Both operations use the bounded owner and
+send no frame. Missing records and concurrent terminal transitions are handled
+as stale local recovery state rather than overwritten. Deliberate durable retry
+and conflict-specific actions remain a separate later unit because they must
+revalidate the live authenticated server, room, capability, and client instance.
 
 ## Server retention
 

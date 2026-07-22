@@ -3,6 +3,9 @@ use iced::{Element, Font, Length};
 
 use super::super::*;
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+const OMENCHAT_RECOVERED_INTENTS_VISIBLE_MAX: usize = 4;
+
 pub(in crate::desktop) fn omenchat_media_animation_allowed(
     pane_visible: bool,
     reduce_motion: bool,
@@ -234,6 +237,12 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 .style(status_container_style),
         );
     }
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    if let Some(recovered) =
+        omenchat_recovered_mutations_panel(desktop, &session.server.destination)
+    {
+        timeline_panel = timeline_panel.push(recovered);
+    }
     timeline_panel = timeline_panel.push(
         app_scrollable(timeline)
             .id(omenchat_scroll_id(session.session_id, active_room_id))
@@ -278,6 +287,127 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     .padding(10)
     .height(Length::Fill)
     .into()
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_recovered_mutations_panel(
+    desktop: &DesktopApp,
+    server_destination: &str,
+) -> Option<Element<'static, Message>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .unwrap_or_default();
+    let matching_count = desktop
+        .omenchat
+        .omenchat_recovered_mutation_intents
+        .iter()
+        .filter(|intent| intent.server_destination == server_destination)
+        .count();
+    if matching_count == 0 {
+        return None;
+    }
+    let mut content =
+        column![
+            text("Recovered durable mutations — nothing was resent automatically")
+                .size(ui_size(13))
+        ]
+        .spacing(6)
+        .width(Length::Fill);
+    for intent in desktop
+        .omenchat
+        .omenchat_recovered_mutation_intents
+        .iter()
+        .filter(|intent| intent.server_destination == server_destination)
+        .take(OMENCHAT_RECOVERED_INTENTS_VISIBLE_MAX)
+    {
+        let past_expiry = intent.expires_at <= now;
+        let state = if past_expiry {
+            "past expiry"
+        } else {
+            match intent.state {
+                crate::chat::mutation_intents::OutboundMutationState::Prepared => {
+                    "prepared; not transmitted"
+                }
+                crate::chat::mutation_intents::OutboundMutationState::SentUncertain => {
+                    "uncertain; server may have committed it"
+                }
+                _ => "unexpected recovered state",
+            }
+        };
+        let preview = match &intent.body {
+            crate::chat::protocol::FrameBody::Text(body) => {
+                let mut chars = body.chars();
+                let mut preview = chars.by_ref().take(96).collect::<String>();
+                if chars.next().is_some() {
+                    preview.push('…');
+                }
+                preview
+            }
+            _ => "non-text mutation".into(),
+        };
+        let label = format!(
+            "Room {} | {state} | {preview}",
+            intent
+                .room_id
+                .map(|room_id| room_id.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        );
+        let confirming = desktop
+            .omenchat
+            .omenchat_mutation_resolution_confirmation
+            .filter(|confirmation| confirmation.mutation_id == intent.mutation_id);
+        let actions = if let Some(confirmation) = confirming {
+            row![
+                warning_button(
+                    if confirmation.next
+                        == crate::chat::mutation_intents::OutboundMutationState::Expired
+                    {
+                        "Confirm Expired"
+                    } else {
+                        "Confirm Stop Tracking"
+                    },
+                    Message::OmenChat(OmenChatMessage::ConfirmMutationResolution),
+                ),
+                subtle_button(
+                    "Cancel",
+                    Message::OmenChat(OmenChatMessage::CancelMutationResolution),
+                ),
+            ]
+            .spacing(6)
+        } else {
+            let (button_label, action) = if past_expiry {
+                ("Finalize Expired", OmenChatMutationResolutionAction::Expire)
+            } else {
+                ("Stop Tracking", OmenChatMutationResolutionAction::Abandon)
+            };
+            row![warning_button(
+                button_label,
+                Message::OmenChat(OmenChatMessage::BeginMutationResolution {
+                    mutation_id: intent.mutation_id,
+                    action,
+                }),
+            )]
+        };
+        content = content.push(column![text(label).size(ui_size(12)), actions].spacing(4));
+    }
+    if matching_count > OMENCHAT_RECOVERED_INTENTS_VISIBLE_MAX {
+        content = content.push(
+            text(format!(
+                "{} additional recovered mutation(s) are hidden; resolve visible entries to continue",
+                matching_count - OMENCHAT_RECOVERED_INTENTS_VISIBLE_MAX
+            ))
+            .size(ui_size(12)),
+        );
+    }
+    Some(
+        container(content)
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(warning_container_style)
+            .into(),
+    )
 }
 
 #[cfg(test)]

@@ -422,6 +422,14 @@ impl OmenChatMutationRecoveryState {
     }
 }
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct OmenChatMutationResolutionConfirmation {
+    pub(in crate::desktop) mutation_id: crate::chat::protocol::MutationId,
+    pub(in crate::desktop) expected: crate::chat::mutation_intents::OutboundMutationState,
+    pub(in crate::desktop) next: crate::chat::mutation_intents::OutboundMutationState,
+}
+
 pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) chat_client: ChatClient,
     pub(in crate::desktop) chat_store: Option<SqliteChatStore>,
@@ -457,6 +465,9 @@ pub(in crate::desktop) struct OmenChatDesktopState {
         Vec<crate::chat::mutation_intents::OutboundMutationIntent>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_other_identity_mutation_intents: usize,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_mutation_resolution_confirmation:
+        Option<OmenChatMutationResolutionConfirmation>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_transports:
         HashMap<ChatSessionId, DesktopOmenChatTransport>,
@@ -577,6 +588,8 @@ impl OmenChatDesktopState {
             omenchat_recovered_mutation_intents: Vec::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_other_identity_mutation_intents: 0,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_mutation_resolution_confirmation: None,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_transports: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]

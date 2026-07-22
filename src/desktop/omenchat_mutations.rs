@@ -9,10 +9,12 @@ use crate::chat::mutation_intents::{
 use crate::chat::protocol::{ChatOp, FrameBody, MutationId};
 use crate::chat::{ChatClientEvent, ChatSessionId};
 
-use super::omenchat_desktop_state::OmenChatMutationRecoveryState;
+use super::omenchat_desktop_state::{
+    OmenChatMutationRecoveryState, OmenChatMutationResolutionConfirmation,
+};
 use super::{
     is_omenchat_local_echo_event, DesktopApp, Message, OmenChatDraftCommandResult,
-    OmenChatMutationCompletionMessage,
+    OmenChatMutationCompletionMessage, OmenChatMutationResolutionAction,
 };
 
 const DURABLE_MUTATION_INTENT_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -184,7 +186,179 @@ impl DesktopApp {
                 self.finish_omenchat_mutation_acknowledgement(session_id, mutation_id, result);
                 Task::none()
             }
+            OmenChatMutationCompletionMessage::Resolved {
+                mutation_id,
+                next,
+                result,
+            } => {
+                self.finish_omenchat_mutation_resolution(mutation_id, next, result);
+                Task::none()
+            }
         }
+    }
+
+    pub(in crate::desktop) fn begin_omenchat_mutation_resolution(
+        &mut self,
+        mutation_id: MutationId,
+        action: OmenChatMutationResolutionAction,
+    ) {
+        let Some(intent) = self
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .find(|intent| intent.mutation_id == mutation_id)
+        else {
+            self.app.status.task = "recovered OMENchat mutation is no longer available".into();
+            return;
+        };
+        let next = match action {
+            OmenChatMutationResolutionAction::Abandon => OutboundMutationState::Abandoned,
+            OmenChatMutationResolutionAction::Expire => {
+                if intent.expires_at > current_unix_seconds() {
+                    self.app.status.task =
+                        "OMENchat mutation has not reached its persisted expiry".into();
+                    return;
+                }
+                OutboundMutationState::Expired
+            }
+        };
+        self.omenchat.omenchat_mutation_resolution_confirmation =
+            Some(OmenChatMutationResolutionConfirmation {
+                mutation_id,
+                expected: intent.state,
+                next,
+            });
+        self.app.status.task = match next {
+            OutboundMutationState::Abandoned => {
+                "confirm stopping local tracking; this does not claim whether the server committed the mutation"
+                    .into()
+            }
+            OutboundMutationState::Expired => {
+                "confirm marking the locally expired mutation terminal; no network action will occur"
+                    .into()
+            }
+            _ => "confirm resolving the recovered mutation without network action".into(),
+        };
+    }
+
+    pub(in crate::desktop) fn cancel_omenchat_mutation_resolution(&mut self) {
+        self.omenchat.omenchat_mutation_resolution_confirmation = None;
+        self.app.status.task = "OMENchat mutation resolution cancelled".into();
+    }
+
+    pub(in crate::desktop) fn confirm_omenchat_mutation_resolution(&mut self) -> Task<Message> {
+        let Some(confirmation) = self.omenchat.omenchat_mutation_resolution_confirmation else {
+            self.app.status.task =
+                "no OMENchat mutation resolution is awaiting confirmation".into();
+            return Task::none();
+        };
+        let Some(intent) = self
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .find(|intent| intent.mutation_id == confirmation.mutation_id)
+        else {
+            self.omenchat.omenchat_mutation_resolution_confirmation = None;
+            self.app.status.task = "recovered OMENchat mutation is no longer available".into();
+            return Task::none();
+        };
+        if intent.state != confirmation.expected {
+            self.omenchat.omenchat_mutation_resolution_confirmation = None;
+            self.app.status.task =
+                "OMENchat mutation state changed before confirmation; no action was taken".into();
+            return Task::none();
+        }
+        if confirmation.next == OutboundMutationState::Expired
+            && intent.expires_at > current_unix_seconds()
+        {
+            self.omenchat.omenchat_mutation_resolution_confirmation = None;
+            self.app.status.task =
+                "OMENchat mutation expiry changed before confirmation; no action was taken".into();
+            return Task::none();
+        }
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.app.status.task =
+                "OMENchat mutation persistence is unavailable; no action was taken".into();
+            return Task::none();
+        };
+        let reply = match worker.try_transition(
+            confirmation.mutation_id,
+            confirmation.expected,
+            confirmation.next,
+        ) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.app.status.task =
+                    format!("OMENchat mutation resolution was not admitted: {error}");
+                return Task::none();
+            }
+        };
+        self.omenchat.omenchat_mutation_resolution_confirmation = None;
+        Task::perform(await_intent_worker_reply(reply), move |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::Resolved {
+                    mutation_id: confirmation.mutation_id,
+                    next: confirmation.next,
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
+    fn finish_omenchat_mutation_resolution(
+        &mut self,
+        mutation_id: MutationId,
+        next: OutboundMutationState,
+        result: Result<IntentTransition, String>,
+    ) {
+        let status_override = match result {
+            Ok(IntentTransition::Updated(intent)) if intent.state == next => None,
+            Ok(IntentTransition::StateMismatch { current }) if current == next => None,
+            Ok(IntentTransition::StateMismatch { current })
+                if matches!(
+                    current,
+                    OutboundMutationState::Acknowledged
+                        | OutboundMutationState::Conflict
+                        | OutboundMutationState::Expired
+                        | OutboundMutationState::Abandoned
+                ) =>
+            {
+                Some(format!(
+                    "the recovered OMENchat mutation was already terminal as {current:?}; removed its stale recovery entry without network action"
+                ))
+            }
+            Ok(IntentTransition::Missing) => Some(
+                "the recovered OMENchat mutation was no longer stored; removed its stale local recovery entry without network action"
+                    .into(),
+            ),
+            Ok(other) => {
+                self.app.status.task = format!(
+                    "OMENchat mutation resolution did not apply because its state changed: {other:?}"
+                );
+                return;
+            }
+            Err(error) => {
+                self.app.status.task = format!("OMENchat mutation resolution failed: {error}");
+                return;
+            }
+        };
+        self.omenchat
+            .omenchat_recovered_mutation_intents
+            .retain(|intent| intent.mutation_id != mutation_id);
+        if let Some(status) = status_override {
+            self.app.status.task = status;
+            return;
+        }
+        self.app.status.task = match next {
+            OutboundMutationState::Abandoned => {
+                "stopped tracking the recovered OMENchat mutation locally; no delivery outcome was claimed and no network action occurred"
+                    .into()
+            }
+            OutboundMutationState::Expired => {
+                "marked the recovered OMENchat mutation expired; no network action occurred".into()
+            }
+            _ => "resolved recovered OMENchat mutation without network action".into(),
+        };
     }
 
     fn finish_omenchat_mutation_recovery(
@@ -727,7 +901,7 @@ mod tests {
             now.saturating_sub(10),
             now.saturating_add(100),
         );
-        let _expired = persist_recovery_fixture(
+        let expired = persist_recovery_fixture(
             &store,
             vec![0x62; 16],
             client_instance_id,
@@ -770,6 +944,94 @@ mod tests {
             .omenchat_recovered_mutation_intents
             .iter()
             .any(|intent| intent.mutation_id == uncertain.mutation_id));
+        desktop.omenchat.omenchat_mutation_intent_worker = Some(
+            crate::chat::mutation_intent_worker::MutationIntentWorker::start(
+                desktop.app.paths.identity_storage_root(),
+            )
+            .expect("resolution worker"),
+        );
+
+        desktop.begin_omenchat_mutation_resolution(
+            prepared.mutation_id,
+            OmenChatMutationResolutionAction::Expire,
+        );
+        assert!(desktop
+            .omenchat
+            .omenchat_mutation_resolution_confirmation
+            .is_none());
+        assert!(desktop.app.status.task.contains("has not reached"));
+
+        desktop.begin_omenchat_mutation_resolution(
+            prepared.mutation_id,
+            OmenChatMutationResolutionAction::Abandon,
+        );
+        assert!(desktop
+            .omenchat
+            .omenchat_mutation_resolution_confirmation
+            .is_some());
+        let _abandon_task = desktop.confirm_omenchat_mutation_resolution();
+        assert!(!recover_intents(&desktop)
+            .iter()
+            .any(|intent| intent.mutation_id == prepared.mutation_id));
+        desktop.finish_omenchat_mutation_resolution(
+            prepared.mutation_id,
+            OutboundMutationState::Abandoned,
+            Ok(IntentTransition::StateMismatch {
+                current: OutboundMutationState::Abandoned,
+            }),
+        );
+        assert!(!desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| intent.mutation_id == prepared.mutation_id));
+        assert!(desktop
+            .app
+            .status
+            .task
+            .contains("no delivery outcome was claimed"));
+
+        desktop.begin_omenchat_mutation_resolution(
+            expired.mutation_id,
+            OmenChatMutationResolutionAction::Expire,
+        );
+        let _expire_task = desktop.confirm_omenchat_mutation_resolution();
+        assert!(!recover_intents(&desktop)
+            .iter()
+            .any(|intent| intent.mutation_id == expired.mutation_id));
+        desktop.finish_omenchat_mutation_resolution(
+            expired.mutation_id,
+            OutboundMutationState::Expired,
+            Ok(IntentTransition::StateMismatch {
+                current: OutboundMutationState::Expired,
+            }),
+        );
+        assert!(desktop
+            .app
+            .status
+            .task
+            .contains("no network action occurred"));
+        desktop.finish_omenchat_mutation_resolution(
+            uncertain.mutation_id,
+            OutboundMutationState::Abandoned,
+            Ok(IntentTransition::StateMismatch {
+                current: OutboundMutationState::Acknowledged,
+            }),
+        );
+        assert!(!desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| intent.mutation_id == uncertain.mutation_id));
+        assert!(desktop.app.status.task.contains("already terminal"));
+        assert!(desktop.omenchat.omenchat_live_transports.is_empty());
+        desktop
+            .omenchat
+            .omenchat_mutation_intent_worker
+            .take()
+            .expect("resolution worker")
+            .shutdown()
+            .expect("resolution worker shutdown");
         drop(desktop);
         let _ = std::fs::remove_dir_all(root);
     }
