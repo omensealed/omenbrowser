@@ -190,14 +190,20 @@ The expanded adjacent LXMF hosted matrix passes in Python interoperability run
 `29884168183` at commit `8d9bcd5`. The adjacent OMENchat additions remain local
 until the next interoperability checkpoint so ordinary development does not
 dispatch the roughly half-hour workflow for each small commit.
+An equivalent local release-profile resource comparison at commit `2721e96`
+also passes: desktop idle CPU is effectively unchanged, RSS rises 0.47%,
+private-dirty memory falls 0.03%, and the bounded omenchatd database and
+backpressure fixtures retain their queue, latency, FD, cleanup, and memory
+gates. Raw measurements remain under the ignored `target/` evidence root.
 
 - Keep the pinned Python lane at the immutable upstream references used by
   0.9.6 (`RNS 15320e4...`, `LXMF 727830c...`, conformance `0319444...`).
 - Run the separately versioned current-Python drift lane.
 - Run NomadNet, direct/propagated LXMF, OMENchat, omenchatd restart, Resource,
   IFAC, mixed `0.9.5-2`/`0.9.6-1`, and state-reopen suites.
-- Compare idle CPU/RSS/tasks/links and bounded soak results against the saved
-  0.9.5 baseline.
+- Complete the longer task/link soaks and any hardware-dependent measurements;
+  the equivalent short desktop, SQLite, and backpressure comparisons against
+  the saved 0.9.5 baseline pass.
 - Run native packaging only after Linux product and standalone gates pass;
   native Windows/macOS CI remains authoritative for those platforms.
 - Update README claims only from collected OMEN evidence.

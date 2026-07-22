@@ -4800,10 +4800,9 @@ for why recovery is required.
 
 No product retry, protocol, schema, identity, queue, or storage behavior
 changed. Rollback removes harness parameterization but discards adjacent-release
-evidence. Packaging and resource comparisons remain pending. The Python
-interoperability workflow now
-runs the locally proven five
-adjacent cases in the existing bounded mixed-release job, with a distinct old
+evidence. Native packaging and longer soak measurements remain pending. The
+Python interoperability workflow now runs the locally proven five adjacent
+cases in the existing bounded mixed-release job, with a distinct old
 Cargo target so its 0.9.5 artifacts cannot contaminate the long-range 0.6
 fixtures.
 
@@ -4855,3 +4854,44 @@ production networking, protocol, queue, retry, or persistence behavior.
 Rollback removes the sender reconnect correction and loses adjacent restart and
 crash recovery coverage. These cases remain local until the next bundled hosted
 interoperability checkpoint.
+
+## v0.9.6-1 unit 4e: release-profile resource comparison
+
+The exact published `v0.9.5-2` desktop binary from commit
+`c6ad96d3e083425a62e6713abe8598c4d494bde0` and the `0.9.6-1` desktop binary
+from commit `2721e9651f0215e208bb787d3d81bb18f3ebeee3` were measured sequentially
+with the same Xvfb/i3 harness, isolated roots, 15-second warmup, and sixty
+one-second samples. Both report the canonical `desktop-product` identity and
+closed normally in 170 ms.
+
+Median CPU changed from 0.974% to 0.976%, p95 CPU from 2.944% to 2.932%, and
+`perf` task clock from 561.47 ms to 557.65 ms. Median RSS changed from 254,580
+KiB to 255,780 KiB (0.47%), private-dirty memory from 59,168 KiB to 59,148 KiB
+(-0.03%), and median/p95 FDs remained 60. The scheduler context-switch proxy
+changed from 60.000 to 66.102 per minute; it is not relabeled as an application
+message counter. Recurring application-message and physical GPU measurements
+remain explicitly pending. The single startup observations were 1,514 ms and
+544 ms respectively, but one observation per binary is not treated as a
+startup benchmark. Binary size increased 0.13% from 54,358,760 to 54,428,352
+bytes.
+
+The matching 15-second omenchatd SQLite fixture accepted and committed 1,500
+operations, rejected 10,500 at its bounded admission point, retained 13 FDs,
+and passed integrity. Compared with the saved same-host/toolchain baseline,
+average worker latency changed from 342 us to 375 us, maximum latency improved
+from 1,279 us to 1,075 us, heartbeat maximum changed from 1,895 us to 2,055 us,
+and RSS growth changed from 610,304 to 716,800 bytes. All remain far inside the
+250-ms heartbeat and 64-MiB growth gates.
+
+The matching backpressure fixture retained its 256-item/16,718,820-byte
+transport peak, 513-observed-item/33,554,432-byte event peak, 21-ms maximum
+control latency, 11 peak FDs, and zero final item/byte occupancy. RSS growth
+changed from 53,489,664 to 55,668,736 bytes (4.07%), below half the 112-MiB
+allowance. These are equivalent deterministic short samples on the same host
+and Rust 1.97 toolchain, not universal hardware claims. Raw reports and copied
+binaries remain in ignored `target/reticulum-0.9.6-comparison/` evidence.
+
+This unit changes documentation only. No dependency, runtime, queue, cache,
+protocol, schema, identity, or user state changes. Rollback removes the evidence
+record. Longer link/task/logging soaks, interactive GPU measurements, native
+packaging, and the next bundled hosted checkpoint remain pending.
