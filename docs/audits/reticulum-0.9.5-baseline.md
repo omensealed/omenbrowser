@@ -882,3 +882,21 @@ upstream-regression, or interoperability tests ignored in each profile. Strict
 Clippy passed for both profiles and formatting passed. Capability acceptance
 remains disabled: the browser persistent-intent actor and negotiated
 send/recovery path are not yet production-active.
+
+## v0.9.6-1 hosted qualification checkpoint
+
+The superseding v0.9.6-1 work was qualified at commit
+`2bdcae1c22fc98bd6f750c6c99471d54b59b7102`. CI run `29890013927`, Python
+interoperability run `29890014693`, and package run `29890015669` all passed.
+Together they cover the Linux quick gate; native Windows MSVC, Intel macOS, and
+Apple Silicon macOS matrices; pinned/current/mixed Python interoperability;
+adjacent v0.9.5-2 LXMF, propagation durability, and OMENchat compatibility;
+Linux packages; and Windows portable/unsigned installer lifecycle checks.
+
+No physical-radio or public-network peer was available, and no hardware-
+specific GPU measurement was collected. The known maximum UDP Resource
+boundary failure was reproduced separately and remains an upstream 0.9.6
+limitation rather than an OMEN release claim. The repository has no macOS DMG
+job; native macOS behavior is qualified, but a macOS installer is not claimed.
+This checkpoint changes documentation only and preserves this file as the 0.9.5
+rollback audit.

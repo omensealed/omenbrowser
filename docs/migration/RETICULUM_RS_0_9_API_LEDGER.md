@@ -4994,3 +4994,32 @@ adjacent durability and OMENchat evidence. One CI run, one Python interop run,
 and one native package run are the intended bundled checkpoint; ordinary
 follow-up commits should not dispatch them again unless they affect those
 gates.
+
+## v0.9.6-1 unit 4i: hosted release qualification
+
+The deliberately bundled hosted checkpoint passed at exact commit
+`2bdcae1c22fc98bd6f750c6c99471d54b59b7102`:
+
+- CI run `29890013927` passed the Linux quick gate and native Windows MSVC,
+  Intel macOS, and Apple Silicon macOS matrices.
+- Python interoperability run `29890014693` passed the immutable pinned lane,
+  the explicitly versioned current-Python drift lane, the long-range mixed
+  compatibility lane, and the adjacent v0.9.5-2 LXMF, propagation durability,
+  and OMENchat compatibility cases.
+- Package run `29890015669` passed native prerequisites, Linux tar/deb/AppImage
+  construction and package smoke, and Windows portable, unsigned NSIS, and
+  unsigned WiX construction and lifecycle checks. The non-tag publication job
+  skipped as designed.
+
+The package run retained two qualified artifact groups: the Linux release set
+and the Windows portable/installer set. The repository does not currently
+define a macOS DMG job, so this evidence claims native macOS build, test,
+Clippy, product-identity, and smoke qualification, not a macOS installer.
+
+Physical-radio/public-network interoperability and hardware-specific GPU
+measurements were unavailable and remain unclaimed. The explicitly reproduced
+maximum UDP Resource failure remains the documented upstream 0.9.6 limitation;
+it blocks a maximum-UDP-Resource parity claim but does not invalidate the other
+passing version-aligned release gates. No production code, dependency,
+protocol, schema, identity, storage, queue, or configuration changed in this
+evidence-recording unit. Rollback removes only this record.

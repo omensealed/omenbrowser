@@ -97,10 +97,11 @@ not run.
 
 ### Unit 1 — exact dependency and application-version alignment
 
-Status: complete locally on 2026-07-21; CI qualification remains pending until
-the compiler-guided Unit 2 validation is batched with it. Both lockfiles resolve
-one registry-sourced 0.9.6 train, active release/mixed-version checks identify
-`0.9.6-1`, and canonical desktop plus both standalone-server profiles compile.
+Status: complete. Both lockfiles resolve one registry-sourced 0.9.6 train,
+active release/mixed-version checks identify `0.9.6-1`, and canonical desktop
+plus both standalone-server profiles compile. Hosted CI run `29890013927`
+passed the Linux quick gate and native Windows MSVC, Intel macOS, and Apple
+Silicon macOS matrices at commit `2bdcae1`.
 
 1. Set root and server application versions to `0.9.6-1` together.
 2. Change only the five direct upstream family pins listed above to `=0.9.6`.
@@ -115,11 +116,11 @@ may remain only when recorded in the API ledger.
 
 ### Unit 2 — compiler-guided API migration
 
-Status: complete locally on 2026-07-21. Canonical desktop, TUI, mock-runtime,
-standalone headless, and standalone full suites pass; strict desktop, TUI, and
-headless Clippy pass. Fallible 0.9.6 identity and message-ID APIs are used at
-persisted/untrusted boundaries, with malformed-key regressions. Native-platform
-CI and interop remain Unit 4 gates, not local compilation claims.
+Status: complete. Canonical desktop, TUI, mock-runtime, standalone headless,
+and standalone full suites pass; strict desktop, TUI, and headless Clippy pass.
+Fallible 0.9.6 identity and message-ID APIs are used at persisted/untrusted
+boundaries, with malformed-key regressions. Native-platform CI and interop
+subsequently passed as recorded under Unit 4.
 
 1. Run narrow checks from identity/core through transport, runtime, LXMF wire,
    SDK/RPC, omenchatd, GUI, and TUI.
@@ -168,11 +169,13 @@ retained, or superseded. No workaround is removed from release notes alone.
 
 ### Unit 4 — interoperability, performance, and release qualification
 
-Status: in progress. The separately versioned current-Python drift lane was
+Status: complete for the v0.9.6-1 release scope, with the maximum UDP Resource
+case retained as an accurately scoped upstream limitation. The separately
+versioned current-Python drift lane was
 advanced to the 2026-07-21 PyPI snapshot (RNS 1.4.0, LXMF 1.1.0, NomadNet
 1.2.7) and passed its complete informational matrix. This does not replace the
-immutable pinned-reference gate. Mixed-version, state-reopen, native packaging,
-and before/after desktop/server resource measurements remain. The published
+immutable pinned-reference gate. Mixed-version, state-reopen, hosted packaging,
+and before/after desktop/server resource measurements now pass. The published
 `v0.9.5-2` adjacent binary now passes bidirectional direct Link packets, 64-KiB
 Resources, restart/state reopening, and both propagation directions. The
 `0.9.6-1` sender to `0.9.5-2` recipient direction requires the documented
@@ -187,9 +190,9 @@ GitHub runs `29877719914` and `29877720971` pass at commit
 Linux quick checks, native Windows/Intel macOS/Apple Silicon macOS matrices,
 pinned and current Python lanes, and the existing full `0.6.0-1` mixed matrix.
 The expanded adjacent LXMF hosted matrix passes in Python interoperability run
-`29884168183` at commit `8d9bcd5`. The adjacent OMENchat additions remain local
-until the next interoperability checkpoint so ordinary development does not
-dispatch the roughly half-hour workflow for each small commit.
+`29884168183` at commit `8d9bcd5`. The adjacent OMENchat and propagation-
+durability additions passed in the bundled Python interoperability run
+`29890014693` at commit `2bdcae1`.
 An equivalent local release-profile resource comparison at commit `2721e96`
 also passes: desktop idle CPU is effectively unchanged, RSS rises 0.47%,
 private-dirty memory falls 0.03%, and the bounded omenchatd database and
@@ -201,12 +204,17 @@ The link soak ends with zero active/pending links and no FD/task growth; the
 logger remains bounded and preserves priority records.
 The local Linux quick gate, canonical package build, archive extraction,
 checksum verification, collector redaction, isolated server initialization,
-and two-client OMENchat package smoke also pass. Native Windows and macOS
-packaging remain hosted release gates rather than Linux cross-build claims.
+and two-client OMENchat package smoke also pass. Hosted package run
+`29890015669` passed at commit `2bdcae1`. It produced and qualified the Linux
+tar/deb/AppImage/checksum set and Windows portable, unsigned NSIS, and unsigned
+WiX artifacts after the native Windows and both native macOS prerequisite
+matrices passed. The repository does not currently define a macOS DMG release
+artifact; native macOS compile, test, Clippy, product-identity, and smoke
+coverage are the accepted macOS gate for this release.
 The final full local gate passes 1,554 desktop-product tests (33 explicit
 ignored/live measurements), 366 server-full tests (eight explicit
 ignored/live measurements), and strict Clippy for both roots. This is the
-checkpoint at which one bundled hosted CI/interop/package run becomes useful.
+checkpoint qualified by the three successful hosted runs above.
 
 - Keep the pinned Python lane at the immutable upstream references used by
   0.9.6 (`RNS 15320e4...`, `LXMF 727830c...`, conformance `0319444...`).
@@ -217,12 +225,15 @@ checkpoint at which one bundled hosted CI/interop/package run becomes useful.
   hardware-dependent measurements; the equivalent short desktop, SQLite, and
   backpressure comparisons and the current 60-second link/logging soaks pass.
 - Run native packaging only after Linux product and standalone gates pass;
-  the local Linux package gate passes, while native Windows/macOS CI remains
-  authoritative for those platforms.
+  the local Linux package gate and hosted Linux/Windows artifact jobs pass,
+  while native Windows/macOS CI remains authoritative for native behavior.
 - Update README claims only from collected OMEN evidence.
 
-Gate: release checklist names every unavailable live/hardware test and no
-unsupported upstream claim is promoted to an OMEN support claim.
+Gate: met for review. Unavailable physical-radio/public-network and hardware-
+specific GPU measurements remain explicitly unclaimed. The maximum UDP
+Resource boundary remains a documented upstream limitation and blocks that
+specific parity claim, not the version-aligned release. No unsupported upstream
+claim is promoted to an OMEN support claim.
 
 ## Rollback
 
