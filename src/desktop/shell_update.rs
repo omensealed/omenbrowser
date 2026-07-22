@@ -250,6 +250,7 @@ impl DesktopApp {
     pub(super) fn update_omenchat_maintenance_deadline_reached(&mut self) -> Task<Message> {
         let now = current_epoch_ms();
         Task::batch([
+            self.recover_omenchat_mutation_intents_if_pending(),
             self.sync_due_omenchat_recent_history(now),
             self.maintain_omenchat_live_links(now),
             self.reconnect_restored_omenchat_sessions_if_ready(),

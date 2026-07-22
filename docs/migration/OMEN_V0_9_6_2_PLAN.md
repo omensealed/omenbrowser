@@ -70,8 +70,8 @@ build `906.2`; protocol and database versions remain independent.
 
 ## Unit 2 — durable mutation live activation
 
-Status: negotiated room-text activation is locally complete; restart recovery
-and explicit uncertain-state actions remain pending. Startup owns the bounded
+Status: negotiated room-text activation and conservative restart recovery are
+locally complete; explicit uncertain-state actions remain pending. Startup owns the bounded
 intent worker only when the persistent client instance and authenticated active
 identity are both available. Only then does the browser advertise the bounded
 capability extension. omenchatd accepts only that known capability and binds the
@@ -95,6 +95,15 @@ transport output, draft retention/clearing, and terminal acknowledgement
 persistence. No prepared or uncertain intent is automatically replayed after a
 restart. Room actions, commands, and other mutation types still use their
 existing legacy path unless a later focused unit explicitly activates them.
+
+The first maintenance deadline now submits one bounded recovery request. Its
+reply is received off the async worker, filtered to the active authenticated
+identity and persistent client instance, and retained within the store's
+existing 4,096-item/16-MiB recovery ceiling. Other-identity records are counted
+without exposing their bodies or identifiers. Prepared, uncertain, and
+past-expiry counts are surfaced in redacted session diagnostics together with
+worker queue health. Recovery changes no intent state and emits no transport
+frame; the application status explicitly states that nothing was resent.
 
 The server transaction/replay executors and browser intent store remain staged
 but production capability acceptance is off in v0.9.6-1. Connect them in the

@@ -9,6 +9,7 @@ use crate::chat::mutation_intents::{
 use crate::chat::protocol::{ChatOp, FrameBody, MutationId};
 use crate::chat::{ChatClientEvent, ChatSessionId};
 
+use super::omenchat_desktop_state::OmenChatMutationRecoveryState;
 use super::{
     is_omenchat_local_echo_event, DesktopApp, Message, OmenChatDraftCommandResult,
     OmenChatMutationCompletionMessage,
@@ -17,6 +18,38 @@ use super::{
 const DURABLE_MUTATION_INTENT_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 impl DesktopApp {
+    pub(in crate::desktop) fn recover_omenchat_mutation_intents_if_pending(
+        &mut self,
+    ) -> Task<Message> {
+        if self.omenchat.omenchat_mutation_recovery_state != OmenChatMutationRecoveryState::Pending
+        {
+            return Task::none();
+        }
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.omenchat.omenchat_mutation_recovery_state =
+                OmenChatMutationRecoveryState::Unavailable;
+            return Task::none();
+        };
+        let reply = match worker.try_recover() {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.omenchat.omenchat_mutation_recovery_state =
+                    OmenChatMutationRecoveryState::Failed;
+                self.app.status.task =
+                    format!("OMENchat durable mutation recovery was not admitted: {error}");
+                return Task::none();
+            }
+        };
+        self.omenchat.omenchat_mutation_recovery_state = OmenChatMutationRecoveryState::InFlight;
+        Task::perform(await_intent_worker_reply(reply), |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::Recovered {
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
     pub(in crate::desktop) fn send_omenchat_draft_with_durable_intent(
         &mut self,
         session_id: ChatSessionId,
@@ -133,6 +166,10 @@ impl DesktopApp {
         completion: OmenChatMutationCompletionMessage,
     ) -> Task<Message> {
         match completion {
+            OmenChatMutationCompletionMessage::Recovered { result } => {
+                self.finish_omenchat_mutation_recovery(result);
+                Task::none()
+            }
             OmenChatMutationCompletionMessage::Prepared { session_id, result } => {
                 self.mark_prepared_omenchat_mutation_uncertain(session_id, result)
             }
@@ -148,6 +185,79 @@ impl DesktopApp {
                 Task::none()
             }
         }
+    }
+
+    fn finish_omenchat_mutation_recovery(
+        &mut self,
+        result: Result<Vec<crate::chat::mutation_intents::OutboundMutationIntent>, String>,
+    ) {
+        let intents = match result {
+            Ok(intents) => intents,
+            Err(error) => {
+                self.omenchat.omenchat_mutation_recovery_state =
+                    OmenChatMutationRecoveryState::Failed;
+                self.app.status.task =
+                    format!("OMENchat durable mutation recovery failed: {error}");
+                return;
+            }
+        };
+        let Some(identity_hash) = self
+            .omenchat
+            .omenchat_authenticated_identity_hash
+            .as_deref()
+        else {
+            self.omenchat.omenchat_mutation_recovery_state = OmenChatMutationRecoveryState::Failed;
+            self.app.status.task =
+                "OMENchat durable mutation recovery lacks an authenticated identity".into();
+            return;
+        };
+        let Some(client_instance_id) = self.omenchat.omenchat_live_state.client_instance_id()
+        else {
+            self.omenchat.omenchat_mutation_recovery_state = OmenChatMutationRecoveryState::Failed;
+            self.app.status.task =
+                "OMENchat durable mutation recovery lacks a persistent client instance".into();
+            return;
+        };
+        let mut current = Vec::new();
+        let mut other_count = 0usize;
+        for intent in intents {
+            if intent.authenticated_identity_hash == identity_hash
+                && intent.client_instance_id == client_instance_id
+            {
+                current.push(intent);
+            } else {
+                other_count = other_count.saturating_add(1);
+            }
+        }
+        let now = current_unix_seconds();
+        let prepared = current
+            .iter()
+            .filter(|intent| {
+                intent.state == OutboundMutationState::Prepared && intent.expires_at > now
+            })
+            .count();
+        let uncertain = current
+            .iter()
+            .filter(|intent| {
+                intent.state == OutboundMutationState::SentUncertain && intent.expires_at > now
+            })
+            .count();
+        let expired = current
+            .iter()
+            .filter(|intent| intent.expires_at <= now)
+            .count();
+        self.omenchat.omenchat_recovered_mutation_intents = current;
+        self.omenchat.omenchat_other_identity_mutation_intents = other_count;
+        self.omenchat.omenchat_mutation_recovery_state = OmenChatMutationRecoveryState::Loaded;
+        let total = prepared.saturating_add(uncertain).saturating_add(expired);
+        self.app.status.task = if total == 0 && other_count == 0 {
+            "OMENchat durable mutation recovery found no unresolved intents".into()
+        } else {
+            format!(
+                "OMENchat recovered {prepared} prepared, {uncertain} uncertain, and {expired} expired intent(s); {} other-identity intent(s) retained; nothing was resent",
+                other_count
+            )
+        };
     }
 
     fn mark_prepared_omenchat_mutation_uncertain(
@@ -568,6 +678,102 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn restart_recovery_is_identity_scoped_visible_and_never_transmits() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-desktop-mutation-recovery-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let paths = crate::config::AppPaths::from_root(root.clone());
+        paths.ensure().expect("isolated paths");
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+        let client_instance_id = ClientInstanceId::new([0x61; 16]);
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_client_instance_id(Some(client_instance_id));
+        desktop.omenchat.omenchat_authenticated_identity_hash = Some(vec![0x62; 16]);
+        let now = current_unix_seconds();
+        let store =
+            crate::chat::mutation_intents::MutationIntentStore::open_for_identity_storage_root(
+                desktop.app.paths.identity_storage_root(),
+            )
+            .expect("intent store");
+        let prepared = persist_recovery_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            OutboundMutationState::Prepared,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain = persist_recovery_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let _other_identity = persist_recovery_fixture(
+            &store,
+            vec![0x66; 16],
+            client_instance_id,
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let _expired = persist_recovery_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            OutboundMutationState::Prepared,
+            now.saturating_sub(100),
+            now.saturating_sub(1),
+        );
+        drop(store);
+        let reopened =
+            crate::chat::mutation_intents::MutationIntentStore::open_for_identity_storage_root(
+                desktop.app.paths.identity_storage_root(),
+            )
+            .expect("reopened intent store");
+        let recovered = reopened.recover_nonterminal().expect("restart recovery");
+        drop(reopened);
+
+        desktop.finish_omenchat_mutation_recovery(Ok(recovered));
+
+        assert_eq!(
+            desktop.omenchat.omenchat_mutation_recovery_state,
+            OmenChatMutationRecoveryState::Loaded
+        );
+        assert_eq!(
+            desktop.omenchat.omenchat_recovered_mutation_intents.len(),
+            3
+        );
+        assert_eq!(desktop.omenchat.omenchat_other_identity_mutation_intents, 1);
+        assert!(desktop.app.status.task.contains("1 prepared"));
+        assert!(desktop.app.status.task.contains("1 uncertain"));
+        assert!(desktop.app.status.task.contains("1 expired"));
+        assert!(desktop.app.status.task.contains("nothing was resent"));
+        assert!(desktop.omenchat.omenchat_live_transports.is_empty());
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| intent.mutation_id == prepared.mutation_id));
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| intent.mutation_id == uncertain.mutation_id));
+        drop(desktop);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn recover_intents(
         desktop: &DesktopApp,
     ) -> Vec<crate::chat::mutation_intents::OutboundMutationIntent> {
@@ -581,5 +787,39 @@ mod tests {
             .recv()
             .expect("recovery reply")
             .expect("recovery result")
+    }
+
+    fn persist_recovery_fixture(
+        store: &crate::chat::mutation_intents::MutationIntentStore,
+        authenticated_identity_hash: Vec<u8>,
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+        created_at: i64,
+        expires_at: i64,
+    ) -> crate::chat::mutation_intents::OutboundMutationIntent {
+        let request = OwnedPrepareOutboundMutation {
+            server_destination: "00112233445566778899aabbccddeeff".into(),
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::RoomMessage,
+            room_id: Some(1),
+            body: FrameBody::Text("recovered body".into()),
+            created_at,
+            expires_at,
+            correlation_id: None,
+        };
+        let prepared = store
+            .persist_prepared(request.as_borrowed())
+            .expect("persist recovery fixture");
+        if state == OutboundMutationState::Prepared {
+            return prepared;
+        }
+        match store
+            .transition(prepared.mutation_id, OutboundMutationState::Prepared, state)
+            .expect("transition recovery fixture")
+        {
+            IntentTransition::Updated(intent) => intent,
+            other => panic!("unexpected recovery fixture transition: {other:?}"),
+        }
     }
 }

@@ -447,6 +447,9 @@ pub(in crate::desktop) enum OmenChatTransportCompletionMessage {
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 #[derive(Clone, Debug)]
 pub(in crate::desktop) enum OmenChatMutationCompletionMessage {
+    Recovered {
+        result: Result<Vec<crate::chat::mutation_intents::OutboundMutationIntent>, String>,
+    },
     Prepared {
         session_id: ChatSessionId,
         result: Result<crate::chat::mutation_intents::OutboundMutationIntent, String>,

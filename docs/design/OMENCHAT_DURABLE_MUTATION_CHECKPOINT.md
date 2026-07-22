@@ -1,6 +1,6 @@
 # OMENchat durable mutation checkpoint
 
-Status: checkpoint accepted; negotiated room-text durable transmission active; restart recovery remains conservative
+Status: checkpoint accepted; negotiated room-text durable transmission and conservative restart recovery active
 Baseline: OMENbrowser/omenchatd v0.9.5-2, OMENchat protocol v1  
 Proposed capability: `durable-mutations-v1`
 
@@ -233,6 +233,16 @@ are monotonic: prepared may become uncertain,
 expired, or abandoned; uncertain may become acknowledged, conflict, expired,
 or abandoned; terminal states never regress. Negotiated room-text sends now
 use this owner; other mutations remain on the unchanged legacy path.
+
+Desktop restart recovery is deliberately read-only. The first OMENchat
+maintenance deadline submits one bounded recovery command and never transmits
+an intent. Results are filtered to the active authenticated identity and
+persistent client instance before retention in desktop state; records belonging
+to another identity are counted without exposing their request bodies or
+identifiers. Redacted session diagnostics report prepared, uncertain,
+past-expiry, and worker-queue counts. Recovery failure is visible and does not
+fall back to automatic resend. Explicit abandon, retry, and conflict actions
+remain a later guarded UI unit.
 
 ## Server retention
 
