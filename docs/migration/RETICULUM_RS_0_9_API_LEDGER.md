@@ -4800,8 +4800,8 @@ for why recovery is required.
 
 No product retry, protocol, schema, identity, queue, or storage behavior
 changed. Rollback removes harness parameterization but discards adjacent-release
-evidence. Propagation-node restart/crash/stamp-ticket variants, packaging, and
-resource comparisons remain pending. The Python interoperability workflow now
+evidence. Packaging and resource comparisons remain pending. The Python
+interoperability workflow now
 runs the locally proven five
 adjacent cases in the existing bounded mixed-release job, with a distinct old
 Cargo target so its 0.9.5 artifacts cannot contaminate the long-range 0.6
@@ -4834,3 +4834,24 @@ peer selection and loses adjacent evidence. The cases remain local until the
 next meaningful interoperability checkpoint; repeatedly dispatching the full
 hosted matrix for harness-only commits would add cost and latency without
 additional platform coverage.
+
+## v0.9.6-1 unit 4d: adjacent propagation durability
+
+The remaining adjacent propagation cases now pass from the `0.9.6-1` sender to
+the `v0.9.5-2` recipient: orderly propagation-node restart, abrupt node crash,
+and required stamp/ticket handling. Each case first records the older
+recipient's expected unknown-sender deferral, then learns a fresh authenticated
+sender announce and decodes the same retained transient. No logical message is
+resubmitted. Restart and crash both preserve one queued transient and the
+propagation identity; crash additionally observes a non-zero abrupt exit.
+Stamp/ticket qualification verifies the required stamp policy and ticket bytes
+independently of transport acceptance.
+
+The first adjacent restart attempts exposed a harness-only reconnect defect:
+after selecting the restarted node's new ephemeral port, the recipient was
+updated but the recovery announce sender retained the dead port. Updating both
+peer argument sets made the intended recovery executable. This does not change
+production networking, protocol, queue, retry, or persistence behavior.
+Rollback removes the sender reconnect correction and loses adjacent restart and
+crash recovery coverage. These cases remain local until the next bundled hosted
+interoperability checkpoint.

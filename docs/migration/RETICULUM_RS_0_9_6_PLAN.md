@@ -179,7 +179,10 @@ Resources, restart/state reopening, and both propagation directions. The
 two-sync unknown-sender recovery without resending the logical mutation.
 Adjacent OMENchat qualification also passes SQLite state reopening, live room
 traffic, orderly server restart, and Resource-backed history in both client and
-server directions. GitHub runs `29877719914` and `29877720971` pass at commit
+server directions. Adjacent propagation qualification also passes orderly node
+restart, abrupt node crash with persisted queue recovery, and required
+stamp/ticket wire handling through the explicit unknown-sender recovery path.
+GitHub runs `29877719914` and `29877720971` pass at commit
 `5905d0b`, covering
 Linux quick checks, native Windows/Intel macOS/Apple Silicon macOS matrices,
 pinned and current Python lanes, and the existing full `0.6.0-1` mixed matrix.

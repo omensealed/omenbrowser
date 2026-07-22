@@ -366,6 +366,7 @@ PY
     --tcp-client "127.0.0.1:$port" --network-name "$network_name"
     --passphrase-file "$passphrase_file"
   )
+  sender_common=("${common_current[@]}")
   recipient_common=("${common_old[@]}")
 fi
 

@@ -3477,6 +3477,12 @@ bash scripts/run-mixed-0-6-0-9-lxmf.sh --restart
 bash scripts/run-mixed-0-6-0-9-propagation.sh --reverse
 OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
   bash scripts/run-mixed-0-6-0-9-propagation.sh
+OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
+  bash scripts/run-mixed-0-6-0-9-propagation.sh --node-restart
+OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
+  bash scripts/run-mixed-0-6-0-9-propagation.sh --node-crash
+OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
+  bash scripts/run-mixed-0-6-0-9-propagation.sh --stamp-ticket
 bash scripts/run-mixed-0-6-0-9-omenchat-history.sh
 bash scripts/run-mixed-0-6-0-9-omenchat-live.sh
 bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse
@@ -3496,6 +3502,12 @@ sync to retain exactly one transient and request the unknown authenticated
 sender path, learns a fresh sender announce, and then syncs the retained
 transient. It is used where the older recipient does not persist enough sender
 evidence across the receive/sync process boundary.
+
+For propagation-node restart and crash cases, both peers reconnect to the new
+ephemeral listener before the recovery announce. The assertion also requires a
+stable propagation identity and exactly one restored queued transient. The
+stamp/ticket case applies the same retained-transient recovery while preserving
+its independent stamp-policy and ticket-wire assertions.
 
 Each direct and Resource case runs one direction at a time with its receive-only
 peer online before the sender opens a link. Each logical message is attempted
