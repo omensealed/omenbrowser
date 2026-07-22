@@ -172,7 +172,14 @@ Status: in progress. The separately versioned current-Python drift lane was
 advanced to the 2026-07-21 PyPI snapshot (RNS 1.4.0, LXMF 1.1.0, NomadNet
 1.2.7) and passed its complete informational matrix. This does not replace the
 immutable pinned-reference gate. Mixed-version, state-reopen, native packaging,
-and before/after desktop/server resource measurements remain.
+and before/after desktop/server resource measurements remain. The published
+`v0.9.5-2` adjacent binary now passes bidirectional direct Link packets, 64-KiB
+Resources, restart/state reopening, and both propagation directions. The
+`0.9.6-1` sender to `0.9.5-2` recipient direction requires the documented
+two-sync unknown-sender recovery without resending the logical mutation.
+GitHub runs `29877719914` and `29877720971` pass at commit `5905d0b`, covering
+Linux quick checks, native Windows/Intel macOS/Apple Silicon macOS matrices,
+pinned and current Python lanes, and the existing full `0.6.0-1` mixed matrix.
 
 - Keep the pinned Python lane at the immutable upstream references used by
   0.9.6 (`RNS 15320e4...`, `LXMF 727830c...`, conformance `0319444...`).

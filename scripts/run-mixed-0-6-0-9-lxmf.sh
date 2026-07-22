@@ -3,7 +3,9 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
-readonly old_commit=5ba6683055fb6c59111919fbad1ac37f56a4c203
+readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a4c203}
+readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
+readonly current_expected_version=0.9.6-1
 readonly gateway_rns_version=1.4.0
 readonly network_name=omen-mixed-version
 
@@ -103,11 +105,11 @@ else
 fi
 old_version=$($old_bin --version | awk '{print $2}')
 current_version=$($current_bin --version | awk '{print $2}')
-if [[ "$old_version" != "0.6.0-1" ]]; then
+if [[ "$old_version" != "$old_expected_version" ]]; then
   echo "mixed LXMF old application version mismatch: $old_version" >&2
   exit 1
 fi
-if [[ "$current_version" != "0.9.6-1" ]]; then
+if [[ "$current_version" != "$current_expected_version" ]]; then
   echo "mixed LXMF current application version mismatch: $current_version" >&2
   exit 1
 fi
@@ -269,13 +271,16 @@ run_directional_round() {
   wait "$current_pid"
   current_pid=""
 
-  "$python" - "$prefix" "$temporary_root" <<'PY'
+  "$python" - "$prefix" "$temporary_root" \
+    "$old_expected_version" "$current_expected_version" <<'PY'
 import json
 import pathlib
 import sys
 
 prefix = sys.argv[1]
 root = pathlib.Path(sys.argv[2])
+old_version = sys.argv[3]
+current_version = sys.argv[4]
 
 def load(name):
     return json.loads((root / f"{prefix}-{name}.json").read_text(encoding="utf-8"))
@@ -300,8 +305,8 @@ def combine(version, sender, receiver):
     }
     return sender
 
-old = combine("0.6.0-1", load("old-sender"), load("old-receiver"))
-current = combine("0.9.6-1", load("current-sender"), load("current-receiver"))
+old = combine(old_version, load("old-sender"), load("old-receiver"))
+current = combine(current_version, load("current-sender"), load("current-receiver"))
 (root / f"{prefix}-old-report.json").write_text(
     json.dumps(old), encoding="utf-8"
 )
@@ -395,9 +400,11 @@ def validate(label, report):
         report.get("local", {}).get("local_lxmf_destination_hash"))
 
 def validate_round(label, old, current):
-    old_summary, old_sent, old_received, old_destination = validate(f"{label} 0.6.0-1", old)
+    old_summary, old_sent, old_received, old_destination = validate(
+        f"{label} {sys.argv[7]}", old
+    )
     current_summary, current_sent, current_received, current_destination = validate(
-        f"{label} 0.9.6-1", current
+        f"{label} {sys.argv[8]}", current
     )
     if not all((old_sent, old_received, current_sent, current_received)):
         raise RuntimeError(f"{label} did not expose message identifiers for correlation")
@@ -472,7 +479,7 @@ if [[ -n "$report_path" ]]; then
 fi
 cat "$summary"
 if [[ "$restart_fixture" == true ]]; then
-  echo "mixed OMENbrowser 0.6.0-1/0.9.6-1 restart/state reopening: pass"
+  echo "mixed OMENbrowser $old_version/$current_version restart/state reopening: pass"
 else
-  echo "mixed OMENbrowser 0.6.0-1/0.9.6-1 direct LXMF $transfer_fixture interoperability: pass"
+  echo "mixed OMENbrowser $old_version/$current_version direct LXMF $transfer_fixture interoperability: pass"
 fi

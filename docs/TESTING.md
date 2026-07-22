@@ -3452,12 +3452,36 @@ bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --history-resource \
 The old binary is built with `--locked` from immutable hardened commit
 `5ba6683055fb6c59111919fbad1ac37f56a4c203` in a disposable Git archive. The
 current binary uses the canonical native-network layers. Separate temporary
-application/identity/Reticulum roots connect through exact Python RNS 1.3.8 on
+application/identity/Reticulum roots connect through the exact Python RNS
+version selected by the harness on
 ephemeral loopback TCP with fixed public IFAC fixture credentials supplied by
 an owner-only file. The harness requires both direct sends, one reciprocal
 peer-bound message in each process, and exact 32-byte-title/102-byte-content
 shape metadata. It retains no raw application report containing paths or
 identity material.
+
+For adjacent-release qualification, the direct and propagation harnesses also
+accept an explicit immutable old commit and expected version without changing
+their legacy defaults. The published `v0.9.5-2` cases use:
+
+```bash
+export OMEN_MIXED_OLD_COMMIT=c6ad96d3e083425a62e6713abe8598c4d494bde0
+export OMEN_MIXED_OLD_VERSION=0.9.5-2
+export OMEN_MIXED_OLD_TARGET_DIR="$PWD/target/mixed-v0.9.5-2"
+
+bash scripts/run-mixed-0-6-0-9-lxmf.sh
+bash scripts/run-mixed-0-6-0-9-lxmf.sh --resource
+bash scripts/run-mixed-0-6-0-9-lxmf.sh --restart
+bash scripts/run-mixed-0-6-0-9-propagation.sh --reverse
+OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
+  bash scripts/run-mixed-0-6-0-9-propagation.sh
+```
+
+The recovery option does not resend the logical message. It requires an initial
+sync to retain exactly one transient and request the unknown authenticated
+sender path, learns a fresh sender announce, and then syncs the retained
+transient. It is used where the older recipient does not persist enough sender
+evidence across the receive/sync process boundary.
 
 Each direct and Resource case runs one direction at a time with its receive-only
 peer online before the sender opens a link. Each logical message is attempted
@@ -3481,7 +3505,8 @@ exact peer-send/inbound-ID correlation, and exactly one inbound event per
 direction. Compared IDs and destinations are discarded rather than retained.
 
 The propagation command tests both store-and-forward directions separately.
-The sender submits one propagated message to exact Python RNS 1.3.8/LXMF 1.0.1;
+The sender submits one propagated message to the exact Python RNS/LXMF versions
+selected by the harness;
 the recipient then reconnects with the same isolated identity and syncs it. In
 the reverse case, the current recipient must initially defer the unknown old
 sender without acknowledgement, request sender-path recovery, learn a fresh

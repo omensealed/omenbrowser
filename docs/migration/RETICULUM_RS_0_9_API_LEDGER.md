@@ -4772,3 +4772,37 @@ wire protocol, schema, identity, runtime policy, queue, retry, or user state.
 Rollback restores the former current-lane pins but would cease testing the
 current published Python stack. Mixed 0.9.5/0.9.6 execution, native packaging,
 and product/server before-after resource measurements remain pending.
+
+## v0.9.6-1 unit 4b: adjacent v0.9.5-2 interoperability
+
+The long-range mixed harness retains immutable `0.6.0-1` defaults and now
+accepts an explicit old commit/version for adjacent-release evidence. The old
+binary was built with its committed lockfile from published `v0.9.5-2` commit
+`c6ad96d3e083425a62e6713abe8598c4d494bde0`; the current peer was
+`0.9.6-1`, with exact Python RNS 1.4.0/LXMF 1.1.0 as the gateway.
+
+Bidirectional direct Link-packet traffic passed on one logical attempt in
+40,077 ms with reciprocal message IDs, exact 102-byte content, and both packet
+proofs correlated. Reopening the same isolated roots preserved both destination
+identities, generated new inbound/outbound message IDs, and admitted no
+duplicates. Bidirectional 65,536-byte Resource traffic passed in 40,068 ms with
+exact content and message-ID correlation; packet proofs are not claimed for
+Resource completion.
+
+Propagation from `0.9.5-2` to `0.9.6-1` passed directly. In the reverse
+direction, the older recipient's first sync correctly deferred the transient
+because its authenticated sender path was absent and requested that path. The
+harness exposes explicit recovery: it learns a fresh sender announce and syncs
+the same retained transient again without resending the logical message. That
+path passed with one queued transient, one decoded message, one acknowledgement,
+and an empty propagation queue. The original one-shot failure remains evidence
+for why recovery is required.
+
+No product retry, protocol, schema, identity, queue, or storage behavior
+changed. Rollback removes harness parameterization but discards adjacent-release
+evidence. Adjacent OMENchat client/server execution, propagation-node
+restart/crash/stamp-ticket variants, packaging, and resource comparisons remain
+pending. The Python interoperability workflow now runs the locally proven five
+adjacent cases in the existing bounded mixed-release job, with a distinct old
+Cargo target so its 0.9.5 artifacts cannot contaminate the long-range 0.6
+fixtures. Hosted completion remains the unit's final gate.
