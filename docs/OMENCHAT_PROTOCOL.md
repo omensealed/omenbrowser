@@ -163,6 +163,13 @@ with the current request sequence. This is required for a client to correlate
 the acknowledgement after Link replacement or restart and does not repeat the
 mutation, rate accounting, or fan-out.
 
+The browser recognizes conflict (1013) and replay-expired (1014) as terminal
+only when the authenticated server response sequence matches an outstanding
+durable mutation. It then removes that mutation's optimistic local echo and
+persists `conflict` or `expired`. Uncorrelated errors and nonterminal outcomes,
+including store-busy (1015), do not terminalize or silently retry uncertain
+work.
+
 The shared protocol crate defines the bounded optional negotiation extension.
 Existing `SessionOpen` fields remain protocol name, display name, and optional
 client LXMF destination at indexes 0 through 2. Requested capabilities and a

@@ -186,6 +186,20 @@ impl DesktopApp {
                 self.finish_omenchat_mutation_acknowledgement(session_id, mutation_id, result);
                 Task::none()
             }
+            OmenChatMutationCompletionMessage::Terminalized {
+                session_id,
+                mutation_id,
+                next,
+                result,
+            } => {
+                self.finish_omenchat_mutation_terminal_response(
+                    session_id,
+                    mutation_id,
+                    next,
+                    result,
+                );
+                Task::none()
+            }
             OmenChatMutationCompletionMessage::Resolved {
                 mutation_id,
                 next,
@@ -747,7 +761,7 @@ impl DesktopApp {
         }) {
             self.persist_omenchat_session(session_id);
         }
-        let tasks = self.omenchat_mutation_acknowledgement_tasks(&events);
+        let tasks = self.omenchat_mutation_persistence_tasks(&events);
         if tasks.is_empty() {
             Task::none()
         } else {
@@ -755,26 +769,46 @@ impl DesktopApp {
         }
     }
 
-    pub(in crate::desktop) fn omenchat_mutation_acknowledgement_tasks(
+    pub(in crate::desktop) fn omenchat_mutation_persistence_tasks(
         &mut self,
         events: &[ChatClientEvent],
     ) -> Vec<Task<Message>> {
-        let acknowledgements = events.iter().filter_map(|event| match event {
+        let transitions = events.iter().filter_map(|event| match event {
             ChatClientEvent::DurableMutationAcknowledged {
                 session_id,
                 mutation_id,
-            } => Some((*session_id, *mutation_id)),
+            } => Some((
+                *session_id,
+                *mutation_id,
+                OutboundMutationState::Acknowledged,
+            )),
+            ChatClientEvent::DurableMutationTerminal {
+                session_id,
+                mutation_id,
+                state,
+            } => Some((
+                *session_id,
+                *mutation_id,
+                match state {
+                    crate::chat::DurableMutationTerminalState::Conflict => {
+                        OutboundMutationState::Conflict
+                    }
+                    crate::chat::DurableMutationTerminalState::Expired => {
+                        OutboundMutationState::Expired
+                    }
+                },
+            )),
             _ => None,
         });
         let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
             return Vec::new();
         };
-        acknowledgements
-            .filter_map(|(session_id, mutation_id)| {
+        transitions
+            .filter_map(|(session_id, mutation_id, next)| {
                 let reply = match worker.try_transition(
                     mutation_id,
                     OutboundMutationState::SentUncertain,
-                    OutboundMutationState::Acknowledged,
+                    next,
                 ) {
                     Ok(reply) => reply,
                     Err(error) => {
@@ -790,13 +824,22 @@ impl DesktopApp {
                 Some(Task::perform(
                     await_intent_worker_reply(reply),
                     move |result| {
-                        Message::OmenChatMutationCompletion(Box::new(
+                        let result = result.map_err(|error| error.to_string());
+                        let completion = if next == OutboundMutationState::Acknowledged {
                             OmenChatMutationCompletionMessage::Acknowledged {
                                 session_id,
                                 mutation_id,
-                                result: result.map_err(|error| error.to_string()),
-                            },
-                        ))
+                                result,
+                            }
+                        } else {
+                            OmenChatMutationCompletionMessage::Terminalized {
+                                session_id,
+                                mutation_id,
+                                next,
+                                result,
+                            }
+                        };
+                        Message::OmenChatMutationCompletion(Box::new(completion))
                     },
                 ))
             })
@@ -847,6 +890,78 @@ impl DesktopApp {
                 .omenchat_recovered_mutation_intents
                 .retain(|intent| intent.mutation_id != mutation_id);
         }
+    }
+
+    fn finish_omenchat_mutation_terminal_response(
+        &mut self,
+        session_id: ChatSessionId,
+        mutation_id: MutationId,
+        next: OutboundMutationState,
+        result: Result<IntentTransition, String>,
+    ) {
+        if !matches!(
+            next,
+            OutboundMutationState::Conflict | OutboundMutationState::Expired
+        ) {
+            tracing::warn!(
+                session_id,
+                ?mutation_id,
+                ?next,
+                "ignored invalid durable OMENchat terminal response state"
+            );
+            return;
+        }
+        let terminalized = match result {
+            Ok(IntentTransition::Updated(intent)) if intent.state == next => true,
+            Ok(IntentTransition::StateMismatch { current }) if current == next => true,
+            Ok(IntentTransition::StateMismatch {
+                current: OutboundMutationState::Acknowledged,
+            }) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    "durable OMENchat acknowledgement won a concurrent terminal response race"
+                        .into(),
+                );
+                true
+            }
+            Ok(other) => {
+                tracing::warn!(
+                    session_id,
+                    ?mutation_id,
+                    ?next,
+                    transition = ?other,
+                    "durable OMENchat terminal response did not persist"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    ?mutation_id,
+                    ?next,
+                    %error,
+                    "failed to persist durable OMENchat terminal response"
+                );
+                false
+            }
+        };
+        if !terminalized {
+            self.set_omenchat_session_status(
+                session_id,
+                "server returned a terminal durable mutation result, but local persistence failed"
+                    .into(),
+            );
+            return;
+        }
+        self.omenchat
+            .omenchat_recovered_mutation_intents
+            .retain(|intent| intent.mutation_id != mutation_id);
+        let status = if next == OutboundMutationState::Conflict {
+            "server rejected the durable mutation because its identity conflicts with a retained operation; it will not be retried"
+        } else {
+            "server reports the durable replay identity expired; the mutation was not executed and will not be retried"
+        };
+        self.set_omenchat_session_status(session_id, status.into());
     }
 }
 
@@ -1020,7 +1135,7 @@ mod tests {
             .omenchat_live_state
             .durable_mutation_is_pending(session_id, mutation_id));
 
-        let _ack_tasks = desktop.omenchat_mutation_acknowledgement_tasks(&[
+        let _ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
             ChatClientEvent::DurableMutationAcknowledged {
                 session_id,
                 mutation_id,
@@ -1086,6 +1201,34 @@ mod tests {
                 .map(|transport| transport.chat_frames_out),
             Some(2)
         );
+        let _terminal_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationTerminal {
+                session_id,
+                mutation_id: recovered_prepared.mutation_id,
+                state: crate::chat::DurableMutationTerminalState::Conflict,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
+        desktop.finish_omenchat_mutation_terminal_response(
+            session_id,
+            recovered_prepared.mutation_id,
+            OutboundMutationState::Conflict,
+            Ok(IntentTransition::StateMismatch {
+                current: OutboundMutationState::Conflict,
+            }),
+        );
+        assert!(!desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| intent.mutation_id == recovered_prepared.mutation_id));
+        assert!(desktop
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .expect("session")
+            .status
+            .contains("will not be retried"));
 
         desktop
             .omenchat

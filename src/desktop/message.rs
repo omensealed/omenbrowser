@@ -480,6 +480,12 @@ pub(in crate::desktop) enum OmenChatMutationCompletionMessage {
         mutation_id: crate::chat::protocol::MutationId,
         result: Result<crate::chat::mutation_intents::IntentTransition, String>,
     },
+    Terminalized {
+        session_id: ChatSessionId,
+        mutation_id: crate::chat::protocol::MutationId,
+        next: crate::chat::mutation_intents::OutboundMutationState,
+        result: Result<crate::chat::mutation_intents::IntentTransition, String>,
+    },
     Resolved {
         mutation_id: crate::chat::protocol::MutationId,
         next: crate::chat::mutation_intents::OutboundMutationState,

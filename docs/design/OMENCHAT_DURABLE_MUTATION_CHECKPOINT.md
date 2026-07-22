@@ -266,6 +266,15 @@ never creates a second logical operation, never runs automatically, and never
 clears unrelated composer text. Conflict-specific remediation remains a later
 unit.
 
+Typed terminal response handling is active for conflict and replay expiry.
+Only a response correlated to the outstanding durable request sequence can
+release its bounded pending echo and transition the persistent intent from
+`sent_uncertain` to `conflict` or `expired`. The UI reports that no further
+retry will occur. Store-busy, malformed, unnegotiated, generic, and
+uncorrelated errors remain uncertain; they cannot fabricate a delivery or
+terminal result. A persistence failure leaves the durable intent recoverable
+and is reported instead of being hidden.
+
 ## Server retention
 
 Initial ceilings, subject to soak evidence:

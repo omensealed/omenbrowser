@@ -2246,6 +2246,23 @@ fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_jso
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>(),
         }),
+        omenbrowser_rs::chat::ChatClientEvent::DurableMutationTerminal {
+            session_id,
+            mutation_id,
+            state,
+        } => serde_json::json!({
+            "event": "durable_mutation_terminal",
+            "session_id": session_id,
+            "mutation_id": mutation_id
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "state": match state {
+                omenbrowser_rs::chat::DurableMutationTerminalState::Conflict => "conflict",
+                omenbrowser_rs::chat::DurableMutationTerminalState::Expired => "expired",
+            },
+        }),
         omenbrowser_rs::chat::ChatClientEvent::HistoryPrepended { session_id, events } => {
             serde_json::json!({"event": "history_prepended", "session_id": session_id, "events": events.len()})
         }

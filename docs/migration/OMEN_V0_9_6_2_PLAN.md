@@ -134,6 +134,14 @@ replay after Link replacement: the acknowledgement correlates to the retry and
 no second room event is fanned out. The stored replay result and protocol frame
 shape are unchanged.
 
+Conflict and replay-expired server responses now cross a typed client boundary
+only when correlated to an outstanding durable sequence. The matching
+optimistic echo is released and the bounded worker persists `conflict` or
+`expired` before removing any recovered row. Store-busy and uncorrelated errors
+preserve uncertain state and do not trigger retry. Focused tests cover both
+terminal codes, nonterminal/uncorrelated preservation, persistent transition,
+and truthful session status.
+
 The server transaction/replay executor and browser intent store are active only
 for explicitly negotiated room-text operations. Client intent ownership,
 advertisement/acceptance, durable envelope send, acknowledgement resolution,

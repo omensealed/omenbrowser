@@ -28,6 +28,8 @@ pub mod live;
 #[cfg(feature = "chat-client-lxmf")]
 pub mod lxmf;
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub use client::DurableMutationTerminalState;
 pub use client::{
     ChatClient, ChatClientEvent, ChatClientRequest, ChatConnectionState, ChatSessionId,
     ChatSessionView,

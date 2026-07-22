@@ -179,7 +179,7 @@ impl DesktopApp {
                 );
             }
             self.apply_omenchat_client_events_status(&events);
-            scroll_tasks.extend(self.omenchat_mutation_acknowledgement_tasks(&events));
+            scroll_tasks.extend(self.omenchat_mutation_persistence_tasks(&events));
             if was_following_bottom && omenchat_recent_sync_wants_bottom_restore(&events) {
                 self.omenchat
                     .chat_scroll_offsets
@@ -258,7 +258,7 @@ impl DesktopApp {
                     );
                 }
                 self.apply_omenchat_client_events_status(&events);
-                scroll_tasks.extend(self.omenchat_mutation_acknowledgement_tasks(&events));
+                scroll_tasks.extend(self.omenchat_mutation_persistence_tasks(&events));
                 if was_following_bottom && omenchat_recent_sync_wants_bottom_restore(&events) {
                     self.omenchat
                         .chat_scroll_offsets
