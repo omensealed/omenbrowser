@@ -14,6 +14,18 @@ pub const MUTATION_INTENT_WORKER_QUEUE_BYTES: usize = 2 * 1024 * 1024;
 
 pub type IntentWorkerReply<T> = mpsc::Receiver<anyhow::Result<T>>;
 
+pub async fn await_intent_worker_reply<T: Send + 'static>(
+    reply: IntentWorkerReply<T>,
+) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(move || {
+        reply
+            .recv()
+            .map_err(|_| anyhow::anyhow!("OMENchat mutation intent worker dropped its reply"))?
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("OMENchat mutation intent reply task failed: {error}"))?
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IntentWorkerMetrics {
     pub queued: usize,
@@ -356,6 +368,19 @@ mod tests {
             expires_at: 200,
             correlation_id: Some("local-message-1".into()),
         }
+    }
+
+    #[tokio::test]
+    async fn admitted_reply_is_awaited_off_the_async_worker() {
+        let root = isolated_root("async-reply");
+        let worker = MutationIntentWorker::start(&root).expect("worker");
+        let reply = worker.try_prepare(request()).expect("prepare admitted");
+
+        let intent = await_intent_worker_reply(reply).await.expect("reply");
+
+        assert_eq!(intent.state, OutboundMutationState::Prepared);
+        worker.shutdown().expect("shutdown");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

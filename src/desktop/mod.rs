@@ -52,6 +52,8 @@ mod omenchat_media_tasks;
 #[cfg(feature = "chat-client")]
 mod omenchat_media_update;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+mod omenchat_mutations;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 mod omenchat_recent_sync;
 mod omenchat_runtime;
 #[cfg(feature = "chat-client")]

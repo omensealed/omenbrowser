@@ -70,21 +70,31 @@ build `906.2`; protocol and database versions remain independent.
 
 ## Unit 2 — durable mutation live activation
 
-Status: negotiation slice locally complete; durable envelope sending remains
-pending. A browser with a persisted client-instance identity advertises the
-bounded capability extension. omenchatd accepts only that known capability and
-binds the instance to the authenticated Link. The browser records acceptance
-only when it has a matching outstanding request; legacy, downgraded, unsolicited,
-reconnected, and retired sessions remain inactive. Normal room mutations still
-use the legacy no-automatic-resend path.
+Status: negotiated room-text activation is locally complete; restart recovery
+and explicit uncertain-state actions remain pending. Startup owns the bounded
+intent worker only when the persistent client instance and authenticated active
+identity are both available. Only then does the browser advertise the bounded
+capability extension. omenchatd accepts only that known capability and binds the
+instance to the authenticated Link. The browser records acceptance only when it
+has a matching outstanding request; legacy, downgraded, unsolicited,
+reconnected, and retired sessions remain inactive.
 
-The next client boundary is also locally staged but remains unreachable from
-ordinary UI actions. It accepts only an already-persisted `sent_uncertain`
-intent, validates its negotiated client/server/room ownership, emits the
-canonical durable envelope within existing pending-echo bounds, and returns the
-mutation identifier on acknowledgement. Desktop intent-worker orchestration and
-acknowledgement persistence remain pending; therefore production UI sends have
-not switched to this path.
+An ordinary room-text send on a negotiated session now queues a bounded worker
+operation, commits `prepared`, transitions it to `sent_uncertain`, and only then
+uses the validated durable-envelope boundary. The draft remains intact on
+admission, persistence, transition, negotiation, or transport failure. A
+matching acknowledgement is queued back to the same owner and persisted as
+`acknowledged`. Worker replies are awaited through bounded blocking tasks rather
+than blocking Iced or a Tokio worker. Negotiated sessions fail closed if the
+persistence owner is unavailable; legacy and downgraded sessions retain the
+unchanged legacy no-automatic-resend behavior.
+
+The focused integration test proves negotiated activation, fail-closed owner
+loss, prepared-before-transport ordering, uncertain-before-send ordering,
+transport output, draft retention/clearing, and terminal acknowledgement
+persistence. No prepared or uncertain intent is automatically replayed after a
+restart. Room actions, commands, and other mutation types still use their
+existing legacy path unless a later focused unit explicitly activates them.
 
 The server transaction/replay executors and browser intent store remain staged
 but production capability acceptance is off in v0.9.6-1. Connect them in the

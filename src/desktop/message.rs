@@ -444,6 +444,24 @@ pub(in crate::desktop) enum OmenChatTransportCompletionMessage {
     LiveReconnect(Box<OmenChatLiveReconnectCompletion>),
 }
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Debug)]
+pub(in crate::desktop) enum OmenChatMutationCompletionMessage {
+    Prepared {
+        session_id: ChatSessionId,
+        result: Result<crate::chat::mutation_intents::OutboundMutationIntent, String>,
+    },
+    MarkedUncertain {
+        session_id: ChatSessionId,
+        result: Result<crate::chat::mutation_intents::IntentTransition, String>,
+    },
+    Acknowledged {
+        session_id: ChatSessionId,
+        mutation_id: crate::chat::protocol::MutationId,
+        result: Result<crate::chat::mutation_intents::IntentTransition, String>,
+    },
+}
+
 #[cfg(feature = "chat-client")]
 #[derive(Clone, Debug)]
 pub(in crate::desktop) enum OmenChatMediaCompletionMessage {
@@ -473,6 +491,8 @@ pub(in crate::desktop) enum Message {
     OmenChat(OmenChatMessage),
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     OmenChatTransportCompletion(OmenChatTransportCompletionMessage),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    OmenChatMutationCompletion(Box<OmenChatMutationCompletionMessage>),
     #[cfg(feature = "chat-client")]
     OmenChatMediaCompletion(Box<OmenChatMediaCompletionMessage>),
     WorkspacePane(WorkspacePaneMessage),

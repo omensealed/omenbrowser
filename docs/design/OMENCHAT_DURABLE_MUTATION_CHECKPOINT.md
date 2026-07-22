@@ -1,6 +1,6 @@
 # OMENchat durable mutation checkpoint
 
-Status: checkpoint accepted; capability negotiation active; durable mutation transmission remains inactive
+Status: checkpoint accepted; negotiated room-text durable transmission active; restart recovery remains conservative
 Baseline: OMENbrowser/omenchatd v0.9.5-2, OMENchat protocol v1  
 Proposed capability: `durable-mutations-v1`
 
@@ -36,14 +36,14 @@ created once per browser identity/application root and persisted owner-only. It
 is never derived from identity hash, display name, clock, PID, or sequence.
 Corruption must not silently replace it while uncertain intents exist.
 
-Implemented inactive foundation: desktop startup now loads or atomically
+Implemented foundation: desktop startup loads or atomically
 creates the raw 16-byte value at the active identity-scoped
 `omenchat/client-instance-id` path. Publication is create-without-replacement,
 owner-only on Unix, synchronized, concurrency-safe, and rejects symlinks,
 special files, wrong lengths, and permissive modes without rewriting them. The
 value is retained in live client state and transmitted only in a bounded
-`SessionOpen` capability request. It is not yet used to transmit or replay a
-durable mutation.
+`SessionOpen` capability request. Negotiated room-text sends use it as part of
+their persistent replay key; uncertain intents are not automatically replayed.
 
 `mutation_id` is a fresh random 128-bit value generated before each logical
 mutation is persisted and remains stable only for retries of that intent.
@@ -210,7 +210,7 @@ dropped; new admission fails visibly. Publication uses the existing atomic,
 owner-only, identity-scoped recovery rules. Legacy sends remain unchanged if
 negotiation or persistence is unavailable.
 
-The inactive implementation now uses the identity-scoped, owner-only
+The client implementation uses the identity-scoped, owner-only
 `omenchat/mutation-intents.sqlite`. Preparing an intent generates a random
 128-bit mutation ID, computes the shared canonical hash, encodes a sequence-zero
 legacy request fixture, and commits all metadata in one immediate SQLite
@@ -218,18 +218,21 @@ transaction before returning. Admission enforces the proposed item/byte limits
 and never evicts existing pending or uncertain rows. Recovery preflights field
 lengths before blob/text allocation, then verifies the frame metadata,
 canonical hash, expiry, state, and retained-byte accounting. The synchronous
-store is deliberately not opened from startup or Iced update handling; a
-bounded storage owner is required before integration.
+store is never opened from Iced update handling. Desktop startup constructs its
+bounded owner only after the persistent client instance and authenticated
+active identity are available.
 
-That inactive owner now exists as one named thread with a 32-item/2-MiB
+That owner is one named thread with a 32-item/2-MiB
 `sync_channel`, pre-admission payload validation, nonblocking overload
 rejection, queue-item/byte/rejection/completion metrics, and joined
 draining shutdown. It owns the SQLite connection and supports prepare,
 compare-and-transition, bounded nonterminal recovery, and incremental terminal
-pruning. State transitions are monotonic: prepared may become uncertain,
+pruning. Worker replies are received through bounded blocking tasks rather than
+blocking the Iced update path or an arbitrary Tokio worker. State transitions
+are monotonic: prepared may become uncertain,
 expired, or abandoned; uncertain may become acknowledged, conflict, expired,
-or abandoned; terminal states never regress. Neither startup nor networking
-constructs the worker yet.
+or abandoned; terminal states never regress. Negotiated room-text sends now
+use this owner; other mutations remain on the unchanged legacy path.
 
 ## Server retention
 
@@ -410,8 +413,8 @@ policy, reversible rate admission, membership, event insertion, exact
 acknowledgement encoding, and replay publication. Stored terminal rejections
 remain stable even if policy later changes. A first commit returns one event
 for fan-out; replay returns no event. Restart, conflict, malformed hash,
-permission change, rate, and duplicate cases pass. Client envelope dispatch
-remains disabled pending persisted-intent integration.
+permission change, rate, and duplicate cases pass. Client envelope dispatch is
+active only for negotiated, persistently owned room text.
 
 The live envelope-routing gate is now implemented behind the authenticated
 binding. Tagged malformed envelopes fail with 1012; valid envelopes without a
@@ -421,20 +424,20 @@ authority. First execution sends the retained acknowledgement to the origin
 and broadcasts its event; exact replay sends the original acknowledgement and
 has no broadcast. Tests cover duplicate delivery under a different sequence,
 malformed and unbound requests, and legacy isolation. Production capability
-acceptance is now on for a valid negotiated request, but the browser still sends
-only legacy mutations. The route therefore remains unreachable from normal
-client mutation actions until persisted intent and durable envelope dispatch
-are connected.
+acceptance is now on for a valid negotiated request. The browser reaches this
+route only for ordinary room-text sends after its intent is persisted as
+uncertain; other mutation actions remain legacy.
 
-The live client now has a deliberately unreachable durable-send boundary for
+The live client has a guarded durable-send boundary for
 room messages and actions. It accepts only an intent already persisted in the
 `sent_uncertain` state and verifies negotiated session, persistent client
 instance, server destination, active room, operation, body shape, sequence, and
 pending-echo budgets before sending the canonical envelope. A matching
-`MessageAck` reports the fixed mutation identifier so the future desktop owner
-can transition the intent to `acknowledged`. Missing negotiation and merely
-`prepared` intents fail before transport output. Ordinary UI sends do not call
-this boundary yet, and no uncertain intent is automatically replayed.
+`MessageAck` reports the fixed mutation identifier so the desktop owner can
+transition the intent to `acknowledged`. Missing negotiation and merely
+`prepared` intents fail before transport output. Ordinary negotiated room-text
+sends call this boundary only through the bounded persistence worker, and no
+uncertain intent is automatically replayed.
 
 `PartRoom` now uses the same durable replay authority. Its membership deletion,
 departure event, exact legacy-compatible `CommandResult`, and replay record are

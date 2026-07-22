@@ -58,6 +58,7 @@ pub struct LivePendingLocalEchoMetrics {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveChatClientState {
     client_instance_id: Option<ClientInstanceId>,
+    durable_mutation_owner_ready: bool,
     durable_requests: BTreeSet<ChatSessionId>,
     durable_sessions: BTreeSet<ChatSessionId>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
@@ -102,10 +103,19 @@ struct PendingLiveUploadDownload {
 impl LiveChatClientState {
     pub fn set_client_instance_id(&mut self, client_instance_id: Option<ClientInstanceId>) {
         self.client_instance_id = client_instance_id;
+        self.durable_mutation_owner_ready = client_instance_id.is_some();
     }
 
     pub fn client_instance_id(&self) -> Option<ClientInstanceId> {
         self.client_instance_id
+    }
+
+    pub fn set_durable_mutation_owner_ready(&mut self, ready: bool) {
+        self.durable_mutation_owner_ready = ready && self.client_instance_id.is_some();
+    }
+
+    pub fn durable_mutation_owner_ready(&self) -> bool {
+        self.durable_mutation_owner_ready
     }
 
     pub fn durable_mutations_negotiated(&self, session_id: ChatSessionId) -> bool {
@@ -553,7 +563,10 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
             ])
         })
         .unwrap_or(FrameBody::Empty);
-    if let Some(client_instance_id) = state.client_instance_id {
+    if let Some(client_instance_id) = state
+        .client_instance_id
+        .filter(|_| state.durable_mutation_owner_ready)
+    {
         session_open_body = match with_session_open_negotiation(
             session_open_body,
             &SessionOpenNegotiation {

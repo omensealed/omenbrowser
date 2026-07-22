@@ -59,7 +59,9 @@ impl Message {
             #[cfg(feature = "chat-client")]
             Message::OmenChat(_) | Message::OmenChatMediaCompletion(_) => MessageRoute::OmenChat,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            Message::OmenChatTransportCompletion(_) => MessageRoute::OmenChat,
+            Message::OmenChatTransportCompletion(_) | Message::OmenChatMutationCompletion(_) => {
+                MessageRoute::OmenChat
+            }
 
             Message::WorkspacePane(_) => MessageRoute::WorkspacePane,
 
