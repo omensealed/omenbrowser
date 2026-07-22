@@ -1,0 +1,13 @@
+[package]
+name = "omenchat-protocol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "Shared bounded OMENchat wire contract"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/omensealed/omenbrowser"
+
+[dependencies]
+sha2 = "0.10"
+thiserror = "1.0"

@@ -3042,24 +3042,24 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lxmf"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "496892ebe70967a4a6a97cd131790a20b0f0129d02ce6258645481c852fd089c"
+checksum = "fbf136e91d4b2d6dde7edd5a50e8f95a02a62310645a9164403c66a70ff33ff9"
 dependencies = [
  "lxmf-wire",
 ]
 
 [[package]]
 name = "lxmf-reference"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11857f307becf0d15895335921c124d2a450e5c3b83612a6e6d64d7e23d73564"
+checksum = "15e4a1c545c947312b6ab287b92a537c0bfb888aa199a1a88e58e7c3a2747a1e"
 
 [[package]]
 name = "lxmf-sdk"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "401fb72f118f02bc9ce30c0bb1d0822dc9824324ca7ee3977a888b469dee6a8c"
+checksum = "c0a11a2df256b2348baf3c2471dd4cf52bef2d81661ddea42fec9dadd77360ed"
 dependencies = [
  "hex",
  "hmac",
@@ -3080,9 +3080,9 @@ dependencies = [
 
 [[package]]
 name = "lxmf-wire"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f085711ee980f35f52571c6683060510066d55f3aac8b57f18ab48c841fb8708"
+checksum = "393d90d2f37d97ba1dd987cc5994261637d280abf9aa082ae17822dee54f2afa"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -3891,7 +3891,7 @@ dependencies = [
 
 [[package]]
 name = "omenbrowser_rs"
-version = "0.9.5-2"
+version = "0.9.6-1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3909,6 +3909,7 @@ dependencies = [
  "lxmf",
  "lxmf-sdk",
  "omen-ifac-tcp",
+ "omenchat-protocol",
  "rand_core 0.6.4",
  "ratatui",
  "reqwest",
@@ -3929,6 +3930,14 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "omenchat-protocol"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -4708,9 +4717,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6f8d1b059a822763d55803fc0240e64b23a7b0d53208aa0873561938870fc84"
+checksum = "1de4ac11623f7f99cdbb2651071c738824fd9d8f7c931ed2006325d1512b89f8"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -4718,9 +4727,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-core"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec4f1b0d2d20a30dc35787cfff8a063086ef320f6ef0dede344a13fc1a96be56"
+checksum = "2984682e71b22a83c1e1598a98bb37991cc218a5c3f87c4652933e7e32f90e18"
 dependencies = [
  "aes",
  "cbc",
@@ -4739,9 +4748,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-rpc"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1ee77690c30d43ee60c9d4dbfb8a2298f024eac51e0dd4a6898077fc35140a0"
+checksum = "dfdaa66306d0fbb64df9aa0b5126ba1eb5983261f2469bd4d7919e1612be35bc"
 dependencies = [
  "base64",
  "ciborium",
@@ -4765,9 +4774,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-transport"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abc5932f474eb853508b1cee9ac2b66f8c82e70f6d4669b8aeef172514d84a2f"
+checksum = "149873f10b5c575718976ceb6be2dfc25a6adb0d4df012b7b80b135af40c788e"
 dependencies = [
  "aes",
  "base64",
@@ -4791,6 +4800,7 @@ dependencies = [
  "sha2",
  "shlex 2.0.1",
  "socket2 0.5.10",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-serial",
  "tokio-util",

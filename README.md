@@ -422,7 +422,7 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
 
 ## Known Release Gaps
 
-- The crates and deterministic suites are aligned at Reticulum/LXMF 0.9.5.
+- The crates and deterministic suites are aligned at Reticulum/LXMF 0.9.6.
   Isolated current-product OMENchat reconnect/upload and NomadNet portal fetches
   pass, as does the current Python NomadNet direct/Resource request-response
   matrix and the pinned/current Python LXMF direct, propagated, ticket/stamp,
@@ -434,7 +434,7 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   Intel macOS, and Apple Silicon checks pass. The Linux packages and Windows
   portable ZIP, unsigned NSIS setup, and unsigned WiX MSI also pass their
   isolated install/upgrade/launch/uninstall qualification. The published
-  Reticulum 0.9.5 UDP worker cannot transmit maximum Resource packets; that
+  Reticulum 0.9.6 UDP worker cannot transmit maximum Resource packets; that
   known upstream limitation remains visible and blocks a UDP Resource parity
   claim, but does not block this version-aligned OMEN release. The two
   `quick-xml 0.39.2` findings are accepted only on the machine-checked Linux

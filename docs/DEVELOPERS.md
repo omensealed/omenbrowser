@@ -12,7 +12,12 @@ The protocol-neutral IFAC TCP implementation is owned by
 `src/server/crates/omen-ifac-tcp`; both products depend on that one local crate,
 so a relocated `src/server` remains complete without duplicating transport
 behavior. Run `bash src/server/scripts/verify-standalone.sh check` after changing
-server path dependencies, source includes, or fixtures.
+server path dependencies, source includes, or fixtures. The relocation harness
+owns a disposable Cargo target beneath `CARGO_TARGET_DIR` (or the server target
+directory) and removes it on exit. Do not point relocated sources at the
+canonical target: Rust test binaries can embed the temporary
+`CARGO_MANIFEST_DIR` and poison later fixture discovery after that source copy
+is removed.
 
 ## Feature Flags
 

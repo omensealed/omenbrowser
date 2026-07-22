@@ -26,10 +26,28 @@ pub(in crate::desktop) struct OmenChatStartupState {
     pub(in crate::desktop) chat_client: ChatClient,
     pub(in crate::desktop) chat_store: Option<SqliteChatStore>,
     pub(in crate::desktop) session_ids: Vec<ChatSessionId>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) client_instance_id: Option<crate::chat::protocol::ClientInstanceId>,
 }
 
 #[cfg(feature = "chat-client")]
 pub(in crate::desktop) fn restore_omenchat_startup_state(app: &App) -> OmenChatStartupState {
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    let client_instance_id = {
+        let store = crate::chat::client_instance::ClientInstanceIdStore::for_identity_storage_root(
+            app.paths.identity_storage_root(),
+        );
+        match store.load_or_create() {
+            Ok(client_instance_id) => Some(client_instance_id),
+            Err(error) => {
+                tracing::warn!(
+                    "OMENchat durable mutation capability remains disabled because the client instance could not be loaded from {}: {error}",
+                    store.path().display()
+                );
+                None
+            }
+        }
+    };
     let chat_store_path = app
         .paths
         .identity_storage_root()
@@ -65,6 +83,8 @@ pub(in crate::desktop) fn restore_omenchat_startup_state(app: &App) -> OmenChatS
         chat_client,
         chat_store,
         session_ids,
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        client_instance_id,
     }
 }
 

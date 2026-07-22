@@ -12,9 +12,14 @@ case "$mode" in
 esac
 
 server_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-target_dir="${CARGO_TARGET_DIR:-$server_root/target}"
 copy_root="$(mktemp -d "${TMPDIR:-/tmp}/omenchatd-standalone.XXXXXX")"
-trap 'rm -rf "$copy_root"' EXIT
+target_parent="${CARGO_TARGET_DIR:-$server_root/target}"
+mkdir -p -- "$target_parent"
+target_dir="$(mktemp -d "$target_parent/omenchatd-standalone-target.XXXXXX")"
+cleanup() {
+  rm -rf -- "$copy_root" "$target_dir"
+}
+trap cleanup EXIT
 
 tar -C "$server_root" --exclude=target -cf - . | tar -C "$copy_root" -xf -
 

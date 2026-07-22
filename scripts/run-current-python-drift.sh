@@ -3,8 +3,8 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
-readonly rns_version=1.3.8
-readonly lxmf_version=1.0.1
+readonly rns_version=1.4.0
+readonly lxmf_version=1.1.0
 readonly nomadnet_version=1.2.7
 readonly msgpack_version=1.2.1
 

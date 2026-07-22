@@ -3,9 +3,12 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
-readonly old_commit=5ba6683055fb6c59111919fbad1ac37f56a4c203
-readonly python_rns_version=1.3.8
-readonly python_lxmf_version=1.0.1
+readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a4c203}
+readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
+readonly current_expected_version=0.9.6-1
+readonly recover_unknown_sender=${OMEN_MIXED_RECOVER_UNKNOWN_SENDER:-false}
+readonly python_rns_version=1.4.0
+readonly python_lxmf_version=1.1.0
 readonly network_name=omen-mixed-propagation
 
 report_path=""
@@ -55,6 +58,10 @@ if ((selected_special_modes > 1)); then
   echo "--reverse, --node-restart, --node-crash, and --stamp-ticket are separate bounded cases" >&2
   exit 2
 fi
+if [[ "$recover_unknown_sender" != true && "$recover_unknown_sender" != false ]]; then
+  echo "OMEN_MIXED_RECOVER_UNKNOWN_SENDER must be true or false" >&2
+  exit 2
+fi
 
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/omen-mixed-propagation.XXXXXX")
 node_pid=""
@@ -90,8 +97,8 @@ old_bin="$old_target/debug/omenbrowser_rs"
 current_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
 old_version=$($old_bin --version | awk '{print $2}')
 current_version=$($current_bin --version | awk '{print $2}')
-[[ "$old_version" == "0.6.0-1" ]]
-[[ "$current_version" == "0.9.5-2" ]]
+[[ "$old_version" == "$old_expected_version" ]]
+[[ "$current_version" == "$current_expected_version" ]]
 
 python3 -m venv "$temporary_root/venv"
 python="$temporary_root/venv/bin/python"
@@ -182,7 +189,7 @@ if [[ "$reverse" == true ]]; then
   recipient_bin=$current_bin
   recipient_label=current
   recipient_common=("${common_current[@]}")
-  direction="0.6.0-1_to_0.9.5-2"
+  direction="${old_expected_version}_to_${current_expected_version}"
 else
   sender_bin=$current_bin
   sender_label=current
@@ -191,7 +198,7 @@ else
   recipient_bin=$old_bin
   recipient_label=old
   recipient_common=("${common_old[@]}")
-  direction="0.9.5-2_to_0.6.0-1"
+  direction="${current_expected_version}_to_${old_expected_version}"
 fi
 
 # Put the sender online before the recipient announces. This warms only the
@@ -359,6 +366,7 @@ PY
     --tcp-client "127.0.0.1:$port" --network-name "$network_name"
     --passphrase-file "$passphrase_file"
   )
+  sender_common=("${common_current[@]}")
   recipient_common=("${common_old[@]}")
 fi
 
@@ -366,7 +374,7 @@ fi
 # transient. Its production implementation must decode and acknowledge it.
 sync_report="$temporary_root/$recipient_label-sync.json"
 initial_deferred=false
-if [[ "$reverse" == true ]]; then
+if [[ "$reverse" == true || "$recover_unknown_sender" == true ]]; then
   set +e
   "$recipient_bin" --lxmf-sync-propagation --sync-limit 1 \
     --propagation-node "$propagation_destination" "${recipient_common[@]}" \
@@ -397,7 +405,7 @@ if (
     or counts.get("deferred") != 1
     or counts.get("sender_path_requests") != 1
 ):
-    raise RuntimeError("initial reverse sync did not preserve one unauthenticated transient")
+    raise RuntimeError("initial sync did not preserve one unauthenticated transient")
 PY
   initial_deferred=true
 

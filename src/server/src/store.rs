@@ -1,7 +1,11 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rusqlite::OptionalExtension;
+
 use crate::error::ServerResult;
 use crate::protocol::{EventId, RoomId, UserId};
+
+pub mod durable_replay;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerRoom {
@@ -112,7 +116,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 
 impl OmenchatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -327,19 +331,12 @@ impl OmenchatStore {
         display_name: &str,
         lxmf_destination: Option<&str>,
     ) -> ServerResult<ServerUser> {
-        let now = current_unix_seconds();
-        self.connection.execute(
-            "INSERT INTO users(
-               rns_identity_hash, display_name, lxmf_destination, first_seen_at, last_seen_at
-             ) VALUES (?1, ?2, ?3, ?4, ?4)
-             ON CONFLICT(rns_identity_hash) DO UPDATE SET
-               display_name = excluded.display_name,
-               lxmf_destination = COALESCE(excluded.lxmf_destination, users.lxmf_destination),
-               last_seen_at = excluded.last_seen_at",
-            (identity_hash, display_name, lxmf_destination, now),
-        )?;
-        self.user_by_identity(identity_hash)?
-            .ok_or_else(|| crate::error::ServerError::Message("user was not created".into()))
+        ensure_user_on(
+            &self.connection,
+            identity_hash,
+            display_name,
+            lxmf_destination,
+        )
     }
 
     pub fn user_by_identity(&self, identity_hash: &[u8]) -> ServerResult<Option<ServerUser>> {
@@ -443,14 +440,7 @@ impl OmenchatStore {
     }
 
     pub fn join_room(&self, room_id: RoomId, user_id: UserId) -> ServerResult<()> {
-        let now = current_unix_seconds();
-        self.connection.execute(
-            "INSERT INTO room_members(room_id, user_id, joined_at, last_seen_at)
-             VALUES (?1, ?2, ?3, ?3)
-             ON CONFLICT(room_id, user_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
-            (room_id, user_id, now),
-        )?;
-        Ok(())
+        join_room_on(&self.connection, room_id, user_id)
     }
 
     pub fn leave_room(&self, room_id: RoomId, user_id: UserId) -> ServerResult<()> {
@@ -495,32 +485,9 @@ impl OmenchatStore {
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let event_id = next_event_id(&transaction, room_id)?;
-        let at_unix = current_unix_seconds();
-        let (kind_code, payload) = encode_event_kind(&kind);
-        transaction.execute(
-            "INSERT INTO room_events(room_id, event_id, event_kind, actor_user_id, at, payload)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            (
-                room_id,
-                event_id,
-                kind_code,
-                actor_user_id,
-                at_unix,
-                payload,
-            ),
-        )?;
+        let event = append_event_in_transaction(&transaction, room_id, actor_user_id, kind)?;
         transaction.commit()?;
-        Ok(ServerRoomEvent {
-            room_id,
-            event_id,
-            kind,
-            actor_user_id,
-            actor_display_name: actor_user_id
-                .and_then(|user_id| self.user_by_id(user_id).ok().flatten())
-                .map(|user| user.display_name),
-            at_unix,
-        })
+        Ok(event)
     }
 
     pub fn record_upload_file(&self, upload: RecordUploadFile<'_>) -> ServerResult<()> {
@@ -894,6 +861,92 @@ fn next_event_id(
     Ok(event_id as EventId)
 }
 
+fn ensure_user_on(
+    connection: &rusqlite::Connection,
+    identity_hash: &[u8],
+    display_name: &str,
+    lxmf_destination: Option<&str>,
+) -> ServerResult<ServerUser> {
+    let now = current_unix_seconds();
+    connection.execute(
+        "INSERT INTO users(
+           rns_identity_hash, display_name, lxmf_destination, first_seen_at, last_seen_at
+         ) VALUES (?1, ?2, ?3, ?4, ?4)
+         ON CONFLICT(rns_identity_hash) DO UPDATE SET
+           display_name = excluded.display_name,
+           lxmf_destination = COALESCE(excluded.lxmf_destination, users.lxmf_destination),
+           last_seen_at = excluded.last_seen_at",
+        (identity_hash, display_name, lxmf_destination, now),
+    )?;
+    connection
+        .query_row(
+            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+             FROM users WHERE rns_identity_hash = ?1",
+            [identity_hash],
+            user_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| crate::error::ServerError::Message("user was not created".into()))
+}
+
+fn join_room_on(
+    connection: &rusqlite::Connection,
+    room_id: RoomId,
+    user_id: UserId,
+) -> ServerResult<()> {
+    let now = current_unix_seconds();
+    connection.execute(
+        "INSERT INTO room_members(room_id, user_id, joined_at, last_seen_at)
+         VALUES (?1, ?2, ?3, ?3)
+         ON CONFLICT(room_id, user_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+        (room_id, user_id, now),
+    )?;
+    Ok(())
+}
+
+fn append_event_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    actor_user_id: Option<UserId>,
+    kind: ServerRoomEventKind,
+) -> ServerResult<ServerRoomEvent> {
+    let event_id = next_event_id(transaction, room_id)?;
+    let at_unix = current_unix_seconds();
+    let (kind_code, payload) = encode_event_kind(&kind);
+    transaction.execute(
+        "INSERT INTO room_events(room_id, event_id, event_kind, actor_user_id, at, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        (
+            room_id,
+            event_id,
+            kind_code,
+            actor_user_id,
+            at_unix,
+            payload,
+        ),
+    )?;
+    let actor_display_name = actor_user_id
+        .map(|user_id| {
+            transaction
+                .query_row(
+                    "SELECT display_name FROM users WHERE user_id = ?1",
+                    [user_id as i64],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+        })
+        .transpose()?
+        .flatten();
+    Ok(ServerRoomEvent {
+        room_id,
+        event_id,
+        kind,
+        actor_user_id,
+        actor_display_name,
+        at_unix,
+    })
+}
+
 fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRoom> {
     Ok(ServerRoom {
         room_id: row.get::<_, i64>(0)? as RoomId,
@@ -991,7 +1044,7 @@ fn current_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-fn normalize_room_name(name: &str) -> String {
+pub(crate) fn normalize_room_name(name: &str) -> String {
     name.trim()
         .trim_start_matches('#')
         .chars()
@@ -1318,7 +1371,7 @@ mod tests {
             .expect("version one schema");
         drop(connection);
 
-        let store = OmenchatStore::open(&path).expect("version two migration");
+        let store = OmenchatStore::open(&path).expect("current-schema migration");
         let row_count: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM upload_files", [], |row| row.get(0))
@@ -1343,6 +1396,130 @@ mod tests {
 
         let backup_path = migration_backup_path(&path, 1);
         assert!(backup_path.is_file());
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn version_two_database_adds_durable_replay_schema_without_losing_rows() {
+        let path = isolated_database_path("v2-durable-replay");
+        let connection = rusqlite::Connection::open(&path).expect("version two database");
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .expect("version two base schema");
+        connection
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_durable_mutation_clients_retired;
+                 DROP TABLE IF EXISTS durable_mutation_clients;
+                 DROP INDEX IF EXISTS idx_durable_mutation_results_created;
+                 DROP TABLE IF EXISTS durable_mutation_results;
+                 INSERT INTO rooms(name, topic, created_at)
+                 VALUES ('preserved-v2-room', 'must survive migration', 1);
+                 INSERT INTO upload_files(
+                   resource_id, room_id, actor_user_id, filename, byte_len, path, created_at
+                 ) VALUES ('preserved-v2-upload', 1, 9, 'file.bin', 3, '/isolated/file.bin', 1);
+                 PRAGMA user_version = 2;",
+            )
+            .expect("version two fixture");
+        drop(connection);
+
+        let store = OmenchatStore::open(&path).expect("version three migration");
+        let room_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM rooms WHERE name = 'preserved-v2-room'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved room");
+        let upload_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM upload_files WHERE resource_id = 'preserved-v2-upload'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved upload");
+        let table_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'durable_mutation_results'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable replay table");
+        let index_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_durable_mutation_results_created'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable replay index");
+        let client_table_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'durable_mutation_clients'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable client table");
+        let client_index_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_durable_mutation_clients_retired'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable client index");
+        let schema_version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+
+        assert_eq!(room_count, 1);
+        assert_eq!(upload_count, 1);
+        assert_eq!(table_count, 1);
+        assert_eq!(index_count, 1);
+        assert_eq!(client_table_count, 1);
+        assert_eq!(client_index_count, 1);
+        assert_eq!(schema_version, SCHEMA_VERSION);
+
+        let backup_path = migration_backup_path(&path, 2);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version two migration backup");
+        let backup_version: i64 = backup
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("backup schema version");
+        let backup_replay_table_count: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'durable_mutation_results'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backup replay table count");
+        let backup_client_table_count: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'durable_mutation_clients'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backup durable client table count");
+        assert_eq!(backup_version, 2);
+        assert_eq!(backup_replay_table_count, 0);
+        assert_eq!(backup_client_table_count, 0);
+
+        drop(backup);
         drop(store);
         std::fs::remove_file(backup_path).expect("remove migration backup");
         remove_database_files(&path);

@@ -11,12 +11,12 @@ import threading
 import time
 
 
-RNS_VERSION = "1.3.8"
-LXMF_VERSION = "1.0.1"
+RNS_VERSION = "1.4.0"
+LXMF_VERSION = "1.1.0"
 NETWORK_NAME = "omen-ifac-vector"
 PASSPHRASE = "public-test-fixture"
 TITLE = "Current Python propagated LXMF"
-CONTENT = "Rust 0.9.5 synced and acknowledged this signed Python LXMF message"
+CONTENT = "Rust 0.9.6 synced and acknowledged this signed Python LXMF message"
 
 
 def verify_packages(

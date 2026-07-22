@@ -26,8 +26,11 @@ bash scripts/verify-standalone.sh check
 `scripts/verify-standalone.sh check` copies this directory without its build
 output to a temporary root and runs locked, offline metadata, compile, test
 compile, and IFAC tests there. The protocol-neutral `omen-ifac-tcp` crate and
-the server's compatibility wire fixture deliberately live inside this tree so
-the standalone source package never imports OMENbrowser application modules.
+the wire-only `omenchat-protocol` crate and compatibility fixture deliberately
+live inside this tree so the standalone source package never imports
+OMENbrowser application modules. `omenchat-protocol` owns only the shared wire
+types/numbers and fixtures; server runtime, SQLite, Reticulum ownership, and
+policy remain in omenchatd.
 
 `server-headless` is the daemon/admin CLI product and excludes Ratatui and
 Crossterm. `server-full` adds the optional interactive TUI and is used for the
@@ -168,7 +171,7 @@ server cleanly and run:
 
 ```bash
 omenchatd database restore-migration-backup \
-  --from ~/.omenchatd/omenchat.sqlite.pre-v2-from-v1.bak \
+  --from ~/.omenchatd/omenchat.sqlite.pre-v3-from-v2.bak \
   --confirm --home ~/.omenchatd
 ```
 
@@ -416,13 +419,27 @@ priority survival, graceful drain, RSS/FD stability, and the 32 MiB per-writer
 retention cap. The delay is a reproducible slow-disk simulation, not a benchmark
 of a particular storage device.
 
-The schema currently uses SQLite `user_version = 2`; version 2 adds the upload
-ledger actor/time index used by quota planning. Older files are migrated
-transactionally. Files with a newer schema version are rejected
-without modification; run the matching or newer omenchatd rather than forcing
-the version backward.
+The schema currently uses SQLite `user_version = 3`. Version 2 added the upload
+ledger actor/time index used by quota planning. Version 3 adds the dormant,
+bounded-shape durable-mutation replay table, client-instance retirement table,
+and their indexes; no live request path reads or writes those tables until the
+capability is explicitly negotiated and activated. The isolated store boundary
+already enforces exact
+request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
+bounded global/per-identity item and byte budgets, and at most 128 incremental
+deletions per commit. Before deleting a replay result it permanently retires
+the associated authenticated identity/client-instance pair; all later requests
+from that instance return `Expired` without mutation execution, including after
+restart. Remembered instances are capped at 100,000 globally and 1,024 per
+identity, with capacity exhaustion failing closed. Activation remains blocked
+pending retention measurements and end-to-end mixed-version recovery tests.
+Protocol-v1 error numbers 1011 through 1015 are reserved for the dormant
+durable outcomes but are not emitted by live sessions. Older files are migrated
+transactionally. Files with
+a newer schema version are rejected without modification; run the matching or
+newer omenchatd rather than forcing the version backward.
 Migration of a non-empty older database first retains an online SQLite backup
-at `omenchat.sqlite.pre-v2-from-v<old>.bak`. The backup is owner-only on
+at `omenchat.sqlite.pre-v3-from-v<old>.bak`. The backup is owner-only on
 Unix and is never overwritten. If that path already exists or backup creation
 fails, startup aborts before changing the source database.
 Migration schema work and its version update are transactional. On failure the

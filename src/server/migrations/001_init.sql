@@ -60,6 +60,38 @@ CREATE TABLE IF NOT EXISTS upload_files (
 CREATE INDEX IF NOT EXISTS idx_upload_files_actor_created
 ON upload_files(actor_user_id, created_at, resource_id);
 
+CREATE TABLE IF NOT EXISTS durable_mutation_results (
+  identity_hash BLOB NOT NULL,
+  client_instance_id BLOB NOT NULL CHECK(length(client_instance_id) = 16),
+  mutation_id BLOB NOT NULL CHECK(length(mutation_id) = 16),
+  request_hash BLOB NOT NULL CHECK(length(request_hash) = 32),
+  result_frame BLOB NOT NULL,
+  retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+  created_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  PRIMARY KEY(identity_hash, client_instance_id, mutation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_durable_mutation_results_created
+ON durable_mutation_results(
+  created_at,
+  identity_hash,
+  client_instance_id,
+  mutation_id
+);
+
+CREATE TABLE IF NOT EXISTS durable_mutation_clients (
+  identity_hash BLOB NOT NULL,
+  client_instance_id BLOB NOT NULL CHECK(length(client_instance_id) = 16),
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  retired_at INTEGER,
+  PRIMARY KEY(identity_hash, client_instance_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_durable_mutation_clients_retired
+ON durable_mutation_clients(retired_at, identity_hash, client_instance_id);
+
 CREATE TABLE IF NOT EXISTS room_members (
   room_id INTEGER NOT NULL,
   user_id INTEGER NOT NULL,

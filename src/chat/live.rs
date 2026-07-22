@@ -14,8 +14,8 @@ use super::model::{
     CHAT_USER_DISPLAY_MAX_BYTES,
 };
 use super::protocol::{
-    ChatErrorCode, ChatOp, Frame, FrameBody, FrameValue, RoomId, DEFAULT_JOIN_BACKLOG_EVENTS,
-    PROTOCOL_NAME,
+    ChatErrorCode, ChatOp, ClientInstanceId, Frame, FrameBody, FrameValue, RoomId,
+    DEFAULT_JOIN_BACKLOG_EVENTS, PROTOCOL_NAME,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -53,6 +53,7 @@ pub struct LivePendingLocalEchoMetrics {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveChatClientState {
+    client_instance_id: Option<ClientInstanceId>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
     pending_uploads: BTreeMap<(ChatSessionId, u32), PendingLiveUpload>,
@@ -92,6 +93,14 @@ struct PendingLiveUploadDownload {
 }
 
 impl LiveChatClientState {
+    pub fn set_client_instance_id(&mut self, client_instance_id: Option<ClientInstanceId>) {
+        self.client_instance_id = client_instance_id;
+    }
+
+    pub fn client_instance_id(&self) -> Option<ClientInstanceId> {
+        self.client_instance_id
+    }
+
     fn reserve_sequence_range(
         &mut self,
         session_id: ChatSessionId,
@@ -2646,6 +2655,21 @@ fn error_code_label(code: u64) -> Option<&'static str> {
             Some("compression unsupported")
         }
         value if value == ChatErrorCode::ResourceUnavailable as u16 => Some("resource unavailable"),
+        value if value == ChatErrorCode::DurableMutationNotNegotiated as u16 => {
+            Some("durable mutation not negotiated")
+        }
+        value if value == ChatErrorCode::DurableMutationMalformed as u16 => {
+            Some("malformed durable mutation")
+        }
+        value if value == ChatErrorCode::DurableMutationConflict as u16 => {
+            Some("durable mutation conflict")
+        }
+        value if value == ChatErrorCode::DurableMutationResultExpired as u16 => {
+            Some("durable mutation result expired")
+        }
+        value if value == ChatErrorCode::DurableMutationStoreBusy as u16 => {
+            Some("durable mutation store busy")
+        }
         _ => None,
     }
 }
@@ -5630,6 +5654,14 @@ mod tests {
         ]));
 
         assert_eq!(text, "permission denied: user is muted");
+
+        let expired = parse_error_text(&FrameBody::Fields(vec![FrameValue::U64(
+            ChatErrorCode::DurableMutationResultExpired as u16 as u64,
+        )]));
+        assert_eq!(
+            expired,
+            "durable mutation result expired: OMENchat server returned an error"
+        );
     }
 
     #[test]

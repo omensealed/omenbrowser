@@ -30,6 +30,20 @@ bash scripts/release-check.sh quick
 
 This runs the fast repository checks used before sharing a build.
 
+For a locally staged archive, the package gate accepts an optional third
+argument for retained OMENchat smoke evidence:
+
+```bash
+bash scripts/release-check.sh package \
+  target/local-package/OMENbrowser_rs-latest.tar.gz \
+  target/local-package-smoke
+```
+
+A relative smoke-output path is anchored to the directory from which the gate
+was invoked. It therefore remains available after the temporary extracted
+package is removed. The smoke itself continues to use distinct temporary
+browser and server identity/storage roots.
+
 ## CLI product identity
 
 The compatibility binary delegates its stable `--version` output to the
@@ -2672,7 +2686,7 @@ acknowledgement remain outside this case.
 ## Current Python drift lane
 
 The current-Python lane is deliberately separate from the immutable pinned
-reference above. As of 2026-07-17 it installs exactly RNS 1.3.8, LXMF 1.0.1,
+reference above. As of 2026-07-21 it installs exactly RNS 1.4.0, LXMF 1.1.0,
 and NomadNet 1.2.7 into a disposable virtual environment, records the resolved
 Python and pip versions, and verifies that all three packages import. It then
 reuses the bounded compatibility-vector, IFAC TCP, and link/proof tests against
@@ -3397,7 +3411,7 @@ The test uses temporary config/storage roots and prints only bounded metadata.
 Outbound incremental percentages are not claimed because the 0.9.5 transport
 currently exposes receiver progress and sender terminal events.
 
-## Mixed OMENbrowser 0.6.0-1 and 0.9.5-2 LXMF/OMENchat
+## Mixed OMENbrowser 0.6.0-1 and 0.9.6-1 LXMF/OMENchat
 
 This Linux-only multi-process harness tests actual application binaries rather
 than importing 0.6 types into the current build:
@@ -3452,12 +3466,62 @@ bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --history-resource \
 The old binary is built with `--locked` from immutable hardened commit
 `5ba6683055fb6c59111919fbad1ac37f56a4c203` in a disposable Git archive. The
 current binary uses the canonical native-network layers. Separate temporary
-application/identity/Reticulum roots connect through exact Python RNS 1.3.8 on
+application/identity/Reticulum roots connect through the exact Python RNS
+version selected by the harness on
 ephemeral loopback TCP with fixed public IFAC fixture credentials supplied by
 an owner-only file. The harness requires both direct sends, one reciprocal
 peer-bound message in each process, and exact 32-byte-title/102-byte-content
 shape metadata. It retains no raw application report containing paths or
 identity material.
+
+For adjacent-release qualification, the direct, propagation, and OMENchat
+harnesses also
+accept an explicit immutable old commit and expected version without changing
+their legacy defaults. The published `v0.9.5-2` cases use:
+
+```bash
+export OMEN_MIXED_OLD_COMMIT=c6ad96d3e083425a62e6713abe8598c4d494bde0
+export OMEN_MIXED_OLD_VERSION=0.9.5-2
+export OMEN_MIXED_OLD_TARGET_DIR="$PWD/target/mixed-v0.9.5-2"
+export OMEN_MIXED_OLD_SERVER_STOP_MODE=orderly
+
+bash scripts/run-mixed-0-6-0-9-lxmf.sh
+bash scripts/run-mixed-0-6-0-9-lxmf.sh --resource
+bash scripts/run-mixed-0-6-0-9-lxmf.sh --restart
+bash scripts/run-mixed-0-6-0-9-propagation.sh --reverse
+OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
+  bash scripts/run-mixed-0-6-0-9-propagation.sh
+OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
+  bash scripts/run-mixed-0-6-0-9-propagation.sh --node-restart
+OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
+  bash scripts/run-mixed-0-6-0-9-propagation.sh --node-crash
+OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
+  bash scripts/run-mixed-0-6-0-9-propagation.sh --stamp-ticket
+bash scripts/run-mixed-0-6-0-9-omenchat-history.sh
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --restart
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --restart
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --history-resource
+bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --history-resource
+```
+
+The stop-mode override records a real release difference: the long-range
+`0.6.0-1` server default still expects SIGTERM, while `0.9.5-2` participates in
+the harness's orderly server shutdown. It changes only the assertion for the
+selected immutable old peer.
+
+The recovery option does not resend the logical message. It requires an initial
+sync to retain exactly one transient and request the unknown authenticated
+sender path, learns a fresh sender announce, and then syncs the retained
+transient. It is used where the older recipient does not persist enough sender
+evidence across the receive/sync process boundary.
+
+For propagation-node restart and crash cases, both peers reconnect to the new
+ephemeral listener before the recovery announce. The assertion also requires a
+stable propagation identity and exactly one restored queued transient. The
+stamp/ticket case applies the same retained-transient recovery while preserving
+its independent stamp-policy and ticket-wire assertions.
 
 Each direct and Resource case runs one direction at a time with its receive-only
 peer online before the sender opens a link. Each logical message is attempted
@@ -3481,7 +3545,8 @@ exact peer-send/inbound-ID correlation, and exactly one inbound event per
 direction. Compared IDs and destinations are discarded rather than retained.
 
 The propagation command tests both store-and-forward directions separately.
-The sender submits one propagated message to exact Python RNS 1.3.8/LXMF 1.0.1;
+The sender submits one propagated message to the exact Python RNS/LXMF versions
+selected by the harness;
 the recipient then reconnects with the same isolated identity and syncs it. In
 the reverse case, the current recipient must initially defer the unknown old
 sender without acknowledgement, request sender-path recovery, learn a fresh
@@ -3524,7 +3589,7 @@ under one explicit temporary root and is deleted; the retained report contains
 only versions, counts, and validation booleans.
 
 The live OMENchat command builds the selected client/server pair from the
-immutable hardened `0.6.0-1` source and current `0.9.5-2` source. The default
+immutable hardened `0.6.0-1` source and current `0.9.6-1` source. The default
 case is current client to old server; `--reverse` is old client to current
 server. Each starts both binaries with separate isolated roots over an
 ephemeral loopback TCP interface, then requires the client to start its
@@ -3539,7 +3604,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.5-2` must report
+therefore exits with the expected signal status; current `0.9.6-1` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 

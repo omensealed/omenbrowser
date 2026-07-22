@@ -3,7 +3,18 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
-readonly old_commit=5ba6683055fb6c59111919fbad1ac37f56a4c203
+readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a4c203}
+readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
+readonly old_server_stop_mode=${OMEN_MIXED_OLD_SERVER_STOP_MODE:-sigterm}
+readonly current_expected_version=0.9.6-1
+
+case "$old_server_stop_mode" in
+  orderly|sigterm) ;;
+  *)
+    echo "OMEN_MIXED_OLD_SERVER_STOP_MODE must be orderly or sigterm" >&2
+    exit 2
+    ;;
+esac
 
 report_path=""
 reverse=0
@@ -64,10 +75,10 @@ if ((reverse)); then
     --no-default-features --features server-headless --bin omenchatd
   browser_bin="$old_target/debug/omenbrowser_rs"
   server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
-  expected_client_version="0.6.0-1"
-  expected_server_version="0.9.5-2"
-  direction="0.6.0-1_client_to_0.9.5-2_server"
-  message="mixed hardened old client to current server"
+  expected_client_version="$old_expected_version"
+  expected_server_version="$current_expected_version"
+  direction="${old_expected_version}_client_to_${current_expected_version}_server"
+  message="mixed old client to current server"
 else
   CARGO_TARGET_DIR="$old_target" cargo build --locked \
     --manifest-path "$old_source/src/server/Cargo.toml" \
@@ -76,9 +87,9 @@ else
     --no-default-features --features desktop-product --bin omenbrowser_rs
   browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
   server_bin="$old_target/debug/omenchatd"
-  expected_client_version="0.9.5-2"
-  expected_server_version="0.6.0-1"
-  direction="0.9.5-2_client_to_0.6.0-1_server"
+  expected_client_version="$current_expected_version"
+  expected_server_version="$old_expected_version"
+  direction="${current_expected_version}_client_to_${old_expected_version}_server"
   message="mixed current client to hardened old server"
 fi
 
@@ -119,7 +130,7 @@ if ((restart)); then
   if ((reverse)); then
     [[ "$restart_stop" == "orderly" ]]
   else
-    [[ "$restart_stop" == "sigterm" ]]
+    [[ "$restart_stop" == "$old_server_stop_mode" ]]
   fi
 fi
 history_report=""

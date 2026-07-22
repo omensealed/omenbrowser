@@ -1,5 +1,9 @@
 # Reticulum-rs/LXMF 0.9 Dependency Map
 
+Current resolved baseline remains the exact 0.9.5 train described below. The
+approved successor target and its staged gates are recorded in
+`RETICULUM_RS_0_9_6_PLAN.md`; manifests and lockfiles have not yet been changed.
+
 This map records the Phase 1 dependency decision. It does not claim live or
 Python interoperability.
 

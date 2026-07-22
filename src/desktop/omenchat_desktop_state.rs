@@ -280,6 +280,8 @@ mod tests {
             chat_client: ChatClient::new(),
             chat_store: None,
             session_ids: Vec::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            client_instance_id: None,
         };
         let panes = iced::widget::pane_grid::State::new(DesktopPane::Browser(1)).0;
         let mut state = OmenChatDesktopState::from_startup(startup, &panes);
@@ -469,6 +471,13 @@ impl OmenChatDesktopState {
             })
             .collect();
 
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        let omenchat_live_state = {
+            let mut state = crate::chat::live::LiveChatClientState::default();
+            state.set_client_instance_id(startup.client_instance_id);
+            state
+        };
+
         Self {
             chat_client: startup.chat_client,
             chat_store: startup.chat_store,
@@ -489,7 +498,7 @@ impl OmenChatDesktopState {
             omenchat_rooms_visible: true,
             omenchat_pending_upload_sources: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            omenchat_live_state: crate::chat::live::LiveChatClientState::default(),
+            omenchat_live_state,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_transports: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]

@@ -1,5 +1,10 @@
 # Reticulum-rs/LXMF 0.9 API Migration Ledger
 
+The entries below describe the current 0.9.5 implementation. Upstream 0.9.6 is
+now the approved next train; `RETICULUM_RS_0_9_6_PLAN.md` defines the assessment
+and migration gates. Add 0.9.6 evidence here during compiler/API migration
+rather than rewriting prior 0.9.5 results.
+
 Status date: 2026-07-16. Starting application commit:
 `d0c147391e89427b3e309ecfaa8de6e95b561df8`.
 
@@ -4595,3 +4600,426 @@ the other current/mixed-version smoke helpers already do. This is path
 portability, not reduced coverage: the real PTY resize, signal, shutdown-latency,
 and terminal-restoration assertions still execute against the freshly built TUI
 binary. A replacement full CI run remains the completion gate.
+
+## v0.9.6-1 units 0–1: rollback freeze and coherent dependency train
+
+The known-good behavioral rollback point is commit `d484724`; GitHub Actions CI
+run `29871754030` passed for that commit. Planning commit `4e1c048` followed
+without changing product behavior. OMENbrowser and independently manifested
+omenchatd now report `0.9.6-1`. Their direct Reticulum/LXMF dependencies and the
+private IFAC adapter's transport dependency use exact registry `=0.9.6` pins.
+The adapter's own package identity remains `0.9.5-1` because its API and IFAC
+wire contract did not change.
+
+Root and server lockfiles were resolved independently with `cargo update -p
+reticulum-rs --precise 0.9.6`. The root train contains `lxmf`, `lxmf-sdk`,
+`lxmf-wire`, `reticulum-rs`, `reticulum-rs-core`, `reticulum-rs-rpc`, and
+`reticulum-rs-transport` 0.9.6. The server train contains `reticulum-rs`, core,
+and transport 0.9.6. All resolve from crates.io, no 0.9.5 family package remains
+in either production tree, and the only new upstream transitive requirement is
+`thiserror 1.0.69` in transport 0.9.6; it was already resolved elsewhere in both
+lockfiles.
+
+Validation passed for the release-version and dependency-train scripts, shell
+syntax for every edited harness, `git diff --check`, canonical
+`desktop-product`, and standalone `server-headless` and `server-full` checks.
+`cargo tree -d` was reviewed for both roots; existing non-family duplicate
+versions remain, with no duplicate Reticulum/LXMF identity or source split.
+Unit 2 tests, strict Clippy, native-platform CI, Python interoperability, and
+packaging are deliberately batched after compiler/API qualification rather than
+dispatching a documentation-and-lockfile-only 15-minute workflow.
+
+No protocol, schema, configuration, destination/aspect, identity, state-path,
+queue, timeout, or runtime behavior changed. Rollback restores the two product
+versions, five direct root pins, two direct server pins, the IFAC transport pin,
+both lockfiles, and active release/test labels to the `d484724` state. No user
+data migration or cache deletion is involved.
+
+## v0.9.6-1 unit 2: fallible identity and LXMF message-ID boundaries
+
+The 0.9.6 compatibility constructors `Identity::new_from_slices` and
+`WireMessage::message_id` intentionally call `expect` after invoking their new
+fallible counterparts. They remain appropriate only where OMEN converts an
+already validated upstream identity. They are unsafe at persisted/untrusted
+boundaries because corrupt key material or an encoding failure could terminate
+the process.
+
+Path-table restore now validates every restored public/verifying-key pair with
+`try_new_from_slices`. Invalid entries are omitted from OMEN's bounded identity
+cache and produce a destination-only diagnostic; other valid restored entries
+continue loading. Propagation transient construction rejects an invalid remote
+recipient identity as a structured application error. LXMF stamp computation,
+decoded-message attachment routing, and SDK send/correlation paths use
+`try_message_id` and preserve the upstream encoding error instead of panicking.
+Validated in-memory conversions from an existing upstream `Identity` retain the
+compatibility constructor because its length and point-validity invariants have
+already been established.
+
+Two focused regressions prove malformed compressed-point and wrong-length key
+material return errors without panicking, including the propagation-recipient
+path. Full local validation passed:
+
+- `cargo test --locked --no-default-features --features desktop-product`;
+- desktop all-target strict Clippy;
+- `cargo test` and strict all-target Clippy with the `tui` profile;
+- `cargo test` with the isolated `mock-runtime` profile;
+- standalone `server-headless` tests (244 passed, 8 explicit soaks/live tests
+  ignored), `server-full` tests (366 passed, 8 ignored), and headless all-target
+  strict Clippy;
+- both formatting checks, release-version/train verification, shell syntax,
+  dependency-tree/source checks, and `git diff --check`.
+
+`bash scripts/release-check.sh quick` also passed end to end, including accepted
+advisory-boundary verification, native release CLI identity, isolated and real
+PTY TUI lifecycle, product-feature identity, focused browser/server OMENchat
+tests, standalone omenchatd relocation, and the local IFAC vector/negative
+tests. The quick gate intentionally leaves its pinned-Python tests ignored for
+the dedicated interoperability workflow.
+
+The ignored server cases remain explicit 60-second soak, multi-process Resource,
+UDP maximum-Resource, and cancellation/hardware-like live gates; they were not
+relabelled as passes. Pinned/current Python interoperability, mixed 0.6/0.9
+process tests, native Windows/macOS CI, live Reticulum peers, package builds,
+and resource measurements have not run for this commit yet. They are Unit 3/4
+qualification gates.
+
+This unit changes failure behavior only: malformed restored/remote identity
+material and message-ID encoding failures now fail closed rather than aborting.
+It changes no successful wire bytes, message ID, identity hash, protocol,
+schema, configuration, path, queue, retry, or storage format. Rollback restores
+the prior compatibility calls; no state migration is required.
+
+## v0.9.6-1 unit 3a: maximum UDP Resource gap requalification
+
+The explicit ignored
+`reticulum_udp_tx_buffer_covers_max_resource_wire_packet` sentinel was run
+against the locked 0.9.6 transport. It remains known-red: the upstream buffer is
+456 bytes while the maximum type-one Resource packet is 483 bytes. Normal
+headless/full suites continue to ignore this one deliberately failing boundary,
+and their smaller Resource/terminal tests pass.
+
+The test annotation and transport gap document now scope the limitation through
+0.9.6. No runtime code, buffer, packet, retry, protocol, schema, configuration,
+or feature changed. Rollback is documentation/test-label only. The gap blocks a
+maximum-UDP-Resource support claim, not the version-aligned release as a whole;
+OMEN retains the upstream behavior without a fork or local workaround.
+
+## v0.9.6-1 unit 3b: pinned-Python qualification and test isolation
+
+The dedicated pinned-reference runner initially failed before live socket
+execution because the standalone relocation check had compiled a temporary
+server source copy into the canonical server target. Rust integration-test
+binaries embed `CARGO_MANIFEST_DIR`; after the source copy was removed, Cargo
+reused the otherwise-fresh binary and fixture discovery addressed a deleted
+`/tmp/omenchatd-standalone.*` path. The relocation harness now owns a unique
+target directory beneath the configured target parent and removes that target
+together with the source copy. Its full locked offline check, compile-only
+headless test build, and four IFAC unit regressions pass, with zero relocation
+target directories retained after exit.
+
+A deliberately fresh Cargo target then filled the host's 32-GiB tmpfs while
+linking the desktop test binary and `ld` exited with `SIGBUS`. Inspection found
+156 prior browser-cache byte-budget fixtures of roughly 61 MiB each and more
+than 161,000 `omenbrowser-rs-*` test directories accumulated across historical
+runs. These were isolated project test artifacts, not user/application state.
+The browser-cache integration fixture now owns its directory through an RAII
+guard, including assertion-panic paths; one focused suite leaves the directory
+count unchanged at zero. The live stamped-propagation fixture likewise owns a
+cleanup guard so an interoperability assertion cannot strand its isolated
+identity/config/storage tree.
+
+After removing only those project-prefixed artifacts and rebuilding the two
+contaminated server integration tests, the complete pinned lane reached every
+live case. TCP split/coalesced/reconnect and wrong-credential checks, forged and
+stale proof ordering, propagation enqueue/get/ack, deterministic stamp
+boundaries, ticket issue/use/expiry/reuse, first-send direct stamp-policy
+discovery, 65,536-byte stamped direct Resource transfer, direct stamp
+accept/reject, and live ticket roundtrip passed. The network propagation
+accepted/under-cost-rejected case timed out once after the first accepted
+message; its immediate complete rerun passed in 32.32 seconds. This intermittent
+failure remains a disclosed qualification flake and must not be relabelled as a
+deterministic 0.9.6 incompatibility or silently retried by the gate.
+
+No production protocol, identity, storage, retry, queue, link, or wire behavior
+changed. Rollback restores shared relocation artifacts and non-owning test
+fixtures, which would reintroduce false fixture failures and unbounded test
+disk retention. Current-Python drift, mixed 0.9.5/0.9.6 peers, native packaging,
+and performance comparison remain Unit 4 gates.
+
+## v0.9.6-1 unit 4a: current-Python drift alignment
+
+Official PyPI JSON metadata was rechecked on 2026-07-21. The separately
+versioned informational lane advanced from RNS 1.3.8/LXMF 1.0.1 to exact RNS
+1.4.0/LXMF 1.1.0; NomadNet remains exact 1.2.7 and msgpack remains exact 1.2.1.
+The packages co-resolve and import under Python 3.14.6. Current-only fixture
+expectations and mixed-version Python gateway pins moved together; the
+release-blocking Python source commits remain immutable and unchanged.
+
+The full current lane passed all 18 reported checks: Reticulum vectors, IFAC
+TCP/reconnect/wrong-credential handling, proof ordering, reciprocal direct LXMF,
+propagation sync/ack and stamp admission, direct stamp/ticket behavior, a
+65,536-byte stamped direct Resource, NomadNet exact-byte primitives,
+timeout/cancellation without replay, active-link reuse, and a 32-request
+keepalive/recovery soak. The soak observed two deliberate link generations,
+at most one active link, 1,043-ms recovery, and 4,400-ms total exchange time.
+The release-profile eight-sample comparison used one link and measured direct
+requests at 39,929-us median/41,585-us p95 and request Resources at 86,281-us
+median/88,252-us p95. The ignored local report records the exact resolved Python
+distribution set without becoming a committed release artifact.
+
+This is test/evidence alignment only. It changes no Rust production dependency,
+wire protocol, schema, identity, runtime policy, queue, retry, or user state.
+Rollback restores the former current-lane pins but would cease testing the
+current published Python stack. Mixed 0.9.5/0.9.6 execution, native packaging,
+and product/server before-after resource measurements remain pending.
+
+## v0.9.6-1 unit 4b: adjacent v0.9.5-2 interoperability
+
+The long-range mixed harness retains immutable `0.6.0-1` defaults and now
+accepts an explicit old commit/version for adjacent-release evidence. The old
+binary was built with its committed lockfile from published `v0.9.5-2` commit
+`c6ad96d3e083425a62e6713abe8598c4d494bde0`; the current peer was
+`0.9.6-1`, with exact Python RNS 1.4.0/LXMF 1.1.0 as the gateway.
+
+Bidirectional direct Link-packet traffic passed on one logical attempt in
+40,077 ms with reciprocal message IDs, exact 102-byte content, and both packet
+proofs correlated. Reopening the same isolated roots preserved both destination
+identities, generated new inbound/outbound message IDs, and admitted no
+duplicates. Bidirectional 65,536-byte Resource traffic passed in 40,068 ms with
+exact content and message-ID correlation; packet proofs are not claimed for
+Resource completion.
+
+Propagation from `0.9.5-2` to `0.9.6-1` passed directly. In the reverse
+direction, the older recipient's first sync correctly deferred the transient
+because its authenticated sender path was absent and requested that path. The
+harness exposes explicit recovery: it learns a fresh sender announce and syncs
+the same retained transient again without resending the logical message. That
+path passed with one queued transient, one decoded message, one acknowledgement,
+and an empty propagation queue. The original one-shot failure remains evidence
+for why recovery is required.
+
+No product retry, protocol, schema, identity, queue, or storage behavior
+changed. Rollback removes harness parameterization but discards adjacent-release
+evidence. Native packaging and longer soak measurements remain pending. The
+Python interoperability workflow now runs the locally proven five adjacent
+cases in the existing bounded mixed-release job, with a distinct old
+Cargo target so its 0.9.5 artifacts cannot contaminate the long-range 0.6
+fixtures.
+
+Hosted run `29884168183` passed all pinned, current-drift, long-range, and
+adjacent cases at commit `8d9bcd5`.
+
+## v0.9.6-1 unit 4c: adjacent v0.9.5-2 OMENchat compatibility
+
+The OMENchat history and live-process harnesses now accept the same immutable
+old commit/version selection while retaining their `0.6.0-1` defaults. The
+published `v0.9.5-2` commit and its committed lockfile were used for every old
+binary. An explicit old-server stop-mode assertion preserves the long-range
+SIGTERM expectation and records that the adjacent server shuts down orderly.
+
+The isolated SQLite store passed bidirectional reopening: `0.9.6-1` read the
+old release's event and metadata, then `0.9.5-2` reopened the current release's
+additional event with order, room state, and server metadata intact. Live
+loopback tests passed in both directions for session establishment, room join,
+message send, and echo. Both client/server arrangements passed server restart
+with stable destination identity, reused client state, reconnection, rejoin,
+and post-restart echo. Both arrangements also decoded Resource-backed history
+through an isolated one-byte large-batch threshold and a second client.
+
+This changes only test selection and assertions. It does not change OMENchat's
+wire version, SQLite schema, identity ownership, retry policy, runtime queues,
+or production shutdown behavior. Rollback removes the environment-driven old
+peer selection and loses adjacent evidence. The cases remain local until the
+next meaningful interoperability checkpoint; repeatedly dispatching the full
+hosted matrix for harness-only commits would add cost and latency without
+additional platform coverage.
+
+## v0.9.6-1 unit 4d: adjacent propagation durability
+
+The remaining adjacent propagation cases now pass from the `0.9.6-1` sender to
+the `v0.9.5-2` recipient: orderly propagation-node restart, abrupt node crash,
+and required stamp/ticket handling. Each case first records the older
+recipient's expected unknown-sender deferral, then learns a fresh authenticated
+sender announce and decodes the same retained transient. No logical message is
+resubmitted. Restart and crash both preserve one queued transient and the
+propagation identity; crash additionally observes a non-zero abrupt exit.
+Stamp/ticket qualification verifies the required stamp policy and ticket bytes
+independently of transport acceptance.
+
+The first adjacent restart attempts exposed a harness-only reconnect defect:
+after selecting the restarted node's new ephemeral port, the recipient was
+updated but the recovery announce sender retained the dead port. Updating both
+peer argument sets made the intended recovery executable. This does not change
+production networking, protocol, queue, retry, or persistence behavior.
+Rollback removes the sender reconnect correction and loses adjacent restart and
+crash recovery coverage. These cases remain local until the next bundled hosted
+interoperability checkpoint.
+
+## v0.9.6-1 unit 4e: release-profile resource comparison
+
+The exact published `v0.9.5-2` desktop binary from commit
+`c6ad96d3e083425a62e6713abe8598c4d494bde0` and the `0.9.6-1` desktop binary
+from commit `2721e9651f0215e208bb787d3d81bb18f3ebeee3` were measured sequentially
+with the same Xvfb/i3 harness, isolated roots, 15-second warmup, and sixty
+one-second samples. Both report the canonical `desktop-product` identity and
+closed normally in 170 ms.
+
+Median CPU changed from 0.974% to 0.976%, p95 CPU from 2.944% to 2.932%, and
+`perf` task clock from 561.47 ms to 557.65 ms. Median RSS changed from 254,580
+KiB to 255,780 KiB (0.47%), private-dirty memory from 59,168 KiB to 59,148 KiB
+(-0.03%), and median/p95 FDs remained 60. The scheduler context-switch proxy
+changed from 60.000 to 66.102 per minute; it is not relabeled as an application
+message counter. Recurring application-message and physical GPU measurements
+remain explicitly pending. The single startup observations were 1,514 ms and
+544 ms respectively, but one observation per binary is not treated as a
+startup benchmark. Binary size increased 0.13% from 54,358,760 to 54,428,352
+bytes.
+
+The matching 15-second omenchatd SQLite fixture accepted and committed 1,500
+operations, rejected 10,500 at its bounded admission point, retained 13 FDs,
+and passed integrity. Compared with the saved same-host/toolchain baseline,
+average worker latency changed from 342 us to 375 us, maximum latency improved
+from 1,279 us to 1,075 us, heartbeat maximum changed from 1,895 us to 2,055 us,
+and RSS growth changed from 610,304 to 716,800 bytes. All remain far inside the
+250-ms heartbeat and 64-MiB growth gates.
+
+The matching backpressure fixture retained its 256-item/16,718,820-byte
+transport peak, 513-observed-item/33,554,432-byte event peak, 21-ms maximum
+control latency, 11 peak FDs, and zero final item/byte occupancy. RSS growth
+changed from 53,489,664 to 55,668,736 bytes (4.07%), below half the 112-MiB
+allowance. These are equivalent deterministic short samples on the same host
+and Rust 1.97 toolchain, not universal hardware claims. Raw reports and copied
+binaries remain in ignored `target/reticulum-0.9.6-comparison/` evidence.
+
+This unit changes documentation only. No dependency, runtime, queue, cache,
+protocol, schema, identity, or user state changes. Rollback removes the evidence
+record. Longer link/task/logging soaks, interactive GPU measurements, native
+packaging, and the next bundled hosted checkpoint remain pending.
+
+## v0.9.6-1 unit 4f: long ownership and cleanup soaks
+
+The current `0.9.6-1` server passed its explicit 60-second live-link admission
+and reconnect-storm soak. Across 4,635 cycles it retained the intended 224
+identified links, saturated the 256-active/32-pending limits, rejected every
+over-limit admission, and expired 148,320 deliberately slow handshakes. The
+maximum close path was 797 us against the 250,000-us deadline. RSS grew 241,664
+bytes, FDs remained four, tasks remained two, and final active and pending
+counts were both zero.
+
+The bounded logger passed its 60-second slow-filesystem soak across three
+rotation cycles and 382,101 submissions. The payload queue peaked at its
+64-item bound and 777,932 bytes; overload dropped 353,268 ordinary records but
+zero priority records, with zero write failures. Admission was 564 ns median,
+1,820 ns p95, and 297,580 ns maximum. RSS grew 5,091,328 bytes, FDs remained
+four, and retention remained bounded to 12 files. The retained-byte result is a
+deliberately high-throughput fault fixture, not an estimate of normal logging.
+
+The isolated two-core runtime policy measurement also passed. The adaptive
+policy selected two async workers rather than the legacy fixed four, retained
+the eight-thread blocking ceiling, and completed 5,000 async tasks plus 32
+bounded 256-KiB writes. Its measured async p95 was 32,205 ns versus 625,246 ns
+for the legacy policy in this synthetic run. This validates bounded policy
+selection on a constrained CPU affinity; it is not a universal latency claim.
+
+These ignored measurement fixtures used Linux `/proc`, isolated state, and the
+local Rust 1.97 release profile. Raw evidence remains under
+`target/reticulum-0.9.6-comparison/`. No production behavior, dependency,
+protocol, schema, identity, queue, or retention setting changed. Rollback
+removes this documentation only. Longer database/backpressure runs, physical
+GPU and network/hardware measurements, native packaging, and the next bundled
+hosted checkpoint remain pending.
+
+## v0.9.6-1 unit 4g: local package readiness and retained evidence
+
+`bash scripts/release-check.sh quick` passed at commit `afb0aea`, including
+format and script syntax, version consistency, exact Reticulum/LXMF 0.9.6
+dependency trains, the accepted build-time advisory boundary, native CLI
+product identities, TUI lifecycle and real-PTY shutdown, canonical desktop
+feature checks, focused OMENchat behavior, standalone omenchatd relocation,
+headless/full server feature checks, and focused server history/config tests.
+The explicitly pinned Python tests remained ignored in this local quick gate;
+their most recent hosted lanes are recorded separately.
+
+The non-publishing Linux package build then rebuilt canonical `desktop-product`
+and `server-full` binaries, staged version `0.9.6-1`, created and re-extracted
+the archive, and passed binary help/version, isolated omenchatd
+init/status/doctor, root separation, script syntax, and collector redaction
+checks. The browser reports commit
+`afb0aeaaf3c64cd7d26c6f2c6dfa5ea1e512fa2d` and the complete production
+feature identity; omenchatd reports headless, full, live Reticulum, and TUI
+enabled. The ignored local archive SHA-256 is
+`c4c801978765c6d8ef4a91661bf7569d06ee3a70a83ecd8db8e77e58ae0f9fcc`.
+It is qualification evidence, not a release asset.
+
+The extracted package passed the two-client OMENchat smoke with distinct
+browser roots and a separate server home. Inspection found that a relative
+caller-supplied smoke-output directory was previously interpreted after the
+gate changed into the temporary extracted package, so the successful evidence
+was deleted during cleanup. `release-check.sh` now anchors that argument to the
+invocation directory before extraction. Repeating the complete package gate
+passed and left the requested report directory in place with `outcome: pass`
+and `multi_client: 1`.
+
+This changes release-test evidence ownership only. It does not change packaged
+binaries, dependencies, runtime behavior, protocols, schemas, identities,
+queues, or user state. Rollback removes the path anchoring and documentation,
+but again discards relative-path smoke evidence after successful checks. Native
+Windows/macOS packaging and the next bundled hosted checkpoint remain pending.
+
+## v0.9.6-1 unit 4h: full local gate and bundled hosted scope
+
+`bash scripts/release-check.sh full` passed after the retained-evidence fix.
+The canonical desktop matrix passed 1,554 tests with 33 explicit ignored
+hardware/live/measurement cases, and strict desktop-product Clippy passed with
+warnings denied. The independent `server-full` matrix passed 366 tests with
+eight explicit ignored interoperability/soak/upstream-limit cases, and strict
+server-full Clippy passed with warnings denied. The gate also repeated the
+quick feature, identity, advisory, TUI, focused behavior, and standalone
+relocation checks successfully.
+
+This is the first checkpoint after the local adjacent-release, resource, soak,
+and package units where hosted work adds distinct evidence. The existing
+Python job already covers pinned/current Python, long-range `0.6.0-1`, and the
+adjacent direct/Resource/restart/propagation matrix. Its single bounded
+mixed-release job now also includes the locally proven adjacent propagation
+restart/crash/stamp-ticket cases and adjacent OMENchat state/live/restart/
+Resource cases. They share the existing immutable `v0.9.5-2` Cargo target so
+the job does not rebuild the old dependency train independently for every
+case.
+
+This changes hosted test coverage only. It does not change product code,
+dependencies, protocols, schemas, identity ownership, queue limits, or user
+state. Rollback removes the two added hosted steps but loses reproducible
+adjacent durability and OMENchat evidence. One CI run, one Python interop run,
+and one native package run are the intended bundled checkpoint; ordinary
+follow-up commits should not dispatch them again unless they affect those
+gates.
+
+## v0.9.6-1 unit 4i: hosted release qualification
+
+The deliberately bundled hosted checkpoint passed at exact commit
+`2bdcae1c22fc98bd6f750c6c99471d54b59b7102`:
+
+- CI run `29890013927` passed the Linux quick gate and native Windows MSVC,
+  Intel macOS, and Apple Silicon macOS matrices.
+- Python interoperability run `29890014693` passed the immutable pinned lane,
+  the explicitly versioned current-Python drift lane, the long-range mixed
+  compatibility lane, and the adjacent v0.9.5-2 LXMF, propagation durability,
+  and OMENchat compatibility cases.
+- Package run `29890015669` passed native prerequisites, Linux tar/deb/AppImage
+  construction and package smoke, and Windows portable, unsigned NSIS, and
+  unsigned WiX construction and lifecycle checks. The non-tag publication job
+  skipped as designed.
+
+The package run retained two qualified artifact groups: the Linux release set
+and the Windows portable/installer set. The repository does not currently
+define a macOS DMG job, so this evidence claims native macOS build, test,
+Clippy, product-identity, and smoke qualification, not a macOS installer.
+
+Physical-radio/public-network interoperability and hardware-specific GPU
+measurements were unavailable and remain unclaimed. The explicitly reproduced
+maximum UDP Resource failure remains the documented upstream 0.9.6 limitation;
+it blocks a maximum-UDP-Resource parity claim but does not invalidate the other
+passing version-aligned release gates. No production code, dependency,
+protocol, schema, identity, storage, queue, or configuration changed in this
+evidence-recording unit. Rollback removes only this record.

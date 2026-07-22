@@ -2,8 +2,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::error::ServerResult;
 use crate::protocol::codec::{decode_frame, encode_frame};
-use crate::protocol::{ChatErrorCode, ChatOp, Frame, FrameBody, FrameValue, RoomId};
-use crate::session::{ServerPeer, SessionEngine};
+use crate::protocol::{
+    parse_session_accept_negotiation, parse_session_open_negotiation, ChatErrorCode, ChatOp,
+    ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
+    DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG,
+};
+use crate::session::{DurableMutationPeerContext, ServerPeer, SessionEngine};
 use crate::transport::{
     release_response_resource, send_response_frame_with_context, LinkId, OmenchatTransport,
     OMENCHAT_LINK_CONTEXT,
@@ -65,6 +69,10 @@ pub enum LiveResourceOutcome {
 #[cfg(test)]
 #[path = "live_link_soak_tests.rs"]
 mod link_soak_tests;
+
+#[cfg(test)]
+#[path = "live_retry_safety_tests.rs"]
+mod retry_safety_tests;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveServerStats {
@@ -137,10 +145,18 @@ enum ReplayLookup {
     Collision,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct FrameDispatchOutcome {
+    session_accepted: bool,
+    accepted_client_instance_id: Option<ClientInstanceId>,
     part_succeeded: bool,
     moderation_disconnect_succeeded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DurableSessionBinding {
+    identity_hash: Vec<u8>,
+    client_instance_id: ClientInstanceId,
 }
 
 impl LinkReplayCache {
@@ -385,6 +401,7 @@ pub struct OmenchatLiveServer<T> {
     link_traffic: BTreeMap<LinkId, LinkTrafficSummary>,
     identified_links: BTreeSet<LinkId>,
     session_open_links: BTreeSet<LinkId>,
+    durable_sessions: BTreeMap<LinkId, DurableSessionBinding>,
     recent_closed_links: VecDeque<ClosedLinkSummary>,
     replay_cache: LinkReplayCache,
     stats: LiveServerStats,
@@ -402,6 +419,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             link_traffic: BTreeMap::new(),
             identified_links: BTreeSet::new(),
             session_open_links: BTreeSet::new(),
+            durable_sessions: BTreeMap::new(),
             recent_closed_links: VecDeque::new(),
             replay_cache: LinkReplayCache::default(),
             stats: LiveServerStats::default(),
@@ -442,6 +460,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 };
                 let mut identified = existing;
                 identified.identity_hash = identity_hash.to_vec();
+                self.durable_sessions.remove(&link_id);
                 self.identified_links.insert(link_id);
                 self.replace_duplicate_peer_links(link_id, &identified);
                 self.peers.insert(link_id, identified);
@@ -461,7 +480,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 if frame.is_some() && context != 0 {
                     self.link_response_contexts.insert(link_id, context);
                 }
-                let mut peer = match self.peers.get(&link_id).cloned() {
+                let peer = match self.peers.get(&link_id).cloned() {
                     Some(peer) => peer,
                     None => {
                         if !frame
@@ -481,24 +500,18 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                         if !self.admit_new_link(link_id) {
                             return Ok(());
                         }
-                        let peer =
-                            peer_from_session_open(&provisional, &data).unwrap_or(provisional);
-                        self.peers.insert(link_id, peer.clone());
+                        self.peers.insert(link_id, provisional.clone());
                         self.link_opened_at
                             .entry(link_id)
                             .or_insert_with(current_unix_secs);
                         self.link_traffic.entry(link_id).or_default();
                         self.stats.links_opened = self.stats.links_opened.saturating_add(1);
                         self.refresh_active_links();
-                        peer
+                        provisional
                     }
                 };
-                if let Some(updated_peer) = peer_from_session_open(&peer, &data) {
-                    peer = updated_peer;
-                    self.replace_duplicate_peer_links(link_id, &peer);
-                    self.peers.insert(link_id, peer.clone());
-                    self.refresh_active_links();
-                }
+                let candidate_peer =
+                    peer_from_session_open(&peer, &data).unwrap_or_else(|| peer.clone());
                 self.record_link_traffic(
                     link_id,
                     data.len() as u64,
@@ -508,11 +521,15 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 let parted_room_id = frame.as_ref().and_then(parted_room_id_from_frame);
                 let active_room_peers = joined_room_id
                     .or(parted_room_id)
-                    .map(|room_id| self.active_peers_for_room(link_id, room_id, &peer))
+                    .map(|room_id| self.active_peers_for_room(link_id, room_id, &candidate_peer))
                     .unwrap_or_default();
                 let moderation_disconnect = frame.as_ref().and_then(|frame| {
                     self.engine
-                        .moderation_disconnect_target_for_frame(&peer, frame, &active_room_peers)
+                        .moderation_disconnect_target_for_frame(
+                            &candidate_peer,
+                            frame,
+                            &active_room_peers,
+                        )
                         .ok()
                         .flatten()
                 });
@@ -522,7 +539,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 let resource_bytes_before = self.transport.resource_byte_count();
                 let dispatch = match self.handle_decoded_frame(
                     link_id,
-                    &peer,
+                    &candidate_peer,
                     frame.clone(),
                     &active_room_peers,
                 ) {
@@ -533,11 +550,24 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                         return Ok(());
                     }
                 };
-                if frame
-                    .as_ref()
-                    .is_some_and(|frame| frame.op == ChatOp::SessionOpen)
-                {
+                if dispatch.session_accepted {
+                    if candidate_peer != peer {
+                        self.replace_duplicate_peer_links(link_id, &candidate_peer);
+                        self.peers.insert(link_id, candidate_peer.clone());
+                    }
                     self.session_open_links.insert(link_id);
+                    self.durable_sessions.remove(&link_id);
+                    if self.identified_links.contains(&link_id) {
+                        if let Some(client_instance_id) = dispatch.accepted_client_instance_id {
+                            self.durable_sessions.insert(
+                                link_id,
+                                DurableSessionBinding {
+                                    identity_hash: candidate_peer.identity_hash.clone(),
+                                    client_instance_id,
+                                },
+                            );
+                        }
+                    }
                     self.refresh_active_links();
                 }
                 if dispatch.moderation_disconnect_succeeded {
@@ -550,8 +580,9 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 }
                 if dispatch.part_succeeded {
                     if let Some(room_id) = parted_room_id {
-                        self.link_rooms.remove(&link_id);
-                        self.broadcast_userlist_for_room(room_id)?;
+                        if self.link_rooms.remove(&link_id).is_some() {
+                            self.broadcast_userlist_for_room(room_id)?;
+                        }
                     }
                 }
                 self.stats.frames_in = self.stats.frames_in.saturating_add(1);
@@ -687,6 +718,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 self.link_traffic.remove(&link_id);
                 self.identified_links.remove(&link_id);
                 self.session_open_links.remove(&link_id);
+                self.durable_sessions.remove(&link_id);
                 if let Some(room_id) = room_id {
                     self.broadcast_userlist_for_room(room_id)?;
                 }
@@ -710,6 +742,10 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         };
         let request_op = frame.op;
         let request_seq = frame.seq;
+        if is_durable_mutation_envelope(&frame.body) {
+            return self.handle_durable_mutation_frame(link_id, peer, frame, active_room_peers);
+        }
+        let requested_client_instance_id = requested_durable_client_instance(&frame);
         let replay_candidate = is_replay_guarded_request(&frame);
         let request_fingerprint = if replay_candidate {
             Some(encode_frame(&frame).map_err(|error| {
@@ -750,6 +786,14 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             self.engine
                 .handle_frame_with_active_peers(peer, frame, active_room_peers)?;
         let dispatch = FrameDispatchOutcome {
+            session_accepted: request_op == ChatOp::SessionOpen
+                && responses
+                    .iter()
+                    .any(|response| response.op == ChatOp::SessionAccept),
+            accepted_client_instance_id: accepted_durable_client_instance(
+                requested_client_instance_id,
+                &responses,
+            ),
             part_succeeded: request_op == ChatOp::PartRoom
                 && responses.iter().any(is_successful_part_response),
             moderation_disconnect_succeeded: request_op == ChatOp::Command
@@ -799,6 +843,75 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         }
         send_result?;
         Ok(dispatch)
+    }
+
+    fn handle_durable_mutation_frame(
+        &mut self,
+        link_id: LinkId,
+        peer: &ServerPeer,
+        frame: Frame,
+        active_room_peers: &[ServerPeer],
+    ) -> ServerResult<FrameDispatchOutcome> {
+        let envelope = match DurableMutationEnvelope::from_frame_body(&frame.body) {
+            Ok(envelope) => envelope,
+            Err(_) => {
+                self.stats.protocol_errors = self.stats.protocol_errors.saturating_add(1);
+                let response = durable_dispatch_error_frame(
+                    frame.seq,
+                    frame.room_id,
+                    ChatErrorCode::DurableMutationMalformed,
+                    "durable mutation envelope is malformed",
+                );
+                self.stats.count_outbound_op(&response);
+                self.send_response_frame(link_id, &response)?;
+                return Ok(FrameDispatchOutcome::default());
+            }
+        };
+        let binding = self
+            .identified_links
+            .contains(&link_id)
+            .then(|| self.durable_sessions.get(&link_id))
+            .flatten()
+            .filter(|binding| binding.identity_hash == peer.identity_hash)
+            .cloned();
+        let Some(binding) = binding else {
+            let response = durable_dispatch_error_frame(
+                frame.seq,
+                frame.room_id,
+                ChatErrorCode::DurableMutationNotNegotiated,
+                "durable mutations were not negotiated for this authenticated link",
+            );
+            self.stats.count_outbound_op(&response);
+            self.send_response_frame(link_id, &response)?;
+            return Ok(FrameDispatchOutcome::default());
+        };
+
+        let request_op = frame.op;
+        let dispatch = self.engine.handle_durable_mutation_with_active_peers(
+            DurableMutationPeerContext {
+                peer,
+                active_room_peers,
+            },
+            frame.seq,
+            frame.room_id,
+            request_op,
+            binding.client_instance_id,
+            envelope,
+        )?;
+        let part_succeeded =
+            request_op == ChatOp::PartRoom && is_successful_part_response(&dispatch.origin);
+        if let Some(identity_hash) = dispatch.disconnect_identity.as_deref() {
+            self.disconnect_identity(identity_hash);
+        }
+        self.stats.count_outbound_op(&dispatch.origin);
+        self.send_response_frame(link_id, &dispatch.origin)?;
+        for broadcast in dispatch.broadcasts {
+            self.broadcast_room_event(link_id, &broadcast)?;
+        }
+        Ok(FrameDispatchOutcome {
+            part_succeeded,
+            ..FrameDispatchOutcome::default()
+        })
     }
 
     fn broadcast_room_event(
@@ -980,6 +1093,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             self.link_traffic.remove(link_id);
             self.identified_links.remove(link_id);
             self.session_open_links.remove(link_id);
+            self.durable_sessions.remove(link_id);
         }
         self.stats.links_closed = self.stats.links_closed.saturating_add(links.len() as u64);
         for room_id in unique_room_ids(affected_rooms) {
@@ -1157,6 +1271,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.link_traffic.remove(&link_id);
         self.identified_links.remove(&link_id);
         self.session_open_links.remove(&link_id);
+        self.durable_sessions.remove(&link_id);
     }
 
     fn retire_link(&mut self, link_id: LinkId, reason: &str) {
@@ -1182,6 +1297,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.link_traffic.remove(&link_id);
         self.identified_links.remove(&link_id);
         self.session_open_links.remove(&link_id);
+        self.durable_sessions.remove(&link_id);
     }
 
     fn discard_pending_uploads_for_identity(&mut self, identity_hash: &[u8]) -> usize {
@@ -1321,6 +1437,34 @@ fn replay_collision_frame(seq: u32, room_id: Option<RoomId>) -> Frame {
     )
 }
 
+fn durable_dispatch_error_frame(
+    seq: u32,
+    room_id: Option<RoomId>,
+    code: ChatErrorCode,
+    message: &str,
+) -> Frame {
+    Frame::new(
+        ChatOp::Error,
+        seq,
+        room_id,
+        FrameBody::Fields(vec![
+            FrameValue::U64(code as u16 as u64),
+            FrameValue::String(message.into()),
+        ]),
+    )
+}
+
+fn is_durable_mutation_envelope(body: &FrameBody) -> bool {
+    matches!(
+        body,
+        FrameBody::Fields(fields)
+            if matches!(
+                fields.first(),
+                Some(FrameValue::String(tag)) if tag == DURABLE_MUTATION_ENVELOPE_TAG
+            )
+    )
+}
+
 fn is_replay_guarded_request(frame: &Frame) -> bool {
     match frame.op {
         ChatOp::RoomMessage | ChatOp::RoomAction | ChatOp::RoomNotice | ChatOp::PartRoom => true,
@@ -1419,6 +1563,7 @@ fn peer_from_session_open(peer: &ServerPeer, frame_bytes: &[u8]) -> Option<Serve
     if frame.op != ChatOp::SessionOpen {
         return None;
     }
+    parse_session_open_negotiation(&frame.body).ok()?;
     let mut updated = peer.clone();
     match frame.body {
         FrameBody::Text(name) => {
@@ -1438,6 +1583,41 @@ fn peer_from_session_open(peer: &ServerPeer, frame_bytes: &[u8]) -> Option<Serve
         FrameBody::Empty => return None,
     }
     Some(updated)
+}
+
+fn requested_durable_client_instance(frame: &Frame) -> Option<ClientInstanceId> {
+    if frame.op != ChatOp::SessionOpen {
+        return None;
+    }
+    let negotiation = parse_session_open_negotiation(&frame.body).ok().flatten()?;
+    negotiation
+        .requested_capabilities
+        .iter()
+        .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
+        .then_some(negotiation.client_instance_id)
+        .flatten()
+}
+
+fn accepted_durable_client_instance(
+    requested: Option<ClientInstanceId>,
+    responses: &[Frame],
+) -> Option<ClientInstanceId> {
+    let requested = requested?;
+    let accepted = responses
+        .iter()
+        .filter(|response| response.op == ChatOp::SessionAccept)
+        .filter_map(|response| {
+            parse_session_accept_negotiation(&response.body)
+                .ok()
+                .flatten()
+        })
+        .any(|negotiation| {
+            negotiation
+                .accepted_capabilities
+                .iter()
+                .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
+        });
+    accepted.then_some(requested)
 }
 
 fn frame_value_string(value: &FrameValue) -> Option<&str> {
@@ -1524,6 +1704,69 @@ mod tests {
     use crate::session::{ServerPeer, SessionLimits};
     use crate::store::{OmenchatStore, ServerRoomEventKind};
     use crate::transport::{CapturedTransport, OMENCHAT_LINK_CONTEXT};
+
+    #[derive(Default)]
+    struct FailOnceTransport {
+        captured: CapturedTransport,
+        reject_next_frame: bool,
+        reject_next_command_result: bool,
+    }
+
+    impl OmenchatTransport for FailOnceTransport {
+        fn send_frame(&mut self, link_id: LinkId, frame_bytes: Vec<u8>) -> ServerResult<()> {
+            self.send_frame_with_context(link_id, frame_bytes, OMENCHAT_LINK_CONTEXT)
+        }
+
+        fn send_frame_with_context(
+            &mut self,
+            link_id: LinkId,
+            frame_bytes: Vec<u8>,
+            context: u8,
+        ) -> ServerResult<()> {
+            let reject_command_result = self.reject_next_command_result
+                && decode_frame(&frame_bytes).is_ok_and(|frame| frame.op == ChatOp::CommandResult);
+            if self.reject_next_frame || reject_command_result {
+                self.reject_next_frame = false;
+                self.reject_next_command_result = false;
+                return Err(crate::error::ServerError::Message(
+                    "injected frame delivery failure".into(),
+                ));
+            }
+            self.captured
+                .send_frame_with_context(link_id, frame_bytes, context)
+        }
+
+        fn offer_resource(
+            &mut self,
+            link_id: LinkId,
+            resource_id: String,
+            payload: Vec<u8>,
+            metadata: Vec<u8>,
+        ) -> ServerResult<()> {
+            self.captured
+                .offer_resource(link_id, resource_id, payload, metadata)
+        }
+
+        fn sent_frame_count(&self) -> u64 {
+            self.captured.sent_frame_count()
+        }
+
+        fn offered_resource_count(&self) -> u64 {
+            self.captured.offered_resource_count()
+        }
+
+        fn sent_frame_bytes(&self) -> u64 {
+            self.captured.sent_frame_bytes()
+        }
+
+        fn offered_resource_bytes(&self) -> u64 {
+            self.captured.offered_resource_bytes()
+        }
+
+        fn close_link(&mut self, link_id: LinkId) -> ServerResult<()> {
+            self.captured.close_link(link_id)
+        }
+    }
 
     fn peer() -> ServerPeer {
         ServerPeer {
@@ -2329,6 +2572,206 @@ mod tests {
     }
 
     #[test]
+    fn malformed_negotiation_does_not_complete_handshake_and_valid_retry_can_recover() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let link_id = [10u8; 16];
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: peer(),
+        })
+        .expect("open identified link");
+
+        let malformed = FrameBody::Fields(vec![
+            FrameValue::String(crate::protocol::PROTOCOL_NAME.into()),
+            FrameValue::String("Rejected Metadata".into()),
+            FrameValue::Nil,
+            FrameValue::Array(vec![FrameValue::String(
+                crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+            )]),
+            FrameValue::Bytes(vec![7; 15]),
+        ]);
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::SessionOpen, 1, None, malformed))
+                .expect("malformed session frame"),
+        })
+        .expect("malformed session response");
+        assert!(!live.handshake_complete(link_id));
+        assert_eq!(live.pending_handshake_count(), 1);
+        assert_eq!(
+            live.peers
+                .get(&link_id)
+                .map(|peer| peer.display_name.as_str()),
+            Some("Live Peer"),
+            "rejected session metadata must not replace the authenticated peer"
+        );
+        assert!(live.transport().frames.iter().any(|captured| {
+            decode_frame(&captured.bytes).is_ok_and(|frame| {
+                frame.op == ChatOp::Error
+                    && matches!(
+                        frame.body,
+                        FrameBody::Fields(ref fields)
+                            if fields.first()
+                                == Some(&FrameValue::U64(
+                                    ChatErrorCode::DurableMutationMalformed as u16 as u64
+                                ))
+                    )
+            })
+        }));
+
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::SessionOpen,
+                2,
+                None,
+                FrameBody::Text("Accepted Metadata".into()),
+            ))
+            .expect("valid session frame"),
+        })
+        .expect("valid session retry");
+        assert!(live.handshake_complete(link_id));
+        assert_eq!(live.pending_handshake_count(), 0);
+        assert_eq!(
+            live.peers
+                .get(&link_id)
+                .map(|peer| peer.display_name.as_str()),
+            Some("Accepted Metadata")
+        );
+        assert!(live.transport().frames.iter().any(|captured| {
+            decode_frame(&captured.bytes)
+                .is_ok_and(|frame| frame.op == ChatOp::SessionAccept && frame.seq == 2)
+        }));
+    }
+
+    #[test]
+    fn unaccepted_durable_request_never_binds_client_instance_to_link() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let link_id = [18u8; 16];
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: peer(),
+        })
+        .expect("open identified link");
+        let client_instance_id = ClientInstanceId::new([3; 16]);
+        let body = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Durable Candidate".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                client_instance_id: Some(client_instance_id),
+            },
+        )
+        .expect("durable request");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::SessionOpen, 1, None, body))
+                .expect("session frame"),
+        })
+        .expect("session response");
+
+        assert!(live.handshake_complete(link_id));
+        assert!(live.durable_sessions.is_empty());
+        assert_eq!(
+            live.peers
+                .get(&link_id)
+                .map(|peer| peer.display_name.as_str()),
+            Some("Durable Candidate")
+        );
+    }
+
+    #[test]
+    fn durable_binding_requires_explicit_acceptance_and_is_link_scoped() {
+        let client_instance_id = ClientInstanceId::new([4; 16]);
+        let request_body = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Bound Client".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                client_instance_id: Some(client_instance_id),
+            },
+        )
+        .expect("request negotiation");
+        let request = Frame::new(ChatOp::SessionOpen, 1, None, request_body);
+        let requested = requested_durable_client_instance(&request);
+        assert_eq!(requested, Some(client_instance_id));
+
+        let legacy_accept = Frame::new(
+            ChatOp::SessionAccept,
+            1,
+            None,
+            FrameBody::Fields(vec![FrameValue::String(
+                crate::protocol::PROTOCOL_NAME.into(),
+            )]),
+        );
+        assert_eq!(
+            accepted_durable_client_instance(requested, &[legacy_accept]),
+            None
+        );
+
+        let negotiated_accept = crate::protocol::with_session_accept_negotiation(
+            FrameBody::Fields(vec![FrameValue::String(
+                crate::protocol::PROTOCOL_NAME.into(),
+            )]),
+            &crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+            },
+        )
+        .expect("accept negotiation");
+        let accepted = Frame::new(ChatOp::SessionAccept, 1, None, negotiated_accept);
+        assert_eq!(
+            accepted_durable_client_instance(requested, &[accepted]),
+            Some(client_instance_id)
+        );
+    }
+
+    #[test]
+    fn durable_binding_is_cleared_on_identity_change_and_link_close() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let link_id = [19u8; 16];
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: peer(),
+        })
+        .expect("open identified link");
+        live.durable_sessions.insert(
+            link_id,
+            DurableSessionBinding {
+                identity_hash: b"peer-live".to_vec(),
+                client_instance_id: ClientInstanceId::new([5; 16]),
+            },
+        );
+
+        live.handle_event(OmenchatLinkEvent::PeerIdentified {
+            link_id,
+            identity_hash: [6; 16],
+        })
+        .expect("replace authenticated identity");
+        assert!(live.durable_sessions.is_empty());
+
+        live.durable_sessions.insert(
+            link_id,
+            DurableSessionBinding {
+                identity_hash: vec![6; 16],
+                client_instance_id: ClientInstanceId::new([7; 16]),
+            },
+        );
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id,
+            reason: Some("test close".into()),
+        })
+        .expect("close link");
+        assert!(live.durable_sessions.is_empty());
+    }
+
+    #[test]
     fn live_server_ignores_context_zero_non_frames() {
         let store = OmenchatStore::in_memory().expect("store");
         let engine = SessionEngine::new(store);
@@ -2847,6 +3290,877 @@ mod tests {
         assert!(!ack_links.contains(&link_b));
         assert!(!room_event_links.contains(&link_a));
         assert!(room_event_links.contains(&link_b));
+    }
+
+    #[test]
+    fn authenticated_durable_binding_routes_once_and_replays_original_ack() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let link_a = [23u8; 16];
+        let link_b = [24u8; 16];
+
+        for (link_id, name) in [(link_a, "Alice"), (link_b, "Bob")] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+
+        let client_instance_id = ClientInstanceId::new([31; 16]);
+        live.durable_sessions.insert(
+            link_a,
+            DurableSessionBinding {
+                identity_hash: b"Alice".to_vec(),
+                client_instance_id,
+            },
+        );
+        let body = FrameBody::Text("durable hello".into());
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([32; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomMessage,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        let frames_before = live.transport().frames.len();
+
+        for seq in [3, 4] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id: link_a,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::RoomMessage,
+                    seq,
+                    Some(1),
+                    envelope.clone(),
+                ))
+                .expect("message"),
+            })
+            .expect("send durable message");
+        }
+
+        let routed = live
+            .transport()
+            .frames
+            .iter()
+            .skip(frames_before)
+            .filter_map(|captured| {
+                decode_frame(&captured.bytes)
+                    .ok()
+                    .map(|frame| (captured.link_id, frame))
+            })
+            .collect::<Vec<_>>();
+        let origin_acks = routed
+            .iter()
+            .filter(|(link_id, frame)| *link_id == link_a && frame.op == ChatOp::MessageAck)
+            .map(|(_, frame)| frame)
+            .collect::<Vec<_>>();
+        let observer_events = routed
+            .iter()
+            .filter(|(link_id, frame)| *link_id == link_b && frame.op == ChatOp::RoomEvent)
+            .count();
+
+        assert_eq!(origin_acks.len(), 2);
+        assert_eq!(origin_acks[0], origin_acks[1]);
+        assert_eq!(origin_acks[0].seq, 3);
+        assert_eq!(observer_events, 1);
+        assert_eq!(live.replay_cache.entries.len(), 0);
+    }
+
+    #[test]
+    fn durable_notice_replays_to_origin_without_second_room_fanout() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let moderator = store
+            .ensure_user(b"Alice", "Alice", None)
+            .expect("moderator");
+        store
+            .set_user_role_bits(moderator.user_id, 1 << 1)
+            .expect("moderator role");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let link_a = [30u8; 16];
+        let link_b = [31u8; 16];
+
+        for (link_id, name) in [(link_a, "Alice"), (link_b, "Bob")] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+        live.durable_sessions.insert(
+            link_a,
+            DurableSessionBinding {
+                identity_hash: b"Alice".to_vec(),
+                client_instance_id: ClientInstanceId::new([38; 16]),
+            },
+        );
+        let body = FrameBody::Text("maintenance soon".into());
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([39; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomNotice,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        let frames_before = live.transport().frames.len();
+
+        for seq in [9, 10] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id: link_a,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::RoomNotice,
+                    seq,
+                    Some(1),
+                    envelope.clone(),
+                ))
+                .expect("notice"),
+            })
+            .expect("durable notice");
+        }
+
+        let routed = live
+            .transport()
+            .frames
+            .iter()
+            .skip(frames_before)
+            .filter_map(|captured| {
+                decode_frame(&captured.bytes)
+                    .ok()
+                    .filter(|frame| frame.op == ChatOp::RoomEvent)
+                    .map(|frame| (captured.link_id, frame))
+            })
+            .collect::<Vec<_>>();
+        let origin_events = routed
+            .iter()
+            .filter(|(link_id, _)| *link_id == link_a)
+            .map(|(_, frame)| frame)
+            .collect::<Vec<_>>();
+        assert_eq!(origin_events.len(), 2);
+        assert_eq!(origin_events[0], origin_events[1]);
+        assert_eq!(origin_events[0].seq, 9);
+        assert_eq!(
+            routed
+                .iter()
+                .filter(|(link_id, _)| *link_id == link_b)
+                .count(),
+            1
+        );
+        assert!(live.replay_cache.entries.is_empty());
+    }
+
+    #[test]
+    fn durable_topic_replays_to_origin_without_second_room_delta() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let moderator = store
+            .ensure_user(b"Alice", "Alice", None)
+            .expect("moderator");
+        store
+            .set_user_role_bits(moderator.user_id, 1 << 1)
+            .expect("moderator role");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let link_a = [32u8; 16];
+        let link_b = [33u8; 16];
+
+        for (link_id, name) in [(link_a, "Alice"), (link_b, "Bob")] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+        live.durable_sessions.insert(
+            link_a,
+            DurableSessionBinding {
+                identity_hash: b"Alice".to_vec(),
+                client_instance_id: ClientInstanceId::new([40; 16]),
+            },
+        );
+        let body = FrameBody::Text("topic Durable lobby".into());
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([41; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::Command,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        let frames_before = live.transport().frames.len();
+
+        for seq in [11, 12] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id: link_a,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(ChatOp::Command, seq, Some(1), envelope.clone()))
+                    .expect("topic"),
+            })
+            .expect("durable topic");
+        }
+
+        let routed = live
+            .transport()
+            .frames
+            .iter()
+            .skip(frames_before)
+            .filter_map(|captured| {
+                decode_frame(&captured.bytes)
+                    .ok()
+                    .map(|frame| (captured.link_id, frame))
+            })
+            .collect::<Vec<_>>();
+        let origin_results = routed
+            .iter()
+            .filter(|(link_id, frame)| {
+                *link_id == link_a && command_result_name(frame) == Some("topic")
+            })
+            .map(|(_, frame)| frame)
+            .collect::<Vec<_>>();
+        assert_eq!(origin_results.len(), 2);
+        assert_eq!(origin_results[0], origin_results[1]);
+        assert_eq!(origin_results[0].seq, 11);
+        assert_eq!(
+            routed
+                .iter()
+                .filter(|(link_id, frame)| { *link_id == link_b && frame.op == ChatOp::RoomDelta })
+                .count(),
+            1
+        );
+        assert!(live.replay_cache.entries.is_empty());
+    }
+
+    #[test]
+    fn durable_role_fans_out_each_effect_once_then_replays_only_to_origin() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let administrator = store
+            .ensure_user(b"Alice", "Alice", None)
+            .expect("administrator");
+        store
+            .set_user_role_bits(administrator.user_id, 1 << 2)
+            .expect("administrator role");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let link_a = [34u8; 16];
+        let link_b = [35u8; 16];
+
+        for (link_id, name) in [(link_a, "Alice"), (link_b, "Bob")] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+        live.durable_sessions.insert(
+            link_a,
+            DurableSessionBinding {
+                identity_hash: b"Alice".to_vec(),
+                client_instance_id: ClientInstanceId::new([42; 16]),
+            },
+        );
+        let body = FrameBody::Text("role Bob mod".into());
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([43; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::Command,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        let frames_before = live.transport().frames.len();
+
+        for seq in [13, 14] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id: link_a,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(ChatOp::Command, seq, Some(1), envelope.clone()))
+                    .expect("role"),
+            })
+            .expect("durable role");
+        }
+
+        let routed = live
+            .transport()
+            .frames
+            .iter()
+            .skip(frames_before)
+            .filter_map(|captured| {
+                decode_frame(&captured.bytes)
+                    .ok()
+                    .map(|frame| (captured.link_id, frame))
+            })
+            .collect::<Vec<_>>();
+        let origin_results = routed
+            .iter()
+            .filter(|(link_id, frame)| {
+                *link_id == link_a && command_result_name(frame) == Some("role")
+            })
+            .map(|(_, frame)| frame)
+            .collect::<Vec<_>>();
+        assert_eq!(origin_results.len(), 2);
+        assert_eq!(origin_results[0], origin_results[1]);
+        for op in [ChatOp::UserDelta, ChatOp::RoomEvent] {
+            assert_eq!(
+                routed
+                    .iter()
+                    .filter(|(link_id, frame)| *link_id == link_b && frame.op == op)
+                    .count(),
+                1
+            );
+        }
+        assert!(live.replay_cache.entries.is_empty());
+    }
+
+    #[test]
+    fn durable_kick_commit_survives_lost_response_without_disconnecting_replacement() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let administrator = store
+            .ensure_user(b"Admin", "Admin", None)
+            .expect("administrator");
+        store
+            .set_user_role_bits(administrator.user_id, 1 << 2)
+            .expect("administrator role");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, FailOnceTransport::default());
+        let admin_link = [36u8; 16];
+        let original_bob_link = [37u8; 16];
+        let observer_link = [39u8; 16];
+
+        for (link_id, name) in [
+            (admin_link, "Admin"),
+            (original_bob_link, "Bob"),
+            (observer_link, "Charlie"),
+        ] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+        live.durable_sessions.insert(
+            admin_link,
+            DurableSessionBinding {
+                identity_hash: b"Admin".to_vec(),
+                client_instance_id: ClientInstanceId::new([44; 16]),
+            },
+        );
+        let body = FrameBody::Text("kick Bob".into());
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([45; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::Command,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+
+        live.transport_mut().reject_next_command_result = true;
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: admin_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 15, Some(1), envelope.clone()))
+                .expect("kick"),
+        })
+        .expect("durable kick");
+        assert_eq!(
+            live.transport().captured.closed_links,
+            vec![original_bob_link]
+        );
+
+        let replacement_bob_link = [38u8; 16];
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id: replacement_bob_link,
+            peer: ServerPeer {
+                identity_hash: b"Bob".to_vec(),
+                display_name: "Bob".into(),
+                lxmf_destination: None,
+            },
+        })
+        .expect("open replacement link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_bob_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                2,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("replacement join"),
+        })
+        .expect("join replacement");
+
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: admin_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 16, Some(1), envelope))
+                .expect("kick replay"),
+        })
+        .expect("replayed durable kick");
+        assert_eq!(
+            live.transport().captured.closed_links,
+            vec![original_bob_link]
+        );
+        assert!(live.peers.contains_key(&replacement_bob_link));
+        assert_eq!(
+            live.transport()
+                .captured
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == admin_link)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .filter(|frame| { command_result_name(frame) == Some("kick") && frame.seq == 15 })
+                .count(),
+            1
+        );
+        assert_eq!(
+            live.transport()
+                .captured
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == original_bob_link)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .filter(|frame| frame.op == ChatOp::RoomEvent)
+                .count(),
+            0
+        );
+        assert_eq!(
+            live.transport()
+                .captured
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == observer_link)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .filter(|frame| frame.op == ChatOp::RoomEvent)
+                .count(),
+            0
+        );
+        assert_eq!(
+            live.transport()
+                .captured
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == replacement_bob_link)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .filter(|frame| frame.op == ChatOp::RoomEvent)
+                .count(),
+            0
+        );
+        assert!(live.replay_cache.entries.is_empty());
+    }
+
+    #[test]
+    fn durable_part_cleans_live_room_once_and_replays_without_fanout() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let link_a = [26u8; 16];
+        let link_b = [27u8; 16];
+
+        for (link_id, name) in [(link_a, "Alice"), (link_b, "Bob")] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+
+        live.durable_sessions.insert(
+            link_a,
+            DurableSessionBinding {
+                identity_hash: b"Alice".to_vec(),
+                client_instance_id: ClientInstanceId::new([34; 16]),
+            },
+        );
+        let body = FrameBody::Empty;
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([35; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::PartRoom,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        let frames_before = live.transport().frames.len();
+
+        for seq in [5, 6] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id: link_a,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::PartRoom,
+                    seq,
+                    Some(1),
+                    envelope.clone(),
+                ))
+                .expect("part"),
+            })
+            .expect("durable part");
+        }
+
+        let routed = live
+            .transport()
+            .frames
+            .iter()
+            .skip(frames_before)
+            .filter_map(|captured| {
+                decode_frame(&captured.bytes)
+                    .ok()
+                    .map(|frame| (captured.link_id, frame))
+            })
+            .collect::<Vec<_>>();
+        let origin_results = routed
+            .iter()
+            .filter(|(link_id, frame)| *link_id == link_a && is_successful_part_response(frame))
+            .map(|(_, frame)| frame)
+            .collect::<Vec<_>>();
+        let observer_events = routed
+            .iter()
+            .filter(|(link_id, frame)| *link_id == link_b && frame.op == ChatOp::RoomEvent)
+            .count();
+        let observer_userlists = routed
+            .iter()
+            .filter(|(link_id, frame)| {
+                *link_id == link_b
+                    && matches!(
+                        frame.op,
+                        ChatOp::UserListSnapshotInline | ChatOp::UserListSnapshotResource
+                    )
+            })
+            .count();
+
+        assert_eq!(origin_results.len(), 2);
+        assert_eq!(origin_results[0], origin_results[1]);
+        assert_eq!(origin_results[0].seq, 5);
+        assert_eq!(observer_events, 1);
+        assert_eq!(observer_userlists, 1);
+        assert!(!live.link_rooms.contains_key(&link_a));
+        assert_eq!(live.link_rooms.get(&link_b), Some(&1));
+        assert!(live.replay_cache.entries.is_empty());
+    }
+
+    #[test]
+    fn durable_part_replay_repairs_live_room_after_origin_delivery_failure() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, FailOnceTransport::default());
+        let link_a = [28u8; 16];
+        let link_b = [29u8; 16];
+
+        for (link_id, name) in [(link_a, "Alice"), (link_b, "Bob")] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+        live.durable_sessions.insert(
+            link_a,
+            DurableSessionBinding {
+                identity_hash: b"Alice".to_vec(),
+                client_instance_id: ClientInstanceId::new([36; 16]),
+            },
+        );
+        let body = FrameBody::Empty;
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([37; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::PartRoom,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        let frames_before = live.transport().captured.frames.len();
+
+        live.transport_mut().reject_next_frame = true;
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: link_a,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::PartRoom, 7, Some(1), envelope.clone()))
+                .expect("first part"),
+        })
+        .expect("commit despite delivery failure");
+        assert_eq!(live.link_rooms.get(&link_a), Some(&1));
+
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: link_a,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::PartRoom, 8, Some(1), envelope))
+                .expect("replayed part"),
+        })
+        .expect("replay part");
+
+        assert!(!live.link_rooms.contains_key(&link_a));
+        let routed = live
+            .transport()
+            .captured
+            .frames
+            .iter()
+            .skip(frames_before)
+            .filter_map(|captured| {
+                decode_frame(&captured.bytes)
+                    .ok()
+                    .map(|frame| (captured.link_id, frame))
+            })
+            .collect::<Vec<_>>();
+        assert!(routed.iter().any(|(link_id, frame)| {
+            *link_id == link_a && is_successful_part_response(frame) && frame.seq == 7
+        }));
+        assert_eq!(
+            routed
+                .iter()
+                .filter(|(link_id, frame)| {
+                    *link_id == link_b
+                        && matches!(
+                            frame.op,
+                            ChatOp::UserListSnapshotInline | ChatOp::UserListSnapshotResource
+                        )
+                })
+                .count(),
+            1
+        );
+        assert!(!routed
+            .iter()
+            .any(|(link_id, frame)| *link_id == link_b && frame.op == ChatOp::RoomEvent));
+    }
+
+    #[test]
+    fn durable_envelopes_fail_closed_without_breaking_legacy_room_messages() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let link_id = [25u8; 16];
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: peer(),
+        })
+        .expect("open link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                1,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("join"),
+        })
+        .expect("join room");
+
+        let body = FrameBody::Text("not negotiated".into());
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([33; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomMessage,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        for frame in [
+            Frame::new(ChatOp::RoomMessage, 2, Some(1), envelope),
+            Frame::new(
+                ChatOp::RoomMessage,
+                3,
+                Some(1),
+                FrameBody::Fields(vec![FrameValue::String(
+                    DURABLE_MUTATION_ENVELOPE_TAG.into(),
+                )]),
+            ),
+            Frame::new(
+                ChatOp::RoomMessage,
+                4,
+                Some(1),
+                FrameBody::Text("legacy still works".into()),
+            ),
+        ] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&frame).expect("frame"),
+            })
+            .expect("dispatch frame");
+        }
+
+        let responses = live
+            .transport()
+            .frames
+            .iter()
+            .filter(|captured| captured.link_id == link_id)
+            .filter_map(|captured| decode_frame(&captured.bytes).ok())
+            .collect::<Vec<_>>();
+        let error_code = |seq| {
+            responses
+                .iter()
+                .find(|frame| frame.op == ChatOp::Error && frame.seq == seq)
+                .and_then(|frame| match &frame.body {
+                    FrameBody::Fields(fields) => fields.first(),
+                    _ => None,
+                })
+                .and_then(|value| match value {
+                    FrameValue::U64(code) => Some(*code),
+                    _ => None,
+                })
+        };
+        assert_eq!(
+            error_code(2),
+            Some(ChatErrorCode::DurableMutationNotNegotiated as u16 as u64)
+        );
+        assert_eq!(
+            error_code(3),
+            Some(ChatErrorCode::DurableMutationMalformed as u16 as u64)
+        );
+        assert!(responses
+            .iter()
+            .any(|frame| frame.op == ChatOp::MessageAck && frame.seq == 4));
     }
 
     #[test]

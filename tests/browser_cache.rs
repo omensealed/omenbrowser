@@ -1,19 +1,42 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use omenbrowser_rs::browser::cache::{
     cache_ttl_for_markup, PageCache, DEFAULT_CACHE_SECONDS, PAGE_CACHE_MAX_BYTES,
     PAGE_CACHE_MAX_ITEMS, PAGE_CACHE_MAX_RECORD_BYTES,
 };
 
-fn temp_dir(name: &str) -> PathBuf {
+struct TestDirectory(PathBuf);
+
+impl Deref for TestDirectory {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TestDirectory {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn temp_dir(name: &str) -> TestDirectory {
     let dir = std::env::temp_dir().join(format!(
         "omenbrowser-rs-cache-{name}-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+    TestDirectory(dir)
 }
 
 #[test]
@@ -33,7 +56,8 @@ fn parses_cache_ttl_from_markup() {
 
 #[test]
 fn cache_store_load_delete_round_trip() {
-    let cache = PageCache::new(temp_dir("round-trip")).expect("create cache");
+    let root = temp_dir("round-trip");
+    let cache = PageCache::new(root.to_path_buf()).expect("create cache");
 
     cache
         .store("mock.node:/", "markup", 60, "Title", BTreeMap::new())
@@ -51,7 +75,7 @@ fn cache_store_load_delete_round_trip() {
 #[test]
 fn cache_lookup_is_deterministic_and_item_budget_evicts_oldest() {
     let root = temp_dir("indexed-budget");
-    let cache = PageCache::new(root.clone()).expect("create cache");
+    let cache = PageCache::new(root.to_path_buf()).expect("create cache");
     for index in 0..=PAGE_CACHE_MAX_ITEMS {
         cache
             .store(
@@ -88,7 +112,8 @@ fn cache_lookup_is_deterministic_and_item_budget_evicts_oldest() {
 
 #[test]
 fn cache_rejects_single_record_above_byte_budget() {
-    let cache = PageCache::new(temp_dir("oversize")).expect("create cache");
+    let root = temp_dir("oversize");
+    let cache = PageCache::new(root.to_path_buf()).expect("create cache");
     let markup = "x".repeat(PAGE_CACHE_MAX_RECORD_BYTES as usize);
     let error = cache
         .store("oversize", &markup, 60, "Title", BTreeMap::new())
@@ -99,7 +124,8 @@ fn cache_rejects_single_record_above_byte_budget() {
 
 #[test]
 fn cache_byte_budget_evicts_oldest_record() {
-    let cache = PageCache::new(temp_dir("byte-budget")).expect("create cache");
+    let root = temp_dir("byte-budget");
+    let cache = PageCache::new(root.to_path_buf()).expect("create cache");
     let markup = "x".repeat(PAGE_CACHE_MAX_RECORD_BYTES as usize - 1024);
     let records = PAGE_CACHE_MAX_BYTES / (markup.len() as u64) + 1;
     for index in 0..records {
@@ -124,7 +150,7 @@ fn cache_byte_budget_evicts_oldest_record() {
 #[test]
 fn cache_rebuild_migrates_legacy_expiry_filename_once() {
     let root = temp_dir("legacy-migration");
-    let cache = PageCache::new(root.clone()).expect("create cache");
+    let cache = PageCache::new(root.to_path_buf()).expect("create cache");
     let canonical = cache
         .store("legacy.node:/", "markup", 60, "Legacy", BTreeMap::new())
         .expect("store cache")
@@ -136,7 +162,7 @@ fn cache_rebuild_migrates_legacy_expiry_filename_once() {
     std::fs::rename(&canonical, &legacy).expect("legacy rename");
     std::fs::remove_file(root.join(".page-cache-index.json")).expect("remove index");
 
-    let reopened = PageCache::new(root).expect("rebuild cache index");
+    let reopened = PageCache::new(root.to_path_buf()).expect("rebuild cache index");
     assert!(reopened
         .load("legacy.node:/")
         .expect("migrated lookup")
@@ -148,7 +174,7 @@ fn cache_rebuild_migrates_legacy_expiry_filename_once() {
 #[ignore = "release-mode cache latency measurement"]
 fn measure_cache_index_latency() {
     let root = temp_dir("latency-measurement");
-    let cache = PageCache::new(root.clone()).expect("create cache");
+    let cache = PageCache::new(root.to_path_buf()).expect("create cache");
     for index in 0..PAGE_CACHE_MAX_ITEMS {
         cache
             .store(
@@ -197,5 +223,4 @@ fn measure_cache_index_latency() {
         "page_scan_shape_p95_ns={}",
         scan_shape[(scan_shape.len() * 95).div_ceil(100) - 1]
     );
-    std::fs::remove_dir_all(root).expect("cleanup measurement cache");
 }

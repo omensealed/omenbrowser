@@ -9,10 +9,10 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-### v0.6.0-1 / v0.9.5-2 compatibility boundary
+### v0.6.0-1 / v0.9.6-1 compatibility boundary
 
 The application release number does not version the OMENchat wire protocol.
-The v0.9.5-2 release retains protocol version `1`, protocol name
+The v0.9.6-1 release retains protocol version `1`, protocol name
 `omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
 legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
 
@@ -33,6 +33,15 @@ fixtures byte-for-byte and decode them to the same typed frames. These tests
 prove deterministic codec compatibility in both directions, but do not replace
 the pending multi-process v0.6/v0.9 link, resource, restart, and reconnect
 matrix.
+
+The protocol v1 enums, operation/error numbers, frame body/value types, and
+public compatibility fixture are owned by the private `omenchat-protocol`
+crate under `src/server/crates/`. Both browser and server re-export those types
+through their existing module paths, so application code does not depend on a
+new API surface. Their bounded codec implementations remain separate and both
+must pass the same shared fixture bytes. The crate contains no transport,
+runtime, storage, GUI, TUI, or server policy and remains part of the relocatable
+standalone omenchatd source tree.
 
 The standalone server's quiet NomadNet portal is a separate Reticulum request
 surface. It accepts direct request-context packets for requests within packet
@@ -137,6 +146,126 @@ The destination hash identifies the chat server.
 5. Client joins a room.
 6. Server replies with room state, userlist, topic, and recent history.
 7. Client and server exchange room events.
+
+### Capability negotiation boundary
+
+The shared protocol crate defines a bounded optional negotiation extension but
+the current product does not yet advertise or accept any durable-mutation
+capability. Existing `SessionOpen` fields remain protocol name, display name,
+and optional client LXMF destination at indexes 0 through 2. Requested
+capabilities and a 16-byte client-instance ID, when a future negotiated client
+uses them, occupy trailing indexes 3 and 4. Accepted capabilities occupy
+trailing `SessionAccept` index 6.
+
+Capability lists are limited to 64 unique ASCII names of at most 128 bytes.
+Requesting `durable-mutations-v1` requires an exact 16-byte client-instance ID.
+Missing trailing fields mean no capabilities; application version and
+descriptor metadata never imply acceptance. The current server deliberately
+returns its six-field legacy `SessionAccept` even when a test client sends the
+well-formed extension, so no durable envelope can become active prematurely.
+Unknown well-formed capabilities receive the same legacy response. A malformed
+trailing negotiation receives error 1012 and never marks the Link handshake
+complete; the client may correct the request and retry `SessionOpen` on that
+Link. Handshake completion requires an actual `SessionAccept`, not merely an
+inbound frame carrying the `SessionOpen` operation number.
+
+The browser now persists the future client-instance value under its active
+identity-scoped application storage and retains it in live client state. It is
+not placed in `SessionOpen` yet. Invalid, unsafe, or overly permissive stored
+state disables this future capability instead of generating a replacement;
+ordinary legacy OMENchat remains available.
+
+An inactive persistent-intent boundary now records a future mutation's server
+destination, authenticated identity binding, stable client/mutation IDs,
+canonical request hash and body, expiry, state, and local correlation before it
+can be handed to a transport owner. Recovery length-preflights SQLite values
+before allocation and then revalidates frame metadata, canonical hashing, and
+retained-byte accounting. No production send path calls this boundary yet.
+Prepared intents can move only to uncertain, expired, or abandoned; uncertain
+intents can move only to acknowledged, conflict, expired, or abandoned.
+Terminal states cannot regress. Recovery returns only prepared/uncertain rows,
+and incremental maintenance removes at most 128 terminal rows older than 30
+days. A dedicated 32-request/2-MiB storage owner exists but is not started yet.
+
+The dormant server store also has deterministic post-retention behavior. Before
+pruning any durable result, it permanently retires that authenticated
+identity/client-instance pair. Any later operation under the retired instance
+returns `Expired` before mutation execution, even after server restart.
+Remembered active and retired instances are bounded (100,000 globally and
+1,024 per authenticated identity), and admission fails closed at capacity.
+The inactive intent store can rotate the owner-only instance file only while an
+immediate SQLite transaction proves there are no prepared or uncertain intents.
+It never rewrites terminal historical intents. Protocol-v1 codes 1011 through
+1015 are reserved respectively for not-negotiated, malformed, conflict,
+result-expired, and store-busy durable outcomes. This is still not live
+protocol behavior: production does not invoke rotation, advertise the
+capability, emit these errors, or automatically retry uncertain work.
+
+The dormant store additionally has an atomic room-event primitive: event
+insertion and the exact encoded origin response are committed together. A new
+result carries the event for one-time future fan-out; an exact replay carries
+only the retained response. Invalid response encoding rolls back the event.
+No live handler calls this primitive yet because authorization, membership,
+rate reservation, negotiated client-instance ownership, and broadcast timing
+must be composed and tested without double accounting or duplicate fan-out.
+The rate limiter now exposes an internal owned reservation for that future
+composition. Existing protocol-v1 handlers commit it immediately and behave as
+before. The durable store finisher runs only on a replay miss, returns the
+reservation with a successful first commit, and releases it automatically on
+rollback. This mechanism is inactive until the Link has negotiated and bound a
+client-instance identifier.
+
+The live server now stages session display/LXMF metadata until a real
+`SessionAccept` is produced, so malformed negotiation cannot mutate the
+retained peer record. A future durable client-instance binding requires both a
+valid request and explicit capability acceptance on an authenticated Link. The
+binding is Link-scoped, bounded by active-Link admission, identity-bound, and
+cleared on identity replacement or every Link retirement path. Production
+continues to return the legacy accept, so well-formed durable requests remain
+unbound and cannot send durable envelopes.
+
+An inactive session executor now implements the negotiated semantics for room
+messages, actions, notices, and part-room operations behind the staged live
+Link gate. It checks
+the canonical hash, stores mutation and exact origin result transactionally,
+returns a broadcast event only for first execution, preserves terminal policy
+rejections, avoids a second rate charge, and replays across server restart.
+Errors 1012 through 1015 have executor mappings. Current live peers can receive
+1011 for an unnegotiated durable envelope or 1012 for malformed negotiation or
+envelope data, but cannot activate successful durable execution.
+
+Live dispatch recognizes the durable envelope marker before applying the
+protocol-v1 same-Link sequence replay cache. A tagged malformed envelope returns
+1012, while a valid envelope without an authenticated, identity-matched durable
+binding returns 1011. With a binding, the durable replay record is authoritative:
+the first execution can broadcast one room event and exact replay returns only
+the originally encoded origin acknowledgement. Capability acceptance is still
+disabled, so production peers cannot create that binding yet.
+
+For durable `PartRoom`, membership deletion, the departure event, the exact
+legacy-compatible `CommandResult`, and replay publication commit atomically.
+Only first execution changes live room ownership and emits a refreshed user
+list. Replay returns the retained result without repeating those effects.
+
+Durable `RoomNotice` retains the moderator/admin decision and exact origin room
+event in the same transaction as event insertion. Only first execution is
+fanned out to other room Links; replay returns the retained origin event
+without another rate charge or broadcast.
+
+Durable `topic` and `create` commands atomically retain their exact
+`CommandResult` with the room update. Their `RoomDelta` is a one-use live effect
+returned only for first execution. Exact replay cannot increment a room
+revision, recreate a room, consume another command-rate slot, or repeat the
+delta. Durable `role` and `unban` commands use the same transaction boundary for
+the user mutation, optional audit event, and retained result. Their bounded
+first-execution effects contain a `UserDelta` and, when room-scoped, a
+`RoomEvent`; replay emits neither. Durable `kick`, `ban`, `mute`, and `unmute`
+resolve only active room peers and commit the target status change, audit event,
+and exact result together. First execution emits the bounded deltas; `kick` and
+`ban` additionally carry a one-use target-identity disconnect effect that runs
+immediately after commit and before response I/O. Replay cannot disconnect a
+replacement Link. Capability acceptance remains disabled until the browser's
+persistent intent owner and negotiated send/recovery path are live.
 
 ## Operation correlation and same-link replay
 

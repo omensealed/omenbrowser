@@ -11,8 +11,8 @@ import sys
 import threading
 
 
-RNS_VERSION = "1.3.8"
-LXMF_VERSION = "1.0.1"
+RNS_VERSION = "1.4.0"
+LXMF_VERSION = "1.1.0"
 NETWORK_NAME = "omen-ifac-vector"
 PASSPHRASE = "public-test-fixture"
 

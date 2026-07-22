@@ -179,12 +179,7 @@ mod tests {
     use crate::chat::protocol::batch::{resource_offer_body, ResourceOffer};
     use crate::chat::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
-    mod v0_6_0_1 {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/fixtures/omenchat/v0_6_0_1_wire.rs"
-        ));
-    }
+    use omenchat_protocol::fixtures::v0_6_0_1;
 
     #[test]
     fn v0_6_0_1_frame_fixtures_remain_bidirectionally_exact() {
