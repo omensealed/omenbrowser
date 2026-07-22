@@ -4895,3 +4895,36 @@ This unit changes documentation only. No dependency, runtime, queue, cache,
 protocol, schema, identity, or user state changes. Rollback removes the evidence
 record. Longer link/task/logging soaks, interactive GPU measurements, native
 packaging, and the next bundled hosted checkpoint remain pending.
+
+## v0.9.6-1 unit 4f: long ownership and cleanup soaks
+
+The current `0.9.6-1` server passed its explicit 60-second live-link admission
+and reconnect-storm soak. Across 4,635 cycles it retained the intended 224
+identified links, saturated the 256-active/32-pending limits, rejected every
+over-limit admission, and expired 148,320 deliberately slow handshakes. The
+maximum close path was 797 us against the 250,000-us deadline. RSS grew 241,664
+bytes, FDs remained four, tasks remained two, and final active and pending
+counts were both zero.
+
+The bounded logger passed its 60-second slow-filesystem soak across three
+rotation cycles and 382,101 submissions. The payload queue peaked at its
+64-item bound and 777,932 bytes; overload dropped 353,268 ordinary records but
+zero priority records, with zero write failures. Admission was 564 ns median,
+1,820 ns p95, and 297,580 ns maximum. RSS grew 5,091,328 bytes, FDs remained
+four, and retention remained bounded to 12 files. The retained-byte result is a
+deliberately high-throughput fault fixture, not an estimate of normal logging.
+
+The isolated two-core runtime policy measurement also passed. The adaptive
+policy selected two async workers rather than the legacy fixed four, retained
+the eight-thread blocking ceiling, and completed 5,000 async tasks plus 32
+bounded 256-KiB writes. Its measured async p95 was 32,205 ns versus 625,246 ns
+for the legacy policy in this synthetic run. This validates bounded policy
+selection on a constrained CPU affinity; it is not a universal latency claim.
+
+These ignored measurement fixtures used Linux `/proc`, isolated state, and the
+local Rust 1.97 release profile. Raw evidence remains under
+`target/reticulum-0.9.6-comparison/`. No production behavior, dependency,
+protocol, schema, identity, queue, or retention setting changed. Rollback
+removes this documentation only. Longer database/backpressure runs, physical
+GPU and network/hardware measurements, native packaging, and the next bundled
+hosted checkpoint remain pending.
