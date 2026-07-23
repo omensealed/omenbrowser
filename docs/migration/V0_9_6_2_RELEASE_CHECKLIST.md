@@ -29,7 +29,9 @@ that an unrun native, Python, packaging, or live-network case passed.
 - [x] Standalone `omenchatd` full Clippy with `-D warnings`.
 - [x] Durable mutation focused regression matrix; see
   `OMENCHAT_DURABLE_V0_9_6_2_EVIDENCE.md`.
-- [ ] Resource and shutdown measurements recorded.
+- [x] Release-mode durable retention, queue saturation, SQLite worker, Link
+  reconnect, and native desktop shutdown measurements recorded in
+  `OMENCHAT_DURABLE_V0_9_6_2_EVIDENCE.md`.
 
 ## Bundled hosted checkpoint
 
@@ -49,8 +51,9 @@ Run these once from a stable candidate rather than on each development commit:
 ## Release evidence
 
 - [ ] Hosted workflow URLs and artifact manifest recorded.
-- [ ] Known upstream maximum UDP Resource limitation remains documented.
-- [ ] Accepted build-time advisory boundary is unchanged and reviewed.
+- [x] Known upstream maximum UDP Resource limitation remains documented.
+- [x] Accepted build-time advisory boundary is unchanged and reviewed by the
+  passing local release gate.
 - [ ] Release notes distinguish deterministic, live, native, and untested claims.
 - [ ] Working tree is clean and the candidate commit is identified.
 - [ ] Maintainer explicitly authorizes tag and publication.

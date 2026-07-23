@@ -160,7 +160,8 @@ behavior.
 
 ## Unit 3 — release qualification
 
-Status: in progress. Root and standalone-server application metadata, lockfile
+Status: local qualification complete; bundled hosted qualification pending.
+Root and standalone-server application metadata, lockfile
 entries, active version assertions, current-version interoperability report
 names, and current user documentation now identify `0.9.6-2`. The Reticulum/
 LXMF dependency train remains exactly `0.9.6`; OMENchat protocol version 1,

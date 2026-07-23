@@ -35,8 +35,21 @@ checkpoint.
 - Hosted repetition of the locally passing mixed-version OMENchat process
   smokes with v0.9.6-1 artifacts.
 - Native package qualification, including both unsigned DMGs.
-- Explicit retention/resource measurements and the documented soak commands.
 
 These jobs are intentionally not dispatched for every small commit because
 they are long-running and do not add useful evidence until the local durable
 contract and release metadata are stable.
+
+## Local release-mode measurements
+
+Measured on Linux at candidate commit `2fa7195` with explicit isolated roots.
+Raw local evidence is retained under the ignored
+`target/release-evidence/` directory.
+
+| Harness | Result |
+|---|---|
+| Durable replay/intent retention, 1,024 items | Server commit p95 535 us, replay p95 45 us, 424 KiB database; client prepare p95 203 us, recovery 36.7 ms, 356 KiB database. All bounded retention/pruning assertions passed. |
+| Production queue saturation, 60 seconds | 60,000 attempts per lane; overload rejected; maximum control latency 20 ms; RSS growth 53.1 MiB within the 112 MiB ceiling; 11 peak FDs; every queue drained to zero items and bytes. |
+| Persistent SQLite worker, 60 seconds | 6,000 commits and 42,000 bounded busy rejections; one maximum in-flight operation; 1.86 ms maximum heartbeat delay; 0.84 MiB RSS growth; stable 13 FDs; integrity check passed. |
+| Link admission/reconnect storm, 60 seconds | 4,537 cycles; configured active/pending ceilings reached but not exceeded; 611 us maximum close; zero FD/task growth; 108 KiB RSS growth; zero final active or pending links. |
+| Native desktop close | Startup-to-window 1,420 ms; normal close 138 ms; settings, structured log, and valid JSON flushed; no temporary persistence files remained. |
