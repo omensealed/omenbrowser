@@ -1,8 +1,10 @@
 use super::*;
 use crate::app::App;
 use crate::chat::ChatSessionId;
+use crate::desktop::workspace_scroll_omenchat::omenchat_offset_to_bottom_anchored_widget;
 use crate::desktop::{
-    omenchat_scroll_id, ConversationMessage, OmenChatMessage, ShellMessage, WorkspacePaneMessage,
+    omenchat_offset_from_bottom_anchored_viewport, omenchat_scroll_id, ConversationMessage,
+    OmenChatMessage, ShellMessage, WorkspacePaneMessage,
 };
 use iced::widget::pane_grid;
 
@@ -77,6 +79,22 @@ fn push_omenchat_message(desktop: &mut DesktopApp, session_id: ChatSessionId, bo
 fn omenchat_scroll_ids_are_room_specific() {
     assert_ne!(omenchat_scroll_id(7, 1), omenchat_scroll_id(7, 2));
     assert_ne!(omenchat_scroll_id(7, 1), omenchat_scroll_id(8, 1));
+}
+
+#[test]
+fn omenchat_bottom_anchor_offsets_preserve_existing_storage_semantics() {
+    assert_eq!(
+        omenchat_offset_from_bottom_anchored_viewport(RelativeOffset { x: 0.0, y: 0.0 }),
+        RelativeOffset { x: 0.0, y: 1.0 }
+    );
+    assert_eq!(
+        omenchat_offset_from_bottom_anchored_viewport(RelativeOffset { x: 0.0, y: 0.50 }),
+        RelativeOffset { x: 0.0, y: 0.50 }
+    );
+    assert_eq!(
+        omenchat_offset_to_bottom_anchored_widget(RelativeOffset { x: 0.0, y: 1.0 }),
+        RelativeOffset { x: 0.0, y: 0.0 }
+    );
 }
 
 #[test]
@@ -335,32 +353,26 @@ fn restored_omenchat_pane_starts_at_bottom() {
 }
 
 #[test]
-fn newly_opened_omenchat_pane_rejects_initial_top_scroll_callback() {
+fn newly_opened_omenchat_pane_treats_bottom_anchor_origin_as_present() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-new-omenchat-bottom-lock");
     let session_id = open_test_omenchat_session(&mut desktop);
+    desktop.ensure_pane_for_omenchat(session_id);
     desktop.workspace.restore_workspace_scrolls_pending = false;
     desktop.workspace.restore_workspace_scrolls_remaining = 0;
     desktop
         .workspace
         .restore_workspace_scroll_locks_release_pending = false;
-    desktop.omenchat.chat_scroll_bottom_locks.clear();
-
-    desktop.ensure_pane_for_omenchat(session_id);
     let _ = desktop.update(Message::OmenChat(OmenChatMessage::Scrolled {
         session_id,
         room_id: 1,
-        offset: RelativeOffset { x: 0.0, y: 0.0 },
+        offset: omenchat_offset_from_bottom_anchored_viewport(RelativeOffset { x: 0.0, y: 0.0 }),
     }));
 
     assert_eq!(
         desktop.omenchat.chat_scroll_offsets.get(&(session_id, 1)),
         Some(&RelativeOffset { x: 0.0, y: 1.0 })
     );
-    assert!(desktop
-        .omenchat
-        .chat_scroll_bottom_locks
-        .contains(&(session_id, 1)));
-    assert!(desktop.workspace.restore_workspace_scrolls_remaining >= 3);
+    assert!(!desktop.omenchat_is_viewing_history(session_id, 1));
 }
 
 #[test]
@@ -384,16 +396,17 @@ fn omenchat_media_layout_change_preserves_follow_tail() {
         "https://example.invalid/attachment.png".into(),
         Err("isolated smoke failure".into()),
     );
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::Scrolled {
+        session_id,
+        room_id: 1,
+        offset: omenchat_offset_from_bottom_anchored_viewport(RelativeOffset { x: 0.0, y: 0.0 }),
+    }));
 
     assert_eq!(
         desktop.omenchat.chat_scroll_offsets.get(&(session_id, 1)),
         Some(&RelativeOffset { x: 0.0, y: 1.0 })
     );
-    assert!(desktop
-        .omenchat
-        .chat_scroll_bottom_locks
-        .contains(&(session_id, 1)));
-    assert!(desktop.workspace.pending_workspace_bottom_anchor_ticks >= 3);
+    assert_eq!(desktop.workspace.pending_workspace_bottom_anchor_ticks, 0);
 }
 
 #[test]
@@ -408,7 +421,7 @@ fn omenchat_media_layout_change_does_not_interrupt_history_reading() {
         .restore_workspace_scroll_locks_release_pending = false;
     desktop.workspace.pending_workspace_bottom_anchor_ticks = 0;
     desktop.omenchat.chat_scroll_bottom_locks.clear();
-    let history_offset = RelativeOffset { x: 0.0, y: 0.40 };
+    let history_offset = RelativeOffset { x: 0.0, y: 0.50 };
     desktop
         .omenchat
         .chat_scroll_offsets
@@ -418,6 +431,11 @@ fn omenchat_media_layout_change_does_not_interrupt_history_reading() {
         "https://example.invalid/attachment.png".into(),
         Err("isolated smoke failure".into()),
     );
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::Scrolled {
+        session_id,
+        room_id: 1,
+        offset: omenchat_offset_from_bottom_anchored_viewport(RelativeOffset { x: 0.0, y: 0.50 }),
+    }));
 
     assert_eq!(
         desktop.omenchat.chat_scroll_offsets.get(&(session_id, 1)),

@@ -52,9 +52,7 @@ impl DesktopApp {
     }
 
     pub(super) fn update_load_omenchat_media(&mut self, url: String) -> Task<Message> {
-        let task = self.load_omenchat_media_task(url);
-        self.preserve_visible_omenchat_bottom_after_layout_change(3);
-        task
+        self.load_omenchat_media_task(url)
     }
 
     pub(super) fn update_fetch_omenchat_upload_resource(
@@ -94,7 +92,6 @@ impl DesktopApp {
                 OmenChatMediaLoadState::Failed { message },
             );
         }
-        self.preserve_visible_omenchat_bottom_after_layout_change(3);
     }
 
     pub(super) fn update_pick_omenchat_upload(
@@ -167,7 +164,6 @@ impl DesktopApp {
                     format!("OMENchat GIF animation load failed for {path}: {error}");
             }
         }
-        self.preserve_visible_omenchat_bottom_after_layout_change(3);
     }
 
     pub(super) fn update_omenchat_media_loaded(
@@ -197,9 +193,7 @@ impl DesktopApp {
                     format!("OMENchat media cached: {path}")
                 };
                 if animated {
-                    let task = self.load_omenchat_gif_frames_task(path);
-                    self.preserve_visible_omenchat_bottom_after_layout_change(3);
-                    return task;
+                    return self.load_omenchat_gif_frames_task(path);
                 }
             }
             Err(error) => {
@@ -212,7 +206,6 @@ impl DesktopApp {
                 self.app.status.task = format!("OMENchat media load failed: {error}");
             }
         }
-        self.preserve_visible_omenchat_bottom_after_layout_change(3);
         Task::none()
     }
 
@@ -544,7 +537,6 @@ impl DesktopApp {
                 );
             }
         }
-        self.preserve_visible_omenchat_bottom_after_layout_change(3);
         Task::none()
     }
 }
