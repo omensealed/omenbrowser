@@ -37,8 +37,9 @@ Run these once from a stable candidate rather than on each development commit:
 - [ ] Native Linux/Windows/macOS CI.
 - [ ] Pinned and current Python interoperability.
 - [ ] Mixed v0.6.0-1 and adjacent v0.9.5-2 compatibility.
-- [ ] Mixed published v0.9.6-1 and candidate v0.9.6-2 OMENchat downgrade,
-  durable-capability, restart, and state-reopen compatibility.
+- [ ] Mixed published v0.9.6-1 and candidate v0.9.6-2 OMENchat compatibility:
+  local state reopen and current-client downgrade pass; reverse/restart remains
+  for the bundled hosted checkpoint.
 - [ ] Linux formats and checksums.
 - [ ] Windows portable ZIP, NSIS setup, WiX MSI, and standalone omenchatd.
 - [ ] Unsigned Intel and Apple Silicon DMGs and standalone omenchatd archives.

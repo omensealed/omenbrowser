@@ -248,6 +248,20 @@ jobs:
           bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --history-resource \
             --report target/mixed-0.9.5-2-client-0.9.6-2-server-history-report.json
 
+      - name: Run previous-release OMENchat compatibility tests
+        env:
+          OMEN_MIXED_OLD_COMMIT: 7cbb470
+          OMEN_MIXED_OLD_VERSION: 0.9.6-1
+          OMEN_MIXED_OLD_TARGET_DIR: ${{ github.workspace }}/target/mixed-previous-old-cargo
+          OMEN_MIXED_OLD_SERVER_STOP_MODE: orderly
+        run: |
+          bash scripts/run-mixed-0-6-0-9-omenchat-history.sh \
+            --report target/mixed-0.9.6-1-0.9.6-2-omenchat-history-report.json
+          bash scripts/run-mixed-0-6-0-9-omenchat-live.sh \
+            --report target/mixed-0.9.6-2-client-0.9.6-1-server-report.json
+          bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --restart \
+            --report target/mixed-0.9.6-1-client-0.9.6-2-server-restart-report.json
+
       - name: Run mixed-application propagation-node restart test
         run: |
           bash scripts/run-mixed-0-6-0-9-propagation.sh --node-restart \
