@@ -25,6 +25,7 @@ scripts=(
   07_reticulumd_rpc_interop.sh
   08_nomadnet_page_fetch.sh
   09_network_doctor.sh
+  10_omenchat_scroll.sh
 )
 
 declare -a rows

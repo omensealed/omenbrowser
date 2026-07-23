@@ -49,8 +49,8 @@ browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/release/omenbrowser_rs"
 server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/release/omenchatd"
 browser_version=$("$browser_bin" --version | awk '{print $2}')
 server_version=$("$server_bin" --version | awk '{print $2}')
-[[ "$browser_version" == "0.9.6-2" ]]
-[[ "$server_version" == "0.9.6-2" ]]
+[[ "$browser_version" == "0.9.6-3" ]]
+[[ "$server_version" == "0.9.6-3" ]]
 
 summary="$temporary_root/report.json"
 python3 - "$raw_report" "$summary" "$browser_version" "$server_version" <<'PY'

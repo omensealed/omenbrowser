@@ -245,12 +245,15 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     }
     timeline_panel = timeline_panel.push(
         app_scrollable(timeline)
+            .anchor_bottom()
             .id(omenchat_scroll_id(session.session_id, active_room_id))
             .on_scroll(move |viewport: Viewport| {
                 Message::OmenChat(OmenChatMessage::Scrolled {
                     session_id,
                     room_id: active_room_id,
-                    offset: sanitize_scroll_offset(viewport.relative_offset()),
+                    offset: omenchat_offset_from_bottom_anchored_viewport(
+                        viewport.relative_offset(),
+                    ),
                 })
             })
             .height(Length::Fill),

@@ -18,6 +18,33 @@ pub(in crate::desktop) fn omenchat_scroll_id(
     ScrollableId::from(format!("omenchat-scroll-{session_id}-{room_id}"))
 }
 
+pub(in crate::desktop) fn omenchat_offset_from_bottom_anchored_viewport(
+    offset: RelativeOffset,
+) -> RelativeOffset {
+    RelativeOffset {
+        x: if offset.x.is_finite() {
+            offset.x.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        y: if offset.y.is_finite() {
+            1.0 - offset.y.clamp(0.0, 1.0)
+        } else {
+            1.0
+        },
+    }
+}
+
+pub(in crate::desktop) fn omenchat_offset_to_bottom_anchored_widget(
+    offset: RelativeOffset,
+) -> RelativeOffset {
+    let offset = super::sanitize_scroll_offset(offset);
+    RelativeOffset {
+        x: offset.x,
+        y: 1.0 - offset.y,
+    }
+}
+
 impl DesktopApp {
     pub(in crate::desktop) fn omenchat_is_viewing_history(
         &self,
@@ -62,7 +89,10 @@ impl DesktopApp {
             .get(&(session_id, room_id))
             .copied()
             .unwrap_or(RelativeOffset { x: 0.0, y: 1.0 });
-        snap_to(omenchat_scroll_id(session_id, room_id), offset)
+        snap_to(
+            omenchat_scroll_id(session_id, room_id),
+            omenchat_offset_to_bottom_anchored_widget(offset),
+        )
     }
 
     pub(in crate::desktop) fn omenchat_active_room_id(&self, session_id: ChatSessionId) -> RoomId {
@@ -169,7 +199,7 @@ impl DesktopApp {
                     .insert(key, RelativeOffset { x: 0.0, y: 1.0 });
                 Some(snap_to(
                     omenchat_scroll_id(session_id, key.1),
-                    RelativeOffset { x: 0.0, y: 1.0 },
+                    RelativeOffset { x: 0.0, y: 0.0 },
                 ))
             })
             .collect::<Vec<_>>();

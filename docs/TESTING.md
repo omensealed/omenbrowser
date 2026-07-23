@@ -30,6 +30,14 @@ bash scripts/release-check.sh quick
 
 This runs the fast repository checks used before sharing a build.
 
+The focused OMENchat viewport smoke verifies initial bottom anchoring and both
+sides of attachment/media layout changes: tail-following panes remain at the
+newest event, while manual history scrollback is preserved.
+
+```bash
+bash scripts/smoke/10_omenchat_scroll.sh
+```
+
 For a locally staged archive, the package gate accepts an optional third
 argument for retained OMENchat smoke evidence:
 
@@ -2537,6 +2545,13 @@ cargo test --locked --lib --no-default-features --features desktop-product \
 The tests do not use the maintainer's real attachment, identity, message, or
 Reticulum roots.
 
+The quick LXMF smoke runs the signed Python-compatible attachment encode,
+bounded private-file store, and idempotent replay path:
+
+```bash
+bash scripts/smoke/05_lxmf_service_loopback.sh
+```
+
 ## Pinned Python IFAC wire fixture
 
 The project-local IFAC TCP client has a deterministic public fixture generated
@@ -3389,11 +3404,12 @@ real path variability, mixed-version peers, or CPU/RSS/link-count measurements.
 
 ## Stamped direct LXMF Resource interoperability
 
-The direct-Resource regression sends a deterministic 64 KiB stamped body over
-the integrated Reticulum runtime. It requires automatic `link-resource`
-selection, a bounded `0 / total` outbound offer, terminal completion correlated
-to the same message and Resource hash, and Python verification of body size,
-SHA-256, source signature, and stamp admission.
+The direct-Resource regression sends a deterministic 64 KiB stamped body and a
+2 KiB binary file attachment over the integrated Reticulum runtime. It requires
+automatic `link-resource` selection, a bounded `0 / total` outbound offer,
+terminal completion correlated to the same message and Resource hash, and
+Python verification of body and attachment names, sizes, SHA-256 values, source
+signature, and stamp admission.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \

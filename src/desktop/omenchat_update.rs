@@ -212,7 +212,7 @@ impl DesktopApp {
             .insert((session_id, room_id), RelativeOffset { x: 0.0, y: 1.0 });
         snap_to(
             omenchat_scroll_id(session_id, room_id),
-            RelativeOffset { x: 0.0, y: 1.0 },
+            RelativeOffset { x: 0.0, y: 0.0 },
         )
     }
 

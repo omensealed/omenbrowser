@@ -134,4 +134,6 @@ pub(in crate::desktop) use workspace_scroll::sanitize_scroll_offset;
 pub(in crate::desktop) use workspace_scroll::scroll_offset_is_at_bottom;
 pub(in crate::desktop) use workspace_scroll_conversation::conversation_scroll_id;
 #[cfg(feature = "chat-client")]
-pub(in crate::desktop) use workspace_scroll_omenchat::omenchat_scroll_id;
+pub(in crate::desktop) use workspace_scroll_omenchat::{
+    omenchat_offset_from_bottom_anchored_viewport, omenchat_scroll_id,
+};

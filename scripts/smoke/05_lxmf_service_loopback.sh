@@ -9,5 +9,7 @@ smoke_run "lxmf state mapping tests" \
   cargo test --locked --no-default-features --features desktop-product test_lxmf_delivery_state_mapping
 smoke_run "native lxmf smoke report tests" \
   cargo test --locked --no-default-features --features desktop-product native_lxmf_smoke_send_report_skips_send_when_not_ready
+smoke_run "signed lxmf attachment encode store and replay" \
+  cargo test --locked --no-default-features --features desktop-product outbound_envelope_encodes_python_style_file_attachments
 
 smoke_pass
