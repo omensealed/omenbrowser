@@ -22,10 +22,11 @@ that an unrun native, Python, packaging, or live-network case passed.
 ## Local gates
 
 - [x] `bash scripts/release-check.sh quick` (local Linux, 2026-07-22)
-- [ ] Root full product tests.
-- [ ] Root product Clippy with `-D warnings`.
-- [ ] Standalone `omenchatd` full tests.
-- [ ] Standalone `omenchatd` full Clippy with `-D warnings`.
+- [x] Root full product tests: 1,260 passed, 29 explicitly ignored; binary and
+  integration suites also passed (local Linux, 2026-07-22).
+- [x] Root product Clippy with `-D warnings`.
+- [x] Standalone `omenchatd` full tests: 367 passed, 8 explicitly ignored.
+- [x] Standalone `omenchatd` full Clippy with `-D warnings`.
 - [x] Durable mutation focused regression matrix; see
   `OMENCHAT_DURABLE_V0_9_6_2_EVIDENCE.md`.
 - [ ] Resource and shutdown measurements recorded.
@@ -37,9 +38,9 @@ Run these once from a stable candidate rather than on each development commit:
 - [ ] Native Linux/Windows/macOS CI.
 - [ ] Pinned and current Python interoperability.
 - [ ] Mixed v0.6.0-1 and adjacent v0.9.5-2 compatibility.
-- [ ] Mixed published v0.9.6-1 and candidate v0.9.6-2 OMENchat compatibility:
-  local state reopen and current-client downgrade pass; reverse/restart remains
-  for the bundled hosted checkpoint.
+- [x] Mixed published v0.9.6-1 and candidate v0.9.6-2 OMENchat local
+  compatibility: state reopen, both live directions, and old-client/current-
+  server restart pass. The hosted checkpoint repeats this evidence.
 - [ ] Linux formats and checksums.
 - [ ] Windows portable ZIP, NSIS setup, WiX MSI, and standalone omenchatd.
 - [ ] Unsigned Intel and Apple Silicon DMGs and standalone omenchatd archives.

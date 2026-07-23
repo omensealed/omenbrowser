@@ -26,13 +26,14 @@ checkpoint.
 | Shutdown | `chat::mutation_intent_worker::tests::shutdown_drains_admitted_intents_before_joining`; `reticulum_live::tests::live_runtime_shutdown_is_idempotent_and_joins_owned_workers` | Admitted intent work drains before the named owner joins; server runtime shutdown is joined and idempotent. |
 | Wire compatibility | shared protocol fixture tests and `protocol::codec::tests::v0_6_0_1_frame_fixtures_remain_bidirectionally_exact` | Legacy frames are unchanged. The envelope is sent only after negotiation. |
 | Published v0.9.6-1 state reopen | `run-mixed-0-6-0-9-omenchat-history.sh` with immutable `7cbb470` | Locally passed all four v0.9.6-1/v0.9.6-2 reopen stages with metadata, order, content, and bidirectional writes preserved. |
-| Published v0.9.6-1 live downgrade | `run-mixed-0-6-0-9-omenchat-live.sh` with immutable `7cbb470` | Local isolated loopback passed for v0.9.6-2 client to v0.9.6-1 server: runtime, Link, legacy session, join, send, and echo all completed. Reverse/restart remains in the bundled hosted checkpoint. |
+| Published v0.9.6-1 live downgrade | `run-mixed-0-6-0-9-omenchat-live.sh` with immutable `7cbb470` | Local isolated loopback passed in both directions. The v0.9.6-1 client also passed orderly v0.9.6-2 server restart with stable destination, reused client state, new Link/session/join, and a post-restart echo. |
 
 ## Still required at the bundled release checkpoint
 
 - Native CI on Linux, Windows, Intel macOS, and Apple Silicon macOS.
 - Pinned/current Python Reticulum and LXMF interoperability workflows.
-- Reverse/restart mixed-version OMENchat process smoke with v0.9.6-1 artifacts.
+- Hosted repetition of the locally passing mixed-version OMENchat process
+  smokes with v0.9.6-1 artifacts.
 - Native package qualification, including both unsigned DMGs.
 - Explicit retention/resource measurements and the documented soak commands.
 
