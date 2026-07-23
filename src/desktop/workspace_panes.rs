@@ -177,6 +177,8 @@ impl DesktopApp {
             return;
         }
         self.split_workspace_from_active(DesktopPane::OmenChat(session_id));
+        self.lock_omenchat_bottom_until_restore_settles(session_id);
+        self.schedule_visible_workspace_scroll_restore(3);
     }
 
     #[cfg(feature = "chat-client")]

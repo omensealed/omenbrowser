@@ -12694,7 +12694,10 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
                 if let Some(status) = self.child.try_wait().expect("poll direct-stamp peer") {
-                    assert!(status.success(), "Python direct-stamp peer exited {status}");
+                    assert!(
+                        status.success(),
+                        "Python direct-stamp peer exited {status}: {result}"
+                    );
                     self.join_reader();
                     return result;
                 }
@@ -17510,6 +17513,8 @@ enable_transport = No
     ) {
         const RESOURCE_TITLE: &str = "OMEN Rust stamped Resource LXMF";
         const RESOURCE_BODY_BYTES: usize = 64 * 1024;
+        const ATTACHMENT_NAME: &str = "lxmf-attachment-smoke.bin";
+        const ATTACHMENT_BYTES: usize = 2_048;
 
         let paths = temp_paths(case);
         let manager = IdentityManager::new(
@@ -17520,6 +17525,13 @@ enable_transport = No
         let identity = manager
             .create_managed_identity_with_provider("Native", &provider)
             .expect("create direct-Resource identity");
+        let attachment_path = paths.root.join(ATTACHMENT_NAME);
+        let attachment = (0_u8..=255)
+            .cycle()
+            .take(ATTACHMENT_BYTES)
+            .collect::<Vec<_>>();
+        std::fs::write(&attachment_path, &attachment)
+            .expect("write isolated direct-Resource attachment");
         let source = clean_lxmf_delivery_destination_hash_from_identity_path(&identity.path)
             .expect("direct-Resource source hash");
         let port = current_python_propagation_port();
@@ -17584,7 +17596,7 @@ enable_transport = No
                 include_ticket: false,
                 native_reply_ticket: None,
                 operation: None,
-                attachments: Vec::new(),
+                attachments: vec![attachment_path],
             }))
             .expect("send stamped direct Resource");
         let message_id = message
@@ -17609,6 +17621,9 @@ enable_transport = No
                 .map(String::as_str),
             Some("1")
         );
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].name, ATTACHMENT_NAME);
+        assert_eq!(message.attachments[0].size, ATTACHMENT_BYTES as u64);
 
         let (saw_progress, saw_complete) = tokio.block_on(async {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -17657,10 +17672,13 @@ enable_transport = No
         assert_eq!(result["passed"], true);
         assert_eq!(result["body_bytes"], RESOURCE_BODY_BYTES);
         assert_eq!(result["body_sha256_match"], true);
+        assert_eq!(result["attachment_name"], ATTACHMENT_NAME);
+        assert_eq!(result["attachment_bytes"], ATTACHMENT_BYTES);
+        assert_eq!(result["attachment_sha256_match"], true);
         assert_eq!(result["signature_validated"], true);
         assert_eq!(result["stamp_valid"], true);
         eprintln!(
-            "stamped direct Resource interoperated: bytes={RESOURCE_BODY_BYTES} elapsed_ms={}",
+            "stamped direct Resource and attachment interoperated: body_bytes={RESOURCE_BODY_BYTES} attachment_bytes={ATTACHMENT_BYTES} elapsed_ms={}",
             started.elapsed().as_millis()
         );
         runtime.stop();

@@ -335,6 +335,102 @@ fn restored_omenchat_pane_starts_at_bottom() {
 }
 
 #[test]
+fn newly_opened_omenchat_pane_rejects_initial_top_scroll_callback() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-new-omenchat-bottom-lock");
+    let session_id = open_test_omenchat_session(&mut desktop);
+    desktop.workspace.restore_workspace_scrolls_pending = false;
+    desktop.workspace.restore_workspace_scrolls_remaining = 0;
+    desktop
+        .workspace
+        .restore_workspace_scroll_locks_release_pending = false;
+    desktop.omenchat.chat_scroll_bottom_locks.clear();
+
+    desktop.ensure_pane_for_omenchat(session_id);
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::Scrolled {
+        session_id,
+        room_id: 1,
+        offset: RelativeOffset { x: 0.0, y: 0.0 },
+    }));
+
+    assert_eq!(
+        desktop.omenchat.chat_scroll_offsets.get(&(session_id, 1)),
+        Some(&RelativeOffset { x: 0.0, y: 1.0 })
+    );
+    assert!(desktop
+        .omenchat
+        .chat_scroll_bottom_locks
+        .contains(&(session_id, 1)));
+    assert!(desktop.workspace.restore_workspace_scrolls_remaining >= 3);
+}
+
+#[test]
+fn omenchat_media_layout_change_preserves_follow_tail() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-media-follow-tail");
+    let session_id = open_test_omenchat_session(&mut desktop);
+    desktop.ensure_pane_for_omenchat(session_id);
+    desktop.workspace.restore_workspace_scrolls_pending = false;
+    desktop.workspace.restore_workspace_scrolls_remaining = 0;
+    desktop
+        .workspace
+        .restore_workspace_scroll_locks_release_pending = false;
+    desktop.workspace.pending_workspace_bottom_anchor_ticks = 0;
+    desktop.omenchat.chat_scroll_bottom_locks.clear();
+    desktop
+        .omenchat
+        .chat_scroll_offsets
+        .insert((session_id, 1), RelativeOffset { x: 0.0, y: 1.0 });
+
+    let _ = desktop.update_omenchat_media_loaded(
+        "https://example.invalid/attachment.png".into(),
+        Err("isolated smoke failure".into()),
+    );
+
+    assert_eq!(
+        desktop.omenchat.chat_scroll_offsets.get(&(session_id, 1)),
+        Some(&RelativeOffset { x: 0.0, y: 1.0 })
+    );
+    assert!(desktop
+        .omenchat
+        .chat_scroll_bottom_locks
+        .contains(&(session_id, 1)));
+    assert!(desktop.workspace.pending_workspace_bottom_anchor_ticks >= 3);
+}
+
+#[test]
+fn omenchat_media_layout_change_does_not_interrupt_history_reading() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-media-history-scroll");
+    let session_id = open_test_omenchat_session(&mut desktop);
+    desktop.ensure_pane_for_omenchat(session_id);
+    desktop.workspace.restore_workspace_scrolls_pending = false;
+    desktop.workspace.restore_workspace_scrolls_remaining = 0;
+    desktop
+        .workspace
+        .restore_workspace_scroll_locks_release_pending = false;
+    desktop.workspace.pending_workspace_bottom_anchor_ticks = 0;
+    desktop.omenchat.chat_scroll_bottom_locks.clear();
+    let history_offset = RelativeOffset { x: 0.0, y: 0.40 };
+    desktop
+        .omenchat
+        .chat_scroll_offsets
+        .insert((session_id, 1), history_offset);
+
+    let _ = desktop.update_omenchat_media_loaded(
+        "https://example.invalid/attachment.png".into(),
+        Err("isolated smoke failure".into()),
+    );
+
+    assert_eq!(
+        desktop.omenchat.chat_scroll_offsets.get(&(session_id, 1)),
+        Some(&history_offset)
+    );
+    assert!(!desktop
+        .omenchat
+        .chat_scroll_bottom_locks
+        .contains(&(session_id, 1)));
+    assert_eq!(desktop.workspace.pending_workspace_bottom_anchor_ticks, 0);
+}
+
+#[test]
 fn omenchat_upload_picker_cancel_does_not_touch_scroll_restore() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-upload-no-scroll");
     let session_id = open_test_omenchat_session(&mut desktop);

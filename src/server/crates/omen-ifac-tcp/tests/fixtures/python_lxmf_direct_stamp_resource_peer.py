@@ -18,6 +18,10 @@ RESOURCE_TITLE = "OMEN Rust stamped Resource LXMF"
 RESOURCE_BODY_BYTES = 64 * 1024
 RESOURCE_BODY = "R" * RESOURCE_BODY_BYTES
 RESOURCE_BODY_SHA256 = hashlib.sha256(RESOURCE_BODY.encode("utf-8")).hexdigest()
+ATTACHMENT_FIELD = 0x05
+ATTACHMENT_NAME = "lxmf-attachment-smoke.bin"
+ATTACHMENT_BYTES = bytes(range(256)) * 8
+ATTACHMENT_SHA256 = hashlib.sha256(ATTACHMENT_BYTES).hexdigest()
 
 
 def write_config(root: pathlib.Path, port: int) -> pathlib.Path:
@@ -99,8 +103,18 @@ def main() -> int:
 
     def delivered(message: object) -> None:
         content = text(message.content)
+        fields = getattr(message, "fields", None) or {}
+        attachments = fields.get(ATTACHMENT_FIELD, [])
+        attachment_name = None
+        attachment_bytes = b""
+        if len(attachments) == 1 and len(attachments[0]) == 2:
+            attachment_name = text(attachments[0][0])
+            attachment_bytes = bytes(attachments[0][1])
         observation.update(
             {
+                "attachment_bytes": len(attachment_bytes),
+                "attachment_name": attachment_name,
+                "attachment_sha256": hashlib.sha256(attachment_bytes).hexdigest(),
                 "body_bytes": len(content.encode("utf-8")),
                 "body_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 "signature_validated": bool(message.signature_validated),
@@ -149,6 +163,9 @@ def main() -> int:
             observation.get("title") == RESOURCE_TITLE
             and observation.get("body_bytes") == RESOURCE_BODY_BYTES
             and observation.get("body_sha256") == RESOURCE_BODY_SHA256
+            and observation.get("attachment_name") == ATTACHMENT_NAME
+            and observation.get("attachment_bytes") == len(ATTACHMENT_BYTES)
+            and observation.get("attachment_sha256") == ATTACHMENT_SHA256
             and observation.get("source_hash") == args.rust_source
             and observation.get("signature_validated") is True
             and observation.get("stamp_valid") is True
@@ -157,6 +174,10 @@ def main() -> int:
         print(
             json.dumps(
                 {
+                    "attachment_bytes": observation.get("attachment_bytes"),
+                    "attachment_name": observation.get("attachment_name"),
+                    "attachment_sha256_match": observation.get("attachment_sha256")
+                    == ATTACHMENT_SHA256,
                     "body_bytes": observation.get("body_bytes"),
                     "body_sha256_match": observation.get("body_sha256")
                     == RESOURCE_BODY_SHA256,

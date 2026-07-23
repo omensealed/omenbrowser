@@ -457,13 +457,48 @@ fn build_sdk_wire_delivery_with_policy(
     direct_stamp_cost: Option<u8>,
     cancelled: impl FnMut() -> bool,
 ) -> AppResult<NativeLxmfSdkWireDelivery> {
+    let fields = sdk_record_fields_to_rmpv(record.fields.as_ref())?;
+    build_sdk_wire_delivery_with_policy_fields(
+        record,
+        options,
+        identity_bytes,
+        reply_ticket_hex,
+        NativeLxmfWireFieldPolicy {
+            issued_ticket,
+            direct_stamp_cost,
+            fields,
+        },
+        cancelled,
+    )
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+struct NativeLxmfWireFieldPolicy<'a> {
+    issued_ticket: Option<&'a crate::messaging::NativeLxmfReplyTicket>,
+    direct_stamp_cost: Option<u8>,
+    fields: Option<rmpv::Value>,
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn build_sdk_wire_delivery_with_policy_fields(
+    record: &rns_rpc::MessageRecord,
+    options: &rns_rpc::OutboundDeliveryOptions,
+    identity_bytes: &[u8],
+    reply_ticket_hex: Option<&str>,
+    policy: NativeLxmfWireFieldPolicy<'_>,
+    cancelled: impl FnMut() -> bool,
+) -> AppResult<NativeLxmfSdkWireDelivery> {
+    let NativeLxmfWireFieldPolicy {
+        issued_ticket,
+        direct_stamp_cost,
+        mut fields,
+    } = policy;
     let destination = parse_lxmf_hash_hex(record.destination.as_str())?;
     let source = parse_lxmf_hash_hex(record.source.as_str())?;
     let signer =
         reticulum_rs::core::identity::PrivateIdentity::from_private_key_bytes(identity_bytes)
             .map_err(|_| AppError::Runtime("native LXMF SDK bridge identity is invalid".into()))?;
 
-    let mut fields = sdk_record_fields_to_rmpv(record.fields.as_ref())?;
     if options.include_ticket {
         match issued_ticket {
             Some(ticket) => insert_issued_lxmf_ticket_field(&mut fields, ticket)?,
@@ -619,13 +654,18 @@ pub fn build_sdk_wire_delivery_from_envelope_with_policy(
         }
         None => None,
     };
-    build_sdk_wire_delivery_with_policy(
+    let (fields, _) =
+        crate::runtime::native_lxmf::codec::attachment_fields_from_paths(&envelope.attachments)?;
+    build_sdk_wire_delivery_with_policy_fields(
         &record,
         &plan.rpc_delivery,
         identity_bytes,
         reply_ticket_hex.as_deref(),
-        issued_ticket,
-        direct_stamp_cost,
+        NativeLxmfWireFieldPolicy {
+            issued_ticket,
+            direct_stamp_cost,
+            fields,
+        },
         cancelled,
     )
 }
@@ -1477,9 +1517,10 @@ mod tests {
     use rns_rpc::OutboundBridge;
 
     use super::{
-        build_sdk_send_plan, build_sdk_wire_delivery, build_sdk_wire_delivery_with_issued_ticket,
-        build_sdk_wire_delivery_with_policy, current_unix_secs_f64, hex_bytes,
-        map_sdk_cancel_result, native_lxmf_sdk_record_ticket,
+        build_sdk_send_plan, build_sdk_wire_delivery,
+        build_sdk_wire_delivery_from_envelope_with_issued_ticket,
+        build_sdk_wire_delivery_with_issued_ticket, build_sdk_wire_delivery_with_policy,
+        current_unix_secs_f64, hex_bytes, map_sdk_cancel_result, native_lxmf_sdk_record_ticket,
         native_lxmf_sdk_runtime_boundary_decision, validate_sdk_send_plan_ttl,
         EmbeddedNativeLxmfSdkSender, MissingNativeLxmfSdkSender, NativeLxmfSdkOutboundBridge,
         NativeLxmfSdkRuntimeBoundaryKind, NativeLxmfSdkSender, NativeLxmfSdkSenderState,
@@ -1621,6 +1662,53 @@ mod tests {
         assert!(!plan.rpc_delivery.include_ticket);
         assert!(plan.rpc_delivery.try_propagation_on_fail);
         assert_eq!(plan.rpc_delivery.ticket, None);
+    }
+
+    #[test]
+    fn clean_sdk_wire_envelope_preserves_file_attachment_bytes() {
+        let private = NativeReticulumIdentityProvider
+            .create_identity_material("sdk-attachment-smoke")
+            .expect("isolated identity");
+        let signer =
+            reticulum_rs::core::identity::PrivateIdentity::from_private_key_bytes(&private)
+                .expect("isolated signer");
+        let source = signer.address_hash().to_hex_string();
+        let attachment_path = std::env::temp_dir().join(format!(
+            "omen-lxmf-sdk-attachment-{}-{}.bin",
+            std::process::id(),
+            current_unix_secs_f64().to_bits()
+        ));
+        std::fs::write(&attachment_path, b"clean sdk attachment bytes")
+            .expect("isolated attachment");
+        let envelope = MessageEnvelope {
+            peer_hash: "00112233445566778899aabbccddeeff".into(),
+            title: "attachment smoke".into(),
+            body: "body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: None,
+            attachments: vec![attachment_path.clone()],
+        };
+
+        let delivery = build_sdk_wire_delivery_from_envelope_with_issued_ticket(
+            &envelope, &source, &private, None, None,
+        )
+        .expect("clean SDK wire attachment");
+        let decoded = crate::runtime::native_lxmf::codec::decode_wire_message(&delivery.wire_bytes)
+            .expect("decode clean SDK wire");
+
+        assert_eq!(decoded.attachments.len(), 1);
+        assert_eq!(
+            decoded.attachments[0].name,
+            attachment_path
+                .file_name()
+                .expect("attachment name")
+                .to_string_lossy()
+        );
+        assert_eq!(decoded.attachments[0].size, 26);
+        assert_eq!(decoded.attachments[0].path, None);
+        std::fs::remove_file(attachment_path).expect("remove isolated attachment");
     }
 
     #[test]

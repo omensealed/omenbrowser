@@ -129,6 +129,50 @@ impl DesktopApp {
             .or_insert(RelativeOffset { x: 0.0, y: 1.0 });
     }
 
+    pub(in crate::desktop) fn preserve_visible_omenchat_bottom_after_layout_change(
+        &mut self,
+        ticks: u8,
+    ) {
+        let followed_keys = self
+            .workspace
+            .workspace_panes
+            .iter()
+            .filter_map(|(_, pane)| match pane {
+                DesktopPane::OmenChat(session_id)
+                    if self
+                        .workspace_scroll_pane_is_visible(DesktopPane::OmenChat(*session_id)) =>
+                {
+                    let key = self.omenchat_scroll_key(*session_id);
+                    self.omenchat
+                        .chat_scroll_offsets
+                        .get(&key)
+                        .copied()
+                        .map(scroll_offset_is_at_bottom)
+                        .unwrap_or(true)
+                        .then_some(key)
+                }
+                DesktopPane::OmenChat(_)
+                | DesktopPane::Browser(_)
+                | DesktopPane::Conversation(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if followed_keys.is_empty() {
+            return;
+        }
+
+        self.schedule_visible_workspace_scroll_restore(ticks);
+        for key in followed_keys {
+            self.omenchat.chat_scroll_bottom_locks.insert(key);
+            self.omenchat
+                .chat_scroll_offsets
+                .insert(key, RelativeOffset { x: 0.0, y: 1.0 });
+        }
+        self.workspace.pending_workspace_bottom_anchor_ticks = self
+            .workspace
+            .pending_workspace_bottom_anchor_ticks
+            .max(ticks.max(1));
+    }
+
     pub(in crate::desktop) fn snap_omenchat_with_new_events_to_bottom(&mut self) -> Task<Message> {
         let current_counts = omenchat_event_counts_by_room(self.omenchat.chat_client.sessions());
         let visible_sessions = self

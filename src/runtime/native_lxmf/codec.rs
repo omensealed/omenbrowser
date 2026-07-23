@@ -1040,7 +1040,7 @@ fn validate_lxmf_payload_msgpack(payload: &[u8]) -> AppResult<()> {
     .map_err(|error| AppError::Runtime(format!("LXMF payload rejected: {error}")))
 }
 
-fn attachment_fields_from_paths(
+pub(crate) fn attachment_fields_from_paths(
     paths: &[std::path::PathBuf],
 ) -> AppResult<(Option<rmpv::Value>, Vec<AttachmentSummary>)> {
     if paths.len() > MAX_LXMF_ATTACHMENT_ITEMS {

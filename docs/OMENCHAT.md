@@ -355,6 +355,11 @@ trusted.
   identifier, so the pane truthfully labels the payload as potentially history,
   users, or media instead of claiming a more specific purpose.
 - Show unread state when chat panes are minimized.
+- Open and restored chat panes at the newest event. A pane that is already
+  following the newest event remains bottom-anchored while an attachment or
+  media preview changes the timeline height. Manual scrollback disables that
+  follow behavior until the user returns to the bottom or selects **Jump To
+  Present**; loading an attachment must not interrupt history reading.
 
 Frame `seq` values correlate live requests and responses. omenchatd treats an
 exact same-link replay of a room message, action, notice, part, or mutating
