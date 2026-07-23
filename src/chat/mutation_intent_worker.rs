@@ -14,6 +14,18 @@ pub const MUTATION_INTENT_WORKER_QUEUE_BYTES: usize = 2 * 1024 * 1024;
 
 pub type IntentWorkerReply<T> = mpsc::Receiver<anyhow::Result<T>>;
 
+pub async fn await_intent_worker_reply<T: Send + 'static>(
+    reply: IntentWorkerReply<T>,
+) -> anyhow::Result<T> {
+    tokio::task::spawn_blocking(move || {
+        reply
+            .recv()
+            .map_err(|_| anyhow::anyhow!("OMENchat mutation intent worker dropped its reply"))?
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("OMENchat mutation intent reply task failed: {error}"))?
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IntentWorkerMetrics {
     pub queued: usize,
@@ -358,6 +370,19 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn admitted_reply_is_awaited_off_the_async_worker() {
+        let root = isolated_root("async-reply");
+        let worker = MutationIntentWorker::start(&root).expect("worker");
+        let reply = worker.try_prepare(request()).expect("prepare admitted");
+
+        let intent = await_intent_worker_reply(reply).await.expect("reply");
+
+        assert_eq!(intent.state, OutboundMutationState::Prepared);
+        worker.shutdown().expect("shutdown");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn owned_worker_persists_transitions_recovers_and_joins() {
         let root = isolated_root("lifecycle");
@@ -430,6 +455,43 @@ mod tests {
             .expect("queued result")
             .is_empty());
         worker.shutdown().expect("shutdown");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn shutdown_drains_admitted_intents_before_joining() {
+        let root = isolated_root("shutdown-drain");
+        let worker = MutationIntentWorker::start(&root).expect("worker");
+        let (entered, release) = worker.pause();
+        entered.recv().expect("worker paused");
+        let replies = (0..4)
+            .map(|index| {
+                let mut request = request();
+                request.body = FrameBody::Text(format!("queued-{index}"));
+                worker.try_prepare(request).expect("prepare admitted")
+            })
+            .collect::<Vec<_>>();
+        let shutdown = std::thread::spawn(move || worker.shutdown());
+
+        release.send(()).expect("release worker");
+        shutdown
+            .join()
+            .expect("shutdown thread")
+            .expect("draining shutdown");
+        for reply in replies {
+            assert_eq!(
+                reply
+                    .recv()
+                    .expect("prepare reply")
+                    .expect("prepare result")
+                    .state,
+                OutboundMutationState::Prepared
+            );
+        }
+
+        let reopened = MutationIntentStore::open_for_identity_storage_root(&root).expect("reopen");
+        assert_eq!(reopened.recover_nonterminal().expect("recover").len(), 4);
+        drop(reopened);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

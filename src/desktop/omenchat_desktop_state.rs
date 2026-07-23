@@ -282,6 +282,10 @@ mod tests {
             session_ids: Vec::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             client_instance_id: None,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            authenticated_identity_hash: None,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            mutation_intent_worker: None,
         };
         let panes = iced::widget::pane_grid::State::new(DesktopPane::Browser(1)).0;
         let mut state = OmenChatDesktopState::from_startup(startup, &panes);
@@ -337,6 +341,25 @@ mod tests {
         assert!(session_cancellation.is_cancelled());
     }
 
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    #[test]
+    fn durable_capability_is_not_advertised_without_its_persistence_owner() {
+        let startup = OmenChatStartupState {
+            chat_client: ChatClient::new(),
+            chat_store: None,
+            session_ids: Vec::new(),
+            client_instance_id: Some(crate::chat::protocol::ClientInstanceId::new([7; 16])),
+            authenticated_identity_hash: Some(vec![8; 16]),
+            mutation_intent_worker: None,
+        };
+        let panes = iced::widget::pane_grid::State::new(DesktopPane::Browser(1)).0;
+
+        let state = OmenChatDesktopState::from_startup(startup, &panes);
+
+        assert!(state.omenchat_live_state.client_instance_id().is_some());
+        assert!(!state.omenchat_live_state.durable_mutation_owner_ready());
+    }
+
     #[test]
     fn media_state_cache_enforces_item_and_metadata_byte_budgets() {
         let mut cache = OmenChatMediaStateCache::new();
@@ -376,6 +399,37 @@ mod tests {
     }
 }
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) enum OmenChatMutationRecoveryState {
+    Unavailable,
+    Pending,
+    InFlight,
+    Loaded,
+    Failed,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+impl OmenChatMutationRecoveryState {
+    pub(in crate::desktop) fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Pending => "pending",
+            Self::InFlight => "in-flight",
+            Self::Loaded => "loaded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct OmenChatMutationResolutionConfirmation {
+    pub(in crate::desktop) mutation_id: crate::chat::protocol::MutationId,
+    pub(in crate::desktop) expected: crate::chat::mutation_intents::OutboundMutationState,
+    pub(in crate::desktop) next: crate::chat::mutation_intents::OutboundMutationState,
+}
+
 pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) chat_client: ChatClient,
     pub(in crate::desktop) chat_store: Option<SqliteChatStore>,
@@ -399,6 +453,21 @@ pub(in crate::desktop) struct OmenChatDesktopState {
         HashMap<(ChatSessionId, String, u64), PathBuf>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_state: crate::chat::live::LiveChatClientState,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_authenticated_identity_hash: Option<Vec<u8>>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_mutation_intent_worker:
+        Option<crate::chat::mutation_intent_worker::MutationIntentWorker>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_mutation_recovery_state: OmenChatMutationRecoveryState,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_recovered_mutation_intents:
+        Vec<crate::chat::mutation_intents::OutboundMutationIntent>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_other_identity_mutation_intents: usize,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_mutation_resolution_confirmation:
+        Option<OmenChatMutationResolutionConfirmation>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_transports:
         HashMap<ChatSessionId, DesktopOmenChatTransport>,
@@ -475,7 +544,17 @@ impl OmenChatDesktopState {
         let omenchat_live_state = {
             let mut state = crate::chat::live::LiveChatClientState::default();
             state.set_client_instance_id(startup.client_instance_id);
+            state.set_durable_mutation_owner_ready(
+                startup.mutation_intent_worker.is_some()
+                    && startup.authenticated_identity_hash.is_some(),
+            );
             state
+        };
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        let omenchat_mutation_recovery_state = if startup.mutation_intent_worker.is_some() {
+            OmenChatMutationRecoveryState::Pending
+        } else {
+            OmenChatMutationRecoveryState::Unavailable
         };
 
         Self {
@@ -499,6 +578,18 @@ impl OmenChatDesktopState {
             omenchat_pending_upload_sources: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_state,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_authenticated_identity_hash: startup.authenticated_identity_hash,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_mutation_intent_worker: startup.mutation_intent_worker,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_mutation_recovery_state,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_recovered_mutation_intents: Vec::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_other_identity_mutation_intents: 0,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_mutation_resolution_confirmation: None,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_transports: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]

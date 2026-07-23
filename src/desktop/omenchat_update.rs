@@ -48,7 +48,23 @@ impl DesktopApp {
                 room_id,
             }) => Ok(self.update_jump_omenchat_to_present(session_id, room_id)),
             Message::OmenChat(OmenChatMessage::SendDraft(session_id)) => {
-                self.update_send_omenchat_draft(session_id);
+                Ok(self.update_send_omenchat_draft(session_id))
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::BeginMutationResolution {
+                mutation_id,
+                action,
+            }) => {
+                self.begin_omenchat_mutation_resolution(mutation_id, action);
+                Ok(Task::none())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::ConfirmMutationResolution) => {
+                Ok(self.confirm_omenchat_mutation_resolution())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::CancelMutationResolution) => {
+                self.cancel_omenchat_mutation_resolution();
                 Ok(Task::none())
             }
             Message::OmenChat(OmenChatMessage::ResendLocalEcho {
@@ -108,6 +124,10 @@ impl DesktopApp {
                 completion.descriptor,
                 completion.result,
             )),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChatMutationCompletion(completion) => {
+                Ok(self.update_omenchat_mutation_completion(*completion))
+            }
             _ => self.dispatch_omenchat_media_message(message),
         }
     }
@@ -196,8 +216,19 @@ impl DesktopApp {
         )
     }
 
-    pub(super) fn update_send_omenchat_draft(&mut self, session_id: ChatSessionId) {
-        self.send_omenchat_draft(session_id);
+    pub(super) fn update_send_omenchat_draft(
+        &mut self,
+        session_id: ChatSessionId,
+    ) -> Task<Message> {
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        {
+            self.send_omenchat_draft_with_durable_intent(session_id)
+        }
+        #[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
+        {
+            self.send_omenchat_draft(session_id);
+            Task::none()
+        }
     }
 
     pub(super) fn update_resend_omenchat_local_echo(

@@ -13,6 +13,14 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
+      package_scope:
+        description: "Artifact scope for manual qualification"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - "all"
+          - "macos"
       run_package_smoke:
         description: "Run packaged local OMENchat smoke after release tarball build"
         required: true
@@ -25,11 +33,13 @@ on:
 jobs:
   native:
     name: Native release prerequisite
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.package_scope == 'all' }}
     uses: ./.github/workflows/native-checks.yml
 
   package:
     name: Build release artifacts
     needs: native
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.package_scope == 'all' }}
     runs-on: ubuntu-24.04
     container: rust:1-bullseye
     timeout-minutes: 90
@@ -140,6 +150,7 @@ jobs:
   windows-portable:
     name: Build Windows portable and installer artifacts
     needs: native
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.package_scope == 'all' }}
     runs-on: windows-2025
     timeout-minutes: 90
     env:
@@ -184,12 +195,65 @@ jobs:
             dist/*-unsigned.msi.sha256
           if-no-files-found: error
 
+  macos-packages:
+    name: Build macOS ${{ matrix.name }} packages
+    needs: native
+    if: >-
+      ${{ always() &&
+          ((github.event_name != 'workflow_dispatch' && needs.native.result == 'success') ||
+           (github.event_name == 'workflow_dispatch' && inputs.package_scope == 'macos') ||
+           (github.event_name == 'workflow_dispatch' && inputs.package_scope == 'all' && needs.native.result == 'success')) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Intel
+            runner: macos-15-intel
+            artifact_arch: x86_64
+          - name: Apple Silicon
+            runner: macos-15
+            artifact_arch: aarch64
+    env:
+      CARGO_BUILD_JOBS: "2"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-07-11
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            .
+            src/server
+
+      - name: Build and qualify unsigned DMG and omenchatd archive
+        shell: bash
+        run: bash scripts/package-macos.sh dist --run-lifecycle-smoke
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omenbrowser-rs-macos-${{ matrix.artifact_arch }}-artifacts
+          path: |
+            dist/OMENbrowser_rs-*-macos-${{ matrix.artifact_arch }}-unsigned.dmg
+            dist/OMENbrowser_rs-*-macos-${{ matrix.artifact_arch }}-unsigned.dmg.sha256
+            dist/omenchatd-*-macos-${{ matrix.artifact_arch }}.tar.gz
+            dist/omenchatd-*-macos-${{ matrix.artifact_arch }}.tar.gz.sha256
+          if-no-files-found: error
+
   publish:
     name: Publish release downloads
     if: startsWith(github.ref, 'refs/tags/')
     needs:
       - package
       - windows-portable
+      - macos-packages
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release
@@ -208,6 +272,18 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: omenbrowser-rs-windows-portable-artifacts
+          path: dist
+
+      - name: Download Intel macOS artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: omenbrowser-rs-macos-x86_64-artifacts
+          path: dist
+
+      - name: Download Apple Silicon macOS artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: omenbrowser-rs-macos-aarch64-artifacts
           path: dist
 
       - name: Publish release downloads

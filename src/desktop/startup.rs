@@ -28,6 +28,11 @@ pub(in crate::desktop) struct OmenChatStartupState {
     pub(in crate::desktop) session_ids: Vec<ChatSessionId>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) client_instance_id: Option<crate::chat::protocol::ClientInstanceId>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) authenticated_identity_hash: Option<Vec<u8>>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) mutation_intent_worker:
+        Option<crate::chat::mutation_intent_worker::MutationIntentWorker>,
 }
 
 #[cfg(feature = "chat-client")]
@@ -47,6 +52,40 @@ pub(in crate::desktop) fn restore_omenchat_startup_state(app: &App) -> OmenChatS
                 None
             }
         }
+    };
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    let authenticated_identity_hash = app
+        .runtime_status
+        .active_identity
+        .as_ref()
+        .and_then(|identity| {
+            crate::runtime::native::identity::load_private_identity_file(&identity.path)
+                .map_err(|error| {
+                    tracing::warn!(
+                        ?error,
+                        "OMENchat durable mutation sending remains disabled because the active identity could not be loaded"
+                    );
+                })
+                .ok()
+        })
+        .and_then(|summary| parse_identity_hash(&summary.address_hash_hex));
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    let mutation_intent_worker = if client_instance_id.is_some()
+        && authenticated_identity_hash.is_some()
+    {
+        match crate::chat::mutation_intent_worker::MutationIntentWorker::start(
+            app.paths.identity_storage_root(),
+        ) {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                tracing::warn!(
+                    "OMENchat durable mutation sending remains disabled because the intent store could not start: {error}"
+                );
+                None
+            }
+        }
+    } else {
+        None
     };
     let chat_store_path = app
         .paths
@@ -85,7 +124,21 @@ pub(in crate::desktop) fn restore_omenchat_startup_state(app: &App) -> OmenChatS
         session_ids,
         #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         client_instance_id,
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        authenticated_identity_hash,
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        mutation_intent_worker,
     }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn parse_identity_hash(value: &str) -> Option<Vec<u8>> {
+    if value.len() != 32 {
+        return None;
+    }
+    (0..16)
+        .map(|index| u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok())
+        .collect()
 }
 
 pub(in crate::desktop) fn desktop_workspace_startup_state(

@@ -3411,7 +3411,7 @@ The test uses temporary config/storage roots and prints only bounded metadata.
 Outbound incremental percentages are not claimed because the 0.9.5 transport
 currently exposes receiver progress and sender terminal events.
 
-## Mixed OMENbrowser 0.6.0-1 and 0.9.6-1 LXMF/OMENchat
+## Mixed OMENbrowser 0.6.0-1 and 0.9.6-2 LXMF/OMENchat
 
 This Linux-only multi-process harness tests actual application binaries rather
 than importing 0.6 types into the current build:
@@ -3589,7 +3589,7 @@ under one explicit temporary root and is deleted; the retained report contains
 only versions, counts, and validation booleans.
 
 The live OMENchat command builds the selected client/server pair from the
-immutable hardened `0.6.0-1` source and current `0.9.6-1` source. The default
+immutable hardened `0.6.0-1` source and current `0.9.6-2` source. The default
 case is current client to old server; `--reverse` is old client to current
 server. Each starts both binaries with separate isolated roots over an
 ephemeral loopback TCP interface, then requires the client to start its
@@ -3604,7 +3604,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.6-1` must report
+therefore exits with the expected signal status; current `0.9.6-2` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 

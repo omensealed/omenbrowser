@@ -1,4 +1,5 @@
 use iced::Task;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::chat::ChatSessionId;
 
@@ -24,6 +25,36 @@ impl DesktopApp {
             .pending_local_echo_metrics();
         let pending_uploads = self.omenchat.omenchat_live_state.pending_upload_metrics();
         let inline_downloads = self.omenchat.omenchat_live_state.inline_download_metrics();
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .unwrap_or_default();
+        let (recovered_prepared, recovered_uncertain, recovered_past_expiry) = self
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .filter(|intent| intent.server_destination == session.server.destination)
+            .fold((0usize, 0usize, 0usize), |counts, intent| {
+                (
+                    counts.0
+                        + usize::from(
+                            intent.state
+                                == crate::chat::mutation_intents::OutboundMutationState::Prepared,
+                        ),
+                    counts.1
+                        + usize::from(
+                            intent.state
+                                == crate::chat::mutation_intents::OutboundMutationState::SentUncertain,
+                        ),
+                    counts.2 + usize::from(intent.expires_at <= now_unix),
+                )
+            });
+        let intent_worker = self
+            .omenchat
+            .omenchat_mutation_intent_worker
+            .as_ref()
+            .map(|worker| worker.metrics());
         let last_disconnect_category = self
             .omenchat
             .omenchat_live_last_disconnect_reason
@@ -100,6 +131,18 @@ impl DesktopApp {
                 "inline_download_retained_bytes": inline_downloads.retained_bytes,
                 "inline_download_pending_chunks": inline_downloads.pending_chunks,
                 "rejected_inline_downloads": inline_downloads.rejected,
+            },
+            "durable_mutations": {
+                "negotiated_for_session": self.omenchat.omenchat_live_state.durable_mutations_negotiated(session_id),
+                "persistence_owner_ready": self.omenchat.omenchat_live_state.durable_mutation_owner_ready(),
+                "recovery_state": self.omenchat.omenchat_mutation_recovery_state.label(),
+                "recovered_prepared_for_server": recovered_prepared,
+                "recovered_uncertain_for_server": recovered_uncertain,
+                "recovered_past_expiry_for_server": recovered_past_expiry,
+                "other_identity_unresolved_count": self.omenchat.omenchat_other_identity_mutation_intents,
+                "worker_queue_items": intent_worker.map(|metrics| metrics.queued),
+                "worker_queue_bytes": intent_worker.map(|metrics| metrics.queued_bytes),
+                "worker_rejections": intent_worker.map(|metrics| metrics.rejected),
             },
             "transport": transport,
             "omitted": [

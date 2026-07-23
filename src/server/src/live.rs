@@ -1705,6 +1705,12 @@ mod tests {
     use crate::store::{OmenchatStore, ServerRoomEventKind};
     use crate::transport::{CapturedTransport, OMENCHAT_LINK_CONTEXT};
 
+    fn assert_replayed_response(replayed: &Frame, stored: &Frame, request_seq: u32) {
+        let mut expected = stored.clone();
+        expected.seq = request_seq;
+        assert_eq!(replayed, &expected);
+    }
+
     #[derive(Default)]
     struct FailOnceTransport {
         captured: CapturedTransport,
@@ -2649,7 +2655,7 @@ mod tests {
     }
 
     #[test]
-    fn unaccepted_durable_request_never_binds_client_instance_to_link() {
+    fn accepted_durable_request_binds_client_instance_to_identified_link() {
         let store = OmenchatStore::in_memory().expect("store");
         let engine = SessionEngine::new(store);
         let link_id = [18u8; 16];
@@ -2677,7 +2683,12 @@ mod tests {
         .expect("session response");
 
         assert!(live.handshake_complete(link_id));
-        assert!(live.durable_sessions.is_empty());
+        let binding = live
+            .durable_sessions
+            .get(&link_id)
+            .expect("accepted durable session binding");
+        assert_eq!(binding.client_instance_id, client_instance_id);
+        assert_eq!(binding.identity_hash, peer().identity_hash);
         assert_eq!(
             live.peers
                 .get(&link_id)
@@ -3384,10 +3395,150 @@ mod tests {
             .count();
 
         assert_eq!(origin_acks.len(), 2);
-        assert_eq!(origin_acks[0], origin_acks[1]);
+        assert_replayed_response(origin_acks[1], origin_acks[0], 4);
         assert_eq!(origin_acks[0].seq, 3);
         assert_eq!(observer_events, 1);
         assert_eq!(live.replay_cache.entries.len(), 0);
+    }
+
+    #[test]
+    fn durable_room_text_replay_on_replacement_link_uses_new_sequence_without_refanout() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let first_link = [25u8; 16];
+        let observer_link = [26u8; 16];
+        let replacement_link = [27u8; 16];
+
+        for (link_id, name) in [(first_link, "Alice"), (observer_link, "Bob")] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+
+        let client_instance_id = ClientInstanceId::new([33; 16]);
+        live.durable_sessions.insert(
+            first_link,
+            DurableSessionBinding {
+                identity_hash: b"Alice".to_vec(),
+                client_instance_id,
+            },
+        );
+        let body = FrameBody::Text("survives replacement".into());
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([34; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomMessage,
+                Some(1),
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: first_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::RoomMessage,
+                3,
+                Some(1),
+                envelope.clone(),
+            ))
+            .expect("first message"),
+        })
+        .expect("commit first message");
+        let original_ack = live
+            .transport()
+            .frames
+            .iter()
+            .filter(|captured| captured.link_id == first_link)
+            .filter_map(|captured| decode_frame(&captured.bytes).ok())
+            .find(|frame| frame.op == ChatOp::MessageAck && frame.seq == 3)
+            .expect("original acknowledgement");
+
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id: first_link,
+            reason: Some("response path lost".into()),
+        })
+        .expect("close first link");
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id: replacement_link,
+            peer: ServerPeer {
+                identity_hash: b"Alice".to_vec(),
+                display_name: "Alice".into(),
+                lxmf_destination: None,
+            },
+        })
+        .expect("open replacement link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                1,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("replacement join"),
+        })
+        .expect("join replacement room");
+        live.durable_sessions.insert(
+            replacement_link,
+            DurableSessionBinding {
+                identity_hash: b"Alice".to_vec(),
+                client_instance_id,
+            },
+        );
+        let frames_before_replay = live.transport().frames.len();
+
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::RoomMessage, 7, Some(1), envelope))
+                .expect("replacement replay"),
+        })
+        .expect("replay on replacement link");
+
+        let replayed = live
+            .transport()
+            .frames
+            .iter()
+            .skip(frames_before_replay)
+            .filter_map(|captured| {
+                decode_frame(&captured.bytes)
+                    .ok()
+                    .map(|frame| (captured.link_id, frame))
+            })
+            .collect::<Vec<_>>();
+        let replacement_ack = replayed
+            .iter()
+            .find(|(link_id, frame)| *link_id == replacement_link && frame.op == ChatOp::MessageAck)
+            .map(|(_, frame)| frame)
+            .expect("replacement acknowledgement");
+        assert_replayed_response(replacement_ack, &original_ack, 7);
+        assert!(!replayed
+            .iter()
+            .any(|(link_id, frame)| *link_id == observer_link && frame.op == ChatOp::RoomEvent));
     }
 
     #[test]
@@ -3482,7 +3633,7 @@ mod tests {
             .map(|(_, frame)| frame)
             .collect::<Vec<_>>();
         assert_eq!(origin_events.len(), 2);
-        assert_eq!(origin_events[0], origin_events[1]);
+        assert_replayed_response(origin_events[1], origin_events[0], 10);
         assert_eq!(origin_events[0].seq, 9);
         assert_eq!(
             routed
@@ -3582,7 +3733,7 @@ mod tests {
             .map(|(_, frame)| frame)
             .collect::<Vec<_>>();
         assert_eq!(origin_results.len(), 2);
-        assert_eq!(origin_results[0], origin_results[1]);
+        assert_replayed_response(origin_results[1], origin_results[0], 12);
         assert_eq!(origin_results[0].seq, 11);
         assert_eq!(
             routed
@@ -3682,7 +3833,7 @@ mod tests {
             .map(|(_, frame)| frame)
             .collect::<Vec<_>>();
         assert_eq!(origin_results.len(), 2);
-        assert_eq!(origin_results[0], origin_results[1]);
+        assert_replayed_response(origin_results[1], origin_results[0], 14);
         for op in [ChatOp::UserDelta, ChatOp::RoomEvent] {
             assert_eq!(
                 routed
@@ -3813,7 +3964,7 @@ mod tests {
                 .iter()
                 .filter(|captured| captured.link_id == admin_link)
                 .filter_map(|captured| decode_frame(&captured.bytes).ok())
-                .filter(|frame| { command_result_name(frame) == Some("kick") && frame.seq == 15 })
+                .filter(|frame| { command_result_name(frame) == Some("kick") && frame.seq == 16 })
                 .count(),
             1
         );
@@ -3954,7 +4105,7 @@ mod tests {
             .count();
 
         assert_eq!(origin_results.len(), 2);
-        assert_eq!(origin_results[0], origin_results[1]);
+        assert_replayed_response(origin_results[1], origin_results[0], 6);
         assert_eq!(origin_results[0].seq, 5);
         assert_eq!(observer_events, 1);
         assert_eq!(observer_userlists, 1);
@@ -4048,7 +4199,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(routed.iter().any(|(link_id, frame)| {
-            *link_id == link_a && is_successful_part_response(frame) && frame.seq == 7
+            *link_id == link_a && is_successful_part_response(frame) && frame.seq == 8
         }));
         assert_eq!(
             routed

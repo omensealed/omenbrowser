@@ -10,9 +10,10 @@ use crate::protocol::batch::{
 };
 use crate::protocol::codec::{decode_frame, encode_frame};
 use crate::protocol::{
-    canonical_mutation_request_hash, parse_session_open_negotiation, ChatErrorCode, ChatOp,
-    ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
-    PROTOCOL_NAME,
+    canonical_mutation_request_hash, parse_session_open_negotiation,
+    with_session_accept_negotiation, ChatErrorCode, ChatOp, ClientInstanceId, Compression,
+    DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId, SessionAcceptNegotiation,
+    DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -473,35 +474,57 @@ impl SessionEngine {
         if let Some(error) = self.reject_if_banned(peer, seq, None)? {
             return Ok(vec![error]);
         }
-        if parse_session_open_negotiation(&body).is_err() {
-            return Ok(vec![self.error_frame(
-                seq,
-                None,
-                ChatErrorCode::DurableMutationMalformed,
-                "invalid session capability negotiation",
-            )]);
-        }
+        let negotiation = match parse_session_open_negotiation(&body) {
+            Ok(negotiation) => negotiation,
+            Err(_) => {
+                return Ok(vec![self.error_frame(
+                    seq,
+                    None,
+                    ChatErrorCode::DurableMutationMalformed,
+                    "invalid session capability negotiation",
+                )]);
+            }
+        };
         let rooms = self
             .store
             .list_rooms()?
             .into_iter()
             .map(|room| room_to_value(&room))
             .collect::<Vec<_>>();
+        let mut response_body = FrameBody::Fields(vec![
+            FrameValue::String(PROTOCOL_NAME.into()),
+            FrameValue::Array(rooms),
+            self.server_motd
+                .clone()
+                .map(FrameValue::String)
+                .unwrap_or(FrameValue::Nil),
+            FrameValue::U64(self.limits.upload_quota_bytes),
+            FrameValue::U64(self.limits.ping_interval_seconds.clamp(5, 600)),
+            FrameValue::U64(self.limits.upload_max_file_bytes),
+        ]);
+        let durable_requested = negotiation.as_ref().is_some_and(|negotiation| {
+            negotiation.client_instance_id.is_some()
+                && negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
+        });
+        if durable_requested {
+            response_body = with_session_accept_negotiation(
+                response_body,
+                &SessionAcceptNegotiation {
+                    accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                },
+            )
+            .map_err(|error| {
+                ServerError::Message(format!("session capability response failed: {error}"))
+            })?;
+        }
         Ok(vec![Frame::new(
             ChatOp::SessionAccept,
             seq,
             None,
-            FrameBody::Fields(vec![
-                FrameValue::String(PROTOCOL_NAME.into()),
-                FrameValue::Array(rooms),
-                self.server_motd
-                    .clone()
-                    .map(FrameValue::String)
-                    .unwrap_or(FrameValue::Nil),
-                FrameValue::U64(self.limits.upload_quota_bytes),
-                FrameValue::U64(self.limits.ping_interval_seconds.clamp(5, 600)),
-                FrameValue::U64(self.limits.upload_max_file_bytes),
-            ]),
+            response_body,
         )])
     }
 
@@ -1325,7 +1348,7 @@ impl SessionEngine {
                 pruned,
             }),
             DurableRoomEventCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
-                origin: decode_durable_result(&result_frame)?,
+                origin: decode_durable_replay_result(&result_frame, seq)?,
                 broadcasts: Vec::new(),
                 disconnect_identity: None,
                 pruned: 0,
@@ -1490,7 +1513,7 @@ impl SessionEngine {
                 pruned,
             }),
             DurableRoomEventCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
-                origin: decode_durable_result(&result_frame)?,
+                origin: decode_durable_replay_result(&result_frame, seq)?,
                 broadcasts: Vec::new(),
                 disconnect_identity: None,
                 pruned: 0,
@@ -1967,7 +1990,7 @@ impl SessionEngine {
                 pruned,
             }),
             DurableMutationEffectCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
-                origin: decode_durable_result(&result_frame)?,
+                origin: decode_durable_replay_result(&result_frame, seq)?,
                 broadcasts: Vec::new(),
                 disconnect_identity: None,
                 pruned: 0,
@@ -3520,6 +3543,12 @@ fn decode_durable_result(bytes: &[u8]) -> ServerResult<Frame> {
     })
 }
 
+fn decode_durable_replay_result(bytes: &[u8], request_seq: u32) -> ServerResult<Frame> {
+    let mut frame = decode_durable_result(bytes)?;
+    frame.seq = request_seq;
+    Ok(frame)
+}
+
 fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
     matches!(
         error,
@@ -3534,6 +3563,12 @@ fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_replayed_response(replayed: &Frame, stored: &Frame, request_seq: u32) {
+        let mut expected = stored.clone();
+        expected.seq = request_seq;
+        assert_eq!(replayed, &expected);
+    }
     use crate::protocol::batch::{
         decode_compressed_values_body, decode_compressed_values_payload, decode_resource_offer_body,
     };
@@ -4308,7 +4343,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_durable_capability_request_keeps_legacy_session_accept() {
+    fn durable_capability_request_is_explicitly_accepted() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(
             FrameBody::Fields(vec![
@@ -4331,10 +4366,12 @@ mod tests {
         let FrameBody::Fields(fields) = &response[0].body else {
             panic!("session accept fields");
         };
-        assert_eq!(fields.len(), 6);
+        assert_eq!(fields.len(), 7);
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
-            Ok(None)
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
+            }))
         );
     }
 
@@ -5361,7 +5398,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable message");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 12);
         assert!(replayed.broadcasts.is_empty());
 
         let rate_limited = engine
@@ -5498,7 +5535,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed rejection");
-        assert_eq!(replayed.origin, rejected.origin);
+        assert_replayed_response(&replayed.origin, &rejected.origin, 32);
         assert!(replayed.broadcasts.is_empty());
         assert!(engine
             .store
@@ -5541,7 +5578,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed after restart");
-        assert_eq!(replayed.origin, original);
+        assert_replayed_response(&replayed.origin, &original, 42);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -5614,7 +5651,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable part");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 52);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -5684,7 +5721,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable notice");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 62);
         assert!(replayed.broadcasts.is_empty());
 
         let denied = engine
@@ -5771,7 +5808,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable topic");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 72);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -5839,7 +5876,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable create");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 82);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -5930,7 +5967,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable role");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 92);
         assert!(replayed.broadcasts.is_empty());
         assert_eq!(
             engine
@@ -6024,7 +6061,7 @@ mod tests {
                 envelope,
             )
             .expect("replayed durable unban");
-        assert_eq!(replayed.origin, stored.origin);
+        assert_replayed_response(&replayed.origin, &stored.origin, 102);
         assert!(replayed.broadcasts.is_empty());
         assert_ne!(
             engine
@@ -6161,7 +6198,9 @@ mod tests {
                     envelope,
                 )
                 .expect("replayed durable moderation");
-            assert_eq!(replayed.origin, stored.origin, "{action}");
+            let mut expected = stored.origin.clone();
+            expected.seq = 120 + index as u32;
+            assert_eq!(replayed.origin, expected, "{action}");
             assert!(replayed.broadcasts.is_empty(), "{action}");
             assert!(replayed.disconnect_identity.is_none(), "{action}");
             assert_eq!(

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::client::{
     enforce_client_event_presentation_bounds, enforce_room_catalog_bounds,
     enforce_user_catalog_bounds, ChatClient, ChatClientEvent, ChatClientRequest, ChatSessionId,
-    ChatSessionView, CHAT_CLIENT_MAX_SESSIONS,
+    ChatSessionView, DurableMutationTerminalState, CHAT_CLIENT_MAX_SESSIONS,
 };
 use super::descriptor::OmenChatDescriptor;
 use super::model::{
@@ -13,9 +13,13 @@ use super::model::{
     CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_STATUS_MAX_BYTES, CHAT_UPLOAD_FILENAME_MAX_BYTES,
     CHAT_USER_DISPLAY_MAX_BYTES,
 };
+use super::mutation_intents::{OutboundMutationIntent, OutboundMutationState};
 use super::protocol::{
-    ChatErrorCode, ChatOp, ClientInstanceId, Frame, FrameBody, FrameValue, RoomId,
-    DEFAULT_JOIN_BACKLOG_EVENTS, PROTOCOL_NAME,
+    canonical_mutation_request_hash, parse_session_accept_negotiation,
+    with_session_open_negotiation, ChatErrorCode, ChatOp, ClientInstanceId,
+    DurableMutationEnvelope, Frame, FrameBody, FrameValue, MutationId, RoomId,
+    SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
+    PROTOCOL_NAME,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -54,6 +58,9 @@ pub struct LivePendingLocalEchoMetrics {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveChatClientState {
     client_instance_id: Option<ClientInstanceId>,
+    durable_mutation_owner_ready: bool,
+    durable_requests: BTreeSet<ChatSessionId>,
+    durable_sessions: BTreeSet<ChatSessionId>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
     pending_uploads: BTreeMap<(ChatSessionId, u32), PendingLiveUpload>,
@@ -71,6 +78,7 @@ struct PendingLocalEcho {
     session_id: ChatSessionId,
     room_id: RoomId,
     temp_event_id: u64,
+    mutation_id: Option<MutationId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,10 +103,33 @@ struct PendingLiveUploadDownload {
 impl LiveChatClientState {
     pub fn set_client_instance_id(&mut self, client_instance_id: Option<ClientInstanceId>) {
         self.client_instance_id = client_instance_id;
+        self.durable_mutation_owner_ready = client_instance_id.is_some();
     }
 
     pub fn client_instance_id(&self) -> Option<ClientInstanceId> {
         self.client_instance_id
+    }
+
+    pub fn set_durable_mutation_owner_ready(&mut self, ready: bool) {
+        self.durable_mutation_owner_ready = ready && self.client_instance_id.is_some();
+    }
+
+    pub fn durable_mutation_owner_ready(&self) -> bool {
+        self.durable_mutation_owner_ready
+    }
+
+    pub fn durable_mutations_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.durable_sessions.contains(&session_id)
+    }
+
+    pub fn durable_mutation_is_pending(
+        &self,
+        session_id: ChatSessionId,
+        mutation_id: MutationId,
+    ) -> bool {
+        self.pending_local_echoes.values().any(|pending| {
+            pending.session_id == session_id && pending.mutation_id == Some(mutation_id)
+        })
     }
 
     fn reserve_sequence_range(
@@ -195,9 +226,21 @@ impl LiveChatClientState {
             .retain(|_, download| download.session_id != session_id);
     }
 
-    pub fn retire_session_link_state(&mut self, session_id: ChatSessionId) {
+    pub fn retire_session_link_state(
+        &mut self,
+        session_id: ChatSessionId,
+    ) -> BTreeSet<(RoomId, u64)> {
+        let retired_echoes = self
+            .pending_local_echoes
+            .values()
+            .filter(|echo| echo.session_id == session_id && echo.mutation_id.is_some())
+            .map(|echo| (echo.room_id, echo.temp_event_id))
+            .collect();
         self.cancel_session_transfers(session_id);
         self.next_seq_by_session.remove(&session_id);
+        self.durable_requests.remove(&session_id);
+        self.durable_sessions.remove(&session_id);
+        retired_echoes
     }
 }
 
@@ -364,10 +407,13 @@ pub fn reconnect_live_server<T: ChatLinkTransport>(
             message: "OMENchat reconnect destination changed".into(),
         }];
     }
-    state.retire_session_link_state(session_id);
+    let retired_echoes = state.retire_session_link_state(session_id);
     let session = client
         .session_mut(session_id)
         .expect("reconnect session was validated above");
+    session
+        .events
+        .retain(|event| !retired_echoes.contains(&(event.room_id, event.event_id)));
     session.status = "live link connected; reopening OMENchat session".into();
 
     let mut events = vec![ChatClientEvent::ServerOpened {
@@ -529,7 +575,10 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         Ok(sequences) => sequences,
         Err(_) => return vec![sequence_space_exhausted_event(session_id)],
     };
-    let session_open_body = local_display_name
+    state.durable_sessions.remove(&session_id);
+    state.durable_requests.remove(&session_id);
+    let mut durable_requested = false;
+    let mut session_open_body = local_display_name
         .map(|name| {
             FrameBody::Fields(vec![
                 FrameValue::String(PROTOCOL_NAME.into()),
@@ -537,6 +586,27 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
             ])
         })
         .unwrap_or(FrameBody::Empty);
+    if let Some(client_instance_id) = state
+        .client_instance_id
+        .filter(|_| state.durable_mutation_owner_ready)
+    {
+        session_open_body = match with_session_open_negotiation(
+            session_open_body,
+            &SessionOpenNegotiation {
+                requested_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                client_instance_id: Some(client_instance_id),
+            },
+        ) {
+            Ok(body) => body,
+            Err(error) => {
+                return vec![ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: format!("OMENchat capability negotiation failed: {error}"),
+                }];
+            }
+        };
+        durable_requested = true;
+    }
     if let Err(error) = send_chat_frame(
         transport,
         &Frame::new(
@@ -551,6 +621,9 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
             message: format!("OMENchat live session open failed: {error}"),
         });
         return events;
+    }
+    if durable_requested {
+        state.durable_requests.insert(session_id);
     }
 
     let room_name = client
@@ -676,6 +749,7 @@ fn send_live_room_text<T: ChatLinkTransport>(
                         session_id,
                         room_id,
                         temp_event_id: local_echo.event_id,
+                        mutation_id: None,
                     },
                 );
                 let mut events = vec![ChatClientEvent::EventAppended {
@@ -694,6 +768,116 @@ fn send_live_room_text<T: ChatLinkTransport>(
             }
         }
     }
+}
+
+pub fn send_uncertain_durable_room_text<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    intent: &OutboundMutationIntent,
+) -> Vec<ChatClientEvent> {
+    let error = |message: &str| {
+        vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: message.into(),
+        }]
+    };
+    if !state.durable_mutations_negotiated(session_id) {
+        return error("durable OMENchat mutation was not negotiated for this live session");
+    }
+    if intent.state != OutboundMutationState::SentUncertain {
+        return error("durable OMENchat mutation must be persisted as uncertain before sending");
+    }
+    if intent.expires_at <= current_unix_secs() {
+        return error("durable OMENchat mutation has expired");
+    }
+    if state.client_instance_id != Some(intent.client_instance_id) {
+        return error("durable OMENchat mutation belongs to a different client instance");
+    }
+    let Some(session) = client.session(session_id) else {
+        return error("OMENchat live session is not available");
+    };
+    if session.server.destination != intent.server_destination {
+        return error("durable OMENchat mutation belongs to a different server");
+    }
+    let room_id = session.active_room.room_id;
+    if intent.room_id != Some(room_id) {
+        return error("durable OMENchat mutation belongs to a different room");
+    }
+    if !matches!(intent.op, ChatOp::RoomMessage | ChatOp::RoomAction) {
+        return error("durable OMENchat mutation operation is not enabled for live client sending");
+    }
+    if !matches!(
+        canonical_mutation_request_hash(intent.op, intent.room_id, &intent.body),
+        Ok(request_hash) if request_hash == intent.request_hash
+    ) {
+        return error("durable OMENchat mutation request hash does not match its stored request");
+    }
+    let body = match &intent.body {
+        FrameBody::Text(body) => body.clone(),
+        _ => return error("durable OMENchat room text body is invalid"),
+    };
+    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_local_echo_session_items(session_id)
+            >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
+    {
+        state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
+        return error(
+            "OMENchat pending message queue is full; wait for server acceptance or reconnect",
+        );
+    }
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
+    let envelope = match (DurableMutationEnvelope {
+        mutation_id: intent.mutation_id,
+        request_hash: intent.request_hash,
+        body: intent.body.clone(),
+    })
+    .into_frame_body()
+    {
+        Ok(body) => body,
+        Err(error) => {
+            return vec![ChatClientEvent::Error {
+                session_id: Some(session_id),
+                message: format!("durable OMENchat mutation envelope is invalid: {error}"),
+            }];
+        }
+    };
+    if let Some(event) = send_frame_or_error(
+        transport,
+        Frame::new(intent.op, seq, Some(room_id), envelope),
+        Some(session_id),
+    ) {
+        return vec![event];
+    }
+    let Some(local_echo) =
+        append_pending_local_echo(client, session_id, room_id, seq, body, intent.op)
+    else {
+        return drain_live_events(client, transport, Some(session_id));
+    };
+    state.pending_local_echoes.insert(
+        (session_id, seq),
+        PendingLocalEcho {
+            session_id,
+            room_id,
+            temp_event_id: local_echo.event_id,
+            mutation_id: Some(intent.mutation_id),
+        },
+    );
+    let mut events = vec![ChatClientEvent::EventAppended {
+        session_id,
+        event: local_echo,
+    }];
+    events.extend(drain_live_events_with_state(
+        client,
+        state,
+        transport,
+        Some(session_id),
+    ));
+    events
 }
 
 fn append_pending_local_echo(
@@ -1227,6 +1411,27 @@ fn apply_frame_with_state(
 ) {
     match frame.op {
         ChatOp::SessionAccept => {
+            let durable_accepted = parse_session_accept_negotiation(&frame.body)
+                .ok()
+                .flatten()
+                .is_some_and(|negotiation| {
+                    negotiation
+                        .accepted_capabilities
+                        .iter()
+                        .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
+                });
+            if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
+                let request_pending = state.durable_requests.remove(&session_id);
+                let already_accepted = state.durable_sessions.contains(&session_id);
+                if durable_accepted
+                    && state.client_instance_id.is_some()
+                    && (request_pending || already_accepted)
+                {
+                    state.durable_sessions.insert(session_id);
+                } else {
+                    state.durable_sessions.remove(&session_id);
+                }
+            }
             let policy = body_values(&frame.body).map(|values| {
                 let upload_quota_bytes = values.get(3)?.as_u64()?;
                 let ping_interval_seconds = values.get(4)?.as_u64()?.clamp(5, 600);
@@ -1390,6 +1595,17 @@ fn apply_frame_with_state(
             }
         }
         ChatOp::Error | ChatOp::SessionReject => {
+            if frame.op == ChatOp::Error {
+                if let Some(state) = state {
+                    apply_durable_terminal_error(
+                        client,
+                        state,
+                        preferred_session_id,
+                        &frame,
+                        events,
+                    );
+                }
+            }
             events.push(ChatClientEvent::Error {
                 session_id: preferred_session_id,
                 message: parse_error_text(&frame.body),
@@ -1755,6 +1971,54 @@ fn apply_message_ack(
     events.push(ChatClientEvent::EventAppended {
         session_id: pending.session_id,
         event: confirmed,
+    });
+    if let Some(mutation_id) = pending.mutation_id {
+        events.push(ChatClientEvent::DurableMutationAcknowledged {
+            session_id: pending.session_id,
+            mutation_id,
+        });
+    }
+}
+
+fn apply_durable_terminal_error(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let Some(session_id) = preferred_session_id else {
+        return;
+    };
+    let terminal = match frame_error_code(&frame.body) {
+        Some(code) if code == ChatErrorCode::DurableMutationConflict as u16 => {
+            DurableMutationTerminalState::Conflict
+        }
+        Some(code) if code == ChatErrorCode::DurableMutationResultExpired as u16 => {
+            DurableMutationTerminalState::Expired
+        }
+        _ => return,
+    };
+    let Some(pending) = state
+        .pending_local_echoes
+        .get(&(session_id, frame.seq))
+        .cloned()
+    else {
+        return;
+    };
+    let Some(mutation_id) = pending.mutation_id else {
+        return;
+    };
+    state.pending_local_echoes.remove(&(session_id, frame.seq));
+    if let Some(session) = client.session_mut(session_id) {
+        session.events.retain(|event| {
+            event.room_id != pending.room_id || event.event_id != pending.temp_event_id
+        });
+    }
+    events.push(ChatClientEvent::DurableMutationTerminal {
+        session_id,
+        mutation_id,
+        state: terminal,
     });
 }
 
@@ -2639,6 +2903,16 @@ fn parse_error_text(body: &FrameBody) -> String {
     }
 }
 
+fn frame_error_code(body: &FrameBody) -> Option<u16> {
+    let FrameBody::Fields(values) = body else {
+        return None;
+    };
+    values
+        .first()
+        .and_then(FrameValueExt::as_u64)
+        .and_then(|code| u16::try_from(code).ok())
+}
+
 fn error_code_label(code: u64) -> Option<&'static str> {
     match code as u16 {
         value if value == ChatErrorCode::PermissionDenied as u16 => Some("permission denied"),
@@ -2887,6 +3161,11 @@ mod tests {
         );
 
         assert_eq!(transport.sent_frames.len(), 2);
+        let session_open = decode_frame(&transport.sent_frames[0]).expect("session open");
+        assert_eq!(
+            crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
+            Ok(None)
+        );
         assert!(matches!(
             events.first(),
             Some(ChatClientEvent::ServerOpened { session_id: 1, .. })
@@ -2897,6 +3176,398 @@ mod tests {
         assert_eq!(session.rooms[0].name, "lobby");
         assert_eq!(session.users[0].display_name, "Operator");
         assert_eq!(session.events.len(), 1);
+    }
+
+    #[test]
+    fn live_open_advertises_durable_mutations_only_with_persistent_client_identity() {
+        let client_instance_id = ClientInstanceId::new([7; 16]);
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        let mut transport = CapturedChatTransport::default();
+
+        let events = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::OpenServer(OmenChatDescriptor {
+                server_destination: "abcd".into(),
+                local_display_name: Some("Alice".into()),
+                ..OmenChatDescriptor::default()
+            }),
+        );
+
+        assert!(matches!(
+            events.first(),
+            Some(ChatClientEvent::ServerOpened { session_id: 1, .. })
+        ));
+        let session_open = decode_frame(&transport.sent_frames[0]).expect("session open");
+        assert_eq!(session_open.op, ChatOp::SessionOpen);
+        assert_eq!(
+            crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
+            Ok(Some(SessionOpenNegotiation {
+                requested_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                client_instance_id: Some(client_instance_id),
+            }))
+        );
+        assert!(state.durable_requests.contains(&1));
+        assert!(!state.durable_mutations_negotiated(1));
+    }
+
+    #[test]
+    fn durable_session_activation_requires_acceptance_and_is_cleared_on_downgrade() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: Vec::new(),
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "opening".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(ClientInstanceId::new([8; 16])));
+        state.durable_requests.insert(session_id);
+        let mut transport = NoopChatTransport;
+        let mut events = Vec::new();
+        let accepted_body = crate::chat::protocol::with_session_accept_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::Array(Vec::new()),
+            ]),
+            &crate::chat::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+            },
+        )
+        .expect("negotiated accept");
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 1, None, accepted_body.clone()),
+            &mut events,
+        );
+        assert!(state.durable_mutations_negotiated(session_id));
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::SessionAccept,
+                2,
+                None,
+                FrameBody::Fields(vec![
+                    FrameValue::String(PROTOCOL_NAME.into()),
+                    FrameValue::Array(Vec::new()),
+                ]),
+            ),
+            &mut events,
+        );
+        assert!(!state.durable_mutations_negotiated(session_id));
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 3, None, accepted_body),
+            &mut events,
+        );
+        assert!(!state.durable_mutations_negotiated(session_id));
+    }
+
+    fn durable_room_text_intent(
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+    ) -> OutboundMutationIntent {
+        let body = FrameBody::Text("durable hello".into());
+        OutboundMutationIntent {
+            server_destination: "abcd".into(),
+            authenticated_identity_hash: vec![3; 16],
+            client_instance_id,
+            mutation_id: MutationId::new([4; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomMessage,
+                Some(1),
+                &body,
+            )
+            .expect("request hash"),
+            op: ChatOp::RoomMessage,
+            room_id: Some(1),
+            body,
+            state,
+            created_at: 10,
+            expires_at: i64::MAX,
+            correlation_id: None,
+        }
+    }
+
+    #[test]
+    fn durable_room_text_requires_negotiation_and_uncertain_persistence_before_send() {
+        let client_instance_id = ClientInstanceId::new([2; 16]);
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        let mut transport = CapturedChatTransport::default();
+
+        let intent =
+            durable_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        let events = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+        assert!(transport.sent_frames.is_empty());
+
+        state.durable_sessions.insert(session_id);
+        let prepared =
+            durable_room_text_intent(client_instance_id, OutboundMutationState::Prepared);
+        let events = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &prepared,
+        );
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+        assert!(transport.sent_frames.is_empty());
+
+        let mut tampered =
+            durable_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        tampered.request_hash = crate::chat::protocol::RequestHash::new([9; 32]);
+        let events = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &tampered,
+        );
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+        assert!(transport.sent_frames.is_empty());
+    }
+
+    #[test]
+    fn durable_room_text_sends_canonical_envelope_and_correlates_acknowledgement() {
+        let client_instance_id = ClientInstanceId::new([2; 16]);
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::MessageAck,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::U64(11),
+                    FrameValue::U64(1),
+                    FrameValue::U64(7),
+                    FrameValue::I64(12),
+                    FrameValue::String("Alice".into()),
+                ]),
+            ))
+            .expect("message ack");
+        let intent =
+            durable_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+
+        let events = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+
+        let sent = decode_frame(&transport.sent_frames[0]).expect("durable frame");
+        let envelope = DurableMutationEnvelope::from_frame_body(&sent.body).expect("envelope");
+        assert_eq!(sent.op, ChatOp::RoomMessage);
+        assert_eq!(sent.room_id, Some(1));
+        assert_eq!(envelope.mutation_id, intent.mutation_id);
+        assert_eq!(envelope.request_hash, intent.request_hash);
+        assert_eq!(envelope.body, intent.body);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id: acknowledged_session,
+                mutation_id,
+            } if *acknowledged_session == session_id && *mutation_id == intent.mutation_id
+        )));
+        assert!(state.pending_local_echoes.is_empty());
+        assert_eq!(
+            client.session(session_id).expect("session").events[0].event_id,
+            11
+        );
+    }
+
+    #[test]
+    fn durable_terminal_errors_release_only_correlated_pending_echoes() {
+        for (code, expected) in [
+            (
+                ChatErrorCode::DurableMutationConflict,
+                DurableMutationTerminalState::Conflict,
+            ),
+            (
+                ChatErrorCode::DurableMutationResultExpired,
+                DurableMutationTerminalState::Expired,
+            ),
+        ] {
+            let client_instance_id = ClientInstanceId::new([42; 16]);
+            let mut client = ChatClient::new();
+            let session_id = client.reserve_session_id();
+            client.push_session(ChatSessionView {
+                session_id,
+                server: ChatServerSummary {
+                    server_id: "abcd".into(),
+                    destination: "abcd".into(),
+                    display_name: "Test Chat".into(),
+                },
+                rooms: vec![room_summary("abcd", 1, "lobby")],
+                active_room: room_summary("abcd", 1, "lobby"),
+                users: Vec::new(),
+                events: Vec::new(),
+                status: "ready".into(),
+            });
+            let mut state = LiveChatClientState::default();
+            state.set_client_instance_id(Some(client_instance_id));
+            state.durable_sessions.insert(session_id);
+            let mut transport = CapturedChatTransport::default();
+            transport
+                .push_incoming_frame(&Frame::new(
+                    ChatOp::Error,
+                    1,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::U64(code as u16 as u64),
+                        FrameValue::String("terminal durable result".into()),
+                    ]),
+                ))
+                .expect("terminal response");
+            let intent =
+                durable_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+
+            let events = send_uncertain_durable_room_text(
+                &mut client,
+                &mut state,
+                &mut transport,
+                session_id,
+                &intent,
+            );
+
+            assert!(events.iter().any(|event| matches!(
+                event,
+                ChatClientEvent::DurableMutationTerminal {
+                    session_id: terminal_session,
+                    mutation_id,
+                    state: terminal_state,
+                } if *terminal_session == session_id
+                    && *mutation_id == intent.mutation_id
+                    && *terminal_state == expected
+            )));
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, ChatClientEvent::Error { .. })));
+            assert!(state.pending_local_echoes.is_empty());
+            assert!(client
+                .session(session_id)
+                .expect("session")
+                .events
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn nonterminal_or_uncorrelated_durable_errors_preserve_uncertain_work() {
+        let client_instance_id = ClientInstanceId::new([43; 16]);
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        let mut transport = CapturedChatTransport::default();
+        for (seq, code) in [
+            (99, ChatErrorCode::DurableMutationConflict),
+            (1, ChatErrorCode::DurableMutationStoreBusy),
+        ] {
+            transport
+                .push_incoming_frame(&Frame::new(
+                    ChatOp::Error,
+                    seq,
+                    Some(1),
+                    FrameBody::Fields(vec![FrameValue::U64(code as u16 as u64)]),
+                ))
+                .expect("error response");
+        }
+        let intent =
+            durable_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+
+        let events = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ChatClientEvent::DurableMutationTerminal { .. })));
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+        assert_eq!(client.session(session_id).expect("session").events.len(), 1);
     }
 
     #[test]
@@ -3496,6 +4167,20 @@ mod tests {
             inline_chunk_frame("download", 64, 1, vec![2; 16]),
             &mut events,
         );
+        assert!(matches!(
+            handle_live_request(
+                &mut client,
+                &mut state,
+                &mut transport,
+                ChatClientRequest::SendMessage {
+                    session_id,
+                    room: "lobby".into(),
+                    body: "legacy uncertain".into(),
+                },
+            )
+            .as_slice(),
+            [ChatClientEvent::EventAppended { .. }]
+        ));
 
         let reconnect_events = reconnect_live_server(
             &mut client,
@@ -3514,6 +4199,7 @@ mod tests {
         ));
         assert_eq!(state.pending_upload_metrics().items, 0);
         assert_eq!(state.inline_download_metrics().items, 0);
+        assert_eq!(client.session(session_id).expect("session").events.len(), 1);
         let reconnect_sequences = transport
             .sent_frames
             .iter()
@@ -3522,6 +4208,69 @@ mod tests {
             .map(|bytes| decode_frame(bytes).expect("reconnect frame").seq)
             .collect::<Vec<_>>();
         assert_eq!(reconnect_sequences, vec![2, 1]);
+    }
+
+    #[test]
+    fn live_reconnect_removes_retired_durable_echo_and_requires_renegotiation() {
+        let (mut client, session_id) = live_test_client();
+        let client_instance_id = ClientInstanceId::new([55; 16]);
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        let intent =
+            durable_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        let mut transport = CapturedChatTransport::default();
+
+        let sent = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert!(matches!(
+            sent.as_slice(),
+            [ChatClientEvent::EventAppended { .. }]
+        ));
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+        assert_eq!(client.session(session_id).expect("session").events.len(), 1);
+
+        let reconnect_events = reconnect_live_server(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            OmenChatDescriptor {
+                server_destination: "abcd".into(),
+                ..OmenChatDescriptor::default()
+            },
+        );
+
+        assert!(matches!(
+            reconnect_events.first(),
+            Some(ChatClientEvent::ServerOpened { .. })
+        ));
+        assert!(client
+            .session(session_id)
+            .expect("session")
+            .events
+            .is_empty());
+        assert!(!state.durable_mutation_is_pending(session_id, intent.mutation_id));
+        assert!(!state.durable_mutations_negotiated(session_id));
+        assert!(state.durable_requests.contains(&session_id));
+        let frames_before_retry = transport.sent_frames.len();
+        assert!(matches!(
+            send_uncertain_durable_room_text(
+                &mut client,
+                &mut state,
+                &mut transport,
+                session_id,
+                &intent,
+            )
+            .as_slice(),
+            [ChatClientEvent::Error { .. }]
+        ));
+        assert_eq!(transport.sent_frames.len(), frames_before_retry);
     }
 
     #[test]
@@ -4214,7 +4963,7 @@ mod tests {
         assert_eq!(state.reserve_seq(33), Ok(u32::MAX));
         assert!(state.reserve_seq(33).is_err());
 
-        state.retire_session_link_state(11);
+        let _ = state.retire_session_link_state(11);
         assert_eq!(state.reserve_seq_pair(11), Ok([1, 2]));
     }
 
@@ -4228,6 +4977,7 @@ mod tests {
                     session_id,
                     room_id: 1,
                     temp_event_id: local_echo_event_id(1),
+                    mutation_id: None,
                 },
             );
             state.pending_uploads.insert(
@@ -4388,6 +5138,7 @@ mod tests {
                     session_id: owner_session_id,
                     room_id: 1,
                     temp_event_id: local_echo_event_id(seq),
+                    mutation_id: None,
                 },
             );
         }

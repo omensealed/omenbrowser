@@ -55,6 +55,8 @@ grep -q 'uses: \./\.github/workflows/native-checks\.yml' .github/workflows/ci.ym
   || fail "CI does not invoke native checks"
 grep -q 'uses: \./\.github/workflows/native-checks\.yml' .github/workflows/package.yml \
   || fail "packaging does not invoke native checks"
+grep -q 'package_scope:' .github/workflows/package.yml \
+  || fail "manual packaging lacks a bounded artifact scope"
 grep -q 'cargo install --locked --version 0\.22\.2 cargo-audit' .github/workflows/ci.yml \
   || fail "CI does not pin cargo-audit 0.22.2"
 grep -q 'bash scripts/verify-accepted-advisories.sh' .github/workflows/ci.yml \
@@ -74,7 +76,7 @@ grep -q '^    needs: native$' <<<"$package_job" \
 grep -q 'contents: write' <<<"$package_job" \
   && fail "package build job has contents: write"
 
-windows_package_job="$(sed -n '/^  windows-portable:$/,/^  publish:$/p' .github/workflows/package.yml)"
+windows_package_job="$(sed -n '/^  windows-portable:$/,/^  macos-packages:$/p' .github/workflows/package.yml)"
 grep -q '^    needs: native$' <<<"$windows_package_job" \
   || fail "Windows portable build does not depend on native checks"
 grep -q '^    runs-on: windows-2025$' <<<"$windows_package_job" \
@@ -91,6 +93,41 @@ for installer_pattern in '-setup-unsigned.exe' '-unsigned.msi'; do
 done
 grep -q 'contents: write' <<<"$windows_package_job" \
   && fail "Windows portable build job has contents: write"
+
+macos_package_job="$(sed -n '/^  macos-packages:$/,/^  publish:$/p' .github/workflows/package.yml)"
+grep -q '^    needs: native$' <<<"$macos_package_job" \
+  || fail "macOS package build does not depend on native checks"
+for runner in macos-15-intel macos-15; do
+  grep -q "runner: $runner" <<<"$macos_package_job" \
+    || fail "macOS package build lacks native runner $runner"
+done
+grep -q 'bash scripts/package-macos.sh dist --run-lifecycle-smoke' <<<"$macos_package_job" \
+  || fail "macOS package build does not run the reviewed lifecycle gate"
+grep -q "inputs.package_scope == 'macos'" <<<"$macos_package_job" \
+  || fail "macOS-only manual qualification scope is missing"
+for artifact_arch in x86_64 aarch64; do
+  grep -q "artifact_arch: $artifact_arch" <<<"$macos_package_job" \
+    || fail "macOS package build lacks architecture $artifact_arch"
+done
+for artifact_pattern in '-unsigned.dmg' 'omenchatd-.*macos-.*\.tar\.gz'; do
+  grep -Eq -- "$artifact_pattern" <<<"$macos_package_job" \
+    || fail "macOS artifact upload lacks $artifact_pattern"
+done
+grep -q 'contents: write' <<<"$macos_package_job" \
+  && fail "macOS package build job has contents: write"
+
+macos_package_script=scripts/package-macos.sh
+[[ -f "$macos_package_script" ]] || fail "macOS package script is missing"
+grep -q 'bash -n scripts/package-macos.sh' scripts/release-check.sh \
+  || fail "Linux release checks do not syntax-check macOS packaging"
+grep -q 'hdiutil create' "$macos_package_script" \
+  || fail "macOS package script does not create a native DMG"
+grep -q 'hdiutil attach .* -readonly -nobrowse' "$macos_package_script" \
+  || fail "macOS package script does not mount the DMG read-only"
+grep -q -- '--desktop --app-root' "$macos_package_script" \
+  || fail "macOS package smoke does not isolate application state"
+grep -q 'tell application id.*to quit' "$macos_package_script" \
+  || fail "macOS package smoke does not request normal application quit"
 
 installer_script=scripts/package-windows-installers.ps1
 [[ -f "$installer_script" ]] || fail "Windows installer script is missing"
@@ -118,6 +155,14 @@ grep -q '^      - package$' <<<"$publish_job" \
   || fail "publish job does not depend on Linux package"
 grep -q '^      - windows-portable$' <<<"$publish_job" \
   || fail "publish job does not depend on Windows portable package"
+grep -q '^      - macos-packages$' <<<"$publish_job" \
+  || fail "publish job does not depend on macOS packages"
+for artifact_name in \
+  omenbrowser-rs-macos-x86_64-artifacts \
+  omenbrowser-rs-macos-aarch64-artifacts; do
+  grep -q "name: $artifact_name" <<<"$publish_job" \
+    || fail "publish job does not download $artifact_name"
+done
 grep -q '^    environment: release$' <<<"$publish_job" \
   || fail "publish job lacks the release environment gate"
 grep -q '^      contents: write$' <<<"$publish_job" \
