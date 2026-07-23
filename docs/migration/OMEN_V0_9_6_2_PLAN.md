@@ -160,7 +160,8 @@ behavior.
 
 ## Unit 3 — release qualification
 
-Status: local qualification complete; bundled hosted qualification pending.
+Status: local and bundled hosted qualification complete; merge/tag publication
+pending.
 Root and standalone-server application metadata, lockfile
 entries, active version assertions, current-version interoperability report
 names, and current user documentation now identify `0.9.6-2`. The Reticulum/

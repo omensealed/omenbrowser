@@ -37,24 +37,27 @@ that an unrun native, Python, packaging, or live-network case passed.
 
 Run these once from a stable candidate rather than on each development commit:
 
-- [ ] Native Linux/Windows/macOS CI.
-- [ ] Pinned and current Python interoperability.
-- [ ] Mixed v0.6.0-1 and adjacent v0.9.5-2 compatibility.
+- [x] Native Linux/Windows/macOS CI: run `29969737861` passed at `46ff3e0`.
+- [x] Pinned and current Python interoperability: run `29969738610` passed.
+- [x] Mixed v0.6.0-1 and adjacent v0.9.5-2 compatibility passed in the same
+  interoperability run.
 - [x] Mixed published v0.9.6-1 and candidate v0.9.6-2 OMENchat local
   compatibility: state reopen, both live directions, and old-client/current-
   server restart pass. The hosted checkpoint repeats this evidence.
-- [ ] Linux formats and checksums.
-- [ ] Windows portable ZIP, NSIS setup, WiX MSI, and standalone omenchatd.
-- [ ] Unsigned Intel and Apple Silicon DMGs and standalone omenchatd archives.
-- [ ] Package install/launch/isolated-root/uninstall and data-preservation gates.
+- [x] Linux tarball, Debian, and AppImage artifacts and checksums.
+- [x] Windows portable ZIP, NSIS setup, WiX MSI, and standalone omenchatd.
+- [x] Unsigned Intel and Apple Silicon DMGs and standalone omenchatd archives.
+- [x] Package install/launch/isolated-root/uninstall and data-preservation gates
+  passed in package run `29969739533`.
 
 ## Release evidence
 
-- [ ] Hosted workflow URLs and artifact manifest recorded.
+- [x] Hosted workflow URLs and exact artifact inventory recorded in
+  `RELEASE_NOTES_V0_9_6_2.md`; downloaded qualification checksums verified.
 - [x] Known upstream maximum UDP Resource limitation remains documented.
 - [x] Accepted build-time advisory boundary is unchanged and reviewed by the
   passing local release gate.
-- [ ] Release notes distinguish deterministic, live, native, and untested claims.
+- [x] Release notes distinguish deterministic, live, native, and untested claims.
 - [ ] Working tree is clean and the candidate commit is identified.
 - [ ] Maintainer explicitly authorizes tag and publication.
 
