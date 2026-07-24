@@ -54,6 +54,21 @@ reproducible`, `superseded`, and `not yet inspected`.
 
 ## Supplemental hardening units
 
+- v0.9.6-3 hosted release qualification: PR run `30040924119` passed the
+  Windows x86_64, Intel macOS, Apple Silicon macOS, and Linux quick matrices on
+  exact candidate `c5f0daf`. Annotated tag `v0.9.6-3` resolves with `main` and
+  `origin/main` to merge commit `414d8ea`. Tag run `30042355552` passed every
+  native prerequisite, Linux artifact, Windows portable/NSIS/MSI, Intel and
+  Apple Silicon DMG, standalone omenchatd, and privileged publication job.
+  Twenty-four assets were published; all 11 distributable archives/installers
+  passed independent adjacent-checksum verification and the Linux artifacts
+  also passed the aggregate manifest. This supersedes F-026's statement that
+  no hosted native job had executed, but does not claim physical native
+  terminal input/signal behavior or hardware GPU measurements. F-004 remains
+  partially addressed: GitHub reports the `release` environment exists and
+  the real tag handoff/publication succeeded, but its `protection_rules` list
+  is empty, so required-reviewer protection is not configured.
+
 - Hosted Python-interoperability environment correction: checked-out pinned
   Reticulum/LXMF source paths are canonicalized before Cargo changes the test
   process working directory, so every fixture verifies the intended immutable

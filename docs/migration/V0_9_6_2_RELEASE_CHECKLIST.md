@@ -58,8 +58,10 @@ Run these once from a stable candidate rather than on each development commit:
 - [x] Accepted build-time advisory boundary is unchanged and reviewed by the
   passing local release gate.
 - [x] Release notes distinguish deterministic, live, native, and untested claims.
-- [ ] Working tree is clean and the candidate commit is identified.
-- [ ] Maintainer explicitly authorizes tag and publication.
+- [x] Published candidate is merge commit `5b64626`; tag `v0.9.6-2` resolves
+  to that clean release source.
+- [x] Maintainer authorized tag/publication and the release was published on
+  2026-07-23.
 
 ## Rollback
 

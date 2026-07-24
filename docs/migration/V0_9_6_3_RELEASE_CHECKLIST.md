@@ -31,10 +31,15 @@ Reticulum/LXMF train: exact `0.9.6`
   all-target Clippy passes with `-D warnings`.
 - [x] Standalone omenchatd focused/relocation gates pass; its unchanged full
   test and Clippy matrix passed on the `v0.9.6-2` baseline.
-- [ ] Native GitHub checks pass on the exact candidate.
-- [ ] Linux, Windows, and both macOS package jobs pass.
-- [ ] Published artifacts and checksums are verified.
-- [ ] Candidate commit is identified and the working tree is clean.
+- [x] Native GitHub checks pass on exact candidate `c5f0daf` in run
+  `30040924119`.
+- [x] Linux, Windows, Intel macOS, and Apple Silicon package jobs pass in tag
+  run `30042355552`.
+- [x] All 11 published distributable artifacts pass their adjacent SHA-256
+  checks after an independent release download; the Linux artifacts also pass
+  `release-artifacts.sha256`.
+- [x] PR `#17` merged as clean candidate `414d8ea`; `main`, `origin/main`, and
+  annotated tag `v0.9.6-3` resolve to that commit.
 
 ## Rollback
 
