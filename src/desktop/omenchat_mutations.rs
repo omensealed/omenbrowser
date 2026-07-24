@@ -85,14 +85,14 @@ impl DesktopApp {
         if draft.is_empty() {
             return Task::none();
         }
-        let (op, body) = match parse_client_command(&draft) {
+        let (op, requested_room_id, body) = match parse_client_command(&draft) {
             Some(ClientCommand::Me(body)) => {
                 let body = body.trim().to_owned();
                 if body.is_empty() {
                     self.set_omenchat_session_status(session_id, "usage: /me <action>".into());
                     return Task::none();
                 }
-                (ChatOp::RoomAction, body)
+                (ChatOp::RoomAction, None, FrameBody::Text(body))
             }
             Some(ClientCommand::Notice(body)) => {
                 if !self
@@ -114,7 +114,30 @@ impl DesktopApp {
                     self.set_omenchat_session_status(session_id, "usage: /notice <text>".into());
                     return Task::none();
                 }
-                (ChatOp::RoomNotice, body)
+                (ChatOp::RoomNotice, None, FrameBody::Text(body))
+            }
+            Some(ClientCommand::Part(room)) => {
+                let Some(session) = self.omenchat.chat_client.session(session_id) else {
+                    self.set_omenchat_session_status(
+                        session_id,
+                        "OMENchat session is unavailable".into(),
+                    );
+                    return Task::none();
+                };
+                let room_id = room
+                    .as_deref()
+                    .map(str::trim)
+                    .map(|room| room.trim_start_matches('#'))
+                    .filter(|room| !room.is_empty())
+                    .and_then(|room| {
+                        session
+                            .rooms
+                            .iter()
+                            .find(|candidate| candidate.name.eq_ignore_ascii_case(room))
+                            .map(|room| room.room_id)
+                    })
+                    .unwrap_or(session.active_room.room_id);
+                (ChatOp::PartRoom, Some(room_id), FrameBody::Empty)
             }
             Some(_) => {
                 match self.handle_omenchat_draft_command(session_id, &draft) {
@@ -126,7 +149,7 @@ impl DesktopApp {
                 }
                 return Task::none();
             }
-            None => (ChatOp::RoomMessage, draft),
+            None => (ChatOp::RoomMessage, None, FrameBody::Text(draft)),
         };
 
         let Some(client_instance_id) = self.omenchat.omenchat_live_state.client_instance_id()
@@ -146,7 +169,7 @@ impl DesktopApp {
             );
             return Task::none();
         };
-        let Some((server_destination, room_id)) = self
+        let Some((server_destination, active_room_id)) = self
             .omenchat
             .chat_client
             .session(session_id)
@@ -160,6 +183,7 @@ impl DesktopApp {
             self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
             return Task::none();
         };
+        let room_id = requested_room_id.unwrap_or(active_room_id);
         let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
             return Task::none();
         };
@@ -170,7 +194,7 @@ impl DesktopApp {
             client_instance_id,
             op,
             room_id: Some(room_id),
-            body: FrameBody::Text(body),
+            body,
             created_at,
             expires_at: created_at.saturating_add(DURABLE_MUTATION_INTENT_LIFETIME_SECONDS),
             correlation_id: None,
@@ -470,8 +494,14 @@ impl DesktopApp {
             .sessions()
             .iter()
             .find(|session| {
-                session.server.destination == intent.server_destination
-                    && session.active_room.room_id == room_id
+                if session.server.destination != intent.server_destination {
+                    return false;
+                }
+                if intent.op == ChatOp::PartRoom {
+                    session.rooms.iter().any(|room| room.room_id == room_id)
+                } else {
+                    session.active_room.room_id == room_id
+                }
             })
             .map(|session| session.session_id)
         else {
@@ -771,13 +801,23 @@ impl DesktopApp {
         };
         let (link_id, events, outgoing, resources) = {
             let link_id = transport.link_id;
-            let events = crate::chat::live::send_uncertain_durable_room_text(
-                &mut self.omenchat.chat_client,
-                &mut self.omenchat.omenchat_live_state,
-                transport,
-                session_id,
-                &intent,
-            );
+            let events = if intent.op == ChatOp::PartRoom {
+                crate::chat::live::send_uncertain_durable_part_room(
+                    &mut self.omenchat.chat_client,
+                    &mut self.omenchat.omenchat_live_state,
+                    transport,
+                    session_id,
+                    &intent,
+                )
+            } else {
+                crate::chat::live::send_uncertain_durable_room_text(
+                    &mut self.omenchat.chat_client,
+                    &mut self.omenchat.omenchat_live_state,
+                    transport,
+                    session_id,
+                    &intent,
+                )
+            };
             let outgoing = transport.take_outgoing_frames();
             let resources = transport.take_outgoing_resources();
             (link_id, events, outgoing, resources)
@@ -792,8 +832,9 @@ impl DesktopApp {
             self.omenchat.chat_drafts.insert(session_id, String::new());
         }
         if events.iter().any(|event| {
-            matches!(event, ChatClientEvent::EventAppended { event, .. }
-                if !is_omenchat_local_echo_event(event))
+            matches!(event, ChatClientEvent::RoomsUpdated { .. })
+                || matches!(event, ChatClientEvent::EventAppended { event, .. }
+                    if !is_omenchat_local_echo_event(event))
         }) {
             self.persist_omenchat_session(session_id);
         }
@@ -1179,6 +1220,13 @@ mod tests {
         ]);
         assert!(recover_intents(&desktop).is_empty());
 
+        let joined_before_part = desktop
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .expect("session")
+            .active_room
+            .joined;
         desktop
             .omenchat
             .chat_drafts
@@ -1352,6 +1400,67 @@ mod tests {
         desktop
             .omenchat
             .chat_drafts
+            .insert(session_id, "/part".into());
+        let _prepare_part_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        let prepared_part = recover_intents(&desktop)
+            .into_iter()
+            .next()
+            .expect("prepared part intent");
+        assert_eq!(prepared_part.op, ChatOp::PartRoom);
+        assert_eq!(prepared_part.room_id, Some(1));
+        assert_eq!(prepared_part.body, FrameBody::Empty);
+        assert_eq!(prepared_part.state, OutboundMutationState::Prepared);
+        let _transition_part_task = desktop
+            .mark_prepared_omenchat_mutation_uncertain(session_id, Ok(prepared_part.clone()));
+        let uncertain_part = recover_intents(&desktop)
+            .into_iter()
+            .find(|intent| intent.mutation_id == prepared_part.mutation_id)
+            .expect("uncertain part intent");
+        let _send_part_task = desktop.send_persisted_uncertain_omenchat_mutation(
+            session_id,
+            Ok(IntentTransition::Updated(uncertain_part)),
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(4)
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .and_then(|transport| transport.last_tx_frame.as_deref()),
+            Some("part room")
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_client
+                .session(session_id)
+                .expect("session")
+                .active_room
+                .joined,
+            joined_before_part
+        );
+        assert!(desktop
+            .omenchat
+            .omenchat_live_state
+            .durable_mutation_is_pending(session_id, prepared_part.mutation_id));
+        let _part_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id,
+                mutation_id: prepared_part.mutation_id,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
+
+        desktop
+            .omenchat
+            .chat_drafts
             .insert(session_id, "recover this".into());
         let _prepare_recovered_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
         let recovered_prepared = recover_intents(&desktop)
@@ -1506,6 +1615,15 @@ mod tests {
             now.saturating_sub(10),
             now.saturating_add(100),
         );
+        let uncertain_part = persist_recovery_fixture_for_op(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            ChatOp::PartRoom,
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
         let _other_identity = persist_recovery_fixture(
             &store,
             vec![0x66; 16],
@@ -1539,11 +1657,11 @@ mod tests {
         );
         assert_eq!(
             desktop.omenchat.omenchat_recovered_mutation_intents.len(),
-            5
+            6
         );
         assert_eq!(desktop.omenchat.omenchat_other_identity_mutation_intents, 1);
         assert!(desktop.app.status.task.contains("1 prepared"));
-        assert!(desktop.app.status.task.contains("3 uncertain"));
+        assert!(desktop.app.status.task.contains("4 uncertain"));
         assert!(desktop.app.status.task.contains("1 expired"));
         assert!(desktop.app.status.task.contains("nothing was resent"));
         assert!(desktop.omenchat.omenchat_live_transports.is_empty());
@@ -1564,6 +1682,16 @@ mod tests {
             .any(|intent| {
                 intent.mutation_id == uncertain_action.mutation_id
                     && intent.op == ChatOp::RoomAction
+                    && intent.state == OutboundMutationState::SentUncertain
+            }));
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| {
+                intent.mutation_id == uncertain_part.mutation_id
+                    && intent.op == ChatOp::PartRoom
+                    && intent.body == FrameBody::Empty
                     && intent.state == OutboundMutationState::SentUncertain
             }));
         assert!(desktop
@@ -1740,10 +1868,12 @@ mod tests {
         created_at: i64,
         expires_at: i64,
     ) -> crate::chat::mutation_intents::OutboundMutationIntent {
-        let body = if op == ChatOp::RoomAction {
-            "recovered action"
+        let body = if op == ChatOp::PartRoom {
+            FrameBody::Empty
+        } else if op == ChatOp::RoomAction {
+            FrameBody::Text("recovered action".into())
         } else {
-            "recovered body"
+            FrameBody::Text("recovered body".into())
         };
         let request = OwnedPrepareOutboundMutation {
             server_destination: "00112233445566778899aabbccddeeff".into(),
@@ -1751,7 +1881,7 @@ mod tests {
             client_instance_id,
             op,
             room_id: Some(1),
-            body: FrameBody::Text(body.into()),
+            body,
             created_at,
             expires_at,
             correlation_id: None,

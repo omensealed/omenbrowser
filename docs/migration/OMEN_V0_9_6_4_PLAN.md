@@ -45,10 +45,10 @@ gate.
   is extracted, but major smoke/interop, Network Doctor, log-state, and
   application orchestration regions remain concentrated there.
 - `durable-mutations-v1` is capability-negotiated and active for room messages,
-  `/me` room actions, and `/notice` room notices.
+  `/me` room actions, `/notice` room notices, and `/part` room leaves.
   The persistent intent contract admits `RoomMessage`, `RoomAction`,
   `RoomNotice`, `PartRoom`, and `Command`, while the desktop production sender
-  currently prepares `RoomMessage`, `RoomAction`, and `RoomNotice`.
+  currently prepares the first four operation families.
 - The server durable executor and replay store already cover room-text and
   command mutation families with bounded transactional replay behavior.
 - Network Doctor and delivery evidence provide useful component state, but
@@ -245,9 +245,22 @@ is deterministic and isolated.
 
 ### Unit 2B — part-room
 
-- Preserve current local/session state until the durable result is known.
-- Define truthful UI behavior for committed-but-response-lost part operations.
-- Ensure replay cannot repeat leave events, rate accounting, or fan-out.
+Completed on the `v0.9.6-4` branch:
+
+- Negotiated `/part` persists a `PartRoom` intent with an empty canonical body
+  before transport and transitions it to uncertain before sending.
+- The live client keeps the current local membership unchanged until an exact
+  sequence, room, and `part` `CommandResult` match is received.
+- A missing response remains visibly uncertain and is never retried
+  automatically. Explicit recovery retry accepts the original room from the
+  same server catalog even when it is no longer the active room.
+- Part correlation shares the existing bounded pending-mutation item budgets;
+  it adds no worker, timer, queue, cache, schema, protocol number, or
+  capability.
+- Client restart fixtures recover uncertain PartRoom intents without
+  transmitting. Existing server Link-replacement and restart regressions prove
+  exact-result replay without repeating membership deletion, leave events,
+  rate accounting, or fan-out.
 
 ### Unit 2C — commands
 

@@ -269,6 +269,12 @@ For durable `PartRoom`, membership deletion, the departure event, the exact
 legacy-compatible `CommandResult`, and replay publication commit atomically.
 Only first execution changes live room ownership and emits a refreshed user
 list. Replay returns the retained result without repeating those effects.
+The negotiated desktop sender persists an empty-body PartRoom intent before
+transport and does not change local membership on queue admission or frame
+send. Only a matching Link sequence, room identity, `part` command, and returned
+room identity retires the pending intent and applies the server result. A lost
+result remains uncertain across reconnect or restart and requires an explicit
+user retry; it is never resent automatically.
 
 Durable `RoomNotice` retains the moderator/admin decision and exact origin room
 event in the same transaction as event insertion. Only first execution is

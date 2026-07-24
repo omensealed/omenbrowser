@@ -488,17 +488,20 @@ require `durable-room-notice-ack-v1` and use the already-defined kind-3
 `MessageAck`; older, legacy, and downgraded notices retain their protocol-v1
 `RoomEvent` response and are not placed in the durable intent store.
 
-The live client has a guarded durable-send boundary for room messages, actions,
-and notices. It accepts only an intent already persisted in the
-`sent_uncertain` state and verifies negotiated session, persistent client
-instance, server destination, active room, operation, body shape, sequence, and
-pending-echo budgets before sending the canonical envelope. A matching
-`MessageAck` reports the fixed mutation identifier so the desktop owner can
-transition the intent to `acknowledged`. Missing negotiation and merely
-`prepared` intents fail before transport output. Ordinary negotiated
-room-message, `/me` room-action, and `/notice` sends call this boundary only
-through the bounded persistence worker, and no uncertain intent is
-automatically replayed.
+The live client has guarded durable-send boundaries for room messages, actions,
+notices, and room leaves. They accept only an intent already persisted in the
+`sent_uncertain` state and verify negotiated session, persistent client
+instance, server destination, operation, body shape, sequence, and bounded
+pending-correlation budgets before sending the canonical envelope. Text
+operations additionally require the active room. PartRoom requires its stored
+room to remain in the same server session's bounded catalog, which permits an
+explicit retry after the active room changed without permitting cross-server
+reuse. A matching `MessageAck` acknowledges text operations; PartRoom requires
+an exact sequence/room/command/returned-room `CommandResult`. Missing
+negotiation and merely `prepared` intents fail before transport output.
+Ordinary negotiated room-message, `/me`, `/notice`, and `/part` sends call these
+boundaries only through the bounded persistence worker, and no uncertain intent
+is automatically replayed.
 
 `PartRoom` now uses the same durable replay authority. Its membership deletion,
 departure event, exact legacy-compatible `CommandResult`, and replay record are
@@ -508,6 +511,12 @@ membership and event changes. First execution performs live room cleanup and
 one user-list update. If origin delivery failed after commit, replay returns the
 original result and repairs stale live room ownership; fan-out occurs only when
 that ownership was still present.
+
+The desktop activation preserves local room membership until that exact
+`CommandResult` arrives. Sending or losing the response therefore cannot make
+the UI claim that the leave completed. An uncertain PartRoom intent is
+recovered after restart without transmission and can only be resent through
+the existing explicit confirmation flow.
 
 `RoomNotice` is now covered by the transaction-backed room-event executor. It
 retains moderator/admin authorization decisions, uses reversible bounded
