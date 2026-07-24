@@ -2959,7 +2959,7 @@ server-restart, mixed-version, Python, or live Reticulum retry idempotency. The
 separate negotiated durable-mutation tests below cover deterministic cross-Link
 and restart behavior.
 
-## OMENchat negotiated durable room actions, notices, leaves, topics, and creation
+## OMENchat negotiated durable room and user mutations
 
 Negotiated `/me` sends must persist a `RoomAction` intent before transport,
 transition it to uncertain, emit the canonical durable envelope, and correlate
@@ -2978,6 +2978,11 @@ server-normalized requested room in an otherwise exact result. Server tests requ
 exact replay after Link replacement and server restart to retain the original
 result without another event, rate charge, metadata revision, or fan-out;
 mutation-ID reuse with different content must conflict.
+Negotiated `/role` and `/unban` persist canonical commands and require the
+returned catalog-known numeric ID or display name plus role/ban state to match. Hex
+identity-prefix-only targets retain the legacy path because the result has no
+identity hash. Their replacement-Link and restart replays must not repeat user
+mutation, audit event, rate admission, or fan-out.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
@@ -2993,11 +2998,17 @@ cargo test --locked --no-default-features --features desktop-product \
 cargo test --locked --no-default-features --features desktop-product \
   durable_create_waits_for_matching_normalized_room_before_acknowledging --lib
 cargo test --locked --no-default-features --features desktop-product \
+  durable_role_and_unban_require_matching_user_and_result_state --lib
+cargo test --locked --no-default-features --features desktop-product \
   restart_recovery_is_identity_scoped_visible_and_never_transmits --lib
 (
   cd src/server
   cargo test --locked --no-default-features --features server-headless \
     durable_create
+  cargo test --locked --no-default-features --features server-headless \
+    durable_role
+  cargo test --locked --no-default-features --features server-headless \
+    durable_unban
 )
 ```
 

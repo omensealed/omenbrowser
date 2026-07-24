@@ -483,14 +483,15 @@ has no broadcast. Tests cover duplicate delivery under a different sequence,
 malformed and unbound requests, and legacy isolation. Production capability
 acceptance is now on for a valid negotiated request. The browser reaches this
 route only for ordinary room-message, `/me` room-action, `/notice`, `/part`,
-`/topic`, and `/create` sends after their intent is persisted as uncertain. Durable
+`/topic`, `/create`, `/role`, and `/unban` sends after their intent is persisted as uncertain. Durable
 notices additionally require `durable-room-notice-ack-v1` and use the
 already-defined kind-3
 `MessageAck`; older, legacy, and downgraded notices retain their protocol-v1
 `RoomEvent` response and are not placed in the durable intent store.
 
 The live client has guarded durable-send boundaries for room messages, actions,
-notices, room leaves, topic updates, and room creation. They accept only an intent already
+notices, room leaves, topic updates, room creation, role changes, and unban
+operations. They accept only an intent already
 persisted in the `sent_uncertain` state and verify negotiated session,
 persistent client instance, server destination, operation, body shape,
 sequence, and bounded pending-correlation budgets before sending the canonical
@@ -501,9 +502,13 @@ without permitting cross-server reuse. A matching `MessageAck` acknowledges
 text operations; PartRoom and topic require their exact
 sequence/room/command/returned-room `CommandResult`. Create requires the exact
 sequence, roomless result, command tag, and server-normalized requested room
-name. Missing negotiation and
+name. Role and unban require the exact sequence, room, command tag,
+catalog-known numeric user ID or display name, and requested role or cleared-ban
+state. Identity-prefix
+targets remain legacy because identity hashes are absent from the result. Missing negotiation and
 merely `prepared` intents fail before transport output. Ordinary negotiated
-room-message, `/me`, `/notice`, `/part`, `/topic`, and `/create` sends call these
+room-message, `/me`, `/notice`, `/part`, `/topic`, `/create`, `/role`, and
+`/unban` sends call these
 boundaries only through the bounded persistence worker, and no uncertain intent
 is automatically replayed.
 
@@ -547,6 +552,15 @@ shapes are ignored without losing the pending intent. Create uses a roomless
 request and correlates the introduced room by the server-normalized requested
 name rather than approximating topic's room-ID rule. Restart recovery remains
 visible and non-transmitting.
+
+Desktop activation also covers `role` and `unban` when the target can be
+correlated from the existing result as a catalog-known numeric user ID or exact
+display name.
+Role aliases are canonicalized before persistence. The original room remains
+the audit scope for explicit retry even when another room later becomes active.
+Returned user identity and role/status semantics must match before the intent
+is acknowledged or local catalog state changes. Identity-prefix-only targets
+retain the legacy command path rather than weakening correlation.
 
 The command executor now also covers active-peer `kick`, `ban`, `mute`, and
 `unmute`. Target resolution retains the existing room-presence, self-target,

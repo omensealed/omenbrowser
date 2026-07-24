@@ -4003,7 +4003,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_role_fans_out_each_effect_once_then_replays_only_to_origin() {
+    fn durable_role_and_unban_replay_on_replacement_links_without_repeating_effects() {
         let store = OmenchatStore::in_memory().expect("store");
         let administrator = store
             .ensure_user(b"Alice", "Alice", None)
@@ -4011,10 +4011,18 @@ mod tests {
         store
             .set_user_role_bits(administrator.user_id, 1 << 2)
             .expect("administrator role");
+        let banned = store
+            .ensure_user(b"Charlie", "Charlie", None)
+            .expect("banned target");
+        store
+            .set_user_status_flag(banned.user_id, 1, true)
+            .expect("ban target");
         let engine = SessionEngine::new(store);
         let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
         let link_a = [34u8; 16];
         let link_b = [35u8; 16];
+        let replacement_link = [36u8; 16];
+        let second_replacement_link = [37u8; 16];
 
         for (link_id, name) in [(link_a, "Alice"), (link_b, "Bob")] {
             live.handle_event(OmenchatLinkEvent::LinkOpened {
@@ -4061,15 +4069,118 @@ mod tests {
         .expect("durable envelope");
         let frames_before = live.transport().frames.len();
 
-        for seq in [13, 14] {
-            live.handle_event(OmenchatLinkEvent::LinkData {
-                link_id: link_a,
-                context: OMENCHAT_LINK_CONTEXT,
-                data: encode_frame(&Frame::new(ChatOp::Command, seq, Some(1), envelope.clone()))
-                    .expect("role"),
-            })
-            .expect("durable role");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: link_a,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 13, Some(1), envelope.clone()))
+                .expect("role"),
+        })
+        .expect("durable role");
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id: link_a,
+            reason: Some("role result lost".into()),
+        })
+        .expect("close original role link");
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id: replacement_link,
+            peer: ServerPeer {
+                identity_hash: b"Alice".to_vec(),
+                display_name: "Alice".into(),
+                lxmf_destination: None,
+            },
+        })
+        .expect("open replacement role link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                1,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("replacement join"),
+        })
+        .expect("join replacement role room");
+        live.durable_sessions.insert(
+            replacement_link,
+            DurableSessionBinding::without_notice_ack(
+                b"Alice".to_vec(),
+                ClientInstanceId::new([42; 16]),
+            ),
+        );
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 14, Some(1), envelope))
+                .expect("replacement role"),
+        })
+        .expect("replay durable role");
+        let unban_body = FrameBody::Text("unban Charlie".into());
+        let unban_envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([44; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::Command,
+                Some(1),
+                &unban_body,
+            )
+            .expect("unban canonical hash"),
+            body: unban_body,
         }
+        .into_frame_body()
+        .expect("durable unban envelope");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::Command,
+                15,
+                Some(1),
+                unban_envelope.clone(),
+            ))
+            .expect("unban"),
+        })
+        .expect("durable unban");
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id: replacement_link,
+            reason: Some("unban result lost".into()),
+        })
+        .expect("close first replacement link");
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id: second_replacement_link,
+            peer: ServerPeer {
+                identity_hash: b"Alice".to_vec(),
+                display_name: "Alice".into(),
+                lxmf_destination: None,
+            },
+        })
+        .expect("open second replacement link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: second_replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                1,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("second replacement join"),
+        })
+        .expect("join second replacement room");
+        live.durable_sessions.insert(
+            second_replacement_link,
+            DurableSessionBinding::without_notice_ack(
+                b"Alice".to_vec(),
+                ClientInstanceId::new([42; 16]),
+            ),
+        );
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: second_replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 16, Some(1), unban_envelope))
+                .expect("replacement unban"),
+        })
+        .expect("replay durable unban");
 
         let routed = live
             .transport()
@@ -4085,7 +4196,8 @@ mod tests {
         let origin_results = routed
             .iter()
             .filter(|(link_id, frame)| {
-                *link_id == link_a && command_result_name(frame) == Some("role")
+                (*link_id == link_a || *link_id == replacement_link)
+                    && command_result_name(frame) == Some("role")
             })
             .map(|(_, frame)| frame)
             .collect::<Vec<_>>();
@@ -4097,9 +4209,19 @@ mod tests {
                     .iter()
                     .filter(|(link_id, frame)| *link_id == link_b && frame.op == op)
                     .count(),
-                1
+                2
             );
         }
+        let unban_results = routed
+            .iter()
+            .filter(|(link_id, frame)| {
+                (*link_id == replacement_link || *link_id == second_replacement_link)
+                    && command_result_name(frame) == Some("unban")
+            })
+            .map(|(_, frame)| frame)
+            .collect::<Vec<_>>();
+        assert_eq!(unban_results.len(), 2);
+        assert_replayed_response(unban_results[1], unban_results[0], 16);
         assert!(live.replay_cache.entries.is_empty());
     }
 

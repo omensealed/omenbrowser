@@ -6073,7 +6073,7 @@ mod tests {
                 Some(room.room_id),
                 ChatOp::Command,
                 client_instance_id,
-                envelope.clone(),
+                envelope,
             )
             .expect("replayed durable topic");
         assert_replayed_response(&replayed.origin, &stored.origin, 72);
@@ -6473,6 +6473,36 @@ mod tests {
                 .len(),
             1
         );
+
+        let conflict = engine
+            .handle_durable_mutation(
+                &peer(),
+                93,
+                Some(room.room_id),
+                ChatOp::Command,
+                client_instance_id,
+                durable_envelope_body(
+                    ChatOp::Command,
+                    room.room_id,
+                    12,
+                    FrameBody::Text("role Bob admin".into()),
+                ),
+            )
+            .expect("conflicting durable role");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+        assert!(conflict.broadcasts.is_empty());
+        assert_eq!(
+            engine
+                .store
+                .user_by_identity(b"peer-b")
+                .expect("conflicted target query")
+                .expect("target")
+                .role_bits,
+            0
+        );
     }
 
     #[test]
@@ -6568,6 +6598,160 @@ mod tests {
                 .len(),
             1
         );
+
+        let conflict = engine
+            .handle_durable_mutation(
+                &peer(),
+                103,
+                Some(room.room_id),
+                ChatOp::Command,
+                client_instance_id,
+                durable_envelope_body(
+                    ChatOp::Command,
+                    room.room_id,
+                    13,
+                    FrameBody::Text("unban 2".into()),
+                ),
+            )
+            .expect("conflicting durable unban");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+        assert!(conflict.broadcasts.is_empty());
+        assert_ne!(
+            engine
+                .store
+                .user_by_identity(b"peer-b")
+                .expect("conflicted target query")
+                .expect("target")
+                .status_bits
+                & STATUS_BANNED,
+            0
+        );
+    }
+
+    #[test]
+    fn durable_role_and_unban_replay_after_server_restart_without_second_mutation() {
+        let path = temp_store_path("durable-role-unban-restart");
+        let client_instance_id = ClientInstanceId::new([25; 16]);
+        let (room_id, role_envelope, unban_envelope, role_result, unban_result) = {
+            let store = OmenchatStore::open(&path).expect("persistent store");
+            let room = store.ensure_room("lobby", None).expect("room");
+            let actor = store
+                .ensure_user(&peer().identity_hash, "Alice", None)
+                .expect("administrator");
+            store
+                .set_user_role_bits(actor.user_id, ROLE_ADMIN)
+                .expect("administrator role");
+            let target = store.ensure_user(b"peer-b", "Bob", None).expect("target");
+            store
+                .set_user_status_flag(target.user_id, STATUS_BANNED, true)
+                .expect("ban target");
+            let role_envelope = durable_envelope_body(
+                ChatOp::Command,
+                room.room_id,
+                20,
+                FrameBody::Text("role Bob mod".into()),
+            );
+            let unban_envelope = durable_envelope_body(
+                ChatOp::Command,
+                room.room_id,
+                21,
+                FrameBody::Text("unban Bob".into()),
+            );
+            let engine = SessionEngine::new(store);
+            let role_result = engine
+                .handle_durable_mutation(
+                    &peer(),
+                    181,
+                    Some(room.room_id),
+                    ChatOp::Command,
+                    client_instance_id,
+                    role_envelope.clone(),
+                )
+                .expect("stored role before restart");
+            let unban_result = engine
+                .handle_durable_mutation(
+                    &peer(),
+                    182,
+                    Some(room.room_id),
+                    ChatOp::Command,
+                    client_instance_id,
+                    unban_envelope.clone(),
+                )
+                .expect("stored unban before restart");
+            assert_eq!(role_result.broadcasts.len(), 2);
+            assert_eq!(unban_result.broadcasts.len(), 2);
+            engine
+                .store
+                .set_user_role_bits(actor.user_id, 0)
+                .expect("remove administrator role");
+            engine
+                .store
+                .set_user_role_bits(target.user_id, 0)
+                .expect("change target role after commit");
+            engine
+                .store
+                .set_user_status_flag(target.user_id, STATUS_BANNED, true)
+                .expect("re-ban target after commit");
+            (
+                room.room_id,
+                role_envelope,
+                unban_envelope,
+                role_result.origin,
+                unban_result.origin,
+            )
+        };
+
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("reopened store"));
+        let replayed_role = engine
+            .handle_durable_mutation(
+                &peer(),
+                183,
+                Some(room_id),
+                ChatOp::Command,
+                client_instance_id,
+                role_envelope,
+            )
+            .expect("replayed role after restart");
+        let replayed_unban = engine
+            .handle_durable_mutation(
+                &peer(),
+                184,
+                Some(room_id),
+                ChatOp::Command,
+                client_instance_id,
+                unban_envelope,
+            )
+            .expect("replayed unban after restart");
+        assert_replayed_response(&replayed_role.origin, &role_result, 183);
+        assert_replayed_response(&replayed_unban.origin, &unban_result, 184);
+        assert!(replayed_role.broadcasts.is_empty());
+        assert!(replayed_unban.broadcasts.is_empty());
+        let target = engine
+            .store
+            .user_by_identity(b"peer-b")
+            .expect("target query")
+            .expect("target");
+        assert_eq!(target.role_bits, 0);
+        assert_ne!(target.status_bits & STATUS_BANNED, 0);
+        assert_eq!(
+            engine
+                .store
+                .latest_events(room_id, 10)
+                .expect("events")
+                .len(),
+            2
+        );
+        drop(engine);
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     #[test]

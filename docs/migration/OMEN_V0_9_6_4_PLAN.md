@@ -46,11 +46,12 @@ gate.
   application orchestration regions remain concentrated there.
 - `durable-mutations-v1` is capability-negotiated and active for room messages,
   `/me` room actions, `/notice` room notices, `/part` room leaves, `/topic`
-  room metadata updates, and `/create` room creation.
+  room metadata updates, `/create` room creation, `/role` role changes, and
+  `/unban` status changes.
   The persistent intent contract admits `RoomMessage`, `RoomAction`,
   `RoomNotice`, `PartRoom`, and `Command`, while the desktop production sender
-  currently prepares the first four operation families plus the narrowly
-  admitted topic command.
+  prepares those text/leave families plus the narrowly admitted `topic`,
+  `create`, `role`, and `unban` command subsets.
 - The server durable executor and replay store already cover room-text and
   command mutation families with bounded transactional replay behavior.
 - Network Doctor and delivery evidence provide useful component state, but
@@ -283,7 +284,7 @@ Command classification and first subunit:
 | `rooms` | read-only; mutation identity is unnecessary | legacy/read-only |
 | `topic` | transactionally durable and replay-safe | activated |
 | `create` | transactionally durable and replay-safe | activated |
-| `role`, `unban` | transactionally durable and replay-safe | deferred to target-resolution unit |
+| `role`, `unban` | transactionally durable and replay-safe | activated for catalog-known numeric-ID or exact-display targets |
 | `kick`, `ban`, `mute`, `unmute` | durable database result plus live target effects | deferred to moderation side-effect unit |
 
 The topic subunit persists the exact normalized command before transport,
@@ -305,6 +306,18 @@ replay returns the original result and publishes no second `RoomDelta`.
 Invalid names that normalize to empty are rejected before persistence. This
 subunit reuses the existing capability, intent schema, worker, and bounded
 pending-correlation budgets.
+
+The role/unban subunit persists canonical role labels and target strings before
+transport. It accepts a result only when sequence, room, command, catalog-known
+numeric user ID or exact display name, and requested role/cleared-ban state all
+match.
+Identity-prefix-only targeting cannot be proven from the existing result shape,
+which deliberately omits identity hashes, so those commands retain the legacy
+path. Explicit retry preserves the original server and room audit scope.
+Replacement-Link and server-restart tests prove that the exact result replays
+without a second user mutation, audit event, rate charge, `UserDelta`, or
+`RoomEvent`. No wire, schema, capability, dependency, worker, queue, or timer
+changed.
 
 ### Unit 2D — recovery UX
 
