@@ -295,20 +295,23 @@ and exact result together. First execution emits the bounded deltas; `kick` and
 immediately after commit and before response I/O. Replay cannot disconnect a
 replacement Link.
 
-The negotiated desktop sender activates `topic`, `create`, `role`, and `unban`
-from this command family. It persists the normalized `topic` command under the active room before
+The negotiated desktop sender activates `topic`, `create`, `role`, `unban`,
+`kick`, `ban`, `mute`, and `unmute` from this command family. It persists the
+normalized `topic` command under the active room before
 transport, retains the prior local topic while the result is uncertain, and
 accepts only an exact sequence, room, command name, and returned room identity.
 `create` is persisted with no request room and adds no room locally until the
 exact sequence, roomless result, command name, and server-normalized requested
 room name match. Role and unban results must match the original room,
 catalog-known numeric user ID or exact display name, and requested role or
-cleared-ban state.
+cleared-ban state. Active-peer moderation uses the same user correlation and
+requires the requested ban/mute state. Kick has no durable user-state bit, so
+its exact correlated result removes the target from the active user list.
+Kick and ban disconnect only the identity selected during first execution;
+replay cannot disconnect a replacement Link.
 Identity-prefix-only targets remain on the legacy path because the command
 result does not expose identity hashes. Old or downgraded peers retain the
-protocol-v1 command path. `rooms` remains read-only. Active-peer moderation
-remains on its legacy desktop path until its live-effect cases are activated
-and tested.
+protocol-v1 command path. `rooms` remains read-only.
 
 ## Operation correlation and same-link replay
 

@@ -47,11 +47,12 @@ gate.
 - `durable-mutations-v1` is capability-negotiated and active for room messages,
   `/me` room actions, `/notice` room notices, `/part` room leaves, `/topic`
   room metadata updates, `/create` room creation, `/role` role changes, and
-  `/unban` status changes.
+  `/unban`, `/kick`, `/ban`, `/mute`, and `/unmute` status/moderation changes.
   The persistent intent contract admits `RoomMessage`, `RoomAction`,
   `RoomNotice`, `PartRoom`, and `Command`, while the desktop production sender
   prepares those text/leave families plus the narrowly admitted `topic`,
-  `create`, `role`, and `unban` command subsets.
+  `create`, `role`, `unban`, `kick`, `ban`, `mute`, and `unmute` command
+  subsets.
 - The server durable executor and replay store already cover room-text and
   command mutation families with bounded transactional replay behavior.
 - Network Doctor and delivery evidence provide useful component state, but
@@ -285,7 +286,7 @@ Command classification and first subunit:
 | `topic` | transactionally durable and replay-safe | activated |
 | `create` | transactionally durable and replay-safe | activated |
 | `role`, `unban` | transactionally durable and replay-safe | activated for catalog-known numeric-ID or exact-display targets |
-| `kick`, `ban`, `mute`, `unmute` | durable database result plus live target effects | deferred to moderation side-effect unit |
+| `kick`, `ban`, `mute`, `unmute` | durable database result plus one-use live target effects | activated for catalog-known numeric-ID or exact-display targets |
 
 The topic subunit persists the exact normalized command before transport,
 changes no local metadata until an exact sequence/room/command/returned-room
@@ -318,6 +319,16 @@ Replacement-Link and server-restart tests prove that the exact result replays
 without a second user mutation, audit event, rate charge, `UserDelta`, or
 `RoomEvent`. No wire, schema, capability, dependency, worker, queue, or timer
 changed.
+
+The active-peer moderation subunit uses the same persisted target/result
+correlation for `kick`, `ban`, `mute`, and `unmute`. Ban/mute state must match
+the requested result; kick has no stored status bit and removes only the exact
+correlated user after acknowledgement. The server's first execution captures
+the target identity for a one-use kick/ban disconnect. Exact replay emits no
+disconnect, broadcast, mutation, audit event, or rate admission, so a
+replacement Link cannot be disconnected by an old result. Identity-prefix-only
+targets retain the legacy path. Recovery remains visible and requires explicit
+retry; it never automatically resends an uncertain moderation operation.
 
 ### Unit 2D — recovery UX
 

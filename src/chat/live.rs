@@ -11,7 +11,8 @@ use super::model::{
     ChatServerSummary, ChatUserSummary, CHAT_ACTOR_DISPLAY_MAX_BYTES, CHAT_CONTENT_TYPE_MAX_BYTES,
     CHAT_MOTD_MAX_BYTES, CHAT_RESOURCE_ID_MAX_BYTES, CHAT_ROLE_ADMIN, CHAT_ROLE_MODERATOR,
     CHAT_ROLE_TRUSTED, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_STATUS_BANNED,
-    CHAT_STATUS_MAX_BYTES, CHAT_UPLOAD_FILENAME_MAX_BYTES, CHAT_USER_DISPLAY_MAX_BYTES,
+    CHAT_STATUS_MAX_BYTES, CHAT_STATUS_MUTED, CHAT_UPLOAD_FILENAME_MAX_BYTES,
+    CHAT_USER_DISPLAY_MAX_BYTES,
 };
 use super::mutation_intents::{OutboundMutationIntent, OutboundMutationState};
 use super::protocol::{
@@ -100,6 +101,10 @@ enum PendingCommandResult {
 enum PendingUserCommand {
     Role { role_bits: u64 },
     Unban,
+    Kick,
+    Ban,
+    Mute,
+    Unmute,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1338,6 +1343,10 @@ pub fn send_uncertain_durable_user_command<T: ChatLinkTransport>(
             (PendingUserCommand::Role { role_bits }, target)
         }
         "unban" => (PendingUserCommand::Unban, rest.trim()),
+        "kick" => (PendingUserCommand::Kick, rest.trim()),
+        "ban" => (PendingUserCommand::Ban, rest.trim()),
+        "mute" => (PendingUserCommand::Mute, rest.trim()),
+        "unmute" => (PendingUserCommand::Unmute, rest.trim()),
         _ => return error("durable OMENchat user command body is invalid"),
     };
     let target = target.trim().trim_start_matches('@');
@@ -2617,6 +2626,10 @@ fn durable_command_result_match(
             match command {
                 PendingUserCommand::Role { .. } => "role",
                 PendingUserCommand::Unban => "unban",
+                PendingUserCommand::Kick => "kick",
+                PendingUserCommand::Ban => "ban",
+                PendingUserCommand::Mute => "mute",
+                PendingUserCommand::Unmute => "unmute",
             },
             Some(pending.room_id),
         ),
@@ -2666,9 +2679,11 @@ fn durable_command_result_match(
             else {
                 return Some(Err(()));
             };
-            if user.user_id.to_string() != *target
-                && !user.display_name.eq_ignore_ascii_case(target)
-            {
+            let target_matches = match target.parse::<u32>() {
+                Ok(target_user_id) => user.user_id == target_user_id,
+                Err(_) => user.display_name.eq_ignore_ascii_case(target),
+            };
+            if !target_matches {
                 return Some(Err(()));
             }
             match command {
@@ -2676,6 +2691,15 @@ fn durable_command_result_match(
                     return Some(Err(()));
                 }
                 PendingUserCommand::Unban if user.status_bits & CHAT_STATUS_BANNED != 0 => {
+                    return Some(Err(()));
+                }
+                PendingUserCommand::Ban if user.status_bits & CHAT_STATUS_BANNED == 0 => {
+                    return Some(Err(()));
+                }
+                PendingUserCommand::Mute if user.status_bits & CHAT_STATUS_MUTED == 0 => {
+                    return Some(Err(()));
+                }
+                PendingUserCommand::Unmute if user.status_bits & CHAT_STATUS_MUTED != 0 => {
                     return Some(Err(()));
                 }
                 _ => {}
@@ -3115,7 +3139,7 @@ fn apply_command_result(
                             .users
                             .retain(|user| !user.display_name.eq_ignore_ascii_case(&target));
                     }
-                } else if matches!(command, "role" | "unban") {
+                } else if matches!(command, "role" | "unban" | "mute" | "unmute") {
                     if let Some(target_user) = target_user {
                         if let Some(current) = session
                             .users
@@ -4483,6 +4507,154 @@ mod tests {
             client.session(session_id).expect("session").users[0].status_bits & CHAT_STATUS_BANNED,
             0
         );
+    }
+
+    #[test]
+    fn durable_active_peer_moderation_requires_exact_user_and_status_result() {
+        for (
+            index,
+            command,
+            initial_status,
+            wrong_user_id,
+            wrong_display,
+            wrong_status,
+            exact_status,
+            removes_user,
+        ) in [
+            (0, "kick Bob", 0, 2, "Alice", 0, 0, true),
+            (1, "ban Bob", 0, 2, "Bob", 0, CHAT_STATUS_BANNED, true),
+            (
+                2,
+                "mute 2",
+                0,
+                3,
+                "2",
+                CHAT_STATUS_MUTED,
+                CHAT_STATUS_MUTED,
+                false,
+            ),
+            (
+                3,
+                "unmute Bob",
+                CHAT_STATUS_MUTED,
+                2,
+                "Bob",
+                CHAT_STATUS_MUTED,
+                0,
+                false,
+            ),
+        ] {
+            let client_instance_id = ClientInstanceId::new([20 + index; 16]);
+            let mut client = ChatClient::new();
+            let session_id = client.reserve_session_id();
+            client.push_session(ChatSessionView {
+                session_id,
+                server: ChatServerSummary {
+                    server_id: "abcd".into(),
+                    destination: "abcd".into(),
+                    display_name: "Test Chat".into(),
+                },
+                rooms: vec![room_summary("abcd", 1, "lobby")],
+                active_room: room_summary("abcd", 1, "lobby"),
+                users: vec![ChatUserSummary {
+                    server_id: "abcd".into(),
+                    user_id: 2,
+                    display_name: "Bob".into(),
+                    role_bits: 0,
+                    status_bits: initial_status,
+                    lxmf_available: false,
+                }],
+                events: Vec::new(),
+                status: "ready".into(),
+            });
+            let mut state = LiveChatClientState::default();
+            state.set_client_instance_id(Some(client_instance_id));
+            state.durable_sessions.insert(session_id);
+            let mut transport = CapturedChatTransport::default();
+            let intent = durable_user_command_intent(client_instance_id, 30 + index, command);
+
+            assert!(send_uncertain_durable_user_command(
+                &mut client,
+                &mut state,
+                &mut transport,
+                session_id,
+                &intent,
+            )
+            .is_empty());
+            let sent =
+                crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("command frame");
+            let command_name = command.split_whitespace().next().expect("command name");
+            transport
+                .push_incoming_frame(&Frame::new(
+                    ChatOp::CommandResult,
+                    sent.seq,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String(command_name.into()),
+                        user_value(wrong_user_id, wrong_display, 0, wrong_status.into()),
+                    ]),
+                ))
+                .expect("mismatched moderation result");
+            let mismatched = drain_live_events_with_state(
+                &mut client,
+                &mut state,
+                &mut transport,
+                Some(session_id),
+            );
+            assert!(
+                matches!(
+                    mismatched.as_slice(),
+                    [ChatClientEvent::Error { message, .. }]
+                        if message.contains("mismatched durable command result")
+                ),
+                "{command}"
+            );
+            assert!(
+                state.durable_mutation_is_pending(session_id, intent.mutation_id),
+                "{command}"
+            );
+
+            transport
+                .push_incoming_frame(&Frame::new(
+                    ChatOp::CommandResult,
+                    sent.seq,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String(command_name.into()),
+                        user_value(2, "Bob", 0, exact_status.into()),
+                    ]),
+                ))
+                .expect("exact moderation result");
+            let acknowledged = drain_live_events_with_state(
+                &mut client,
+                &mut state,
+                &mut transport,
+                Some(session_id),
+            );
+            assert!(
+                acknowledged.iter().any(|event| matches!(
+                    event,
+                    ChatClientEvent::DurableMutationAcknowledged { mutation_id, .. }
+                        if *mutation_id == intent.mutation_id
+                )),
+                "{command}"
+            );
+            let target = client
+                .session(session_id)
+                .expect("session")
+                .users
+                .iter()
+                .find(|user| user.user_id == 2);
+            if removes_user {
+                assert!(target.is_none(), "{command}");
+            } else {
+                assert_eq!(
+                    target.expect("updated target").status_bits,
+                    exact_status,
+                    "{command}"
+                );
+            }
+        }
     }
 
     #[test]

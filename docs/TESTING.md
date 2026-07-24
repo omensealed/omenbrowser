@@ -2983,6 +2983,12 @@ returned catalog-known numeric ID or display name plus role/ban state to match. 
 identity-prefix-only targets retain the legacy path because the result has no
 identity hash. Their replacement-Link and restart replays must not repeat user
 mutation, audit event, rate admission, or fan-out.
+Negotiated `/kick`, `/ban`, `/mute`, and `/unmute` use the same persistent
+intent and exact user/result-state boundary. Client regressions reject a wrong
+user or wrong ban/mute state before acknowledging. Server regressions execute
+all four once, replay without another mutation/event/rate admission, and prove
+that a lost kick response closes only the originally selected Link rather than
+a replacement Link.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
@@ -3000,6 +3006,8 @@ cargo test --locked --no-default-features --features desktop-product \
 cargo test --locked --no-default-features --features desktop-product \
   durable_role_and_unban_require_matching_user_and_result_state --lib
 cargo test --locked --no-default-features --features desktop-product \
+  durable_active_peer_moderation_requires_exact_user_and_status_result --lib
+cargo test --locked --no-default-features --features desktop-product \
   restart_recovery_is_identity_scoped_visible_and_never_transmits --lib
 (
   cd src/server
@@ -3009,6 +3017,10 @@ cargo test --locked --no-default-features --features desktop-product \
     durable_role
   cargo test --locked --no-default-features --features server-headless \
     durable_unban
+  cargo test --locked --no-default-features --features server-headless \
+    durable_active_peer_moderation_executes_once_for_each_action
+  cargo test --locked --no-default-features --features server-headless \
+    durable_kick_commit_survives_lost_response_without_disconnecting_replacement
 )
 ```
 
