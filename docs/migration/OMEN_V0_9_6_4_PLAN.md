@@ -148,6 +148,28 @@ Validation:
 Extract in-memory filtering, byte accounting, persistence submission, and
 worker-metric projection without changing the existing writer or queue.
 
+Status: complete. `app::log_state` now owns `LogSeverity`, `LogSource`,
+`LogEntry`, `LogBuffer`, the item/byte/message/startup-scan bounds, filtering,
+persistence submission, flush access, and worker/disk metric aggregation.
+Existing `app::Log*` paths remain stable through re-exports. The existing
+bounded `StructuredLogWorker` remains the sole writer and retains its original
+ownership, queue, rotation, shutdown, and failure behavior. `src/app.rs` fell
+from 35,416 to 35,006 lines; the 451-line child owns the moved memory-bound
+test and a focused stable-filter-order test. No log format, path, retention
+default, queue, worker, protocol, configuration, dependency, or server
+behavior changed.
+
+Validation:
+
+- focused pre-extraction structured-log pipeline matrix: pass (15 tests);
+- focused post-extraction pipeline matrix: pass (15 tests);
+- module-local state tests: pass (2 tests);
+- full `desktop-product` test profile: pass (1,299 library tests plus all
+  selected integration suites; documented measurement harnesses remain
+  ignored);
+- `desktop-product` all-target Clippy with `-D warnings`: pass;
+- TUI check, formatting, and `git diff --check`: pass.
+
 ### Unit 1D — reassess
 
 Measure the resulting file/module sizes and dependency edges. Select another
