@@ -380,6 +380,14 @@ stored intents/replay rows for operator reconciliation.
 Create a small project-owned module, not a new generic framework, and feed both
 GUI and TUI from it.
 
+Phase 3A starts with `src/operations.rs`: a frontend-neutral vocabulary and
+bounded in-memory history. It distinguishes queue, dispatch, transport,
+receipt, delivery, progress, terminal, gap, and reconciliation evidence;
+coalesces updates by stable project operation ID; evicts only terminal history;
+and rejects admission rather than dropping unresolved work. Production event
+adapters and GUI/TUI surfaces remain separate follow-up units. This model-only
+unit adds no worker, timer, subscription, persistence, protocol, or dependency.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:

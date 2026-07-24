@@ -2959,6 +2959,25 @@ server-restart, mixed-version, Python, or live Reticulum retry idempotency. The
 separate negotiated durable-mutation tests below cover deterministic cross-Link
 and restart behavior.
 
+## Shared Operations/Transfers model
+
+The frontend-neutral operation model uses only in-memory fixtures. Its focused
+tests distinguish queue/transport/receipt state from authoritative peer
+delivery, reject delivery without authoritative evidence, require bounded
+Resource totals for progress, coalesce repeated updates by stable operation ID,
+evict only terminal history, reject saturation consisting only of unresolved
+work, incrementally expire completed records, and reject excessive text,
+evidence, or action retention.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::tests --lib
+```
+
+This model-only gate does not claim that production runtime events are wired to
+the ledger or that GUI/TUI Operations views exist yet. It creates no worker,
+timer, subscription, persistence file, network peer, or user-state access.
+
 ## OMENchat negotiated durable room and user mutations
 
 Negotiated `/me` sends must persist a `RoomAction` intent before transport,

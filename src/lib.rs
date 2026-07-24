@@ -30,6 +30,7 @@ pub mod media;
 pub mod messaging;
 pub mod micron;
 mod msgpack;
+pub mod operations;
 pub mod plugins;
 pub mod product_identity;
 mod protocol_limits;
