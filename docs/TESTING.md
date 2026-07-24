@@ -2954,9 +2954,37 @@ accounting.
 ```
 
 These tests use isolated SQLite paths and an in-memory captured transport. They
-do not prove cross-link, server-restart, mixed-version, Python, or live Reticulum
-retry idempotency; protocol v1 lacks the durable session nonce required to make
-that claim safely.
+exercise the legacy same-Link cache and do not by themselves prove cross-Link,
+server-restart, mixed-version, Python, or live Reticulum retry idempotency. The
+separate negotiated durable-mutation tests below cover deterministic cross-Link
+and restart behavior.
+
+## OMENchat negotiated durable room actions
+
+Negotiated `/me` sends must persist a `RoomAction` intent before transport,
+transition it to uncertain, emit the canonical durable envelope, and correlate
+the matching `MessageAck`. Recovery exposes an uncertain action after client
+restart but never automatically transmits it. Server tests require exact replay
+after Link replacement and server restart to retain the original result without
+another event, rate charge, or fan-out; mutation-ID reuse with different
+content must conflict. `/notice` remains on the legacy path until its
+`RoomEvent` response has a durable-safe client correlation contract.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  negotiated_room_text_persists_before_transport_and_acknowledges --lib
+cargo test --locked --no-default-features --features desktop-product \
+  durable_room_action_sends_canonical_envelope_and_correlates_acknowledgement --lib
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    durable_room
+)
+```
+
+All fixtures use isolated temporary SQLite roots and captured in-memory
+transports. They do not establish live Reticulum, mixed-version, Python,
+packaged-platform, or physical-interface interoperability.
 
 ## omenchatd duplicate peer-link retirement
 

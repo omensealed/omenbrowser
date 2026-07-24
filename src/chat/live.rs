@@ -3312,6 +3312,22 @@ mod tests {
         }
     }
 
+    fn durable_room_action_intent(
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+    ) -> OutboundMutationIntent {
+        let mut intent = durable_room_text_intent(client_instance_id, state);
+        intent.op = ChatOp::RoomAction;
+        intent.body = FrameBody::Text("waves".into());
+        intent.request_hash = crate::chat::protocol::canonical_mutation_request_hash(
+            intent.op,
+            intent.room_id,
+            &intent.body,
+        )
+        .expect("action request hash");
+        intent
+    }
+
     #[test]
     fn durable_room_text_requires_negotiation_and_uncertain_persistence_before_send() {
         let client_instance_id = ClientInstanceId::new([2; 16]);
@@ -3438,6 +3454,76 @@ mod tests {
         assert_eq!(
             client.session(session_id).expect("session").events[0].event_id,
             11
+        );
+    }
+
+    #[test]
+    fn durable_room_action_sends_canonical_envelope_and_correlates_acknowledgement() {
+        let client_instance_id = ClientInstanceId::new([12; 16]);
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::MessageAck,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::U64(21),
+                    FrameValue::U64(2),
+                    FrameValue::U64(7),
+                    FrameValue::I64(22),
+                    FrameValue::String("Alice".into()),
+                ]),
+            ))
+            .expect("action acknowledgement");
+        let intent =
+            durable_room_action_intent(client_instance_id, OutboundMutationState::SentUncertain);
+
+        let events = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+
+        let sent = decode_frame(&transport.sent_frames[0]).expect("durable action frame");
+        let envelope = DurableMutationEnvelope::from_frame_body(&sent.body).expect("envelope");
+        assert_eq!(sent.op, ChatOp::RoomAction);
+        assert_eq!(sent.room_id, Some(1));
+        assert_eq!(envelope.mutation_id, intent.mutation_id);
+        assert_eq!(envelope.request_hash, intent.request_hash);
+        assert_eq!(envelope.body, intent.body);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id: acknowledged_session,
+                mutation_id,
+            } if *acknowledged_session == session_id && *mutation_id == intent.mutation_id
+        )));
+        assert!(state.pending_local_echoes.is_empty());
+        assert_eq!(
+            client.session(session_id).expect("session").events[0].kind,
+            ChatEventKind::Action {
+                body: "waves".into()
+            }
         );
     }
 

@@ -3402,7 +3402,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_room_text_replay_on_replacement_link_uses_new_sequence_without_refanout() {
+    fn durable_room_action_replay_on_replacement_link_uses_new_sequence_without_refanout() {
         let store = OmenchatStore::in_memory().expect("store");
         let engine = SessionEngine::new(store);
         let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
@@ -3442,11 +3442,11 @@ mod tests {
                 client_instance_id,
             },
         );
-        let body = FrameBody::Text("survives replacement".into());
+        let body = FrameBody::Text("waves after replacement".into());
         let envelope = DurableMutationEnvelope {
             mutation_id: crate::protocol::MutationId::new([34; 16]),
             request_hash: crate::protocol::canonical_mutation_request_hash(
-                ChatOp::RoomMessage,
+                ChatOp::RoomAction,
                 Some(1),
                 &body,
             )
@@ -3459,7 +3459,7 @@ mod tests {
             link_id: first_link,
             context: OMENCHAT_LINK_CONTEXT,
             data: encode_frame(&Frame::new(
-                ChatOp::RoomMessage,
+                ChatOp::RoomAction,
                 3,
                 Some(1),
                 envelope.clone(),
@@ -3514,7 +3514,7 @@ mod tests {
         live.handle_event(OmenchatLinkEvent::LinkData {
             link_id: replacement_link,
             context: OMENCHAT_LINK_CONTEXT,
-            data: encode_frame(&Frame::new(ChatOp::RoomMessage, 7, Some(1), envelope))
+            data: encode_frame(&Frame::new(ChatOp::RoomAction, 7, Some(1), envelope))
                 .expect("replacement replay"),
         })
         .expect("replay on replacement link");

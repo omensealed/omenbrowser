@@ -44,10 +44,11 @@ gate.
 - `src/app.rs` is approximately 36,337 lines. The diagnostics-result reducer
   is extracted, but major smoke/interop, Network Doctor, log-state, and
   application orchestration regions remain concentrated there.
-- `durable-mutations-v1` is capability-negotiated and active for room text.
+- `durable-mutations-v1` is capability-negotiated and active for room messages
+  and `/me` room actions.
   The persistent intent contract admits `RoomMessage`, `RoomAction`,
   `RoomNotice`, `PartRoom`, and `Command`, while the desktop production sender
-  currently prepares only `RoomMessage`.
+  currently prepares `RoomMessage` and `RoomAction`.
 - The server durable executor and replay store already cover room-text and
   command mutation families with bounded transactional replay behavior.
 - Network Doctor and delivery evidence provide useful component state, but
@@ -222,6 +223,19 @@ Extend the existing `durable-mutations-v1` path one operation family at a time.
 Do not automatically resend uncertain operations.
 
 ### Unit 2A — room actions and notices
+
+Status: partially complete. Negotiated `/me` room actions now persist through
+the existing bounded intent owner, become uncertain before transport, use the
+canonical durable envelope, correlate `MessageAck`, survive restart as visible
+but never automatically transmitted intents, and reuse their mutation identity
+only through the existing explicit retry path. Legacy and downgraded sessions
+retain their prior `/me` frame.
+
+`RoomNotice` remains deliberately legacy. omenchatd transactionally commits and
+replays it, but its exact origin response is a `RoomEvent`; the live client
+currently correlates durable completion through `MessageAck`. Unit 2A closes
+only after notice correlation is designed and tested without changing protocol
+v1 behavior for mixed-version peers.
 
 - Persist intent before transmission.
 - Use stable client/mutation IDs and canonical request hash.

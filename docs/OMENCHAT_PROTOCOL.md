@@ -150,7 +150,8 @@ The destination hash identifies the chat server.
 ### Capability negotiation boundary
 
 Current activation note: the paragraphs below retain the staged design history,
-but negotiated room-text durable transmission is now active. The browser
+but negotiated room-message and `/me` room-action durable transmission is now
+active. The browser
 advertises only when the authenticated identity owns a healthy persistent
 intent worker and client-instance ID. omenchatd accepts only on the
 authenticated Link that requested it. Legacy, downgraded, unknown, and
@@ -196,8 +197,11 @@ destination, authenticated identity binding, stable client/mutation IDs,
 canonical request hash and body, expiry, state, and local correlation before it
 can be handed to a transport owner. Recovery length-preflights SQLite values
 before allocation and then revalidates frame metadata, canonical hashing, and
-retained-byte accounting. Negotiated room-text sends call this boundary before
-transport; other mutation types retain their current legacy path.
+retained-byte accounting. Negotiated room-message and `/me` room-action sends
+call this boundary before transport. `RoomNotice` remains on the legacy path
+until its `RoomEvent` origin response can carry durable correlation without
+changing mixed-version behavior; other mutation types retain their current
+legacy path.
 Prepared intents can move only to uncertain, expired, or abandoned; uncertain
 intents can move only to acknowledged, conflict, expired, or abandoned.
 Terminal states cannot regress. Recovery returns only prepared/uncertain rows,

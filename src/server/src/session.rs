@@ -5437,21 +5437,33 @@ mod tests {
         let engine = SessionEngine::new(store);
         let client_instance_id = ClientInstanceId::new([9; 16]);
         let first = durable_envelope(ChatOp::RoomAction, room.room_id, 3, "waves");
-        engine
+        let stored = engine
             .handle_durable_room_text(
                 &peer(),
                 21,
                 Some(room.room_id),
                 ChatOp::RoomAction,
                 client_instance_id,
-                first,
+                first.clone(),
             )
             .expect("first action");
+        let replayed = engine
+            .handle_durable_room_text(
+                &peer(),
+                22,
+                Some(room.room_id),
+                ChatOp::RoomAction,
+                client_instance_id,
+                first,
+            )
+            .expect("exact action replay");
+        assert_replayed_response(&replayed.origin, &stored.origin, 22);
+        assert!(replayed.broadcasts.is_empty());
 
         let conflict = engine
             .handle_durable_room_text(
                 &peer(),
-                22,
+                23,
                 Some(room.room_id),
                 ChatOp::RoomAction,
                 client_instance_id,
@@ -5469,7 +5481,7 @@ mod tests {
         let malformed = engine
             .handle_durable_room_text(
                 &peer(),
-                23,
+                24,
                 Some(room.room_id),
                 ChatOp::RoomAction,
                 client_instance_id,
@@ -5588,6 +5600,61 @@ mod tests {
                 .len(),
             1
         );
+        drop(engine);
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn durable_room_action_replays_after_server_restart_without_new_event() {
+        let path = temp_store_path("durable-action-restart");
+        let client_instance_id = ClientInstanceId::new([21; 16]);
+        let (room_id, envelope, original) = {
+            let store = OmenchatStore::open(&path).expect("persistent store");
+            let room = store.ensure_room("lobby", None).expect("room");
+            let envelope = durable_envelope(ChatOp::RoomAction, room.room_id, 16, "waves once");
+            let engine = SessionEngine::new(store);
+            let original = engine
+                .handle_durable_room_text(
+                    &peer(),
+                    141,
+                    Some(room.room_id),
+                    ChatOp::RoomAction,
+                    client_instance_id,
+                    envelope.clone(),
+                )
+                .expect("stored action before restart");
+            assert!(!original.broadcasts.is_empty());
+            (room.room_id, envelope, original.origin)
+        };
+
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("reopened store"));
+        let replayed = engine
+            .handle_durable_room_text(
+                &peer(),
+                142,
+                Some(room_id),
+                ChatOp::RoomAction,
+                client_instance_id,
+                envelope,
+            )
+            .expect("replayed action after restart");
+        assert_replayed_response(&replayed.origin, &original, 142);
+        assert!(replayed.broadcasts.is_empty());
+        let events = engine
+            .store
+            .latest_events(room_id, 10)
+            .expect("action events");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].kind,
+            ServerRoomEventKind::Action { body } if body == "waves once"
+        ));
         drop(engine);
         for candidate in [
             path.clone(),

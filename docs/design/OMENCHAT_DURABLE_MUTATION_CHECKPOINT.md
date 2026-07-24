@@ -1,6 +1,6 @@
 # OMENchat durable mutation checkpoint
 
-Status: checkpoint accepted; negotiated room-text durable transmission, conservative restart recovery, and explicit retry active
+Status: checkpoint accepted; negotiated room-message and room-action durable transmission, conservative restart recovery, and explicit retry active
 Baseline: OMENbrowser/omenchatd v0.9.5-2, OMENchat protocol v1  
 Proposed capability: `durable-mutations-v1`
 
@@ -42,9 +42,9 @@ creates the raw 16-byte value at the active identity-scoped
 owner-only on Unix, synchronized, concurrency-safe, and rejects symlinks,
 special files, wrong lengths, and permissive modes without rewriting them. The
 value is retained in live client state and transmitted only in a bounded
-`SessionOpen` capability request. Negotiated room-text sends use it as part of
-their persistent replay key; uncertain intents are retried only after an
-explicit, confirmed action.
+`SessionOpen` capability request. Negotiated room-message and `/me` room-action
+sends use it as part of their persistent replay key; uncertain intents are
+retried only after an explicit, confirmed action.
 
 `mutation_id` is a fresh random 128-bit value generated before each logical
 mutation is persisted and remains stable only for retries of that intent.
@@ -235,8 +235,9 @@ pruning. Worker replies are received through bounded blocking tasks rather than
 blocking the Iced update path or an arbitrary Tokio worker. State transitions
 are monotonic: prepared may become uncertain,
 expired, or abandoned; uncertain may become acknowledged, conflict, expired,
-or abandoned; terminal states never regress. Negotiated room-text sends now
-use this owner; other mutations remain on the unchanged legacy path.
+or abandoned; terminal states never regress. Negotiated room-message and
+`/me` room-action sends now use this owner. `RoomNotice` and other mutations
+remain on the unchanged legacy path.
 
 Desktop restart recovery is deliberately read-only. The first OMENchat
 maintenance deadline submits one bounded recovery command and never transmits
@@ -247,7 +248,8 @@ identifiers. Redacted session diagnostics report prepared, uncertain,
 past-expiry, and worker-queue counts. Recovery failure is visible and does not
 fall back to automatic resend.
 
-The guarded terminal-resolution UI is active for recovered room-text intents.
+The guarded terminal-resolution UI is active for recovered room-message and
+room-action intents.
 It renders no more than four entries per server, bounds each preview, and requires
 confirmation. `Stop Tracking` records `abandoned` without asserting whether an
 uncertain server commit occurred. `Finalize Expired` rechecks the persisted
@@ -379,8 +381,8 @@ construction and parsing enforce canonical scalar/container/value/depth limits
 before the extension can be connected to either live codec. Only a client with
 a persistent instance identity advertises the capability, and only an explicit
 matching `SessionAccept` activates it for that Link. Legacy frames remain
-unchanged. Negotiated room-text sends and explicit retries use the durable
-envelope; legacy and downgraded sessions do not.
+unchanged. Negotiated room-message and `/me` room-action sends and explicit
+retries use the durable envelope; legacy and downgraded sessions do not.
 
 ## Required test matrix
 
@@ -465,7 +467,7 @@ acknowledgement encoding, and replay publication. Stored terminal rejections
 remain stable even if policy later changes. A first commit returns one event
 for fan-out; replay returns no event. Restart, conflict, malformed hash,
 permission change, rate, and duplicate cases pass. Client envelope dispatch is
-active only for negotiated, persistently owned room text.
+active only for negotiated, persistently owned room messages and room actions.
 
 The live envelope-routing gate is now implemented behind the authenticated
 binding. Tagged malformed envelopes fail with 1012; valid envelopes without a
@@ -476,8 +478,10 @@ and broadcasts its event; exact replay sends the original acknowledgement and
 has no broadcast. Tests cover duplicate delivery under a different sequence,
 malformed and unbound requests, and legacy isolation. Production capability
 acceptance is now on for a valid negotiated request. The browser reaches this
-route only for ordinary room-text sends after its intent is persisted as
-uncertain; other mutation actions remain legacy.
+route only for ordinary room-message and `/me` room-action sends after their
+intent is persisted as uncertain. `RoomNotice` remains legacy because its
+origin response is a `RoomEvent`, while current durable client correlation is
+carried by `MessageAck`.
 
 The live client has a guarded durable-send boundary for
 room messages and actions. It accepts only an intent already persisted in the
@@ -486,9 +490,9 @@ instance, server destination, active room, operation, body shape, sequence, and
 pending-echo budgets before sending the canonical envelope. A matching
 `MessageAck` reports the fixed mutation identifier so the desktop owner can
 transition the intent to `acknowledged`. Missing negotiation and merely
-`prepared` intents fail before transport output. Ordinary negotiated room-text
-sends call this boundary only through the bounded persistence worker, and no
-uncertain intent is automatically replayed.
+`prepared` intents fail before transport output. Ordinary negotiated
+room-message and `/me` room-action sends call this boundary only through the
+bounded persistence worker, and no uncertain intent is automatically replayed.
 
 `PartRoom` now uses the same durable replay authority. Its membership deletion,
 departure event, exact legacy-compatible `CommandResult`, and replay record are
