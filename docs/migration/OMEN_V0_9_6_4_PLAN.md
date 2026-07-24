@@ -176,6 +176,34 @@ Measure the resulting file/module sizes and dependency edges. Select another
 cohesive reducer only if the preceding extractions are clean. Do not attempt to
 split all of `App` in this release.
 
+Status: complete; Phase 1 is closed. The parent fell from 36,337 lines at
+`v0.9.6-3` to 35,006 lines, a reduction of 1,331 lines (3.7%). The resulting
+private children and their direct parent dependencies are:
+
+| Module | Lines | Parent dependency |
+| --- | ---: | --- |
+| `diagnostics_results` | 460 | pre-existing, tightly coupled `impl App` using `super::*` |
+| `network_smoke` | 424 | `BrowserProbeSummary` and `DirectoryKind` |
+| `network_doctor` | 631 | three pure formatting/time helpers |
+| `log_state` | 451 | the epoch clock helper |
+
+No cyclic ownership boundary, worker, task, timer, queue, cache, or dependency
+was introduced. Public paths required by existing callers remain stable.
+
+No fourth extraction is selected for this phase. The remaining obvious
+message-task and browser-task result handlers are approximately 379 and 359
+lines and touch 20 and 15 distinct `App` fields/helper surfaces respectively.
+Moving either whole `impl App` block into another `super::*` child would reduce
+the parent line count without reducing state coupling. Separating those
+handlers properly requires project-owned operation state and narrower
+ownership boundaries, which belong to Phase 2/3 behavior work and must not be
+mixed into this mechanical phase.
+
+Phase 1 validation is satisfied by the focused before/after matrices and the
+full product, TUI, formatting, and strict-Clippy gates recorded in Units
+1A–1C. This documentation-only reassessment adds no executable change and does
+not repeat the expensive product matrix.
+
 ### Tests and gate
 
 - Add or move focused reducer tests with each extraction.
