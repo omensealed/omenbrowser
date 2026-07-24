@@ -55,9 +55,10 @@ gate.
   subsets.
 - The server durable executor and replay store already cover room-text and
   command mutation families with bounded transactional replay behavior.
-- Network Doctor and delivery evidence provide useful component state, but
-  there is no single project-owned Operations/Transfers history shared by GUI
-  and TUI.
+- Network Doctor and delivery evidence provide useful component state. A
+  project-owned bounded Operations/Transfers history now exists in shared
+  application state and is seeded from OMENchat durable-mutation recovery, but
+  general runtime adapters and GUI/TUI surfaces remain incomplete.
 - Propagation-node evidence, stamp/ticket boundaries, reduced motion, native
   packaging, bounded queues/caches, and managed runtime ownership already
   exist and should be extended rather than replaced.
@@ -399,6 +400,18 @@ and the current desktop recovery card consumes that shared decision. This
 subunit changes no persistence transition, automatic retry behavior, wire,
 worker, queue, timer, or dependency. Shared history ownership and the TUI
 surface remain separate follow-ups.
+
+Phase 3C places the bounded owner at `App::operation_history` and atomically
+reconciles the OMENchat-mutation domain when durable restart recovery completes.
+Other domains survive replacement; duplicate, mixed-domain, or saturated
+snapshots leave the previous history intact; and terminal persistence outcomes
+remove the exact opaque operation and byte budget. Projection rejection is
+visible but never mutates the authoritative intent store. Synchronization is
+limited to recovery and persisted transition boundaries, with no timer,
+polling, worker, subscription, schema, protocol, or dependency. The owner keeps
+transmission actions conservative because live capability/connection state is
+not yet an owned Operations-domain input. GUI/TUI surfaces and broader runtime
+adapters remain separate follow-ups.
 
 ### Model
 

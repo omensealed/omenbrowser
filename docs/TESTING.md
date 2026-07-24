@@ -2961,22 +2961,24 @@ and restart behavior.
 
 ## Shared Operations/Transfers model
 
-The frontend-neutral operation model uses only in-memory fixtures. Its focused
-tests distinguish queue/transport/receipt state from authoritative peer
-delivery, reject delivery without authoritative evidence, require bounded
-Resource totals for progress, coalesce repeated updates by stable operation ID,
-evict only terminal history, reject saturation consisting only of unresolved
-work, incrementally expire completed records, and reject excessive text,
-evidence, or action retention.
+The frontend-neutral operation-model fixtures distinguish
+queue/transport/receipt state from authoritative peer delivery, reject delivery
+without authoritative evidence, require bounded Resource totals for progress,
+coalesce repeated updates by stable operation ID, evict only terminal history,
+reject saturation consisting only of unresolved work, incrementally expire
+completed records, and reject excessive text, evidence, or action retention.
+They also prove atomic per-domain snapshot replacement, rejection of mixed or
+duplicate snapshot identities, preservation of other domains under replacement
+or saturation, and exact byte release on removal.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
   operations::tests --lib
 ```
 
-This model-only gate does not claim that production runtime events are wired to
-the ledger or that GUI/TUI Operations views exist yet. It creates no worker,
-timer, subscription, persistence file, network peer, or user-state access.
+`App` now owns the bounded history, but GUI/TUI Operations views and general
+runtime event adapters do not exist yet. The owner creates no worker, timer,
+subscription, persistence file, network peer, or user-state access.
 
 The OMENchat recovery adapter adds deterministic fixtures for prepared,
 uncertain, past-expiry, retry-blocked, terminal, and redaction cases:
@@ -2993,6 +2995,18 @@ These tests do not transmit a mutation or access the maintainer's identity,
 Reticulum, OMENchat server, or persistent application root. They verify only
 the read-only projection and the existing recovery card. Server/client restart
 and replay behavior remains covered by the isolated durable-mutation tests.
+
+The isolated desktop restart-recovery fixture additionally proves that all
+current-identity recovered intents atomically populate the shared owner,
+other-identity intents do not, past-expiry records remain nonterminal, no
+transmission action is stored in the conservative snapshot, and explicit
+resolution removes the exact records:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::omenchat_mutations::tests::restart_recovery_is_identity_scoped_visible_and_never_transmits \
+  --lib
+```
 
 ## OMENchat negotiated durable room and user mutations
 

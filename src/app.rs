@@ -5243,6 +5243,7 @@ pub struct App {
     pub diagnostics_state: DiagnosticsPanelState,
     pub monitoring_state: MonitoringPanelState,
     pub network_doctor_state: NetworkDoctorPanelState,
+    pub operation_history: crate::operations::OperationHistory,
     pub logs: LogBuffer,
     pub plugins_state: PluginsPanelState,
     pub settings_state: SettingsPanelState,
@@ -5535,6 +5536,7 @@ impl App {
                 ..MonitoringPanelState::default()
             },
             network_doctor_state: NetworkDoctorPanelState::default(),
+            operation_history: crate::operations::OperationHistory::default(),
             logs,
             plugins_state: PluginsPanelState {
                 manifests: plugin_report

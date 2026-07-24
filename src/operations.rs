@@ -248,7 +248,7 @@ pub struct OperationHistoryMetrics {
     pub evicted_terminal: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct OperationHistory {
     records: VecDeque<OperationRecord>,
     retained_bytes: usize,
@@ -337,6 +337,66 @@ impl OperationHistory {
         Ok(())
     }
 
+    pub fn remove(&mut self, id: OperationId) -> Option<OperationRecord> {
+        let index = self.records.iter().position(|record| record.id == id)?;
+        let record = self.records.remove(index)?;
+        if let Ok(bytes) = operation_record_bytes(&record) {
+            self.retained_bytes = self.retained_bytes.saturating_sub(bytes);
+        }
+        Some(record)
+    }
+
+    pub fn replace_domain_snapshot(
+        &mut self,
+        domain: OperationDomain,
+        records: impl IntoIterator<Item = OperationRecord>,
+    ) -> Result<(), OperationModelError> {
+        let records = records.into_iter().collect::<Vec<_>>();
+        let mut ids = BTreeSet::new();
+        if records.iter().any(|record| record.id.domain != domain) {
+            self.rejected = self.rejected.saturating_add(1);
+            return Err(OperationModelError::DomainMismatch);
+        }
+        if records.iter().any(|record| !ids.insert(record.id)) {
+            self.rejected = self.rejected.saturating_add(1);
+            return Err(OperationModelError::DuplicateOperation);
+        }
+        let mut snapshot_bytes = 0usize;
+        for record in &records {
+            let bytes = match record.validate() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.rejected = self.rejected.saturating_add(1);
+                    return Err(error);
+                }
+            };
+            snapshot_bytes = match snapshot_bytes.checked_add(bytes) {
+                Some(bytes) => bytes,
+                None => {
+                    self.rejected = self.rejected.saturating_add(1);
+                    return Err(OperationModelError::SizeOverflow);
+                }
+            };
+        }
+        let mut staged = self.clone();
+        staged.records.retain(|record| record.id.domain != domain);
+        staged.retained_bytes = staged.records.iter().try_fold(0usize, |bytes, record| {
+            bytes
+                .checked_add(operation_record_bytes(record)?)
+                .ok_or(OperationModelError::SizeOverflow)
+        })?;
+        let projected_items = staged.records.len().saturating_add(records.len());
+        let projected_bytes = staged.retained_bytes.saturating_add(snapshot_bytes);
+        if projected_items > staged.max_items || projected_bytes > staged.max_bytes {
+            self.rejected = self.rejected.saturating_add(1);
+            return Err(OperationModelError::HistoryCapacity);
+        }
+        staged.records.extend(records);
+        staged.retained_bytes = projected_bytes;
+        *self = staged;
+        Ok(())
+    }
+
     pub fn expire_terminal_before(&mut self, cutoff_unix_ms: i64, max_remove: usize) -> usize {
         if max_remove == 0 {
             return 0;
@@ -384,6 +444,10 @@ pub enum OperationModelError {
     RecordByteLimit,
     #[error("operation history is full of unresolved work")]
     HistoryCapacity,
+    #[error("operation snapshot contains a different domain")]
+    DomainMismatch,
+    #[error("operation snapshot contains a duplicate operation")]
+    DuplicateOperation,
     #[error("operation size accounting overflowed")]
     SizeOverflow,
 }
@@ -597,6 +661,82 @@ mod tests {
         assert_eq!(history.records().collect::<Vec<_>>(), vec![&first]);
         assert_eq!(history.metrics().bytes, first_bytes);
         assert_eq!(history.metrics().rejected, 1);
+    }
+
+    #[test]
+    fn domain_snapshot_replacement_is_atomic_and_preserves_other_domains() {
+        let mut history = OperationHistory::new(3, OPERATION_HISTORY_MAX_BYTES);
+        history
+            .upsert(record(1, OperationState::Delivered, 2))
+            .expect("existing LXMF operation");
+        let mut first = record(2, OperationState::Reconciling, 3);
+        first.id = OperationId::numeric(OperationDomain::OmenChatMutation, 2);
+        history
+            .replace_domain_snapshot(OperationDomain::OmenChatMutation, [first])
+            .expect("first snapshot");
+
+        let mut replacement = record(3, OperationState::Reconciling, 4);
+        replacement.id = OperationId::numeric(OperationDomain::OmenChatMutation, 3);
+        history
+            .replace_domain_snapshot(OperationDomain::OmenChatMutation, [replacement])
+            .expect("replacement snapshot");
+        assert_eq!(
+            history
+                .records()
+                .map(|record| record.id)
+                .collect::<Vec<_>>(),
+            vec![
+                OperationId::numeric(OperationDomain::LxmfMessage, 1),
+                OperationId::numeric(OperationDomain::OmenChatMutation, 3),
+            ]
+        );
+
+        let mut duplicate = record(4, OperationState::Reconciling, 5);
+        duplicate.id = OperationId::numeric(OperationDomain::OmenChatMutation, 4);
+        assert_eq!(
+            history.replace_domain_snapshot(
+                OperationDomain::OmenChatMutation,
+                [duplicate.clone(), duplicate]
+            ),
+            Err(OperationModelError::DuplicateOperation)
+        );
+        assert_eq!(history.metrics().items, 2);
+        assert_eq!(history.metrics().rejected, 1);
+
+        let saturated = (4..=6)
+            .map(|id| {
+                let mut record = record(id, OperationState::Reconciling, id as i64);
+                record.id = OperationId::numeric(OperationDomain::OmenChatMutation, id);
+                record
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            history.replace_domain_snapshot(OperationDomain::OmenChatMutation, saturated),
+            Err(OperationModelError::HistoryCapacity)
+        );
+        assert_eq!(
+            history
+                .records()
+                .map(|record| record.id)
+                .collect::<Vec<_>>(),
+            vec![
+                OperationId::numeric(OperationDomain::LxmfMessage, 1),
+                OperationId::numeric(OperationDomain::OmenChatMutation, 3),
+            ]
+        );
+        assert_eq!(history.metrics().rejected, 2);
+    }
+
+    #[test]
+    fn removing_an_operation_releases_its_exact_byte_budget() {
+        let mut history = OperationHistory::default();
+        let active = record(1, OperationState::Active, 2);
+        let bytes = active.validate().expect("record bytes");
+        history.upsert(active.clone()).expect("active record");
+        assert_eq!(history.metrics().bytes, bytes);
+        assert_eq!(history.remove(active.id), Some(active));
+        assert_eq!(history.metrics().items, 0);
+        assert_eq!(history.metrics().bytes, 0);
     }
 
     #[test]

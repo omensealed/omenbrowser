@@ -58,5 +58,26 @@ The mapping is deliberately conservative:
 
 The current OMENchat recovery card consumes this projection for its state and
 transmission-action decision. No automatic resend, persistence transition, or
-wire behavior changed. A shared Operations history owner and TUI surface remain
-follow-up work.
+wire behavior changed.
+
+## Shared owner
+
+`App::operation_history` is the one bounded owner shared by frontend state. An
+OMENchat restart-recovery completion atomically replaces only the
+`OmenChatMutation` domain snapshot. Records from other domains remain intact,
+duplicate IDs or mixed-domain snapshots are rejected, and capacity failure
+leaves the previous snapshot untouched. Resolution, acknowledgement, or a
+terminal server response removes the exact opaque mutation operation and
+releases its retained byte budget.
+
+The persistent mutation-intent database remains authoritative. Failure to
+project its snapshot never removes or transitions an intent and is reported in
+the recovery status/log. The owner initially records conservative recovery
+actions with network transmission disabled; the existing recovery card still
+evaluates the live negotiated-session guard when rendering explicit Send/Retry.
+This avoids stale permission or connection claims in the shared snapshot.
+
+Owner synchronization happens only at recovery and persisted transition
+boundaries. There is no polling, redraw-time mutation, worker, timer,
+subscription, or second persistence layer. GUI/TUI Operations surfaces and
+additional runtime-domain adapters remain follow-up work.

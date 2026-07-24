@@ -750,6 +750,7 @@ impl DesktopApp {
         self.omenchat
             .omenchat_recovered_mutation_intents
             .retain(|intent| intent.mutation_id != mutation_id);
+        self.remove_recovered_omenchat_operation(mutation_id);
         if let Some(status) = status_override {
             self.app.status.task = status;
             return;
@@ -828,8 +829,11 @@ impl DesktopApp {
         self.omenchat.omenchat_recovered_mutation_intents = current;
         self.omenchat.omenchat_other_identity_mutation_intents = other_count;
         self.omenchat.omenchat_mutation_recovery_state = OmenChatMutationRecoveryState::Loaded;
+        let projection_error = self
+            .replace_recovered_omenchat_operation_snapshot(now)
+            .err();
         let total = prepared.saturating_add(uncertain).saturating_add(expired);
-        self.app.status.task = if total == 0 && other_count == 0 {
+        let status = if total == 0 && other_count == 0 {
             "OMENchat durable mutation recovery found no unresolved intents".into()
         } else {
             format!(
@@ -837,6 +841,47 @@ impl DesktopApp {
                 other_count
             )
         };
+        self.app.status.task = if let Some(error) = projection_error {
+            tracing::warn!(%error, "bounded OMENchat Operations projection was rejected");
+            format!("{status}; Operations projection unavailable: {error}")
+        } else {
+            status
+        };
+    }
+
+    fn replace_recovered_omenchat_operation_snapshot(
+        &mut self,
+        observed_at_unix_seconds: i64,
+    ) -> Result<(), String> {
+        let records = self
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .map(|intent| {
+                crate::operations::omenchat::recovered_mutation_record(
+                    intent,
+                    observed_at_unix_seconds,
+                    false,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.app
+            .operation_history
+            .replace_domain_snapshot(
+                crate::operations::OperationDomain::OmenChatMutation,
+                records,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn remove_recovered_omenchat_operation(&mut self, mutation_id: MutationId) {
+        self.app
+            .operation_history
+            .remove(crate::operations::OperationId::opaque_128(
+                crate::operations::OperationDomain::OmenChatMutation,
+                mutation_id.into_bytes(),
+            ));
     }
 
     fn mark_prepared_omenchat_mutation_uncertain(
@@ -958,6 +1003,14 @@ impl DesktopApp {
                 .find(|recovered| recovered.mutation_id == intent.mutation_id)
             {
                 *recovered_intent = intent.clone();
+            }
+            if let Err(error) =
+                self.replace_recovered_omenchat_operation_snapshot(current_unix_seconds())
+            {
+                tracing::warn!(
+                    %error,
+                    "bounded OMENchat Operations projection did not accept an uncertain transition"
+                );
             }
         }
         let Some(transport) = self.omenchat.omenchat_live_transports.get_mut(&session_id) else {
@@ -1168,6 +1221,7 @@ impl DesktopApp {
             self.omenchat
                 .omenchat_recovered_mutation_intents
                 .retain(|intent| intent.mutation_id != mutation_id);
+            self.remove_recovered_omenchat_operation(mutation_id);
         }
     }
 
@@ -1235,6 +1289,7 @@ impl DesktopApp {
         self.omenchat
             .omenchat_recovered_mutation_intents
             .retain(|intent| intent.mutation_id != mutation_id);
+        self.remove_recovered_omenchat_operation(mutation_id);
         let status = if next == OutboundMutationState::Conflict {
             "server rejected the durable mutation because its identity conflicts with a retained operation; it will not be retried"
         } else {
@@ -2217,6 +2272,60 @@ mod tests {
         assert!(desktop.app.status.task.contains("12 uncertain"));
         assert!(desktop.app.status.task.contains("1 expired"));
         assert!(desktop.app.status.task.contains("nothing was resent"));
+        assert_eq!(desktop.app.operation_history.metrics().items, 14);
+        assert_eq!(
+            desktop
+                .app
+                .operation_history
+                .records()
+                .filter(|record| {
+                    record.id.domain == crate::operations::OperationDomain::OmenChatMutation
+                })
+                .count(),
+            14
+        );
+        let prepared_operation = desktop
+            .app
+            .operation_history
+            .records()
+            .find(|record| {
+                record.id
+                    == crate::operations::OperationId::opaque_128(
+                        crate::operations::OperationDomain::OmenChatMutation,
+                        prepared.mutation_id.into_bytes(),
+                    )
+            })
+            .expect("prepared operation projection");
+        assert_eq!(
+            prepared_operation.state,
+            crate::operations::OperationState::Waiting
+        );
+        assert!(!prepared_operation.valid_actions.iter().any(|action| {
+            matches!(
+                action,
+                crate::operations::OperationAction::ExplicitSend
+                    | crate::operations::OperationAction::ExplicitSafeRetry
+            )
+        }));
+        let expired_operation = desktop
+            .app
+            .operation_history
+            .records()
+            .find(|record| {
+                record.id
+                    == crate::operations::OperationId::opaque_128(
+                        crate::operations::OperationDomain::OmenChatMutation,
+                        expired.mutation_id.into_bytes(),
+                    )
+            })
+            .expect("expired operation projection");
+        assert_eq!(
+            expired_operation.state,
+            crate::operations::OperationState::Reconciling
+        );
+        assert!(expired_operation.evidence.iter().any(|evidence| {
+            evidence.kind == crate::operations::OperationEvidenceKind::Expiration
+        }));
         assert!(desktop.omenchat.omenchat_live_transports.is_empty());
         assert!(desktop
             .omenchat
@@ -2368,6 +2477,13 @@ mod tests {
             .omenchat_recovered_mutation_intents
             .iter()
             .any(|intent| intent.mutation_id == prepared.mutation_id));
+        assert!(!desktop.app.operation_history.records().any(|record| {
+            record.id
+                == crate::operations::OperationId::opaque_128(
+                    crate::operations::OperationDomain::OmenChatMutation,
+                    prepared.mutation_id.into_bytes(),
+                )
+        }));
         assert!(desktop
             .app
             .status
@@ -2394,6 +2510,13 @@ mod tests {
             .status
             .task
             .contains("no network action occurred"));
+        assert!(!desktop.app.operation_history.records().any(|record| {
+            record.id
+                == crate::operations::OperationId::opaque_128(
+                    crate::operations::OperationDomain::OmenChatMutation,
+                    expired.mutation_id.into_bytes(),
+                )
+        }));
         desktop.finish_omenchat_mutation_resolution(
             uncertain.mutation_id,
             OutboundMutationState::Abandoned,
@@ -2406,6 +2529,13 @@ mod tests {
             .omenchat_recovered_mutation_intents
             .iter()
             .any(|intent| intent.mutation_id == uncertain.mutation_id));
+        assert!(!desktop.app.operation_history.records().any(|record| {
+            record.id
+                == crate::operations::OperationId::opaque_128(
+                    crate::operations::OperationDomain::OmenChatMutation,
+                    uncertain.mutation_id.into_bytes(),
+                )
+        }));
         assert!(desktop.app.status.task.contains("already terminal"));
         assert!(desktop.omenchat.omenchat_live_transports.is_empty());
         desktop
