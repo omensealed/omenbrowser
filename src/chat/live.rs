@@ -19,7 +19,7 @@ use super::protocol::{
     with_session_open_negotiation, ChatErrorCode, ChatOp, ClientInstanceId,
     DurableMutationEnvelope, Frame, FrameBody, FrameValue, MutationId, RoomId,
     SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
-    PROTOCOL_NAME,
+    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -61,6 +61,7 @@ pub struct LiveChatClientState {
     durable_mutation_owner_ready: bool,
     durable_requests: BTreeSet<ChatSessionId>,
     durable_sessions: BTreeSet<ChatSessionId>,
+    durable_notice_ack_sessions: BTreeSet<ChatSessionId>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
     pending_uploads: BTreeMap<(ChatSessionId, u32), PendingLiveUpload>,
@@ -120,6 +121,10 @@ impl LiveChatClientState {
 
     pub fn durable_mutations_negotiated(&self, session_id: ChatSessionId) -> bool {
         self.durable_sessions.contains(&session_id)
+    }
+
+    pub fn durable_notice_ack_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.durable_notice_ack_sessions.contains(&session_id)
     }
 
     pub fn durable_mutation_is_pending(
@@ -240,6 +245,7 @@ impl LiveChatClientState {
         self.next_seq_by_session.remove(&session_id);
         self.durable_requests.remove(&session_id);
         self.durable_sessions.remove(&session_id);
+        self.durable_notice_ack_sessions.remove(&session_id);
         retired_echoes
     }
 }
@@ -576,6 +582,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         Err(_) => return vec![sequence_space_exhausted_event(session_id)],
     };
     state.durable_sessions.remove(&session_id);
+    state.durable_notice_ack_sessions.remove(&session_id);
     state.durable_requests.remove(&session_id);
     let mut durable_requested = false;
     let mut session_open_body = local_display_name
@@ -593,7 +600,10 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         session_open_body = match with_session_open_negotiation(
             session_open_body,
             &SessionOpenNegotiation {
-                requested_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                requested_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    DURABLE_NOTICE_ACK_CAPABILITY.into(),
+                ],
                 client_instance_id: Some(client_instance_id),
             },
         ) {
@@ -786,6 +796,9 @@ pub fn send_uncertain_durable_room_text<T: ChatLinkTransport>(
     if !state.durable_mutations_negotiated(session_id) {
         return error("durable OMENchat mutation was not negotiated for this live session");
     }
+    if intent.op == ChatOp::RoomNotice && !state.durable_notice_ack_negotiated(session_id) {
+        return error("durable OMENchat room notices were not negotiated for this live session");
+    }
     if intent.state != OutboundMutationState::SentUncertain {
         return error("durable OMENchat mutation must be persisted as uncertain before sending");
     }
@@ -805,7 +818,10 @@ pub fn send_uncertain_durable_room_text<T: ChatLinkTransport>(
     if intent.room_id != Some(room_id) {
         return error("durable OMENchat mutation belongs to a different room");
     }
-    if !matches!(intent.op, ChatOp::RoomMessage | ChatOp::RoomAction) {
+    if !matches!(
+        intent.op,
+        ChatOp::RoomMessage | ChatOp::RoomAction | ChatOp::RoomNotice
+    ) {
         return error("durable OMENchat mutation operation is not enabled for live client sending");
     }
     if !matches!(
@@ -900,6 +916,7 @@ fn append_pending_local_echo(
         at_unix: current_unix_secs(),
         kind: match op {
             ChatOp::RoomAction => ChatEventKind::Action { body },
+            ChatOp::RoomNotice => ChatEventKind::Notice { body },
             _ => ChatEventKind::Message { body },
         },
     };
@@ -1411,15 +1428,17 @@ fn apply_frame_with_state(
 ) {
     match frame.op {
         ChatOp::SessionAccept => {
-            let durable_accepted = parse_session_accept_negotiation(&frame.body)
+            let accepted_capabilities = parse_session_accept_negotiation(&frame.body)
                 .ok()
                 .flatten()
-                .is_some_and(|negotiation| {
-                    negotiation
-                        .accepted_capabilities
-                        .iter()
-                        .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
-                });
+                .map(|negotiation| negotiation.accepted_capabilities)
+                .unwrap_or_default();
+            let durable_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == DURABLE_MUTATION_CAPABILITY);
+            let durable_notice_ack_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == DURABLE_NOTICE_ACK_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
                 let request_pending = state.durable_requests.remove(&session_id);
                 let already_accepted = state.durable_sessions.contains(&session_id);
@@ -1428,8 +1447,14 @@ fn apply_frame_with_state(
                     && (request_pending || already_accepted)
                 {
                     state.durable_sessions.insert(session_id);
+                    if durable_notice_ack_accepted {
+                        state.durable_notice_ack_sessions.insert(session_id);
+                    } else {
+                        state.durable_notice_ack_sessions.remove(&session_id);
+                    }
                 } else {
                     state.durable_sessions.remove(&session_id);
+                    state.durable_notice_ack_sessions.remove(&session_id);
                 }
             }
             let policy = body_values(&frame.body).map(|values| {
@@ -1961,13 +1986,19 @@ fn apply_message_ack(
     event.actor_user_id = actor_user_id;
     event.actor_display_name = actor_display_name;
     event.at_unix = at_unix;
-    if kind_id == 2 {
-        if let ChatEventKind::Message { body } = &event.kind {
-            event.kind = ChatEventKind::Action { body: body.clone() };
-        }
+    if let ChatEventKind::Message { body } = &event.kind {
+        event.kind = match kind_id {
+            2 => ChatEventKind::Action { body: body.clone() },
+            3 => ChatEventKind::Notice { body: body.clone() },
+            _ => event.kind.clone(),
+        };
     }
     let confirmed = event.clone();
-    session.status = "message delivered".into();
+    session.status = if matches!(&confirmed.kind, ChatEventKind::Notice { .. }) {
+        "notice accepted by server".into()
+    } else {
+        "message accepted by server".into()
+    };
     events.push(ChatClientEvent::EventAppended {
         session_id: pending.session_id,
         event: confirmed,
@@ -3206,7 +3237,10 @@ mod tests {
         assert_eq!(
             crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
             Ok(Some(SessionOpenNegotiation {
-                requested_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                requested_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    DURABLE_NOTICE_ACK_CAPABILITY.into(),
+                ],
                 client_instance_id: Some(client_instance_id),
             }))
         );
@@ -3256,6 +3290,31 @@ mod tests {
             &mut events,
         );
         assert!(state.durable_mutations_negotiated(session_id));
+        assert!(!state.durable_notice_ack_negotiated(session_id));
+
+        let notice_accepted_body = crate::chat::protocol::with_session_accept_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::Array(Vec::new()),
+            ]),
+            &crate::chat::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    DURABLE_NOTICE_ACK_CAPABILITY.into(),
+                ],
+            },
+        )
+        .expect("notice acknowledgement accept");
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 2, None, notice_accepted_body),
+            &mut events,
+        );
+        assert!(state.durable_mutations_negotiated(session_id));
+        assert!(state.durable_notice_ack_negotiated(session_id));
 
         apply_frame_with_state(
             &mut client,
@@ -3264,7 +3323,7 @@ mod tests {
             Some(session_id),
             Frame::new(
                 ChatOp::SessionAccept,
-                2,
+                3,
                 None,
                 FrameBody::Fields(vec![
                     FrameValue::String(PROTOCOL_NAME.into()),
@@ -3274,16 +3333,18 @@ mod tests {
             &mut events,
         );
         assert!(!state.durable_mutations_negotiated(session_id));
+        assert!(!state.durable_notice_ack_negotiated(session_id));
 
         apply_frame_with_state(
             &mut client,
             Some(&mut state),
             &mut transport,
             Some(session_id),
-            Frame::new(ChatOp::SessionAccept, 3, None, accepted_body),
+            Frame::new(ChatOp::SessionAccept, 4, None, accepted_body),
             &mut events,
         );
         assert!(!state.durable_mutations_negotiated(session_id));
+        assert!(!state.durable_notice_ack_negotiated(session_id));
     }
 
     fn durable_room_text_intent(
@@ -3325,6 +3386,22 @@ mod tests {
             &intent.body,
         )
         .expect("action request hash");
+        intent
+    }
+
+    fn durable_room_notice_intent(
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+    ) -> OutboundMutationIntent {
+        let mut intent = durable_room_text_intent(client_instance_id, state);
+        intent.op = ChatOp::RoomNotice;
+        intent.body = FrameBody::Text("maintenance soon".into());
+        intent.request_hash = crate::chat::protocol::canonical_mutation_request_hash(
+            intent.op,
+            intent.room_id,
+            &intent.body,
+        )
+        .expect("notice request hash");
         intent
     }
 
@@ -3524,6 +3601,81 @@ mod tests {
             ChatEventKind::Action {
                 body: "waves".into()
             }
+        );
+    }
+
+    #[test]
+    fn durable_room_notice_sends_canonical_envelope_and_correlates_acknowledgement() {
+        let client_instance_id = ClientInstanceId::new([13; 16]);
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        state.durable_notice_ack_sessions.insert(session_id);
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::MessageAck,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::U64(22),
+                    FrameValue::U64(3),
+                    FrameValue::U64(7),
+                    FrameValue::I64(23),
+                    FrameValue::String("Alice".into()),
+                ]),
+            ))
+            .expect("notice acknowledgement");
+        let intent =
+            durable_room_notice_intent(client_instance_id, OutboundMutationState::SentUncertain);
+
+        let events = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+
+        let sent = decode_frame(&transport.sent_frames[0]).expect("durable notice frame");
+        let envelope = DurableMutationEnvelope::from_frame_body(&sent.body).expect("envelope");
+        assert_eq!(sent.op, ChatOp::RoomNotice);
+        assert_eq!(sent.room_id, Some(1));
+        assert_eq!(envelope.mutation_id, intent.mutation_id);
+        assert_eq!(envelope.request_hash, intent.request_hash);
+        assert_eq!(envelope.body, intent.body);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id: acknowledged_session,
+                mutation_id,
+            } if *acknowledged_session == session_id && *mutation_id == intent.mutation_id
+        )));
+        assert!(state.pending_local_echoes.is_empty());
+        assert_eq!(
+            client.session(session_id).expect("session").events[0].kind,
+            ChatEventKind::Notice {
+                body: "maintenance soon".into()
+            }
+        );
+        assert_eq!(
+            client.session(session_id).expect("session").status,
+            "notice accepted by server"
         );
     }
 
@@ -4984,7 +5136,7 @@ mod tests {
             session.events[0].actor_display_name.as_deref(),
             Some("Alice")
         );
-        assert_eq!(session.status, "message delivered");
+        assert_eq!(session.status, "message accepted by server");
     }
 
     #[test]

@@ -2959,26 +2959,30 @@ server-restart, mixed-version, Python, or live Reticulum retry idempotency. The
 separate negotiated durable-mutation tests below cover deterministic cross-Link
 and restart behavior.
 
-## OMENchat negotiated durable room actions
+## OMENchat negotiated durable room actions and notices
 
 Negotiated `/me` sends must persist a `RoomAction` intent before transport,
 transition it to uncertain, emit the canonical durable envelope, and correlate
-the matching `MessageAck`. Recovery exposes an uncertain action after client
-restart but never automatically transmits it. Server tests require exact replay
-after Link replacement and server restart to retain the original result without
-another event, rate charge, or fan-out; mutation-ID reuse with different
-content must conflict. `/notice` remains on the legacy path until its
-`RoomEvent` response has a durable-safe client correlation contract.
+the matching `MessageAck`. Negotiated `/notice` additionally requires
+`durable-room-notice-ack-v1`, follows the same intent boundary, and uses notice
+kind `3` in the acknowledgement. Older, ordinary, and downgraded protocol-v1
+notices retain their `RoomEvent` response and legacy send path. Recovery exposes
+uncertain actions and notices after client restart but never automatically
+transmits them. Server tests require exact replay after Link replacement and
+server restart to retain the original result without another event, rate
+charge, or fan-out; mutation-ID reuse with different content must conflict.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
   negotiated_room_text_persists_before_transport_and_acknowledges --lib
 cargo test --locked --no-default-features --features desktop-product \
   durable_room_action_sends_canonical_envelope_and_correlates_acknowledgement --lib
+cargo test --locked --no-default-features --features desktop-product \
+  durable_room_notice_sends_canonical_envelope_and_correlates_acknowledgement --lib
 (
   cd src/server
   cargo test --locked --no-default-features --features server-headless \
-    durable_room
+    durable_notice
 )
 ```
 

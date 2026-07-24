@@ -13,7 +13,7 @@ use crate::protocol::{
     canonical_mutation_request_hash, parse_session_open_negotiation,
     with_session_accept_negotiation, ChatErrorCode, ChatOp, ClientInstanceId, Compression,
     DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId, SessionAcceptNegotiation,
-    DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
+    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -195,6 +195,13 @@ pub struct DurableMutationDispatch {
 pub(crate) struct DurableMutationPeerContext<'a> {
     pub peer: &'a ServerPeer,
     pub active_room_peers: &'a [ServerPeer],
+    pub durable_notice_ack: bool,
+}
+
+#[derive(Clone, Copy)]
+struct DurableRoomOperation {
+    op: ChatOp,
+    notice_ack: bool,
 }
 
 struct DurableCommandEffect {
@@ -510,10 +517,20 @@ impl SessionEngine {
                     .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
         });
         if durable_requested {
+            let notice_ack_requested = negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == DURABLE_NOTICE_ACK_CAPABILITY)
+            });
+            let mut accepted_capabilities = vec![DURABLE_MUTATION_CAPABILITY.into()];
+            if notice_ack_requested {
+                accepted_capabilities.push(DURABLE_NOTICE_ACK_CAPABILITY.into());
+            }
             response_body = with_session_accept_negotiation(
                 response_body,
                 &SessionAcceptNegotiation {
-                    accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                    accepted_capabilities,
                 },
             )
             .map_err(|error| {
@@ -1090,6 +1107,7 @@ impl SessionEngine {
             DurableMutationPeerContext {
                 peer,
                 active_room_peers: &[],
+                durable_notice_ack: true,
             },
             seq,
             room_id,
@@ -1110,9 +1128,18 @@ impl SessionEngine {
     ) -> ServerResult<DurableMutationDispatch> {
         let peer = peers.peer;
         match op {
-            ChatOp::RoomMessage | ChatOp::RoomAction | ChatOp::RoomNotice => {
-                self.handle_durable_room_text(peer, seq, room_id, op, client_instance_id, envelope)
-            }
+            ChatOp::RoomMessage | ChatOp::RoomAction | ChatOp::RoomNotice => self
+                .handle_durable_room_text_with_notice_ack(
+                    peer,
+                    seq,
+                    room_id,
+                    DurableRoomOperation {
+                        op,
+                        notice_ack: peers.durable_notice_ack,
+                    },
+                    client_instance_id,
+                    envelope,
+                ),
             ChatOp::PartRoom => {
                 self.handle_durable_part_room(peer, seq, room_id, client_instance_id, envelope)
             }
@@ -1143,6 +1170,29 @@ impl SessionEngine {
         client_instance_id: ClientInstanceId,
         envelope: DurableMutationEnvelope,
     ) -> ServerResult<DurableMutationDispatch> {
+        self.handle_durable_room_text_with_notice_ack(
+            peer,
+            seq,
+            room_id,
+            DurableRoomOperation {
+                op,
+                notice_ack: true,
+            },
+            client_instance_id,
+            envelope,
+        )
+    }
+
+    fn handle_durable_room_text_with_notice_ack(
+        &self,
+        peer: &ServerPeer,
+        seq: u32,
+        room_id: Option<RoomId>,
+        operation: DurableRoomOperation,
+        client_instance_id: ClientInstanceId,
+        envelope: DurableMutationEnvelope,
+    ) -> ServerResult<DurableMutationDispatch> {
+        let op = operation.op;
         if !matches!(
             op,
             ChatOp::RoomMessage | ChatOp::RoomAction | ChatOp::RoomNotice
@@ -1291,7 +1341,7 @@ impl SessionEngine {
                 })
             },
             |event| {
-                let result = if op == ChatOp::RoomNotice {
+                let result = if op == ChatOp::RoomNotice && !operation.notice_ack {
                     Frame::new(
                         ChatOp::RoomEvent,
                         seq,
@@ -4376,6 +4426,71 @@ mod tests {
     }
 
     #[test]
+    fn durable_notice_ack_requires_explicit_additional_capability() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![
+                    crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                    crate::protocol::DURABLE_NOTICE_ACK_CAPABILITY.into(),
+                ],
+                client_instance_id: Some(crate::protocol::ClientInstanceId::new([10; 16])),
+            },
+        )
+        .expect("notice acknowledgement request");
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 2, None, request))
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                    crate::protocol::DURABLE_NOTICE_ACK_CAPABILITY.into(),
+                ],
+            }))
+        );
+    }
+
+    #[test]
+    fn base_durable_capability_preserves_legacy_notice_origin_response() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let user = store
+            .ensure_user(&peer().identity_hash, "Alice", None)
+            .expect("moderator");
+        store
+            .set_user_role_bits(user.user_id, ROLE_MODERATOR)
+            .expect("moderator role");
+        let engine = SessionEngine::new(store);
+        let result = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: false,
+                },
+                3,
+                Some(room.room_id),
+                ChatOp::RoomNotice,
+                ClientInstanceId::new([11; 16]),
+                durable_envelope(ChatOp::RoomNotice, room.room_id, 12, "legacy response"),
+            )
+            .expect("base durable notice");
+
+        assert_eq!(result.origin.op, ChatOp::RoomEvent);
+        assert_eq!(
+            result.broadcasts.first().map(|frame| frame.op),
+            Some(ChatOp::RoomEvent)
+        );
+    }
+
+    #[test]
     fn unknown_capability_request_keeps_legacy_session_accept() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(
@@ -5763,15 +5878,18 @@ mod tests {
                 envelope.clone(),
             )
             .expect("stored durable notice");
-        assert_eq!(stored.origin.op, ChatOp::RoomEvent);
+        assert_eq!(stored.origin.op, ChatOp::MessageAck);
+        assert!(matches!(
+            &stored.origin.body,
+            FrameBody::Fields(fields) if fields.get(1) == Some(&FrameValue::U64(3))
+        ));
         assert_eq!(
-            stored
-                .broadcasts
-                .first()
-                .map(encode_frame)
-                .transpose()
-                .expect("broadcast encode"),
-            Some(encode_frame(&stored.origin).expect("origin encode"))
+            stored.broadcasts.first().map(|frame| frame.op),
+            Some(ChatOp::RoomEvent)
+        );
+        assert_eq!(
+            stored.broadcasts.first().map(|frame| frame.seq),
+            Some(stored.origin.seq)
         );
 
         engine
@@ -5791,10 +5909,31 @@ mod tests {
         assert_replayed_response(&replayed.origin, &stored.origin, 62);
         assert!(replayed.broadcasts.is_empty());
 
-        let denied = engine
+        let conflict = engine
             .handle_durable_mutation(
                 &peer(),
                 63,
+                Some(room.room_id),
+                ChatOp::RoomNotice,
+                client_instance_id,
+                durable_envelope(
+                    ChatOp::RoomNotice,
+                    room.room_id,
+                    8,
+                    "different notice content",
+                ),
+            )
+            .expect("conflicting durable notice");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+        assert!(conflict.broadcasts.is_empty());
+
+        let denied = engine
+            .handle_durable_mutation(
+                &peer(),
+                64,
                 Some(room.room_id),
                 ChatOp::RoomNotice,
                 client_instance_id,
@@ -5814,6 +5953,68 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn durable_notice_replays_after_server_restart_without_new_event() {
+        let path = temp_store_path("durable-notice-restart");
+        let client_instance_id = ClientInstanceId::new([22; 16]);
+        let (room_id, envelope, original) = {
+            let store = OmenchatStore::open(&path).expect("persistent store");
+            let room = store.ensure_room("lobby", None).expect("room");
+            let user = store
+                .ensure_user(&peer().identity_hash, "Alice", None)
+                .expect("moderator");
+            store
+                .set_user_role_bits(user.user_id, ROLE_MODERATOR)
+                .expect("moderator role");
+            let envelope = durable_envelope(ChatOp::RoomNotice, room.room_id, 17, "restart notice");
+            let engine = SessionEngine::new(store);
+            let original = engine
+                .handle_durable_mutation(
+                    &peer(),
+                    151,
+                    Some(room.room_id),
+                    ChatOp::RoomNotice,
+                    client_instance_id,
+                    envelope.clone(),
+                )
+                .expect("stored notice before restart");
+            assert_eq!(original.origin.op, ChatOp::MessageAck);
+            assert!(!original.broadcasts.is_empty());
+            (room.room_id, envelope, original.origin)
+        };
+
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("reopened store"));
+        let replayed = engine
+            .handle_durable_mutation(
+                &peer(),
+                152,
+                Some(room_id),
+                ChatOp::RoomNotice,
+                client_instance_id,
+                envelope,
+            )
+            .expect("replayed notice after restart");
+        assert_replayed_response(&replayed.origin, &original, 152);
+        assert!(replayed.broadcasts.is_empty());
+        let events = engine
+            .store
+            .latest_events(room_id, 10)
+            .expect("notice events");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].kind,
+            ServerRoomEventKind::Notice { body } if body == "restart notice"
+        ));
+        drop(engine);
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     #[test]
@@ -6191,6 +6392,7 @@ mod tests {
                     DurableMutationPeerContext {
                         peer: &peer(),
                         active_room_peers: &[peer(), target_peer.clone()],
+                        durable_notice_ack: true,
                     },
                     110 + index as u32,
                     Some(room.room_id),
@@ -6257,6 +6459,7 @@ mod tests {
                     DurableMutationPeerContext {
                         peer: &peer(),
                         active_room_peers: &[],
+                        durable_notice_ack: true,
                     },
                     120 + index as u32,
                     Some(room.room_id),

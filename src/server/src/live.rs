@@ -5,7 +5,7 @@ use crate::protocol::codec::{decode_frame, encode_frame};
 use crate::protocol::{
     parse_session_accept_negotiation, parse_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
-    DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG,
+    DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG, DURABLE_NOTICE_ACK_CAPABILITY,
 };
 use crate::session::{DurableMutationPeerContext, ServerPeer, SessionEngine};
 use crate::transport::{
@@ -149,6 +149,7 @@ enum ReplayLookup {
 struct FrameDispatchOutcome {
     session_accepted: bool,
     accepted_client_instance_id: Option<ClientInstanceId>,
+    durable_notice_ack_accepted: bool,
     part_succeeded: bool,
     moderation_disconnect_succeeded: bool,
 }
@@ -157,6 +158,27 @@ struct FrameDispatchOutcome {
 struct DurableSessionBinding {
     identity_hash: Vec<u8>,
     client_instance_id: ClientInstanceId,
+    durable_notice_ack: bool,
+}
+
+impl DurableSessionBinding {
+    #[cfg(test)]
+    fn without_notice_ack(identity_hash: Vec<u8>, client_instance_id: ClientInstanceId) -> Self {
+        Self {
+            identity_hash,
+            client_instance_id,
+            durable_notice_ack: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_notice_ack(identity_hash: Vec<u8>, client_instance_id: ClientInstanceId) -> Self {
+        Self {
+            identity_hash,
+            client_instance_id,
+            durable_notice_ack: true,
+        }
+    }
 }
 
 impl LinkReplayCache {
@@ -564,6 +586,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                                 DurableSessionBinding {
                                     identity_hash: candidate_peer.identity_hash.clone(),
                                     client_instance_id,
+                                    durable_notice_ack: dispatch.durable_notice_ack_accepted,
                                 },
                             );
                         }
@@ -746,6 +769,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             return self.handle_durable_mutation_frame(link_id, peer, frame, active_room_peers);
         }
         let requested_client_instance_id = requested_durable_client_instance(&frame);
+        let notice_ack_requested =
+            session_open_requests_capability(&frame, DURABLE_NOTICE_ACK_CAPABILITY);
         let replay_candidate = is_replay_guarded_request(&frame);
         let request_fingerprint = if replay_candidate {
             Some(encode_frame(&frame).map_err(|error| {
@@ -794,6 +819,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 requested_client_instance_id,
                 &responses,
             ),
+            durable_notice_ack_accepted: notice_ack_requested
+                && responses_accept_capability(&responses, DURABLE_NOTICE_ACK_CAPABILITY),
             part_succeeded: request_op == ChatOp::PartRoom
                 && responses.iter().any(is_successful_part_response),
             moderation_disconnect_succeeded: request_op == ChatOp::Command
@@ -891,6 +918,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             DurableMutationPeerContext {
                 peer,
                 active_room_peers,
+                durable_notice_ack: binding.durable_notice_ack,
             },
             frame.seq,
             frame.room_id,
@@ -1598,12 +1626,23 @@ fn requested_durable_client_instance(frame: &Frame) -> Option<ClientInstanceId> 
         .flatten()
 }
 
-fn accepted_durable_client_instance(
-    requested: Option<ClientInstanceId>,
-    responses: &[Frame],
-) -> Option<ClientInstanceId> {
-    let requested = requested?;
-    let accepted = responses
+fn session_open_requests_capability(frame: &Frame, expected: &str) -> bool {
+    if frame.op != ChatOp::SessionOpen {
+        return false;
+    }
+    parse_session_open_negotiation(&frame.body)
+        .ok()
+        .flatten()
+        .is_some_and(|negotiation| {
+            negotiation
+                .requested_capabilities
+                .iter()
+                .any(|capability| capability == expected)
+        })
+}
+
+fn responses_accept_capability(responses: &[Frame], expected: &str) -> bool {
+    responses
         .iter()
         .filter(|response| response.op == ChatOp::SessionAccept)
         .filter_map(|response| {
@@ -1615,8 +1654,16 @@ fn accepted_durable_client_instance(
             negotiation
                 .accepted_capabilities
                 .iter()
-                .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
-        });
+                .any(|capability| capability == expected)
+        })
+}
+
+fn accepted_durable_client_instance(
+    requested: Option<ClientInstanceId>,
+    responses: &[Frame],
+) -> Option<ClientInstanceId> {
+    let requested = requested?;
+    let accepted = responses_accept_capability(responses, DURABLE_MUTATION_CAPABILITY);
     accepted.then_some(requested)
 }
 
@@ -2754,10 +2801,10 @@ mod tests {
         .expect("open identified link");
         live.durable_sessions.insert(
             link_id,
-            DurableSessionBinding {
-                identity_hash: b"peer-live".to_vec(),
-                client_instance_id: ClientInstanceId::new([5; 16]),
-            },
+            DurableSessionBinding::without_notice_ack(
+                b"peer-live".to_vec(),
+                ClientInstanceId::new([5; 16]),
+            ),
         );
 
         live.handle_event(OmenchatLinkEvent::PeerIdentified {
@@ -2769,10 +2816,7 @@ mod tests {
 
         live.durable_sessions.insert(
             link_id,
-            DurableSessionBinding {
-                identity_hash: vec![6; 16],
-                client_instance_id: ClientInstanceId::new([7; 16]),
-            },
+            DurableSessionBinding::without_notice_ack(vec![6; 16], ClientInstanceId::new([7; 16])),
         );
         live.handle_event(OmenchatLinkEvent::LinkClosed {
             link_id,
@@ -3338,10 +3382,7 @@ mod tests {
         let client_instance_id = ClientInstanceId::new([31; 16]);
         live.durable_sessions.insert(
             link_a,
-            DurableSessionBinding {
-                identity_hash: b"Alice".to_vec(),
-                client_instance_id,
-            },
+            DurableSessionBinding::without_notice_ack(b"Alice".to_vec(), client_instance_id),
         );
         let body = FrameBody::Text("durable hello".into());
         let envelope = DurableMutationEnvelope {
@@ -3437,10 +3478,7 @@ mod tests {
         let client_instance_id = ClientInstanceId::new([33; 16]);
         live.durable_sessions.insert(
             first_link,
-            DurableSessionBinding {
-                identity_hash: b"Alice".to_vec(),
-                client_instance_id,
-            },
+            DurableSessionBinding::without_notice_ack(b"Alice".to_vec(), client_instance_id),
         );
         let body = FrameBody::Text("waves after replacement".into());
         let envelope = DurableMutationEnvelope {
@@ -3504,10 +3542,7 @@ mod tests {
         .expect("join replacement room");
         live.durable_sessions.insert(
             replacement_link,
-            DurableSessionBinding {
-                identity_hash: b"Alice".to_vec(),
-                client_instance_id,
-            },
+            DurableSessionBinding::without_notice_ack(b"Alice".to_vec(), client_instance_id),
         );
         let frames_before_replay = live.transport().frames.len();
 
@@ -3554,6 +3589,7 @@ mod tests {
         let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
         let link_a = [30u8; 16];
         let link_b = [31u8; 16];
+        let replacement_link = [32u8; 16];
 
         for (link_id, name) in [(link_a, "Alice"), (link_b, "Bob")] {
             live.handle_event(OmenchatLinkEvent::LinkOpened {
@@ -3580,10 +3616,10 @@ mod tests {
         }
         live.durable_sessions.insert(
             link_a,
-            DurableSessionBinding {
-                identity_hash: b"Alice".to_vec(),
-                client_instance_id: ClientInstanceId::new([38; 16]),
-            },
+            DurableSessionBinding::with_notice_ack(
+                b"Alice".to_vec(),
+                ClientInstanceId::new([38; 16]),
+            ),
         );
         let body = FrameBody::Text("maintenance soon".into());
         let envelope = DurableMutationEnvelope {
@@ -3600,20 +3636,58 @@ mod tests {
         .expect("durable envelope");
         let frames_before = live.transport().frames.len();
 
-        for seq in [9, 10] {
-            live.handle_event(OmenchatLinkEvent::LinkData {
-                link_id: link_a,
-                context: OMENCHAT_LINK_CONTEXT,
-                data: encode_frame(&Frame::new(
-                    ChatOp::RoomNotice,
-                    seq,
-                    Some(1),
-                    envelope.clone(),
-                ))
-                .expect("notice"),
-            })
-            .expect("durable notice");
-        }
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: link_a,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::RoomNotice,
+                9,
+                Some(1),
+                envelope.clone(),
+            ))
+            .expect("notice"),
+        })
+        .expect("durable notice");
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id: link_a,
+            reason: Some("notice acknowledgement lost".into()),
+        })
+        .expect("close first notice link");
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id: replacement_link,
+            peer: ServerPeer {
+                identity_hash: b"Alice".to_vec(),
+                display_name: "Alice".into(),
+                lxmf_destination: None,
+            },
+        })
+        .expect("open replacement notice link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                1,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("replacement join"),
+        })
+        .expect("join replacement notice room");
+        live.durable_sessions.insert(
+            replacement_link,
+            DurableSessionBinding::with_notice_ack(
+                b"Alice".to_vec(),
+                ClientInstanceId::new([38; 16]),
+            ),
+        );
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::RoomNotice, 10, Some(1), envelope))
+                .expect("replacement notice"),
+        })
+        .expect("replay durable notice");
 
         let routed = live
             .transport()
@@ -3623,22 +3697,28 @@ mod tests {
             .filter_map(|captured| {
                 decode_frame(&captured.bytes)
                     .ok()
-                    .filter(|frame| frame.op == ChatOp::RoomEvent)
                     .map(|frame| (captured.link_id, frame))
             })
             .collect::<Vec<_>>();
-        let origin_events = routed
+        let origin_acks = routed
             .iter()
-            .filter(|(link_id, _)| *link_id == link_a)
+            .filter(|(link_id, frame)| {
+                (*link_id == link_a || *link_id == replacement_link)
+                    && frame.op == ChatOp::MessageAck
+            })
             .map(|(_, frame)| frame)
             .collect::<Vec<_>>();
-        assert_eq!(origin_events.len(), 2);
-        assert_replayed_response(origin_events[1], origin_events[0], 10);
-        assert_eq!(origin_events[0].seq, 9);
+        assert_eq!(origin_acks.len(), 2);
+        assert_replayed_response(origin_acks[1], origin_acks[0], 10);
+        assert_eq!(origin_acks[0].seq, 9);
+        assert!(matches!(
+            &origin_acks[0].body,
+            FrameBody::Fields(fields) if fields.get(1) == Some(&FrameValue::U64(3))
+        ));
         assert_eq!(
             routed
                 .iter()
-                .filter(|(link_id, _)| *link_id == link_b)
+                .filter(|(link_id, frame)| { *link_id == link_b && frame.op == ChatOp::RoomEvent })
                 .count(),
             1
         );
@@ -3684,10 +3764,10 @@ mod tests {
         }
         live.durable_sessions.insert(
             link_a,
-            DurableSessionBinding {
-                identity_hash: b"Alice".to_vec(),
-                client_instance_id: ClientInstanceId::new([40; 16]),
-            },
+            DurableSessionBinding::without_notice_ack(
+                b"Alice".to_vec(),
+                ClientInstanceId::new([40; 16]),
+            ),
         );
         let body = FrameBody::Text("topic Durable lobby".into());
         let envelope = DurableMutationEnvelope {
@@ -3784,10 +3864,10 @@ mod tests {
         }
         live.durable_sessions.insert(
             link_a,
-            DurableSessionBinding {
-                identity_hash: b"Alice".to_vec(),
-                client_instance_id: ClientInstanceId::new([42; 16]),
-            },
+            DurableSessionBinding::without_notice_ack(
+                b"Alice".to_vec(),
+                ClientInstanceId::new([42; 16]),
+            ),
         );
         let body = FrameBody::Text("role Bob mod".into());
         let envelope = DurableMutationEnvelope {
@@ -3890,10 +3970,10 @@ mod tests {
         }
         live.durable_sessions.insert(
             admin_link,
-            DurableSessionBinding {
-                identity_hash: b"Admin".to_vec(),
-                client_instance_id: ClientInstanceId::new([44; 16]),
-            },
+            DurableSessionBinding::without_notice_ack(
+                b"Admin".to_vec(),
+                ClientInstanceId::new([44; 16]),
+            ),
         );
         let body = FrameBody::Text("kick Bob".into());
         let envelope = DurableMutationEnvelope {
@@ -4038,10 +4118,10 @@ mod tests {
 
         live.durable_sessions.insert(
             link_a,
-            DurableSessionBinding {
-                identity_hash: b"Alice".to_vec(),
-                client_instance_id: ClientInstanceId::new([34; 16]),
-            },
+            DurableSessionBinding::without_notice_ack(
+                b"Alice".to_vec(),
+                ClientInstanceId::new([34; 16]),
+            ),
         );
         let body = FrameBody::Empty;
         let envelope = DurableMutationEnvelope {
@@ -4147,10 +4227,10 @@ mod tests {
         }
         live.durable_sessions.insert(
             link_a,
-            DurableSessionBinding {
-                identity_hash: b"Alice".to_vec(),
-                client_instance_id: ClientInstanceId::new([36; 16]),
-            },
+            DurableSessionBinding::without_notice_ack(
+                b"Alice".to_vec(),
+                ClientInstanceId::new([36; 16]),
+            ),
         );
         let body = FrameBody::Empty;
         let envelope = DurableMutationEnvelope {

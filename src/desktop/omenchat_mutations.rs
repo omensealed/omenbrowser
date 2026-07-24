@@ -94,6 +94,28 @@ impl DesktopApp {
                 }
                 (ChatOp::RoomAction, body)
             }
+            Some(ClientCommand::Notice(body)) => {
+                if !self
+                    .omenchat
+                    .omenchat_live_state
+                    .durable_notice_ack_negotiated(session_id)
+                {
+                    match self.handle_omenchat_draft_command(session_id, &draft) {
+                        OmenChatDraftCommandResult::HandledClear => {
+                            self.omenchat.chat_drafts.insert(session_id, String::new());
+                        }
+                        OmenChatDraftCommandResult::NotCommand
+                        | OmenChatDraftCommandResult::HandledKeep => {}
+                    }
+                    return Task::none();
+                }
+                let body = body.trim().to_owned();
+                if body.is_empty() {
+                    self.set_omenchat_session_status(session_id, "usage: /notice <text>".into());
+                    return Task::none();
+                }
+                (ChatOp::RoomNotice, body)
+            }
             Some(_) => {
                 match self.handle_omenchat_draft_command(session_id, &draft) {
                     OmenChatDraftCommandResult::HandledClear => {
@@ -1160,6 +1182,64 @@ mod tests {
         desktop
             .omenchat
             .chat_drafts
+            .insert(session_id, "/notice legacy-compatible".into());
+        let _legacy_notice_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        assert!(recover_intents(&desktop).is_empty());
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(2)
+        );
+
+        let notice_accept_body = with_session_accept_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::Array(Vec::new()),
+            ]),
+            &SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    crate::chat::protocol::DURABLE_NOTICE_ACK_CAPABILITY.into(),
+                ],
+            },
+        )
+        .expect("notice acknowledgement negotiation");
+        let mut transport = desktop
+            .omenchat
+            .omenchat_live_transports
+            .remove(&session_id)
+            .expect("live transport");
+        assert!(transport.push_incoming_frame(
+            encode_frame(&Frame::new(
+                ChatOp::SessionAccept,
+                2,
+                None,
+                notice_accept_body,
+            ))
+            .expect("notice accept frame"),
+            current_epoch_ms(),
+        ));
+        let _ = crate::chat::live::drain_live_events_with_state(
+            &mut desktop.omenchat.chat_client,
+            &mut desktop.omenchat.omenchat_live_state,
+            &mut transport,
+            Some(session_id),
+        );
+        desktop
+            .omenchat
+            .omenchat_live_transports
+            .insert(session_id, transport);
+        assert!(desktop
+            .omenchat
+            .omenchat_live_state
+            .durable_notice_ack_negotiated(session_id));
+
+        desktop
+            .omenchat
+            .chat_drafts
             .insert(session_id, "/me waves".into());
         let _prepare_action_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
         let prepared_action = recover_intents(&desktop)
@@ -1213,10 +1293,33 @@ mod tests {
             .omenchat
             .chat_drafts
             .insert(session_id, "/notice maintenance".into());
-        let _legacy_notice_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
-        assert!(
-            recover_intents(&desktop).is_empty(),
-            "room notices remain on the legacy path until their RoomEvent response can be durably correlated"
+        let _prepare_notice_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        let prepared_notice = recover_intents(&desktop)
+            .into_iter()
+            .next()
+            .expect("prepared notice intent");
+        assert_eq!(prepared_notice.op, ChatOp::RoomNotice);
+        assert_eq!(prepared_notice.body, FrameBody::Text("maintenance".into()));
+        assert_eq!(prepared_notice.state, OutboundMutationState::Prepared);
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+            Some("/notice maintenance")
+        );
+
+        let _transition_notice_task = desktop
+            .mark_prepared_omenchat_mutation_uncertain(session_id, Ok(prepared_notice.clone()));
+        let uncertain_notice = recover_intents(&desktop)
+            .into_iter()
+            .find(|intent| intent.mutation_id == prepared_notice.mutation_id)
+            .expect("uncertain notice intent");
+        assert_eq!(uncertain_notice.state, OutboundMutationState::SentUncertain);
+        let _send_notice_task = desktop.send_persisted_uncertain_omenchat_mutation(
+            session_id,
+            Ok(IntentTransition::Updated(uncertain_notice)),
         );
         assert_eq!(
             desktop
@@ -1232,8 +1335,19 @@ mod tests {
                 .omenchat_live_transports
                 .get(&session_id)
                 .map(|transport| transport.chat_frames_out),
-            Some(3)
+            Some(4)
         );
+        assert!(desktop
+            .omenchat
+            .omenchat_live_state
+            .durable_mutation_is_pending(session_id, prepared_notice.mutation_id));
+        let _notice_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id,
+                mutation_id: prepared_notice.mutation_id,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
 
         desktop
             .omenchat
@@ -1291,7 +1405,7 @@ mod tests {
                 .omenchat_live_transports
                 .get(&session_id)
                 .map(|transport| transport.chat_frames_out),
-            Some(4)
+            Some(5)
         );
         let _terminal_tasks = desktop.omenchat_mutation_persistence_tasks(&[
             ChatClientEvent::DurableMutationTerminal {
@@ -1383,6 +1497,15 @@ mod tests {
             now.saturating_sub(10),
             now.saturating_add(100),
         );
+        let uncertain_notice = persist_recovery_fixture_for_op(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            ChatOp::RoomNotice,
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
         let _other_identity = persist_recovery_fixture(
             &store,
             vec![0x66; 16],
@@ -1416,11 +1539,11 @@ mod tests {
         );
         assert_eq!(
             desktop.omenchat.omenchat_recovered_mutation_intents.len(),
-            4
+            5
         );
         assert_eq!(desktop.omenchat.omenchat_other_identity_mutation_intents, 1);
         assert!(desktop.app.status.task.contains("1 prepared"));
-        assert!(desktop.app.status.task.contains("2 uncertain"));
+        assert!(desktop.app.status.task.contains("3 uncertain"));
         assert!(desktop.app.status.task.contains("1 expired"));
         assert!(desktop.app.status.task.contains("nothing was resent"));
         assert!(desktop.omenchat.omenchat_live_transports.is_empty());
@@ -1441,6 +1564,15 @@ mod tests {
             .any(|intent| {
                 intent.mutation_id == uncertain_action.mutation_id
                     && intent.op == ChatOp::RoomAction
+                    && intent.state == OutboundMutationState::SentUncertain
+            }));
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| {
+                intent.mutation_id == uncertain_notice.mutation_id
+                    && intent.op == ChatOp::RoomNotice
                     && intent.state == OutboundMutationState::SentUncertain
             }));
         desktop.omenchat.omenchat_mutation_intent_worker = Some(

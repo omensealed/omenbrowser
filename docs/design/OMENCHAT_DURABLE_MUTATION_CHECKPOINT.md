@@ -1,8 +1,9 @@
 # OMENchat durable mutation checkpoint
 
-Status: checkpoint accepted; negotiated room-message and room-action durable transmission, conservative restart recovery, and explicit retry active
+Status: checkpoint accepted; negotiated room-message, room-action, and room-notice durable transmission, conservative restart recovery, and explicit retry active
 Baseline: OMENbrowser/omenchatd v0.9.5-2, OMENchat protocol v1  
 Proposed capability: `durable-mutations-v1`
+Additive notice acknowledgement capability: `durable-room-notice-ack-v1`
 
 ## Observed boundary
 
@@ -235,8 +236,8 @@ pruning. Worker replies are received through bounded blocking tasks rather than
 blocking the Iced update path or an arbitrary Tokio worker. State transitions
 are monotonic: prepared may become uncertain,
 expired, or abandoned; uncertain may become acknowledged, conflict, expired,
-or abandoned; terminal states never regress. Negotiated room-message and
-`/me` room-action sends now use this owner. `RoomNotice` and other mutations
+or abandoned; terminal states never regress. Negotiated room-message,
+`/me` room-action, and `/notice` sends now use this owner. Other mutations
 remain on the unchanged legacy path.
 
 Desktop restart recovery is deliberately read-only. The first OMENchat
@@ -248,8 +249,8 @@ identifiers. Redacted session diagnostics report prepared, uncertain,
 past-expiry, and worker-queue counts. Recovery failure is visible and does not
 fall back to automatic resend.
 
-The guarded terminal-resolution UI is active for recovered room-message and
-room-action intents.
+The guarded terminal-resolution UI is active for recovered room-message,
+room-action, and room-notice intents.
 It renders no more than four entries per server, bounds each preview, and requires
 confirmation. `Stop Tracking` records `abandoned` without asserting whether an
 uncertain server commit occurred. `Finalize Expired` rechecks the persisted
@@ -381,8 +382,9 @@ construction and parsing enforce canonical scalar/container/value/depth limits
 before the extension can be connected to either live codec. Only a client with
 a persistent instance identity advertises the capability, and only an explicit
 matching `SessionAccept` activates it for that Link. Legacy frames remain
-unchanged. Negotiated room-message and `/me` room-action sends and explicit
-retries use the durable envelope; legacy and downgraded sessions do not.
+unchanged. Negotiated room-message, `/me` room-action, and `/notice` sends and
+explicit retries use the durable envelope; legacy and downgraded sessions do
+not.
 
 ## Required test matrix
 
@@ -459,15 +461,17 @@ verification, permission and membership validation, transactional room-event
 commit, reversible rate admission, exact origin response, and one-time fan-out.
 Only after that passes may the server advertise acceptance.
 
-That inactive session-level executor is now implemented for room messages and
-actions. Canonical hash and body validation occurs before replay admission.
+That inactive session-level executor is now implemented for room messages,
+actions, and notices. Canonical hash and body validation occurs before replay
+admission.
 Only a replay miss enters the immediate transaction and evaluates room/user
 policy, reversible rate admission, membership, event insertion, exact
 acknowledgement encoding, and replay publication. Stored terminal rejections
 remain stable even if policy later changes. A first commit returns one event
 for fan-out; replay returns no event. Restart, conflict, malformed hash,
 permission change, rate, and duplicate cases pass. Client envelope dispatch is
-active only for negotiated, persistently owned room messages and room actions.
+active only for negotiated, persistently owned room messages, room actions, and
+room notices.
 
 The live envelope-routing gate is now implemented behind the authenticated
 binding. Tagged malformed envelopes fail with 1012; valid envelopes without a
@@ -478,21 +482,23 @@ and broadcasts its event; exact replay sends the original acknowledgement and
 has no broadcast. Tests cover duplicate delivery under a different sequence,
 malformed and unbound requests, and legacy isolation. Production capability
 acceptance is now on for a valid negotiated request. The browser reaches this
-route only for ordinary room-message and `/me` room-action sends after their
-intent is persisted as uncertain. `RoomNotice` remains legacy because its
-origin response is a `RoomEvent`, while current durable client correlation is
-carried by `MessageAck`.
+route only for ordinary room-message, `/me` room-action, and `/notice` sends
+after their intent is persisted as uncertain. Durable notices additionally
+require `durable-room-notice-ack-v1` and use the already-defined kind-3
+`MessageAck`; older, legacy, and downgraded notices retain their protocol-v1
+`RoomEvent` response and are not placed in the durable intent store.
 
-The live client has a guarded durable-send boundary for
-room messages and actions. It accepts only an intent already persisted in the
+The live client has a guarded durable-send boundary for room messages, actions,
+and notices. It accepts only an intent already persisted in the
 `sent_uncertain` state and verifies negotiated session, persistent client
 instance, server destination, active room, operation, body shape, sequence, and
 pending-echo budgets before sending the canonical envelope. A matching
 `MessageAck` reports the fixed mutation identifier so the desktop owner can
 transition the intent to `acknowledged`. Missing negotiation and merely
 `prepared` intents fail before transport output. Ordinary negotiated
-room-message and `/me` room-action sends call this boundary only through the
-bounded persistence worker, and no uncertain intent is automatically replayed.
+room-message, `/me` room-action, and `/notice` sends call this boundary only
+through the bounded persistence worker, and no uncertain intent is
+automatically replayed.
 
 `PartRoom` now uses the same durable replay authority. Its membership deletion,
 departure event, exact legacy-compatible `CommandResult`, and replay record are

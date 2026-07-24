@@ -243,6 +243,8 @@ mod tests {
         assert_eq!(ChatOp::HistoryResourceOffer as u16, 42);
         assert_eq!(ChatErrorCode::MalformedFrame as u16, 1007);
         assert_eq!(ChatErrorCode::DurableMutationNotNegotiated as u16, 1011);
+        assert_eq!(DURABLE_MUTATION_CAPABILITY, "durable-mutations-v1");
+        assert_eq!(DURABLE_NOTICE_ACK_CAPABILITY, "durable-room-notice-ack-v1");
         assert_eq!(ChatErrorCode::DurableMutationMalformed as u16, 1012);
         assert_eq!(ChatErrorCode::DurableMutationConflict as u16, 1013);
         assert_eq!(ChatErrorCode::DurableMutationResultExpired as u16, 1014);
