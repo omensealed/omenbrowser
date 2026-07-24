@@ -45,8 +45,8 @@ gate.
   is extracted, but major smoke/interop, Network Doctor, log-state, and
   application orchestration regions remain concentrated there.
 - `durable-mutations-v1` is capability-negotiated and active for room messages,
-  `/me` room actions, `/notice` room notices, `/part` room leaves, and `/topic`
-  room metadata updates.
+  `/me` room actions, `/notice` room notices, `/part` room leaves, `/topic`
+  room metadata updates, and `/create` room creation.
   The persistent intent contract admits `RoomMessage`, `RoomAction`,
   `RoomNotice`, `PartRoom`, and `Command`, while the desktop production sender
   currently prepares the first four operation families plus the narrowly
@@ -282,7 +282,7 @@ Command classification and first subunit:
 | --- | --- | --- |
 | `rooms` | read-only; mutation identity is unnecessary | legacy/read-only |
 | `topic` | transactionally durable and replay-safe | activated |
-| `create` | transactionally durable and replay-safe | deferred to no-room/new-room correlation unit |
+| `create` | transactionally durable and replay-safe | activated |
 | `role`, `unban` | transactionally durable and replay-safe | deferred to target-resolution unit |
 | `kick`, `ban`, `mute`, `unmute` | durable database result plus live target effects | deferred to moderation side-effect unit |
 
@@ -294,6 +294,17 @@ capability. Client restart recovery is visible but non-transmitting. Server
 tests cover content conflict, replacement-Link replay, restart replay, and
 one-use `RoomDelta` publication. No schema, protocol number, capability,
 dependency, worker, timer, or queue changed.
+
+The create subunit persists a roomless canonical `create` command before
+transport and adds no room locally until an exact sequence, `room_id = None`,
+command tag, and server-normalized requested room name are returned. A
+mismatched new-room identity leaves the intent uncertain. Explicit retry binds
+to the original server rather than an unrelated active room. Client and server
+restart fixtures remain non-transmitting or exact-replay-only; replacement-Link
+replay returns the original result and publishes no second `RoomDelta`.
+Invalid names that normalize to empty are rejected before persistence. This
+subunit reuses the existing capability, intent schema, worker, and bounded
+pending-correlation budgets.
 
 ### Unit 2D — recovery UX
 

@@ -295,14 +295,16 @@ and exact result together. First execution emits the bounded deltas; `kick` and
 immediately after commit and before response I/O. Replay cannot disconnect a
 replacement Link.
 
-The negotiated desktop sender currently activates only `topic` from this
-command family. It persists the normalized `topic` command under the active
-room before transport, retains the prior local topic while the result is
-uncertain, and accepts only an exact sequence, room, command name, and returned
-room identity. Old or downgraded peers retain the protocol-v1 command path.
-`rooms` remains read-only. `create`, role changes, unban, and active-peer
-moderation remain on their legacy desktop paths until their distinct
-correlation or live-effect cases are activated and tested.
+The negotiated desktop sender activates `topic` and `create` from this command
+family. It persists the normalized `topic` command under the active room before
+transport, retains the prior local topic while the result is uncertain, and
+accepts only an exact sequence, room, command name, and returned room identity.
+`create` is persisted with no request room and adds no room locally until the
+exact sequence, roomless result, command name, and server-normalized requested
+room name match. Old or downgraded peers retain the protocol-v1 command path.
+`rooms` remains read-only. Role changes, unban, and active-peer moderation
+remain on their legacy desktop paths until their distinct target-resolution or
+live-effect cases are activated and tested.
 
 ## Operation correlation and same-link replay
 

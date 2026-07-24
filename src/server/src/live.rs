@@ -3866,6 +3866,143 @@ mod tests {
     }
 
     #[test]
+    fn durable_create_replays_on_replacement_link_without_second_room_delta() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let administrator = store
+            .ensure_user(b"Alice", "Alice", None)
+            .expect("administrator");
+        store
+            .set_user_role_bits(administrator.user_id, 1 << 2)
+            .expect("administrator role");
+        let engine = SessionEngine::new(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let original_link = [44u8; 16];
+        let observer_link = [45u8; 16];
+        let replacement_link = [46u8; 16];
+
+        for (link_id, name) in [(original_link, "Alice"), (observer_link, "Bob")] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: name.as_bytes().to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join"),
+            })
+            .expect("join room");
+        }
+        let client_instance_id = ClientInstanceId::new([47; 16]);
+        live.durable_sessions.insert(
+            original_link,
+            DurableSessionBinding::without_notice_ack(b"Alice".to_vec(), client_instance_id),
+        );
+        let body = FrameBody::Text("create operations Operations room".into());
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([48; 16]),
+            request_hash: crate::protocol::canonical_mutation_request_hash(
+                ChatOp::Command,
+                None,
+                &body,
+            )
+            .expect("canonical hash"),
+            body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        let frames_before = live.transport().frames.len();
+
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: original_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 21, None, envelope.clone()))
+                .expect("create"),
+        })
+        .expect("durable create");
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id: original_link,
+            reason: Some("create result lost".into()),
+        })
+        .expect("close original link");
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id: replacement_link,
+            peer: ServerPeer {
+                identity_hash: b"Alice".to_vec(),
+                display_name: "Alice".into(),
+                lxmf_destination: None,
+            },
+        })
+        .expect("open replacement link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                1,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("replacement join"),
+        })
+        .expect("join replacement room");
+        live.durable_sessions.insert(
+            replacement_link,
+            DurableSessionBinding::without_notice_ack(b"Alice".to_vec(), client_instance_id),
+        );
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 22, None, envelope))
+                .expect("replacement create"),
+        })
+        .expect("replay durable create");
+
+        let routed = live
+            .transport()
+            .frames
+            .iter()
+            .skip(frames_before)
+            .filter_map(|captured| {
+                decode_frame(&captured.bytes)
+                    .ok()
+                    .map(|frame| (captured.link_id, frame))
+            })
+            .collect::<Vec<_>>();
+        let origin_results = routed
+            .iter()
+            .filter(|(link_id, frame)| {
+                (*link_id == original_link || *link_id == replacement_link)
+                    && command_result_name(frame) == Some("create")
+            })
+            .map(|(_, frame)| frame)
+            .collect::<Vec<_>>();
+        assert_eq!(origin_results.len(), 2);
+        assert_replayed_response(origin_results[1], origin_results[0], 22);
+        assert_eq!(origin_results[0].seq, 21);
+        assert_eq!(
+            routed
+                .iter()
+                .filter(|(link_id, frame)| {
+                    *link_id == observer_link && frame.op == ChatOp::RoomDelta
+                })
+                .count(),
+            1
+        );
+        assert!(live.replay_cache.entries.is_empty());
+    }
+
+    #[test]
     fn durable_role_fans_out_each_effect_once_then_replays_only_to_origin() {
         let store = OmenchatStore::in_memory().expect("store");
         let administrator = store

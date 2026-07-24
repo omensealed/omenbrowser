@@ -6268,6 +6268,112 @@ mod tests {
                 .room_revision,
             created.room_revision
         );
+
+        let conflict = engine
+            .handle_durable_mutation(
+                &peer(),
+                83,
+                None,
+                ChatOp::Command,
+                client_instance_id,
+                durable_envelope_optional_room(
+                    ChatOp::Command,
+                    None,
+                    11,
+                    FrameBody::Text("create operations Different content".into()),
+                ),
+            )
+            .expect("conflicting durable create");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+        assert!(conflict.broadcasts.is_empty());
+        assert_eq!(
+            engine
+                .store
+                .room_by_name("operations")
+                .expect("conflicted room")
+                .expect("room")
+                .room_revision,
+            created.room_revision
+        );
+    }
+
+    #[test]
+    fn durable_create_replays_after_server_restart_without_second_room_mutation() {
+        let path = temp_store_path("durable-create-restart");
+        let client_instance_id = ClientInstanceId::new([24; 16]);
+        let (envelope, original, room_id, committed_revision) = {
+            let store = OmenchatStore::open(&path).expect("persistent store");
+            let user = store
+                .ensure_user(&peer().identity_hash, "Alice", None)
+                .expect("administrator");
+            store
+                .set_user_role_bits(user.user_id, ROLE_ADMIN)
+                .expect("administrator role");
+            let envelope = durable_envelope_optional_room(
+                ChatOp::Command,
+                None,
+                19,
+                FrameBody::Text("create restart Restart room".into()),
+            );
+            let engine = SessionEngine::new(store);
+            let original = engine
+                .handle_durable_mutation(
+                    &peer(),
+                    171,
+                    None,
+                    ChatOp::Command,
+                    client_instance_id,
+                    envelope.clone(),
+                )
+                .expect("stored create before restart");
+            assert_eq!(original.origin.op, ChatOp::CommandResult);
+            assert_eq!(
+                original.broadcasts.first().map(|frame| frame.op),
+                Some(ChatOp::RoomDelta)
+            );
+            let room = engine
+                .store
+                .room_by_name("restart")
+                .expect("created room")
+                .expect("room");
+            engine
+                .store
+                .set_user_role_bits(user.user_id, 0)
+                .expect("remove administrator role");
+            (envelope, original.origin, room.room_id, room.room_revision)
+        };
+
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("reopened store"));
+        let replayed = engine
+            .handle_durable_mutation(
+                &peer(),
+                172,
+                None,
+                ChatOp::Command,
+                client_instance_id,
+                envelope,
+            )
+            .expect("replayed create after restart");
+        assert_replayed_response(&replayed.origin, &original, 172);
+        assert!(replayed.broadcasts.is_empty());
+        let room = engine
+            .store
+            .room_by_name("restart")
+            .expect("replayed room")
+            .expect("room");
+        assert_eq!(room.room_id, room_id);
+        assert_eq!(room.room_revision, committed_revision);
+        drop(engine);
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     #[test]
