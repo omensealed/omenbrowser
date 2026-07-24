@@ -123,6 +123,26 @@ Extract Network Doctor path/link/resource/LXMF/OMENchat event reduction and
 bounded history management. This is a mechanical move, not the new Operations
 model.
 
+Status: complete. `app::network_doctor` now owns the typed path, link,
+Resource, LXMF, and active-Resource rows plus their bounded, duplicate-
+suppressing state reducer. The existing public paths remain available through
+`app` re-exports, while runtime-event projection and state ownership remain in
+the parent. `src/app.rs` fell from 35,976 to 35,416 lines; the 631-line child
+adds focused tests for the 12-row history bound and preservation of Resource
+offer context across progress updates. No worker, timer, queue, protocol,
+storage, serialization, dependency, or server behavior changed.
+
+Validation:
+
+- focused pre-extraction Network Doctor matrix: pass (16 tests);
+- focused post-extraction matrix: pass (18 tests, including two module-local
+  invariants);
+- full `desktop-product` test profile: pass (1,298 library tests plus all
+  selected integration suites; documented measurement harnesses remain
+  ignored);
+- `desktop-product` all-target Clippy with `-D warnings`: pass;
+- TUI check, formatting, and `git diff --check`: pass.
+
 ### Unit 1C — structured application-log state
 
 Extract in-memory filtering, byte accounting, persistence submission, and
