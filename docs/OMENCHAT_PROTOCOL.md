@@ -150,8 +150,8 @@ The destination hash identifies the chat server.
 ### Capability negotiation boundary
 
 Current activation note: the paragraphs below retain the staged design history,
-but negotiated room-message, `/me` room-action, and `/notice` durable
-transmission is now active. The browser
+but the negotiated room text, leave, and supported mutating-command families
+documented below now use durable transmission. The browser
 advertises only when the authenticated identity owns a healthy persistent
 intent worker and client-instance ID. omenchatd accepts only on the
 authenticated Link that requested it. Legacy, downgraded, unknown, and
@@ -197,18 +197,31 @@ destination, authenticated identity binding, stable client/mutation IDs,
 canonical request hash and body, expiry, state, and local correlation before it
 can be handed to a transport owner. Recovery length-preflights SQLite values
 before allocation and then revalidates frame metadata, canonical hashing, and
-retained-byte accounting. Negotiated room-message, `/me` room-action, and
-`/notice` sends call this boundary before transport. A durable notice activates
+retained-byte accounting. Negotiated room-message, `/me` room-action,
+`/notice`, `/part`, `/topic`, `/create`, `/role`, `/unban`, `/kick`, `/ban`,
+`/mute`, and `/unmute` sends call this boundary before transport. A durable
+notice activates
 only when the server also accepts `durable-room-notice-ack-v1` and then receives
 a kind-3 `MessageAck`. An older, ordinary, or downgraded protocol-v1 notice
 retains its legacy `RoomEvent` response and is never persisted as a durable
-notice intent. Other mutation types retain their current legacy path.
+notice intent. Identity-prefix-only administration targets retain their legacy
+path because the result does not expose the identity hash needed for exact
+correlation.
 Prepared intents can move only to uncertain, expired, or abandoned; uncertain
 intents can move only to acknowledged, conflict, expired, or abandoned.
 Terminal states cannot regress. Recovery returns only prepared/uncertain rows,
 and incremental maintenance removes at most 128 terminal rows older than 30
 days. A dedicated 32-request/2-MiB storage owner starts only when its identity
 and persistent client-instance prerequisites are satisfied.
+
+Recovered intents are presented without their mutation identifier, request
+hash, or message/command body. Each bounded row shows only a semantic operation
+kind, public server label, room scope, prepared/uncertain state, and relative
+expiry. Send/retry is offered only when the same production guard confirms the
+original identity, client instance, server, room, live transport, negotiated
+capability, and absence of an in-process pending result. An unavailable retry
+shows the redacted reason and retains only the explicit stop-tracking action.
+Nothing is resent automatically.
 
 The dormant server store also has deterministic post-retention behavior. Before
 pruning any durable result, it permanently retires that authenticated

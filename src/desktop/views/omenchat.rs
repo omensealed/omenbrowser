@@ -6,6 +6,70 @@ use super::super::*;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 const OMENCHAT_RECOVERED_INTENTS_VISIBLE_MAX: usize = 4;
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn recovered_mutation_operation(
+    op: crate::chat::protocol::ChatOp,
+    body: &crate::chat::protocol::FrameBody,
+) -> &'static str {
+    use crate::chat::protocol::{ChatOp, FrameBody};
+
+    match op {
+        ChatOp::RoomMessage => "room message",
+        ChatOp::RoomAction => "room action",
+        ChatOp::RoomNotice => "room notice",
+        ChatOp::PartRoom => "leave room",
+        ChatOp::Command => match body {
+            FrameBody::Text(command) => match command.split_whitespace().next() {
+                Some("topic") => "topic update",
+                Some("create") => "room creation",
+                Some("role") => "role change",
+                Some("unban") => "unban user",
+                Some("kick") => "kick user",
+                Some("ban") => "ban user",
+                Some("mute") => "mute user",
+                Some("unmute") => "unmute user",
+                _ => "server command",
+            },
+            _ => "server command",
+        },
+        _ => "unsupported operation",
+    }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn recovered_mutation_expiry_label(expires_at: i64, now: i64) -> String {
+    let (prefix, seconds) = if expires_at <= now {
+        ("expired", now.saturating_sub(expires_at))
+    } else {
+        ("expires in", expires_at.saturating_sub(now))
+    };
+    let value = if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 60 * 60 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 24 * 60 * 60 {
+        format!("{}h", seconds / (60 * 60))
+    } else {
+        format!("{}d", seconds / (24 * 60 * 60))
+    };
+    if expires_at <= now {
+        format!("{prefix} {value} ago")
+    } else {
+        format!("{prefix} {value}")
+    }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn compact_recovery_destination(destination: &str) -> String {
+    let mut chars = destination.chars();
+    let prefix = chars.by_ref().take(12).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
 pub(in crate::desktop) fn omenchat_media_animation_allowed(
     pane_visible: bool,
     reduce_motion: bool,
@@ -311,6 +375,21 @@ fn omenchat_recovered_mutations_panel(
     if matching_count == 0 {
         return None;
     }
+    let server = desktop
+        .omenchat
+        .chat_client
+        .sessions()
+        .iter()
+        .find(|session| session.server.destination == server_destination);
+    let server_label = server
+        .map(|session| {
+            format!(
+                "{} ({})",
+                session.server.display_name,
+                compact_recovery_destination(server_destination)
+            )
+        })
+        .unwrap_or_else(|| compact_recovery_destination(server_destination));
     let mut content =
         column![
             text("Recovered durable mutations — nothing was resent automatically")
@@ -326,37 +405,32 @@ fn omenchat_recovered_mutations_panel(
         .take(OMENCHAT_RECOVERED_INTENTS_VISIBLE_MAX)
     {
         let past_expiry = intent.expires_at <= now;
-        let state = if past_expiry {
-            "past expiry"
-        } else {
-            match intent.state {
-                crate::chat::mutation_intents::OutboundMutationState::Prepared => {
-                    "prepared; not transmitted"
-                }
-                crate::chat::mutation_intents::OutboundMutationState::SentUncertain => {
-                    "uncertain; server may have committed it"
-                }
-                _ => "unexpected recovered state",
+        let state = match intent.state {
+            crate::chat::mutation_intents::OutboundMutationState::Prepared => {
+                "prepared; not transmitted"
             }
-        };
-        let preview = match &intent.body {
-            crate::chat::protocol::FrameBody::Text(body) => {
-                let mut chars = body.chars();
-                let mut preview = chars.by_ref().take(96).collect::<String>();
-                if chars.next().is_some() {
-                    preview.push('…');
-                }
-                preview
+            crate::chat::mutation_intents::OutboundMutationState::SentUncertain => {
+                "uncertain; server may have committed it"
             }
-            _ => "non-text mutation".into(),
+            _ => "unexpected recovered state",
         };
+        let room = intent
+            .room_id
+            .map(|room_id| {
+                server
+                    .and_then(|session| session.rooms.iter().find(|room| room.room_id == room_id))
+                    .map(|room| format!("#{} ({room_id})", room.name))
+                    .unwrap_or_else(|| format!("room {room_id}"))
+            })
+            .unwrap_or_else(|| "no room".into());
         let label = format!(
-            "Room {} | {state} | {preview}",
-            intent
-                .room_id
-                .map(|room_id| room_id.to_string())
-                .unwrap_or_else(|| "unknown".into())
+            "Operation: {} | Server: {server_label} | Room: {room} | State: {state} | {}",
+            recovered_mutation_operation(intent.op, &intent.body),
+            recovered_mutation_expiry_label(intent.expires_at, now),
         );
+        let retry_unavailable = (!past_expiry)
+            .then(|| desktop.recovered_omenchat_retry_session_id(intent).err())
+            .flatten();
         let confirming = desktop
             .omenchat
             .omenchat_mutation_resolution_confirmation
@@ -395,7 +469,7 @@ fn omenchat_recovered_mutations_panel(
                         action: OmenChatMutationResolutionAction::Expire,
                     }),
                 )]
-            } else {
+            } else if retry_unavailable.is_none() {
                 row![
                     warning_button(
                         if intent.state
@@ -419,9 +493,25 @@ fn omenchat_recovered_mutations_panel(
                     ),
                 ]
                 .spacing(6)
+            } else {
+                row![subtle_button(
+                    "Stop Tracking",
+                    Message::OmenChat(OmenChatMessage::BeginMutationResolution {
+                        mutation_id: intent.mutation_id,
+                        action: OmenChatMutationResolutionAction::Abandon,
+                    }),
+                )]
             }
         };
-        content = content.push(column![text(label).size(ui_size(12)), actions].spacing(4));
+        let mut recovered = column![text(label).size(ui_size(12))].spacing(4);
+        if let Some(reason) = retry_unavailable {
+            recovered = recovered.push(
+                text(format!("Send/retry unavailable: {reason}"))
+                    .size(ui_size(11))
+                    .style(iced::widget::text::danger),
+            );
+        }
+        content = content.push(recovered.push(actions));
     }
     if matching_count > OMENCHAT_RECOVERED_INTENTS_VISIBLE_MAX {
         content = content.push(
@@ -443,7 +533,11 @@ fn omenchat_recovered_mutations_panel(
 
 #[cfg(test)]
 mod accessibility_tests {
-    use super::omenchat_media_animation_allowed;
+    use super::{
+        compact_recovery_destination, omenchat_media_animation_allowed,
+        recovered_mutation_expiry_label, recovered_mutation_operation,
+    };
+    use crate::chat::protocol::{ChatOp, FrameBody};
 
     #[test]
     fn reduced_motion_and_hidden_panes_withhold_animated_media() {
@@ -451,5 +545,35 @@ mod accessibility_tests {
         assert!(!omenchat_media_animation_allowed(false, false));
         assert!(!omenchat_media_animation_allowed(true, true));
         assert!(!omenchat_media_animation_allowed(false, true));
+    }
+
+    #[test]
+    fn recovered_mutation_labels_are_redacted_and_semantic() {
+        let secret_body = FrameBody::Text("ban private-target-name".into());
+        assert_eq!(
+            recovered_mutation_operation(ChatOp::Command, &secret_body),
+            "ban user"
+        );
+        assert_eq!(
+            recovered_mutation_operation(
+                ChatOp::RoomMessage,
+                &FrameBody::Text("private message body".into())
+            ),
+            "room message"
+        );
+        assert!(!recovered_mutation_operation(ChatOp::Command, &secret_body)
+            .contains("private-target-name"));
+        assert_eq!(
+            recovered_mutation_expiry_label(1_030, 1_000),
+            "expires in 30s"
+        );
+        assert_eq!(
+            recovered_mutation_expiry_label(900, 1_000),
+            "expired 1m ago"
+        );
+        assert_eq!(
+            compact_recovery_destination("00112233445566778899aabbccddeeff"),
+            "001122334455…"
+        );
     }
 }

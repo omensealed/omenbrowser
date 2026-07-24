@@ -2989,6 +2989,12 @@ user or wrong ban/mute state before acknowledging. Server regressions execute
 all four once, replay without another mutation/event/rate admission, and prove
 that a lost kick response closes only the originally selected Link rather than
 a replacement Link.
+The recovered-intent panel classifies those operations without displaying
+their request bodies, targets, mutation identifiers, or hashes. Pure label
+coverage checks redaction, relative expiry, and bounded destination shortening.
+The existing restart fixture proves that unavailable retry never creates a
+confirmation or transport frame, while stop-tracking and expiry remain
+explicit confirmed storage-only actions.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
@@ -3009,6 +3015,8 @@ cargo test --locked --no-default-features --features desktop-product \
   durable_active_peer_moderation_requires_exact_user_and_status_result --lib
 cargo test --locked --no-default-features --features desktop-product \
   restart_recovery_is_identity_scoped_visible_and_never_transmits --lib
+cargo test --locked --no-default-features --features desktop-product \
+  recovered_mutation_labels_are_redacted_and_semantic --lib
 (
   cd src/server
   cargo test --locked --no-default-features --features server-headless \

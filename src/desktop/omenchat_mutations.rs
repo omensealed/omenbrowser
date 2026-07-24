@@ -586,7 +586,7 @@ impl DesktopApp {
         })
     }
 
-    fn recovered_omenchat_retry_session_id(
+    pub(in crate::desktop) fn recovered_omenchat_retry_session_id(
         &self,
         intent: &OutboundMutationIntent,
     ) -> Result<ChatSessionId, String> {

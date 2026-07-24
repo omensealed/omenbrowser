@@ -347,6 +347,13 @@ trusted.
   message bodies, composer drafts, user lists, room names, filenames, local
   paths, credentials, private identity material, and all free-form status/error
   text. Disconnect detail is reduced to a fixed non-secret category.
+- Show recovered durable mutations in a four-row-per-server panel without
+  mutation IDs, request hashes, message bodies, or command targets. Each row
+  identifies the operation kind, public server, room scope, state, and relative
+  expiry. Send/Retry appears only when the production identity, client-instance,
+  original-room, live-transport, capability, expiry, and pending-result guard
+  passes. Otherwise the panel explains why retry is unavailable and offers only
+  explicit local stop-tracking. Nothing is resent automatically.
 - Show byte progress for the newest active inbound OMENchat Resource in the
   matching session pane. Attribution requires the typed runtime source,
   inbound direction, and exact active link identity to agree; another session's

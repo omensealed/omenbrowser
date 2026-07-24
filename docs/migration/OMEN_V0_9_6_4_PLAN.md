@@ -336,6 +336,16 @@ Use the existing bounded intent owner and recovered-intent UI for all newly
 activated kinds. Show operation kind, room/server, state, expiry, and allowed
 action without exposing mutation IDs or message bodies in logs.
 
+Completed locally: the four-row-per-server panel now classifies every activated
+operation without rendering its mutation ID, request hash, message body, or
+command target. It shows the public server label, resolved room when available,
+prepared/uncertain state, and bounded relative expiry. The exact production
+retry guard controls whether Send/Retry is rendered; unavailable retry shows
+its redacted reason and leaves only explicit Stop Tracking. Expired rows retain
+only Finalize Expired. Confirmation and the bounded persistence owner are
+unchanged, and no automatic retry, worker, queue, timer, schema, wire, or
+capability was added.
+
 ### Required matrix for every newly activated family
 
 - response lost after server commit;

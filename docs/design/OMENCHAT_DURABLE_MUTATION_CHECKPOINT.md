@@ -1,6 +1,6 @@
 # OMENchat durable mutation checkpoint
 
-Status: checkpoint accepted; negotiated room-message, room-action, and room-notice durable transmission, conservative restart recovery, and explicit retry active
+Status: checkpoint accepted; negotiated durable transmission for the admitted room-text, leave, and mutating-command families, conservative restart recovery, and explicit retry active
 Baseline: OMENbrowser/omenchatd v0.9.5-2, OMENchat protocol v1  
 Proposed capability: `durable-mutations-v1`
 Additive notice acknowledgement capability: `durable-room-notice-ack-v1`
@@ -237,8 +237,10 @@ blocking the Iced update path or an arbitrary Tokio worker. State transitions
 are monotonic: prepared may become uncertain,
 expired, or abandoned; uncertain may become acknowledged, conflict, expired,
 or abandoned; terminal states never regress. Negotiated room-message,
-`/me` room-action, and `/notice` sends now use this owner. Other mutations
-remain on the unchanged legacy path.
+`/me` room-action, `/notice`, `/part`, `/topic`, `/create`, `/role`, `/unban`,
+`/kick`, `/ban`, `/mute`, and `/unmute` sends now use this owner.
+Identity-prefix-only administration targets remain on the legacy path because
+the returned result cannot prove the selected identity.
 
 Desktop restart recovery is deliberately read-only. The first OMENchat
 maintenance deadline submits one bounded recovery command and never transmits
@@ -249,10 +251,14 @@ identifiers. Redacted session diagnostics report prepared, uncertain,
 past-expiry, and worker-queue counts. Recovery failure is visible and does not
 fall back to automatic resend.
 
-The guarded terminal-resolution UI is active for recovered room-message,
-room-action, and room-notice intents.
-It renders no more than four entries per server, bounds each preview, and requires
-confirmation. `Stop Tracking` records `abandoned` without asserting whether an
+The guarded terminal-resolution UI is active for every currently negotiated
+durable operation. It renders no more than four entries per server and requires
+confirmation. Rows contain only a semantic operation kind, public server label,
+room scope, prepared/uncertain state, and relative expiry; mutation identifiers,
+request hashes, and message/command bodies are not rendered. The production
+retry guard determines whether Send/Retry is available. When it is unavailable,
+the row shows a redacted reason and only permits stopping local tracking.
+`Stop Tracking` records `abandoned` without asserting whether an
 uncertain server commit occurred. `Finalize Expired` rechecks the persisted
 deadline before recording `expired`. Both operations use the bounded owner and
 send no frame. Missing records and concurrent terminal transitions are handled
@@ -382,9 +388,8 @@ construction and parsing enforce canonical scalar/container/value/depth limits
 before the extension can be connected to either live codec. Only a client with
 a persistent instance identity advertises the capability, and only an explicit
 matching `SessionAccept` activates it for that Link. Legacy frames remain
-unchanged. Negotiated room-message, `/me` room-action, and `/notice` sends and
-explicit retries use the durable envelope; legacy and downgraded sessions do
-not.
+unchanged. Negotiated admitted mutation families and explicit retries use the
+durable envelope; legacy and downgraded sessions do not.
 
 ## Required test matrix
 
