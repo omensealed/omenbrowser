@@ -388,6 +388,18 @@ and rejects admission rather than dropping unresolved work. Production event
 adapters and GUI/TUI surfaces remain separate follow-up units. This model-only
 unit adds no worker, timer, subscription, persistence, protocol, or dependency.
 
+Phase 3B begins with the read-only OMENchat recovered-mutation adapter. It
+projects the existing persistent `Prepared` and `SentUncertain` rows without
+retaining bodies, hashes, correlation IDs, or identity material in
+presentation text. Prepared rows claim persistence but no transmission;
+uncertain rows remain nonterminal without fabricated transport or delivery
+evidence; elapsed expiry remains unresolved until explicit finalization. The
+existing retry guard controls whether explicit send/retry is a valid action,
+and the current desktop recovery card consumes that shared decision. This
+subunit changes no persistence transition, automatic retry behavior, wire,
+worker, queue, timer, or dependency. Shared history ownership and the TUI
+surface remain separate follow-ups.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:

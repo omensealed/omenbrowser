@@ -2978,6 +2978,22 @@ This model-only gate does not claim that production runtime events are wired to
 the ledger or that GUI/TUI Operations views exist yet. It creates no worker,
 timer, subscription, persistence file, network peer, or user-state access.
 
+The OMENchat recovery adapter adds deterministic fixtures for prepared,
+uncertain, past-expiry, retry-blocked, terminal, and redaction cases:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::omenchat::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::views::omenchat::accessibility_tests --lib
+```
+
+These tests do not transmit a mutation or access the maintainer's identity,
+Reticulum, OMENchat server, or persistent application root. They verify only
+the read-only projection and the existing recovery card. Server/client restart
+and replay behavior remains covered by the isolated durable-mutation tests.
+
 ## OMENchat negotiated durable room and user mutations
 
 Negotiated `/me` sends must persist a `RoomAction` intent before transport,

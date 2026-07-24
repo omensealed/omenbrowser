@@ -405,12 +405,29 @@ fn omenchat_recovered_mutations_panel(
         .take(OMENCHAT_RECOVERED_INTENTS_VISIBLE_MAX)
     {
         let past_expiry = intent.expires_at <= now;
-        let state = match intent.state {
-            crate::chat::mutation_intents::OutboundMutationState::Prepared => {
-                "prepared; not transmitted"
-            }
-            crate::chat::mutation_intents::OutboundMutationState::SentUncertain => {
-                "uncertain; server may have committed it"
+        let retry_unavailable = (!past_expiry)
+            .then(|| desktop.recovered_omenchat_retry_session_id(intent).err())
+            .flatten();
+        let operation = crate::operations::omenchat::recovered_mutation_record(
+            intent,
+            now,
+            retry_unavailable.is_none(),
+        )
+        .ok();
+        let state = match operation
+            .as_ref()
+            .map(|record| (record.state, record.authority))
+        {
+            Some((
+                crate::operations::OperationState::Waiting,
+                crate::operations::EvidenceAuthority::Authoritative,
+            )) => "prepared; not transmitted",
+            Some((
+                crate::operations::OperationState::Reconciling,
+                crate::operations::EvidenceAuthority::Uncertain,
+            )) if !past_expiry => "uncertain; server may have committed it",
+            Some((crate::operations::OperationState::Reconciling, _)) if past_expiry => {
+                "expired; outcome still requires explicit resolution"
             }
             _ => "unexpected recovered state",
         };
@@ -428,9 +445,15 @@ fn omenchat_recovered_mutations_panel(
             recovered_mutation_operation(intent.op, &intent.body),
             recovered_mutation_expiry_label(intent.expires_at, now),
         );
-        let retry_unavailable = (!past_expiry)
-            .then(|| desktop.recovered_omenchat_retry_session_id(intent).err())
-            .flatten();
+        let transmission_available = operation.as_ref().is_some_and(|record| {
+            record.valid_actions.iter().any(|action| {
+                matches!(
+                    action,
+                    crate::operations::OperationAction::ExplicitSend
+                        | crate::operations::OperationAction::ExplicitSafeRetry
+                )
+            })
+        });
         let confirming = desktop
             .omenchat
             .omenchat_mutation_resolution_confirmation
@@ -469,7 +492,7 @@ fn omenchat_recovered_mutations_panel(
                         action: OmenChatMutationResolutionAction::Expire,
                     }),
                 )]
-            } else if retry_unavailable.is_none() {
+            } else if transmission_available {
                 row![
                     warning_button(
                         if intent.state

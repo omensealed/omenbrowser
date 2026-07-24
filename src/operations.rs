@@ -3,6 +3,9 @@ use std::collections::{BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub mod omenchat;
+
 pub const OPERATION_HISTORY_MAX_ITEMS: usize = 512;
 pub const OPERATION_HISTORY_MAX_BYTES: usize = 512 * 1024;
 pub const OPERATION_RECORD_MAX_BYTES: usize = 8 * 1024;
@@ -23,7 +26,29 @@ pub enum OperationDomain {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct OperationId {
     pub domain: OperationDomain,
-    pub local_id: u64,
+    pub key: OperationKey,
+}
+
+impl OperationId {
+    pub const fn numeric(domain: OperationDomain, value: u64) -> Self {
+        Self {
+            domain,
+            key: OperationKey::Numeric(value),
+        }
+    }
+
+    pub const fn opaque_128(domain: OperationDomain, value: [u8; 16]) -> Self {
+        Self {
+            domain,
+            key: OperationKey::Opaque128(value),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum OperationKey {
+    Numeric(u64),
+    Opaque128([u8; 16]),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +148,7 @@ impl AuthoritativeProgress {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OperationAction {
+    ExplicitSend,
     Cancel,
     Reconcile,
     ExplicitSafeRetry,
@@ -414,10 +440,7 @@ mod tests {
             }]
         };
         OperationRecord {
-            id: OperationId {
-                domain: OperationDomain::LxmfMessage,
-                local_id,
-            },
+            id: OperationId::numeric(OperationDomain::LxmfMessage, local_id),
             target: OperationTarget {
                 kind: OperationTargetKind::Peer,
                 label: format!("peer-{local_id}"),
@@ -514,9 +537,9 @@ mod tests {
         assert_eq!(
             history
                 .records()
-                .map(|record| record.id.local_id)
+                .map(|record| record.id.key)
                 .collect::<Vec<_>>(),
-            vec![1, 3]
+            vec![OperationKey::Numeric(1), OperationKey::Numeric(3)]
         );
         assert_eq!(history.metrics().evicted_terminal, 1);
         assert_eq!(
@@ -527,9 +550,9 @@ mod tests {
         assert_eq!(
             history
                 .records()
-                .map(|record| record.id.local_id)
+                .map(|record| record.id.key)
                 .collect::<Vec<_>>(),
-            vec![1, 3]
+            vec![OperationKey::Numeric(1), OperationKey::Numeric(3)]
         );
     }
 
@@ -548,9 +571,9 @@ mod tests {
         assert_eq!(
             history
                 .records()
-                .map(|record| record.id.local_id)
+                .map(|record| record.id.key)
                 .collect::<Vec<_>>(),
-            vec![3, 4]
+            vec![OperationKey::Numeric(3), OperationKey::Numeric(4)]
         );
         assert!(history.metrics().bytes <= OPERATION_HISTORY_MAX_BYTES);
     }
