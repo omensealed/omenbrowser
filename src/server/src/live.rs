@@ -3738,6 +3738,7 @@ mod tests {
         let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
         let link_a = [32u8; 16];
         let link_b = [33u8; 16];
+        let replacement_link = [34u8; 16];
 
         for (link_id, name) in [(link_a, "Alice"), (link_b, "Bob")] {
             live.handle_event(OmenchatLinkEvent::LinkOpened {
@@ -3784,15 +3785,53 @@ mod tests {
         .expect("durable envelope");
         let frames_before = live.transport().frames.len();
 
-        for seq in [11, 12] {
-            live.handle_event(OmenchatLinkEvent::LinkData {
-                link_id: link_a,
-                context: OMENCHAT_LINK_CONTEXT,
-                data: encode_frame(&Frame::new(ChatOp::Command, seq, Some(1), envelope.clone()))
-                    .expect("topic"),
-            })
-            .expect("durable topic");
-        }
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: link_a,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 11, Some(1), envelope.clone()))
+                .expect("topic"),
+        })
+        .expect("durable topic");
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id: link_a,
+            reason: Some("topic result lost".into()),
+        })
+        .expect("close first topic link");
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id: replacement_link,
+            peer: ServerPeer {
+                identity_hash: b"Alice".to_vec(),
+                display_name: "Alice".into(),
+                lxmf_destination: None,
+            },
+        })
+        .expect("open replacement topic link");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                1,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("replacement join"),
+        })
+        .expect("join replacement topic room");
+        live.durable_sessions.insert(
+            replacement_link,
+            DurableSessionBinding::without_notice_ack(
+                b"Alice".to_vec(),
+                ClientInstanceId::new([40; 16]),
+            ),
+        );
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: replacement_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::Command, 12, Some(1), envelope))
+                .expect("replacement topic"),
+        })
+        .expect("replay durable topic");
 
         let routed = live
             .transport()
@@ -3808,7 +3847,8 @@ mod tests {
         let origin_results = routed
             .iter()
             .filter(|(link_id, frame)| {
-                *link_id == link_a && command_result_name(frame) == Some("topic")
+                (*link_id == link_a || *link_id == replacement_link)
+                    && command_result_name(frame) == Some("topic")
             })
             .map(|(_, frame)| frame)
             .collect::<Vec<_>>();

@@ -6073,7 +6073,7 @@ mod tests {
                 Some(room.room_id),
                 ChatOp::Command,
                 client_instance_id,
-                envelope,
+                envelope.clone(),
             )
             .expect("replayed durable topic");
         assert_replayed_response(&replayed.origin, &stored.origin, 72);
@@ -6087,6 +6087,119 @@ mod tests {
                 .room_revision,
             updated.room_revision
         );
+
+        let conflict = engine
+            .handle_durable_mutation(
+                &peer(),
+                73,
+                Some(room.room_id),
+                ChatOp::Command,
+                client_instance_id,
+                durable_envelope_body(
+                    ChatOp::Command,
+                    room.room_id,
+                    10,
+                    FrameBody::Text("topic Different content".into()),
+                ),
+            )
+            .expect("conflicting durable topic");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+        assert!(conflict.broadcasts.is_empty());
+        assert_eq!(
+            engine
+                .store
+                .room_by_id(room.room_id)
+                .expect("conflicted room")
+                .expect("room")
+                .room_revision,
+            updated.room_revision
+        );
+    }
+
+    #[test]
+    fn durable_topic_replays_after_server_restart_without_second_update() {
+        let path = temp_store_path("durable-topic-restart");
+        let client_instance_id = ClientInstanceId::new([23; 16]);
+        let (room_id, envelope, original, committed_revision) = {
+            let store = OmenchatStore::open(&path).expect("persistent store");
+            let room = store.ensure_room("lobby", None).expect("room");
+            let user = store
+                .ensure_user(&peer().identity_hash, "Alice", None)
+                .expect("moderator");
+            store
+                .set_user_role_bits(user.user_id, ROLE_MODERATOR)
+                .expect("moderator role");
+            let envelope = durable_envelope_body(
+                ChatOp::Command,
+                room.room_id,
+                18,
+                FrameBody::Text("topic Restart durable topic".into()),
+            );
+            let engine = SessionEngine::new(store);
+            let original = engine
+                .handle_durable_mutation(
+                    &peer(),
+                    161,
+                    Some(room.room_id),
+                    ChatOp::Command,
+                    client_instance_id,
+                    envelope.clone(),
+                )
+                .expect("stored topic before restart");
+            assert_eq!(original.origin.op, ChatOp::CommandResult);
+            assert_eq!(
+                original.broadcasts.first().map(|frame| frame.op),
+                Some(ChatOp::RoomDelta)
+            );
+            let updated = engine
+                .store
+                .room_by_id(room.room_id)
+                .expect("updated room")
+                .expect("room");
+            assert_eq!(updated.topic.as_deref(), Some("Restart durable topic"));
+            engine
+                .store
+                .set_user_role_bits(user.user_id, 0)
+                .expect("remove moderator role");
+            (
+                room.room_id,
+                envelope,
+                original.origin,
+                updated.room_revision,
+            )
+        };
+
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("reopened store"));
+        let replayed = engine
+            .handle_durable_mutation(
+                &peer(),
+                162,
+                Some(room_id),
+                ChatOp::Command,
+                client_instance_id,
+                envelope,
+            )
+            .expect("replayed topic after restart");
+        assert_replayed_response(&replayed.origin, &original, 162);
+        assert!(replayed.broadcasts.is_empty());
+        let room = engine
+            .store
+            .room_by_id(room_id)
+            .expect("replayed room")
+            .expect("room");
+        assert_eq!(room.topic.as_deref(), Some("Restart durable topic"));
+        assert_eq!(room.room_revision, committed_revision);
+        drop(engine);
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     #[test]

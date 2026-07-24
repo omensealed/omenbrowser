@@ -482,24 +482,26 @@ and broadcasts its event; exact replay sends the original acknowledgement and
 has no broadcast. Tests cover duplicate delivery under a different sequence,
 malformed and unbound requests, and legacy isolation. Production capability
 acceptance is now on for a valid negotiated request. The browser reaches this
-route only for ordinary room-message, `/me` room-action, and `/notice` sends
-after their intent is persisted as uncertain. Durable notices additionally
-require `durable-room-notice-ack-v1` and use the already-defined kind-3
+route only for ordinary room-message, `/me` room-action, `/notice`, `/part`,
+and `/topic` sends after their intent is persisted as uncertain. Durable
+notices additionally require `durable-room-notice-ack-v1` and use the
+already-defined kind-3
 `MessageAck`; older, legacy, and downgraded notices retain their protocol-v1
 `RoomEvent` response and are not placed in the durable intent store.
 
 The live client has guarded durable-send boundaries for room messages, actions,
-notices, and room leaves. They accept only an intent already persisted in the
-`sent_uncertain` state and verify negotiated session, persistent client
-instance, server destination, operation, body shape, sequence, and bounded
-pending-correlation budgets before sending the canonical envelope. Text
-operations additionally require the active room. PartRoom requires its stored
-room to remain in the same server session's bounded catalog, which permits an
-explicit retry after the active room changed without permitting cross-server
-reuse. A matching `MessageAck` acknowledges text operations; PartRoom requires
-an exact sequence/room/command/returned-room `CommandResult`. Missing
-negotiation and merely `prepared` intents fail before transport output.
-Ordinary negotiated room-message, `/me`, `/notice`, and `/part` sends call these
+notices, room leaves, and topic updates. They accept only an intent already
+persisted in the `sent_uncertain` state and verify negotiated session,
+persistent client instance, server destination, operation, body shape,
+sequence, and bounded pending-correlation budgets before sending the canonical
+envelope. Text and topic operations additionally require the active room.
+PartRoom requires its stored room to remain in the same server session's
+bounded catalog, which permits an explicit retry after the active room changed
+without permitting cross-server reuse. A matching `MessageAck` acknowledges
+text operations; PartRoom and topic require their exact
+sequence/room/command/returned-room `CommandResult`. Missing negotiation and
+merely `prepared` intents fail before transport output. Ordinary negotiated
+room-message, `/me`, `/notice`, `/part`, and `/topic` sends call these
 boundaries only through the bounded persistence worker, and no uncertain intent
 is automatically replayed.
 
@@ -535,6 +537,14 @@ revisions, creation, rate admission, and observer deltas cannot repeat. Durable
 room audit event, retain the exact origin result, and return a bounded list of
 live effects only on first execution. The internal dispatch list is bounded by
 command semantics rather than a queue.
+
+Desktop activation begins with `topic` only. The client stores the normalized
+command and canonical hash before transport and retains the prior topic until
+the exact result is correlated. Mismatched command or returned-room shapes are
+ignored without losing the pending intent. Restart recovery remains visible
+and non-transmitting. `create` is deferred because its request has no room while
+its result introduces a new room identity; it should not reuse topic
+correlation by approximation.
 
 The command executor now also covers active-peer `kick`, `ban`, `mute`, and
 `unmute`. Target resolution retains the existing room-presence, self-target,

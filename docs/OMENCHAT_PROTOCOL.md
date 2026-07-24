@@ -293,8 +293,16 @@ resolve only active room peers and commit the target status change, audit event,
 and exact result together. First execution emits the bounded deltas; `kick` and
 `ban` additionally carry a one-use target-identity disconnect effect that runs
 immediately after commit and before response I/O. Replay cannot disconnect a
-replacement Link. Capability acceptance remains disabled until the browser's
-persistent intent owner and negotiated send/recovery path are live.
+replacement Link.
+
+The negotiated desktop sender currently activates only `topic` from this
+command family. It persists the normalized `topic` command under the active
+room before transport, retains the prior local topic while the result is
+uncertain, and accepts only an exact sequence, room, command name, and returned
+room identity. Old or downgraded peers retain the protocol-v1 command path.
+`rooms` remains read-only. `create`, role changes, unban, and active-peer
+moderation remain on their legacy desktop paths until their distinct
+correlation or live-effect cases are activated and tested.
 
 ## Operation correlation and same-link replay
 

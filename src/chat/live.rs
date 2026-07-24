@@ -80,6 +80,13 @@ struct PendingLocalEcho {
     room_id: RoomId,
     temp_event_id: Option<u64>,
     mutation_id: Option<MutationId>,
+    command_result: Option<PendingCommandResult>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingCommandResult {
+    Part,
+    Topic,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -760,6 +767,7 @@ fn send_live_room_text<T: ChatLinkTransport>(
                         room_id,
                         temp_event_id: Some(local_echo.event_id),
                         mutation_id: None,
+                        command_result: None,
                     },
                 );
                 let mut events = vec![ChatClientEvent::EventAppended {
@@ -881,6 +889,7 @@ pub fn send_uncertain_durable_room_text<T: ChatLinkTransport>(
             room_id,
             temp_event_id: Some(local_echo.event_id),
             mutation_id: Some(intent.mutation_id),
+            command_result: None,
         },
     );
     let mut events = vec![ChatClientEvent::EventAppended {
@@ -984,11 +993,119 @@ pub fn send_uncertain_durable_part_room<T: ChatLinkTransport>(
             room_id,
             temp_event_id: None,
             mutation_id: Some(intent.mutation_id),
+            command_result: Some(PendingCommandResult::Part),
         },
     );
     if let Some(session) = client.session_mut(session_id) {
         session.status =
             "room leave sent; awaiting the server result before changing local membership".into();
+    }
+    drain_live_events_with_state(client, state, transport, Some(session_id))
+}
+
+pub fn send_uncertain_durable_topic<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    intent: &OutboundMutationIntent,
+) -> Vec<ChatClientEvent> {
+    let error = |message: &str| {
+        vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: message.into(),
+        }]
+    };
+    if !state.durable_mutations_negotiated(session_id) {
+        return error("durable OMENchat mutation was not negotiated for this live session");
+    }
+    if intent.state != OutboundMutationState::SentUncertain {
+        return error("durable OMENchat mutation must be persisted as uncertain before sending");
+    }
+    if intent.expires_at <= current_unix_secs() {
+        return error("durable OMENchat mutation has expired");
+    }
+    if state.client_instance_id != Some(intent.client_instance_id) {
+        return error("durable OMENchat mutation belongs to a different client instance");
+    }
+    let Some(session) = client.session(session_id) else {
+        return error("OMENchat live session is not available");
+    };
+    if session.server.destination != intent.server_destination {
+        return error("durable OMENchat mutation belongs to a different server");
+    }
+    let room_id = session.active_room.room_id;
+    if intent.room_id != Some(room_id) {
+        return error("durable OMENchat topic update belongs to a different room");
+    }
+    if intent.op != ChatOp::Command {
+        return error("durable OMENchat topic update operation is invalid");
+    }
+    let FrameBody::Text(command) = &intent.body else {
+        return error("durable OMENchat topic update body is invalid");
+    };
+    let command = command.trim();
+    let (name, topic) = command
+        .split_once(char::is_whitespace)
+        .unwrap_or((command, ""));
+    if name != "topic" || !chat_text_fits(topic.trim(), CHAT_ROOM_TOPIC_MAX_BYTES) {
+        return error("durable OMENchat topic update body is invalid");
+    }
+    if !matches!(
+        canonical_mutation_request_hash(intent.op, intent.room_id, &intent.body),
+        Ok(request_hash) if request_hash == intent.request_hash
+    ) {
+        return error("durable OMENchat mutation request hash does not match its stored request");
+    }
+    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_local_echo_session_items(session_id)
+            >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
+    {
+        state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
+        return error(
+            "OMENchat pending mutation queue is full; wait for the server result or reconnect",
+        );
+    }
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
+    let envelope = match (DurableMutationEnvelope {
+        mutation_id: intent.mutation_id,
+        request_hash: intent.request_hash,
+        body: intent.body.clone(),
+    })
+    .into_frame_body()
+    {
+        Ok(body) => body,
+        Err(error) => {
+            return vec![ChatClientEvent::Error {
+                session_id: Some(session_id),
+                message: format!("durable OMENchat mutation envelope is invalid: {error}"),
+            }];
+        }
+    };
+    if let Some(event) = send_frame_or_error(
+        transport,
+        Frame::new(ChatOp::Command, seq, Some(room_id), envelope),
+        Some(session_id),
+    ) {
+        return vec![event];
+    }
+    state.pending_local_echoes.insert(
+        (session_id, seq),
+        PendingLocalEcho {
+            session_id,
+            room_id,
+            temp_event_id: None,
+            mutation_id: Some(intent.mutation_id),
+            command_result: Some(PendingCommandResult::Topic),
+        },
+    );
+    if let Some(session) = client.session_mut(session_id) {
+        session.status =
+            "topic update sent; awaiting the server result before changing local room metadata"
+                .into();
     }
     drain_live_events_with_state(client, state, transport, Some(session_id))
 }
@@ -1760,10 +1877,10 @@ fn apply_frame_with_state(
             }
         }
         ChatOp::CommandResult => {
-            let durable_part_match = state.as_deref().and_then(|state| {
-                durable_part_result_match(client, state, preferred_session_id, &frame)
+            let durable_command_match = state.as_deref().and_then(|state| {
+                durable_command_result_match(client, state, preferred_session_id, &frame)
             });
-            match durable_part_match {
+            match durable_command_match {
                 Some(Ok(mutation_id)) => {
                     apply_command_result(client, preferred_session_id, &frame.body, events);
                     if let (Some(session_id), Some(state)) =
@@ -1779,7 +1896,7 @@ fn apply_frame_with_state(
                 Some(Err(())) => {
                     events.push(ChatClientEvent::Error {
                         session_id: preferred_session_id,
-                        message: "OMENchat ignored a mismatched durable room-leave result".into(),
+                        message: "OMENchat ignored a mismatched durable command result".into(),
                     });
                 }
                 None => {
@@ -2185,7 +2302,7 @@ fn apply_durable_terminal_error(
     });
 }
 
-fn durable_part_result_match(
+fn durable_command_result_match(
     client: &ChatClient,
     state: &LiveChatClientState,
     preferred_session_id: Option<ChatSessionId>,
@@ -2196,6 +2313,10 @@ fn durable_part_result_match(
     if pending.temp_event_id.is_some() {
         return None;
     }
+    let expected_command = match pending.command_result? {
+        PendingCommandResult::Part => "part",
+        PendingCommandResult::Topic => "topic",
+    };
     let Some(mutation_id) = pending.mutation_id else {
         return Some(Err(()));
     };
@@ -2205,7 +2326,7 @@ fn durable_part_result_match(
     let Some(values) = body_values(&frame.body) else {
         return Some(Err(()));
     };
-    if values.first().and_then(FrameValueExt::as_str) != Some("part") {
+    if values.first().and_then(FrameValueExt::as_str) != Some(expected_command) {
         return Some(Err(()));
     }
     let server_id = client
@@ -3592,6 +3713,140 @@ mod tests {
         intent
     }
 
+    fn durable_topic_intent(
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+    ) -> OutboundMutationIntent {
+        let mut intent = durable_room_text_intent(client_instance_id, state);
+        intent.op = ChatOp::Command;
+        intent.body = FrameBody::Text("topic Durable topic".into());
+        intent.request_hash = crate::chat::protocol::canonical_mutation_request_hash(
+            intent.op,
+            intent.room_id,
+            &intent.body,
+        )
+        .expect("topic request hash");
+        intent
+    }
+
+    #[test]
+    fn durable_topic_waits_for_matching_result_before_updating_and_acknowledging() {
+        let client_instance_id = ClientInstanceId::new([2; 16]);
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let mut room = room_summary("abcd", 1, "lobby");
+        room.topic = Some("Old topic".into());
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: vec![room.clone()],
+            active_room: room,
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        let mut transport = CapturedChatTransport::default();
+        let intent = durable_topic_intent(client_instance_id, OutboundMutationState::SentUncertain);
+
+        let events = send_uncertain_durable_topic(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(
+            client
+                .session(session_id)
+                .expect("session")
+                .active_room
+                .topic
+                .as_deref(),
+            Some("Old topic")
+        );
+        let sent = crate::chat::codec::decode_frame(&transport.sent_frames[0]).expect("decode");
+        assert_eq!(sent.op, ChatOp::Command);
+        assert_eq!(sent.room_id, Some(1));
+        let envelope = DurableMutationEnvelope::from_frame_body(&sent.body).expect("envelope");
+        assert_eq!(envelope.mutation_id, intent.mutation_id);
+        assert_eq!(envelope.request_hash, intent.request_hash);
+        assert_eq!(envelope.body, FrameBody::Text("topic Durable topic".into()));
+
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                sent.seq,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("part".into()),
+                    room_value(1, "lobby"),
+                ]),
+            ))
+            .expect("mismatched command result");
+        let mismatched =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(matches!(
+            mismatched.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("mismatched durable command result")
+        ));
+        assert_eq!(
+            client
+                .session(session_id)
+                .expect("session")
+                .active_room
+                .topic
+                .as_deref(),
+            Some("Old topic")
+        );
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::CommandResult,
+                sent.seq,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("topic".into()),
+                    room_value_with_topic(1, "lobby", "Durable topic"),
+                ]),
+            ))
+            .expect("topic result");
+        let acknowledged =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+
+        assert!(acknowledged.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::RoomsUpdated { session_id: updated, .. } if *updated == session_id
+        )));
+        assert!(acknowledged.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id: acknowledged_session,
+                mutation_id,
+            } if *acknowledged_session == session_id && *mutation_id == intent.mutation_id
+        )));
+        assert_eq!(
+            client
+                .session(session_id)
+                .expect("session")
+                .active_room
+                .topic
+                .as_deref(),
+            Some("Durable topic")
+        );
+        assert!(!state.durable_mutation_is_pending(session_id, intent.mutation_id));
+    }
+
     #[test]
     fn durable_part_waits_for_matching_result_before_leaving_and_acknowledging() {
         let client_instance_id = ClientInstanceId::new([2; 16]);
@@ -3676,7 +3931,7 @@ mod tests {
         assert!(matches!(
             mismatched.as_slice(),
             [ChatClientEvent::Error { message, .. }]
-                if message.contains("mismatched durable room-leave result")
+                if message.contains("mismatched durable command result")
         ));
         assert!(
             client
@@ -5562,6 +5817,7 @@ mod tests {
                     room_id: 1,
                     temp_event_id: Some(local_echo_event_id(1)),
                     mutation_id: None,
+                    command_result: None,
                 },
             );
             state.pending_uploads.insert(
@@ -5723,6 +5979,7 @@ mod tests {
                     room_id: 1,
                     temp_event_id: Some(local_echo_event_id(seq)),
                     mutation_id: None,
+                    command_result: None,
                 },
             );
         }

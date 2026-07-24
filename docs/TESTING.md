@@ -2959,7 +2959,7 @@ server-restart, mixed-version, Python, or live Reticulum retry idempotency. The
 separate negotiated durable-mutation tests below cover deterministic cross-Link
 and restart behavior.
 
-## OMENchat negotiated durable room actions, notices, and leaves
+## OMENchat negotiated durable room actions, notices, leaves, and topics
 
 Negotiated `/me` sends must persist a `RoomAction` intent before transport,
 transition it to uncertain, emit the canonical durable envelope, and correlate
@@ -2971,8 +2971,10 @@ uncertain actions and notices after client restart but never automatically
 transmits them. Negotiated `/part` persists an empty-body PartRoom intent and
 must leave local membership unchanged until an exact correlated
 `CommandResult`; restart recovery exposes the uncertain leave without sending
-it. Server tests require exact replay after Link replacement and server restart
-to retain the original result without another event, rate charge, or fan-out;
+it. Negotiated `/topic` persists the normalized command and retains the prior
+local room metadata until an exact correlated result. Server tests require
+exact replay after Link replacement and server restart to retain the original
+result without another event, rate charge, metadata revision, or fan-out;
 mutation-ID reuse with different content must conflict.
 
 ```bash
@@ -2985,11 +2987,13 @@ cargo test --locked --no-default-features --features desktop-product \
 cargo test --locked --no-default-features --features desktop-product \
   durable_part_waits_for_matching_result_before_leaving_and_acknowledging --lib
 cargo test --locked --no-default-features --features desktop-product \
+  durable_topic_waits_for_matching_result_before_updating_and_acknowledging --lib
+cargo test --locked --no-default-features --features desktop-product \
   restart_recovery_is_identity_scoped_visible_and_never_transmits --lib
 (
   cd src/server
   cargo test --locked --no-default-features --features server-headless \
-    durable_part
+    durable_topic
 )
 ```
 

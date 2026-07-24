@@ -45,10 +45,12 @@ gate.
   is extracted, but major smoke/interop, Network Doctor, log-state, and
   application orchestration regions remain concentrated there.
 - `durable-mutations-v1` is capability-negotiated and active for room messages,
-  `/me` room actions, `/notice` room notices, and `/part` room leaves.
+  `/me` room actions, `/notice` room notices, `/part` room leaves, and `/topic`
+  room metadata updates.
   The persistent intent contract admits `RoomMessage`, `RoomAction`,
   `RoomNotice`, `PartRoom`, and `Command`, while the desktop production sender
-  currently prepares the first four operation families.
+  currently prepares the first four operation families plus the narrowly
+  admitted topic command.
 - The server durable executor and replay store already cover room-text and
   command mutation families with bounded transactional replay behavior.
 - Network Doctor and delivery evidence provide useful component state, but
@@ -273,6 +275,25 @@ executor. Classify each command as:
 
 Do not send an unsupported command in a durable envelope. Keep exact legacy
 behavior for old or downgraded peers.
+
+Command classification and first subunit:
+
+| Command | Classification | v0.9.6-4 desktop state |
+| --- | --- | --- |
+| `rooms` | read-only; mutation identity is unnecessary | legacy/read-only |
+| `topic` | transactionally durable and replay-safe | activated |
+| `create` | transactionally durable and replay-safe | deferred to no-room/new-room correlation unit |
+| `role`, `unban` | transactionally durable and replay-safe | deferred to target-resolution unit |
+| `kick`, `ban`, `mute`, `unmute` | durable database result plus live target effects | deferred to moderation side-effect unit |
+
+The topic subunit persists the exact normalized command before transport,
+changes no local metadata until an exact sequence/room/command/returned-room
+result arrives, and never retries after silence or disconnect. It shares the
+existing bounded pending-mutation budget and base `durable-mutations-v1`
+capability. Client restart recovery is visible but non-transmitting. Server
+tests cover content conflict, replacement-Link replay, restart replay, and
+one-use `RoomDelta` publication. No schema, protocol number, capability,
+dependency, worker, timer, or queue changed.
 
 ### Unit 2D — recovery UX
 
