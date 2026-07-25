@@ -818,6 +818,11 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         {
             app.save_selected_directory_entry();
         }
+        (_, KeyCode::Char('d'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
+        {
+            app.request_selected_directory_path();
+        }
         (_, KeyCode::Char('r'))
             if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
         {
@@ -1479,6 +1484,60 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
         assert!(!app.network_doctor_state.operation_select_mode);
         assert_eq!(app.network_doctor_state.operation_diagnostic_scroll, 0);
+
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[tokio::test]
+    async fn directory_shortcuts_route_existing_path_and_propagation_refresh_actions() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-directory-network-actions-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        app.directory_service
+            .ingest_announce(
+                "00112233445566778899aabbccddeeff",
+                "Propagation fixture",
+                crate::directory::DirectoryKind::Propagation,
+                None,
+                None,
+            )
+            .expect("propagation directory fixture");
+        app.refresh_panels_from_services();
+        assert!(app.select_directory_entry(0));
+        app.switch_section(workspace::WorkspaceSection::Directory);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(app.status.task.contains("requesting path for"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        )
+        .await;
+        assert_eq!(
+            app.directory_state.propagation_refresh.outcome,
+            crate::app::PropagationNodeRefreshOutcome::Running
+        );
+        assert!(app.status.task.contains("refreshing propagation node"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(app.status.task.contains("cancelling propagation refresh"));
 
         drop(app);
         std::fs::remove_dir_all(root).expect("remove isolated TUI root");

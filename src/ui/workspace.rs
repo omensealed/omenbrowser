@@ -622,7 +622,7 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect::<Vec<_>>();
     let title = format!(
-        " Directory | filter: {} | entries: {} | propagation={}/{} bytes={} truncated={} refresh={:?} | Enter open | s save | t trust | k ticket | r refresh | x cancel | p use | g sync ",
+        " Directory | filter: {} | entries: {} | propagation={}/{} bytes={} truncated={} refresh={:?} | Enter open | d path | s save | t trust | k ticket | r refresh | x cancel | p use | g sync ",
         app.directory_state.filter,
         app.directory_state.entries.len(),
         propagation_inventory.nodes.len(),
@@ -1996,7 +1996,9 @@ fn shortcut_help_lines(section: WorkspaceSection) -> Vec<Line<'static>> {
         ],
         WorkspaceSection::Directory => vec![
             Line::from("Up/Down selects an entry | Enter opens its primary action"),
-            Line::from("k cycles the selected peer reply-ticket default"),
+            Line::from("d requests selected paths | s saves | t cycles trust"),
+            Line::from("r refreshes propagation evidence | x cancels | p selects node"),
+            Line::from("g syncs propagation messages | k cycles peer reply-ticket default"),
         ],
         WorkspaceSection::Interfaces => vec![
             Line::from("Up/Down selects an interface | e enables/disables | x deletes"),
@@ -2087,6 +2089,11 @@ mod tests {
         assert!(browser.contains("Ctrl-l edits address"));
         assert!(browser.contains("D discovers path"));
         assert!(!browser.contains("Operations search"));
+
+        let directory = help_text(WorkspaceSection::Directory);
+        assert!(directory.contains("d requests selected paths"));
+        assert!(directory.contains("r refreshes propagation evidence"));
+        assert!(directory.contains("x cancels"));
     }
 
     #[test]

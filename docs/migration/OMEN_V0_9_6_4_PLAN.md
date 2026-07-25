@@ -833,6 +833,14 @@ owns no OMENchat reconnect deadline; no fake reconnect countdown or polling
 clock is added. The desktop OMENchat monitor remains the owner of its existing
 reconnect timers.
 
+Phase 5G completes the TUI Directory one-key network controls by routing `d` to
+the existing selected-entry path request. The already-existing `r` propagation
+refresh remains single-flight, cancellation-owned, deadline-limited to six
+seconds, and subject to its 30-second cooldown; `x` cancels it. Directory
+titles and contextual help now expose path request, refresh, cancellation,
+selection, and sync keys. No new request implementation, retry, timer, worker,
+queue, or networking state is introduced.
+
 ### TUI
 
 - Search/filter mode.
