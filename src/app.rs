@@ -15975,9 +15975,11 @@ impl App {
                 format!("path Operations projection rejected an update: {error}"),
             );
         }
-        if let Err(error) =
-            crate::operations::lxmf::record_lxmf_runtime_event(&mut self.operation_history, &event)
-        {
+        if let Err(error) = crate::operations::lxmf::record_lxmf_runtime_event_at(
+            &mut self.operation_history,
+            &event,
+            observed_at_unix_ms,
+        ) {
             self.logs.push_with_source(
                 LogSeverity::Warn,
                 LogSource::Runtime,
@@ -22572,6 +22574,58 @@ mod tests {
         assert_eq!(delivered.event_cursor, Some(2));
         assert_eq!(
             delivered.evidence.last().map(|evidence| evidence.kind),
+            Some(crate::operations::OperationEvidenceKind::PeerDelivery)
+        );
+    }
+
+    #[test]
+    fn runtime_handler_correlates_native_lxmf_evidence_without_retaining_raw_detail() {
+        let mut app = App::new(test_config("operations-runtime-handler-native-lxmf"));
+        let evidence = |kind, observed_at| {
+            RuntimeBusEvent::LxmfDeliveryEvidence(crate::runtime::LxmfDeliveryEvidence {
+                peer_hash: "AABBCCDDEEFF00112233445566778899".into(),
+                message_id: Some("native-message-id".into()),
+                kind,
+                detail: Some("packet_hash:private;link_id:private".into()),
+                rtt: Some(0.25),
+                observed_at: Some(observed_at),
+            })
+        };
+        let _ = app.handle_runtime_bus_event(evidence(
+            crate::runtime::LxmfDeliveryEvidenceKind::PropagationNodeAccepted,
+            0.010,
+        ));
+        let accepted = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("propagation acceptance operation");
+        assert_eq!(
+            accepted.state,
+            crate::operations::OperationState::TransportAccepted
+        );
+        assert!(!accepted.state.claims_peer_delivery());
+        assert!(!accepted.evidence.iter().any(|item| item
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private"))));
+
+        let _ = app.handle_runtime_bus_event(evidence(
+            crate::runtime::LxmfDeliveryEvidenceKind::LxmfRouterDelivered,
+            0.020,
+        ));
+        let delivered = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("router-delivered operation");
+        assert_eq!(
+            delivered.state,
+            crate::operations::OperationState::Delivered
+        );
+        assert!(delivered.state.claims_peer_delivery());
+        assert_eq!(
+            delivered.evidence.last().map(|item| item.kind),
             Some(crate::operations::OperationEvidenceKind::PeerDelivery)
         );
     }

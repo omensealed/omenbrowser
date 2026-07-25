@@ -206,12 +206,25 @@ and a terminal record cannot regress to later nonterminal state. Reason codes
 are retained only when control-free and within 512 bytes; otherwise a fixed
 omission notice is stored.
 
-The older native `MessageDeliveryUpdated` and `LxmfDeliveryEvidence` surfaces
-remain unchanged and are not merged into this adapter yet. That reconciliation
-requires explicit correlation and precedence tests so native RNS proof,
-propagation-node acceptance, peer activity, and router delivery do not become
-equivalent evidence accidentally. No send, retry, cancellation, worker, timer,
-subscription, queue, persistence, protocol field, or dependency is added.
+The typed native `LxmfDeliveryEvidence` surface is reconciled only when it
+carries an exact message ID. Packet submission and propagation-node acceptance
+are transport acceptance, RNS packet proof is receipt evidence with peer
+delivery explicitly unconfirmed, and only the LXMF router-delivered event is
+peer delivery. Router/propagation failure remains failure. Peer activity,
+no-receipt observation, and propagation sync without payload remain inferred
+or uncertain reconciliation rather than delivery.
+
+Native evidence uses its typed observation timestamp or the application event
+time when absent. Stale evidence and non-delivery updates after a terminal
+record are ignored; a later authoritative router-delivered event may resolve a
+prior failure. The raw detail and RTT fields are not retained because detail
+may embed packet, link, resource, node, and failure data. Evidence without an
+exact message ID is omitted rather than correlated by peer.
+
+Legacy `MessageDeliveryUpdated` remains outside this adapter. Merging that
+coarser status requires a separate precedence unit. No send, retry,
+cancellation, worker, timer, subscription, queue, persistence, protocol field,
+or dependency is added.
 
 ## Reticulum path-observation adapter
 

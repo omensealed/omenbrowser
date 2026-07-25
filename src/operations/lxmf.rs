@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::runtime::{LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind};
 use crate::runtime::{RuntimeBusEvent, RuntimeLxmfDeliveryState, RuntimeLxmfDeliveryUpdate};
 
 use super::{
@@ -12,14 +13,26 @@ use super::{
 const LXMF_REASON_CODE_MAX_BYTES: usize = 512;
 const UNKNOWN_PEER_TARGET: &str = "peer unavailable";
 
-pub fn record_lxmf_runtime_event(
+#[cfg(test)]
+fn record_lxmf_runtime_event(
     history: &mut OperationHistory,
     event: &RuntimeBusEvent,
 ) -> Result<bool, LxmfOperationError> {
-    let RuntimeBusEvent::SdkDeliveryUpdated(update) = event else {
-        return Ok(false);
-    };
-    record_sdk_delivery_update(history, update)
+    record_lxmf_runtime_event_at(history, event, 0)
+}
+
+pub fn record_lxmf_runtime_event_at(
+    history: &mut OperationHistory,
+    event: &RuntimeBusEvent,
+    observed_at_unix_ms: i64,
+) -> Result<bool, LxmfOperationError> {
+    match event {
+        RuntimeBusEvent::SdkDeliveryUpdated(update) => record_sdk_delivery_update(history, update),
+        RuntimeBusEvent::LxmfDeliveryEvidence(evidence) => {
+            record_native_delivery_evidence(history, evidence, observed_at_unix_ms)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn record_sdk_delivery_update(
@@ -92,6 +105,186 @@ fn record_sdk_delivery_update(
     };
     history.upsert(record)?;
     Ok(true)
+}
+
+fn record_native_delivery_evidence(
+    history: &mut OperationHistory,
+    evidence: &LxmfDeliveryEvidence,
+    fallback_observed_at_unix_ms: i64,
+) -> Result<bool, LxmfOperationError> {
+    let Some(message_id) = evidence.message_id.as_deref() else {
+        return Ok(false);
+    };
+    let message_id = validate_identifier(message_id)?;
+    let id = lxmf_operation_id(message_id);
+    let existing = history.records().find(|record| record.id == id).cloned();
+    let updated_at_unix_ms =
+        native_evidence_timestamp(evidence.observed_at, fallback_observed_at_unix_ms)?;
+    let (projected_state, authority, evidence_kind, detail) =
+        native_evidence_projection(evidence.kind);
+    if existing.as_ref().is_some_and(|record| {
+        updated_at_unix_ms < record.updated_at_unix_ms
+            || (record.state.is_terminal() && projected_state != OperationState::Delivered)
+            || record.evidence.last().is_some_and(|last| {
+                last.at_unix_ms == updated_at_unix_ms && last.kind == evidence_kind
+            })
+    }) {
+        return Ok(false);
+    }
+    let target = normalize_peer(&evidence.peer_hash)?;
+    let created_at_unix_ms = existing
+        .as_ref()
+        .map_or(updated_at_unix_ms, |record| record.created_at_unix_ms);
+    let mut retained_evidence = existing
+        .as_ref()
+        .map(|record| record.evidence.clone())
+        .unwrap_or_default();
+    if retained_evidence.len() >= OPERATION_EVIDENCE_MAX_ITEMS {
+        retained_evidence.remove(0);
+    }
+    retained_evidence.push(OperationEvidence {
+        kind: evidence_kind,
+        authority,
+        at_unix_ms: updated_at_unix_ms,
+        detail: Some(detail.into()),
+    });
+    let state = existing
+        .as_ref()
+        .map(|record| preserve_stronger_nonterminal_state(record.state, projected_state))
+        .unwrap_or(projected_state);
+    let last_error = if matches!(
+        evidence.kind,
+        LxmfDeliveryEvidenceKind::PropagationNodeFailed
+            | LxmfDeliveryEvidenceKind::LxmfRouterFailed
+    ) {
+        Some(detail.into())
+    } else {
+        None
+    };
+    let record = OperationRecord {
+        id,
+        target: OperationTarget {
+            kind: OperationTargetKind::Peer,
+            label: target,
+        },
+        state,
+        authority,
+        evidence: retained_evidence,
+        progress: None,
+        attempt_count: existing.as_ref().map_or(0, |record| record.attempt_count),
+        stamp_cost: None,
+        propagation_node: None,
+        created_at_unix_ms,
+        updated_at_unix_ms,
+        last_error,
+        event_cursor: existing.as_ref().and_then(|record| record.event_cursor),
+        valid_actions: vec![OperationAction::CopyDiagnostics],
+    };
+    history.upsert(record)?;
+    Ok(true)
+}
+
+fn native_evidence_timestamp(
+    observed_at: Option<f64>,
+    fallback_observed_at_unix_ms: i64,
+) -> Result<i64, LxmfOperationError> {
+    let Some(observed_at) = observed_at else {
+        return (fallback_observed_at_unix_ms >= 0)
+            .then_some(fallback_observed_at_unix_ms)
+            .ok_or(LxmfOperationError::InvalidTimestamp);
+    };
+    let millis = observed_at * 1_000.0;
+    if !millis.is_finite() || millis < 0.0 || millis > i64::MAX as f64 {
+        return Err(LxmfOperationError::InvalidTimestamp);
+    }
+    Ok(millis.round() as i64)
+}
+
+fn native_evidence_projection(
+    kind: LxmfDeliveryEvidenceKind,
+) -> (
+    OperationState,
+    EvidenceAuthority,
+    OperationEvidenceKind,
+    &'static str,
+) {
+    match kind {
+        LxmfDeliveryEvidenceKind::PacketSubmitted => (
+            OperationState::TransportAccepted,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::TransportAcceptance,
+            "packet submitted to Reticulum transport; peer delivery unconfirmed",
+        ),
+        LxmfDeliveryEvidenceKind::RnsPacketProof => (
+            OperationState::ReceiptObserved,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::Receipt,
+            "RNS packet proof observed; peer delivery unconfirmed",
+        ),
+        LxmfDeliveryEvidenceKind::PropagationNodeAccepted => (
+            OperationState::TransportAccepted,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::TransportAcceptance,
+            "propagation node accepted the payload; peer delivery unconfirmed",
+        ),
+        LxmfDeliveryEvidenceKind::PropagationNodeFailed => (
+            OperationState::Failed,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::Failure,
+            "propagation node transfer failed",
+        ),
+        LxmfDeliveryEvidenceKind::PropagationSyncNoPayloads => (
+            OperationState::Reconciling,
+            EvidenceAuthority::Uncertain,
+            OperationEvidenceKind::Reconciliation,
+            "propagation sync returned no peer payload; delivery remains unconfirmed",
+        ),
+        LxmfDeliveryEvidenceKind::LxmfRouterDelivered => (
+            OperationState::Delivered,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::PeerDelivery,
+            "LXMF router reports delivery",
+        ),
+        LxmfDeliveryEvidenceKind::LxmfRouterFailed => (
+            OperationState::Failed,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::Failure,
+            "LXMF router reports delivery failure",
+        ),
+        LxmfDeliveryEvidenceKind::InboundPeerMessage => (
+            OperationState::Reconciling,
+            EvidenceAuthority::Inferred,
+            OperationEvidenceKind::Reconciliation,
+            "peer activity observed after send; this message's delivery is not established",
+        ),
+        LxmfDeliveryEvidenceKind::NoReceiptObserved => (
+            OperationState::Reconciling,
+            EvidenceAuthority::Uncertain,
+            OperationEvidenceKind::Reconciliation,
+            "no LXMF receipt observed; delivery remains unconfirmed",
+        ),
+    }
+}
+
+fn preserve_stronger_nonterminal_state(
+    current: OperationState,
+    projected: OperationState,
+) -> OperationState {
+    if projected == OperationState::Reconciling || projected.is_terminal() {
+        return projected;
+    }
+    let rank = |state| match state {
+        OperationState::Queued => 1,
+        OperationState::Dispatching | OperationState::Active => 2,
+        OperationState::TransportAccepted => 3,
+        OperationState::ReceiptObserved => 4,
+        _ => 0,
+    };
+    if rank(current) > rank(projected) {
+        current
+    } else {
+        projected
+    }
 }
 
 fn validate_terminal_semantics(
@@ -274,6 +467,21 @@ mod tests {
             event_id: "private-event-id".into(),
             seq_no,
             cursor: "private-cursor".into(),
+        })
+    }
+
+    fn native_evidence(
+        kind: LxmfDeliveryEvidenceKind,
+        message_id: Option<&str>,
+        observed_at: Option<f64>,
+    ) -> RuntimeBusEvent {
+        RuntimeBusEvent::LxmfDeliveryEvidence(LxmfDeliveryEvidence {
+            peer_hash: "AABBCCDDEEFF00112233445566778899".into(),
+            message_id: message_id.map(str::to_string),
+            kind,
+            detail: Some("private_packet:secret;private_link:secret;private_failure:secret".into()),
+            rtt: Some(0.25),
+            observed_at,
         })
     }
 
@@ -557,5 +765,217 @@ mod tests {
         );
         assert_eq!(saturated.records().next(), Some(&existing));
         assert_eq!(saturated.metrics().rejected, 1);
+    }
+
+    #[test]
+    fn native_packet_and_proof_evidence_correlate_without_claiming_peer_delivery() {
+        let mut history = OperationHistory::default();
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::PacketSubmitted,
+                Some("private-message-id"),
+                Some(0.010),
+            ),
+            999,
+        )
+        .expect("packet submitted");
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::RnsPacketProof,
+                Some("private-message-id"),
+                Some(0.020),
+            ),
+            999,
+        )
+        .expect("RNS proof");
+
+        let record = only_record(&history);
+        assert_eq!(record.state, OperationState::ReceiptObserved);
+        assert!(!record.state.claims_peer_delivery());
+        assert_eq!(record.evidence.len(), 2);
+        assert_eq!(
+            record.evidence.last().map(|evidence| evidence.kind),
+            Some(OperationEvidenceKind::Receipt)
+        );
+        let retained = record
+            .evidence
+            .iter()
+            .filter_map(|evidence| evidence.detail.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!retained.contains("private_packet"));
+        assert!(!retained.contains("private_link"));
+        assert!(!retained.contains("private_failure"));
+    }
+
+    #[test]
+    fn propagation_acceptance_is_not_delivery_and_only_router_delivery_claims_it() {
+        let mut history = OperationHistory::default();
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::PropagationNodeAccepted,
+                Some("private-message-id"),
+                Some(0.010),
+            ),
+            999,
+        )
+        .expect("propagation accepted");
+        assert_eq!(
+            only_record(&history).state,
+            OperationState::TransportAccepted
+        );
+        assert!(!only_record(&history).state.claims_peer_delivery());
+
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::LxmfRouterDelivered,
+                Some("private-message-id"),
+                Some(0.020),
+            ),
+            999,
+        )
+        .expect("router delivered");
+        let record = only_record(&history);
+        assert_eq!(record.state, OperationState::Delivered);
+        assert!(record.state.claims_peer_delivery());
+        assert_eq!(
+            record.evidence.last().map(|evidence| evidence.kind),
+            Some(OperationEvidenceKind::PeerDelivery)
+        );
+    }
+
+    #[test]
+    fn uncertain_native_evidence_stays_unresolved_and_requires_exact_message_id() {
+        let mut history = OperationHistory::default();
+        assert!(!record_lxmf_runtime_event_at(
+            &mut history,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::InboundPeerMessage,
+                None,
+                Some(0.010),
+            ),
+            999,
+        )
+        .expect("uncorrelated peer activity omitted"));
+        for (kind, authority) in [
+            (
+                LxmfDeliveryEvidenceKind::InboundPeerMessage,
+                EvidenceAuthority::Inferred,
+            ),
+            (
+                LxmfDeliveryEvidenceKind::NoReceiptObserved,
+                EvidenceAuthority::Uncertain,
+            ),
+            (
+                LxmfDeliveryEvidenceKind::PropagationSyncNoPayloads,
+                EvidenceAuthority::Uncertain,
+            ),
+        ] {
+            let mut history = OperationHistory::default();
+            record_lxmf_runtime_event_at(
+                &mut history,
+                &native_evidence(kind, Some("private-message-id"), Some(0.010)),
+                999,
+            )
+            .expect("uncertain evidence");
+            let record = only_record(&history);
+            assert_eq!(record.state, OperationState::Reconciling);
+            assert_eq!(record.authority, authority);
+            assert!(!record.state.claims_peer_delivery());
+        }
+    }
+
+    #[test]
+    fn native_evidence_obeys_timestamps_terminal_precedence_and_fallback_time() {
+        let mut history = OperationHistory::default();
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::LxmfRouterDelivered,
+                Some("private-message-id"),
+                None,
+            ),
+            20,
+        )
+        .expect("delivered with fallback time");
+        assert_eq!(only_record(&history).updated_at_unix_ms, 20);
+        assert!(!record_lxmf_runtime_event_at(
+            &mut history,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::LxmfRouterFailed,
+                Some("private-message-id"),
+                Some(0.030),
+            ),
+            30,
+        )
+        .expect("terminal failure cannot replace delivery"));
+        assert!(!record_lxmf_runtime_event_at(
+            &mut history,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::RnsPacketProof,
+                Some("private-message-id"),
+                Some(0.010),
+            ),
+            10,
+        )
+        .expect("stale proof ignored"));
+        assert_eq!(only_record(&history).state, OperationState::Delivered);
+
+        let mut resolved_failure = OperationHistory::default();
+        record_lxmf_runtime_event_at(
+            &mut resolved_failure,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::LxmfRouterFailed,
+                Some("private-message-id"),
+                Some(0.010),
+            ),
+            10,
+        )
+        .expect("router failure");
+        record_lxmf_runtime_event_at(
+            &mut resolved_failure,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::LxmfRouterDelivered,
+                Some("private-message-id"),
+                Some(0.020),
+            ),
+            20,
+        )
+        .expect("later delivery");
+        assert_eq!(
+            only_record(&resolved_failure).state,
+            OperationState::Delivered
+        );
+        assert!(only_record(&resolved_failure).last_error.is_none());
+
+        let mut invalid = match native_evidence(
+            LxmfDeliveryEvidenceKind::PacketSubmitted,
+            Some("another-message"),
+            Some(f64::NAN),
+        ) {
+            RuntimeBusEvent::LxmfDeliveryEvidence(evidence) => evidence,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            record_lxmf_runtime_event_at(
+                &mut history,
+                &RuntimeBusEvent::LxmfDeliveryEvidence(invalid.clone()),
+                40,
+            ),
+            Err(LxmfOperationError::InvalidTimestamp)
+        );
+        invalid.observed_at = None;
+        assert_eq!(
+            record_lxmf_runtime_event_at(
+                &mut history,
+                &RuntimeBusEvent::LxmfDeliveryEvidence(invalid),
+                -1,
+            ),
+            Err(LxmfOperationError::InvalidTimestamp)
+        );
     }
 }

@@ -498,6 +498,21 @@ RNS proof, propagation acceptance, peer activity, and router delivery cannot be
 conflated. No send, retry, cancel, worker, timer, subscription, queue,
 persistence, protocol, or dependency is introduced.
 
+Phase 3K reconciles typed native `LxmfDeliveryEvidence` into the same opaque
+message operation only when an exact message ID is present. Packet submission
+and propagation-node acceptance are transport evidence; RNS packet proof is
+receipt evidence with peer delivery unconfirmed; router delivery alone is peer
+delivery. Failures remain failures, while peer activity, absent receipt, and a
+propagation sync with no payload remain inferred/uncertain reconciliation.
+Typed evidence time or bounded application event time controls ordering.
+Stale updates and non-delivery changes after terminal state are ignored, while
+later router delivery can resolve a prior failure. Raw detail and RTT are
+omitted because detail can contain packet, link, resource, propagation-node,
+and failure data. Evidence lacking message identity is not correlated by peer.
+The coarser legacy `MessageDeliveryUpdated` event remains separate. No send,
+retry, cancellation, worker, timer, subscription, queue, persistence, protocol,
+or dependency is introduced.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:

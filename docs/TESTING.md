@@ -3104,7 +3104,10 @@ mapping, backend-dependent terminal-sent behavior, opaque message correlation,
 peer-target retention, bounded reason handling, exact attempts/sequence,
 transition and evidence coalescing, duplicate/stale rejection, terminal
 regression protection, inconsistent terminal-flag rejection, no private event
-metadata retention, and saturation behavior:
+metadata retention, exact native-evidence correlation, RNS-proof and
+propagation-acceptance boundaries, uncertain peer activity/no-receipt
+semantics, raw-detail omission, timestamp fallback, terminal precedence, and
+saturation behavior:
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
@@ -3115,14 +3118,16 @@ cargo test --locked --no-default-features --features tui \
 
 cargo test --locked --no-default-features --features desktop-product \
   runtime_handler_projects_typed_sdk_delivery --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_correlates_native_lxmf_evidence --lib
 ```
 
 These tests construct typed runtime events in memory and use an isolated
 application root. They do not send LXMF, start Reticulum, contact a peer,
-observe a receipt, synchronize propagation, or establish Python
-interoperability. Native `MessageDeliveryUpdated`/`LxmfDeliveryEvidence`
-correlation and live peer-delivery proof remain separate test and migration
-units.
+observe a live receipt, synchronize propagation, or establish Python
+interoperability. Legacy `MessageDeliveryUpdated` correlation and live
+peer-delivery proof remain separate test and migration units.
 
 The typed Resource adapter fixtures prove stable opaque correlation, transfer
 identifier and browser-operation redaction, offer/progress coalescing, retained
