@@ -10,10 +10,12 @@ use crate::protocol::batch::{
 };
 use crate::protocol::codec::{decode_frame, encode_frame};
 use crate::protocol::{
-    canonical_mutation_request_hash, parse_session_open_negotiation,
-    with_session_accept_negotiation, ChatErrorCode, ChatOp, ClientInstanceId, Compression,
-    DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId, SessionAcceptNegotiation,
+    append_rich_message_event_metadata, canonical_mutation_request_hash,
+    parse_session_open_negotiation, with_session_accept_negotiation, ChatErrorCode, ChatOp,
+    ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
+    RichMessageBody, RichMessageEventMetadata, RoomId, SessionAcceptNegotiation, UserId,
     DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME,
+    REPLY_MENTIONS_BODY_TAG, REPLY_MENTIONS_CAPABILITY,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -44,6 +46,7 @@ const PENDING_UPLOAD_MAX_ITEMS_PER_IDENTITY: usize = 8;
 const PENDING_UPLOAD_TTL_SECONDS: u64 = 6 * 60 * 60;
 const UPLOAD_FILENAME_MAX_BYTES: usize = 255;
 const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
+const REPLY_MENTIONS_SERVER_ENABLED: bool = false;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -196,12 +199,14 @@ pub(crate) struct DurableMutationPeerContext<'a> {
     pub peer: &'a ServerPeer,
     pub active_room_peers: &'a [ServerPeer],
     pub durable_notice_ack: bool,
+    pub reply_mentions: bool,
 }
 
 #[derive(Clone, Copy)]
 struct DurableRoomOperation {
     op: ChatOp,
     notice_ack: bool,
+    reply_mentions: bool,
 }
 
 struct DurableCommandEffect {
@@ -355,6 +360,10 @@ impl SessionEngine {
 
     pub fn handle_frame(&self, peer: &ServerPeer, frame: Frame) -> ServerResult<Vec<Frame>> {
         self.handle_frame_with_active_peers(peer, frame, &[])
+    }
+
+    pub(crate) fn local_user_id(&self, peer: &ServerPeer) -> ServerResult<UserId> {
+        self.ensure_peer(peer).map(|user| user.user_id)
     }
 
     pub fn handle_frame_with_active_peers(
@@ -526,6 +535,15 @@ impl SessionEngine {
             let mut accepted_capabilities = vec![DURABLE_MUTATION_CAPABILITY.into()];
             if notice_ack_requested {
                 accepted_capabilities.push(DURABLE_NOTICE_ACK_CAPABILITY.into());
+            }
+            let reply_mentions_requested = negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == REPLY_MENTIONS_CAPABILITY)
+            });
+            if reply_mentions_requested && REPLY_MENTIONS_SERVER_ENABLED {
+                accepted_capabilities.push(REPLY_MENTIONS_CAPABILITY.into());
             }
             response_body = with_session_accept_negotiation(
                 response_body,
@@ -816,7 +834,7 @@ impl SessionEngine {
                 ChatOp::RoomEvent,
                 seq,
                 room_id,
-                FrameBody::Fields(vec![event_to_value(&event)]),
+                FrameBody::Fields(vec![event_to_value(&event)?]),
             ),
         ])
     }
@@ -885,7 +903,7 @@ impl SessionEngine {
                 ChatOp::RoomEvent,
                 seq,
                 Some(room_id),
-                FrameBody::Fields(vec![event_to_value(&event)]),
+                FrameBody::Fields(vec![event_to_value(&event)?]),
             ));
         }
         Ok(frames)
@@ -972,7 +990,7 @@ impl SessionEngine {
                 ChatOp::RoomEvent,
                 seq,
                 Some(room_id),
-                FrameBody::Fields(vec![event_to_value(&event)]),
+                FrameBody::Fields(vec![event_to_value(&event)?]),
             ));
         }
         Ok(frames)
@@ -1010,7 +1028,7 @@ impl SessionEngine {
             .latest_events(room.room_id, self.limits.join_backlog_events)?
             .into_iter()
             .map(|event| event_to_value(&event))
-            .collect::<Vec<_>>();
+            .collect::<ServerResult<Vec<_>>>()?;
 
         let mut frames = vec![
             Frame::new(
@@ -1086,7 +1104,7 @@ impl SessionEngine {
                 ChatOp::RoomEvent,
                 seq,
                 Some(room_id),
-                FrameBody::Fields(vec![event_to_value(&event)]),
+                FrameBody::Fields(vec![event_to_value(&event)?]),
             ),
         ])
     }
@@ -1108,6 +1126,7 @@ impl SessionEngine {
                 peer,
                 active_room_peers: &[],
                 durable_notice_ack: true,
+                reply_mentions: false,
             },
             seq,
             room_id,
@@ -1136,6 +1155,7 @@ impl SessionEngine {
                     DurableRoomOperation {
                         op,
                         notice_ack: peers.durable_notice_ack,
+                        reply_mentions: peers.reply_mentions,
                     },
                     client_instance_id,
                     envelope,
@@ -1177,6 +1197,7 @@ impl SessionEngine {
             DurableRoomOperation {
                 op,
                 notice_ack: true,
+                reply_mentions: false,
             },
             client_instance_id,
             envelope,
@@ -1232,7 +1253,68 @@ impl SessionEngine {
                 "durable request hash does not match its canonical body",
             ));
         }
-        let Some(body) = body_string(&envelope.body).filter(|body| !body.trim().is_empty()) else {
+        let rich_shape_tagged = matches!(
+            &envelope.body,
+            FrameBody::Fields(fields)
+                if matches!(
+                    fields.get(1),
+                    Some(FrameValue::String(tag)) if tag == REPLY_MENTIONS_BODY_TAG
+                )
+        );
+        if rich_shape_tagged && !operation.reply_mentions {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationNotNegotiated,
+                "reply and mention metadata was not negotiated for this link",
+            ));
+        }
+        let (body, metadata) = if op == ChatOp::RoomMessage
+            && operation.reply_mentions
+            && matches!(&envelope.body, FrameBody::Fields(_))
+        {
+            let rich = match RichMessageBody::from_frame_body(&envelope.body) {
+                Ok(rich) => rich,
+                Err(_) => {
+                    return Ok(self.durable_error_dispatch(
+                        seq,
+                        Some(room_id),
+                        ChatErrorCode::DurableMutationMalformed,
+                        "rich room message body is malformed",
+                    ))
+                }
+            };
+            if rich
+                .reply_to
+                .is_some_and(|reference| reference.room_id != room_id)
+            {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationMalformed,
+                    "reply reference belongs to a different room",
+                ));
+            }
+            (
+                rich.body,
+                Some(RichMessageEventMetadata {
+                    reply_to_event_id: rich.reply_to.map(|reference| reference.event_id),
+                    mentioned_user_ids: rich.mentioned_user_ids,
+                }),
+            )
+        } else {
+            let Some(body) = body_string(&envelope.body).filter(|body| !body.trim().is_empty())
+            else {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationMalformed,
+                    "durable message body is empty",
+                ));
+            };
+            (body, None)
+        };
+        if body.trim().is_empty() {
             return Ok(self.durable_error_dispatch(
                 seq,
                 Some(room_id),
@@ -1320,6 +1402,51 @@ impl SessionEngine {
                         ))?,
                     });
                 }
+                if let Some(metadata) = metadata.as_ref() {
+                    if !OmenchatStore::durable_room_has_member(transaction, room_id, user.user_id)?
+                    {
+                        return Ok(DurableRoomEventPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::NotJoined,
+                                "join the room before sending a rich message",
+                            ))?,
+                        });
+                    }
+                    if let Some(reply_to_event_id) = metadata.reply_to_event_id {
+                        if !OmenchatStore::durable_room_event_exists(
+                            transaction,
+                            room_id,
+                            reply_to_event_id,
+                        )? {
+                            return Ok(DurableRoomEventPlan::Response {
+                                result_frame: self.encode_durable_result(self.error_frame(
+                                    seq,
+                                    Some(room_id),
+                                    ChatErrorCode::HistoryUnavailable,
+                                    "reply target is unavailable in this room",
+                                ))?,
+                            });
+                        }
+                    }
+                    for mentioned_user_id in &metadata.mentioned_user_ids {
+                        if !OmenchatStore::durable_room_has_member(
+                            transaction,
+                            room_id,
+                            *mentioned_user_id,
+                        )? {
+                            return Ok(DurableRoomEventPlan::Response {
+                                result_frame: self.encode_durable_result(self.error_frame(
+                                    seq,
+                                    Some(room_id),
+                                    ChatErrorCode::UserNotFound,
+                                    "mentioned user is not a current room member",
+                                ))?,
+                            });
+                        }
+                    }
+                }
                 let admission = match self.reserve_rate(peer, RateKind::Message)? {
                     RateAdmission::Admitted(admission) => admission,
                     RateAdmission::Rejected => {
@@ -1334,11 +1461,19 @@ impl SessionEngine {
                     }
                 };
                 OmenchatStore::join_durable_room(transaction, room_id, user.user_id)?;
-                Ok(DurableRoomEventPlan::Event {
-                    actor_user_id: Some(user.user_id),
-                    kind: event_kind,
-                    admission,
-                })
+                match metadata.clone() {
+                    Some(metadata) => Ok(DurableRoomEventPlan::RichEvent {
+                        actor_user_id: Some(user.user_id),
+                        kind: event_kind,
+                        metadata,
+                        admission,
+                    }),
+                    None => Ok(DurableRoomEventPlan::Event {
+                        actor_user_id: Some(user.user_id),
+                        kind: event_kind,
+                        admission,
+                    }),
+                }
             },
             |event| {
                 let result = if op == ChatOp::RoomNotice && !operation.notice_ack {
@@ -1346,7 +1481,7 @@ impl SessionEngine {
                         ChatOp::RoomEvent,
                         seq,
                         Some(room_id),
-                        FrameBody::Fields(vec![event_to_value(event)]),
+                        FrameBody::Fields(vec![event_to_value(event)?]),
                     )
                 } else {
                     message_ack_for_event(seq, event)
@@ -1382,7 +1517,7 @@ impl SessionEngine {
                         ChatOp::RoomEvent,
                         seq,
                         Some(room_id),
-                        FrameBody::Fields(vec![event_to_value(&event)]),
+                        FrameBody::Fields(vec![event_to_value(&event)?]),
                     )],
                     disconnect_identity: None,
                     pruned,
@@ -1548,7 +1683,7 @@ impl SessionEngine {
                     ChatOp::RoomEvent,
                     seq,
                     Some(room_id),
-                    FrameBody::Fields(vec![event_to_value(&event)]),
+                    FrameBody::Fields(vec![event_to_value(&event)?]),
                 )],
                 disconnect_identity: None,
                 pruned,
@@ -1889,7 +2024,7 @@ impl SessionEngine {
                                 ChatOp::RoomEvent,
                                 seq,
                                 room_id,
-                                FrameBody::Fields(vec![event_to_value(&event)]),
+                                FrameBody::Fields(vec![event_to_value(&event)?]),
                             ),
                         ];
                         let disconnect_identity = matches!(command_name.as_str(), "kick" | "ban")
@@ -1972,7 +2107,7 @@ impl SessionEngine {
                                 ChatOp::RoomEvent,
                                 seq,
                                 Some(active_room_id),
-                                FrameBody::Fields(vec![event_to_value(&event)]),
+                                FrameBody::Fields(vec![event_to_value(&event)?]),
                             ));
                         }
                         (room_id, user_to_value(&changed_user), broadcasts, None)
@@ -2150,7 +2285,7 @@ impl SessionEngine {
             ChatOp::RoomEvent,
             seq,
             Some(room_id),
-            FrameBody::Fields(vec![event_to_value(&event)]),
+            FrameBody::Fields(vec![event_to_value(&event)?]),
         )])
     }
 
@@ -2232,7 +2367,7 @@ impl SessionEngine {
             ChatOp::RoomEvent,
             seq,
             Some(room_id),
-            FrameBody::Fields(vec![event_to_value(&event)]),
+            FrameBody::Fields(vec![event_to_value(&event)?]),
         )])
     }
 
@@ -2335,7 +2470,7 @@ impl SessionEngine {
             .events_before(room_id, before_event_id, self.limits.history_batch_size)?
             .into_iter()
             .map(|event| event_to_value(&event))
-            .collect::<Vec<_>>();
+            .collect::<ServerResult<Vec<_>>>()?;
         if events.is_empty() {
             return Ok(vec![Frame::new(
                 ChatOp::HistoryEnd,
@@ -2406,7 +2541,10 @@ impl SessionEngine {
             )]);
         }
 
-        let values = events.iter().map(event_to_value).collect::<Vec<_>>();
+        let values = events
+            .iter()
+            .map(event_to_value)
+            .collect::<ServerResult<Vec<_>>>()?;
         if values.is_empty() {
             return Ok(vec![Frame::new(
                 ChatOp::HistoryCurrent,
@@ -2732,7 +2870,7 @@ impl SessionEngine {
                 ChatOp::RoomEvent,
                 0,
                 Some(upload.room_id),
-                FrameBody::Fields(vec![event_to_value(&event)]),
+                FrameBody::Fields(vec![event_to_value(&event)?]),
             ),
         ])
     }
@@ -3515,7 +3653,7 @@ fn user_delta_frame(seq: u32, room_id: Option<RoomId>, user: &ServerUser) -> Fra
     )
 }
 
-fn event_to_value(event: &ServerRoomEvent) -> FrameValue {
+fn event_to_value(event: &ServerRoomEvent) -> ServerResult<FrameValue> {
     let (kind, body) = match &event.kind {
         ServerRoomEventKind::Message { body } => (1_u64, body.clone()),
         ServerRoomEventKind::Action { body } => (2, body.clone()),
@@ -3553,7 +3691,12 @@ fn event_to_value(event: &ServerRoomEvent) -> FrameValue {
         fields.push(FrameValue::String(filename.clone()));
         fields.push(FrameValue::U64(*bytes));
     }
-    FrameValue::Array(fields)
+    if let Some(metadata) = event.metadata.as_ref() {
+        append_rich_message_event_metadata(&mut fields, metadata).map_err(|error| {
+            ServerError::Message(format!("stored rich message metadata is invalid: {error}"))
+        })?;
+    }
+    Ok(FrameValue::Array(fields))
 }
 
 fn message_ack_for_event(seq: u32, event: &ServerRoomEvent) -> Frame {
@@ -3663,6 +3806,26 @@ mod tests {
                 .expect("canonical hash"),
             body,
         }
+    }
+
+    fn rich_message_envelope(
+        room_id: RoomId,
+        mutation_marker: u8,
+        reply_to: Option<crate::protocol::ReplyReference>,
+        mentioned_user_ids: Vec<UserId>,
+    ) -> DurableMutationEnvelope {
+        durable_envelope_body(
+            ChatOp::RoomMessage,
+            room_id,
+            mutation_marker,
+            RichMessageBody {
+                body: "rich message".into(),
+                reply_to,
+                mentioned_user_ids,
+            }
+            .into_frame_body()
+            .expect("bounded rich message"),
+        )
     }
 
     fn frame_error_code(frame: &Frame) -> Option<u64> {
@@ -4455,6 +4618,48 @@ mod tests {
     }
 
     #[test]
+    fn reply_mentions_capability_remains_unadvertised_until_client_activation() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    REPLY_MENTIONS_CAPABILITY.into(),
+                ],
+                client_instance_id: Some(ClientInstanceId::new([12; 16])),
+            },
+        )
+        .expect("reply capability request");
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 3, None, request))
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(Some(SessionAcceptNegotiation {
+                accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+            }))
+        );
+
+        let legacy = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::SessionOpen,
+                    4,
+                    None,
+                    FrameBody::Text("Alice".into()),
+                ),
+            )
+            .expect("legacy session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&legacy[0].body),
+            Ok(None)
+        );
+    }
+
+    #[test]
     fn base_durable_capability_preserves_legacy_notice_origin_response() {
         let store = OmenchatStore::in_memory().expect("store");
         let room = store
@@ -4474,6 +4679,7 @@ mod tests {
                     peer: &peer(),
                     active_room_peers: &[],
                     durable_notice_ack: false,
+                    reply_mentions: false,
                 },
                 3,
                 Some(room.room_id),
@@ -5540,6 +5746,404 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn rich_message_metadata_survives_fanout_history_resource_and_restart_replay() {
+        let path = temp_store_path("rich-message-recovery");
+        let (room_id, original_event_id, alice_user_id, bob_user_id) = {
+            let store = OmenchatStore::open(&path).expect("store");
+            let room = store.ensure_room("lobby", None).expect("room");
+            let alice = store
+                .ensure_user(&peer().identity_hash, "Alice", None)
+                .expect("alice");
+            let bob = store.ensure_user(b"peer-b", "Bob", None).expect("bob");
+            store
+                .join_room(room.room_id, alice.user_id)
+                .expect("join alice");
+            store
+                .join_room(room.room_id, bob.user_id)
+                .expect("join bob");
+            let original = store
+                .append_event(
+                    room.room_id,
+                    Some(bob.user_id),
+                    ServerRoomEventKind::Message {
+                        body: "original".into(),
+                    },
+                )
+                .expect("original event");
+            (room.room_id, original.event_id, alice.user_id, bob.user_id)
+        };
+        let envelope = rich_message_envelope(
+            room_id,
+            31,
+            Some(crate::protocol::ReplyReference {
+                room_id,
+                event_id: original_event_id,
+            }),
+            vec![bob_user_id],
+        );
+        let client_instance_id = ClientInstanceId::new([31; 16]);
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("store"));
+        let stored = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                },
+                31,
+                Some(room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("rich message");
+        assert_eq!(stored.origin.op, ChatOp::MessageAck);
+        assert_eq!(stored.broadcasts.len(), 1);
+        let FrameBody::Fields(broadcast_values) = &stored.broadcasts[0].body else {
+            panic!("rich event broadcast");
+        };
+        let broadcast_event = broadcast_values[0].clone();
+        let FrameValue::Array(event_fields) = &broadcast_event else {
+            panic!("rich event fields");
+        };
+        assert_eq!(event_fields.len(), 8);
+        assert_eq!(
+            event_fields.get(6),
+            Some(&FrameValue::U64(original_event_id))
+        );
+        assert_eq!(
+            event_fields.get(7),
+            Some(&FrameValue::Array(vec![FrameValue::U64(u64::from(
+                bob_user_id
+            ))]))
+        );
+        let events = engine
+            .store
+            .latest_events(room_id, 10)
+            .expect("stored events");
+        assert_eq!(
+            events.last().and_then(|event| event.metadata.clone()),
+            Some(RichMessageEventMetadata {
+                reply_to_event_id: Some(original_event_id),
+                mentioned_user_ids: vec![bob_user_id],
+            })
+        );
+
+        let inline = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::HistoryBefore,
+                    32,
+                    Some(room_id),
+                    FrameBody::Fields(vec![FrameValue::U64(u64::MAX)]),
+                ),
+            )
+            .expect("inline history");
+        let inline_values = inline
+            .iter()
+            .filter(|frame| frame.op == ChatOp::HistoryInline)
+            .flat_map(|frame| {
+                decode_compressed_values_body(&frame.body).expect("inline history values")
+            })
+            .collect::<Vec<_>>();
+        let rich_inline = inline_values
+            .iter()
+            .find_map(|value| match value {
+                FrameValue::Array(fields)
+                    if fields.first() == event_fields.first()
+                        && fields.get(4) == event_fields.get(4) =>
+                {
+                    Some(fields)
+                }
+                _ => None,
+            })
+            .expect("rich inline event");
+        assert_eq!(rich_inline.get(6), event_fields.get(6));
+        assert_eq!(rich_inline.get(7), event_fields.get(7));
+        drop(engine);
+
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::open(&path).expect("reopened store"),
+            SessionLimits {
+                large_batch_threshold_bytes: 1,
+                ..SessionLimits::default()
+            },
+        );
+        let replayed = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                },
+                33,
+                Some(room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("restart replay");
+        assert_replayed_response(&replayed.origin, &stored.origin, 33);
+        assert!(replayed.broadcasts.is_empty());
+
+        let resource = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::HistoryBefore,
+                    34,
+                    Some(room_id),
+                    FrameBody::Fields(vec![FrameValue::U64(u64::MAX)]),
+                ),
+            )
+            .expect("resource history");
+        assert_eq!(resource[0].op, ChatOp::HistoryResourceOffer);
+        let offer = decode_resource_offer_body(&resource[0].body).expect("resource offer");
+        let payload = engine
+            .resource_payload(&offer.resource_id)
+            .expect("resource lookup")
+            .expect("resource payload");
+        let resource_values =
+            decode_compressed_values_payload(&payload).expect("resource history values");
+        let rich_resource = resource_values
+            .iter()
+            .find_map(|value| match value {
+                FrameValue::Array(fields)
+                    if fields.first() == event_fields.first()
+                        && fields.get(4) == event_fields.get(4) =>
+                {
+                    Some(fields)
+                }
+                _ => None,
+            })
+            .expect("rich resource event");
+        assert_eq!(rich_resource.get(6), event_fields.get(6));
+        assert_eq!(rich_resource.get(7), event_fields.get(7));
+
+        let conflicting = rich_message_envelope(
+            room_id,
+            31,
+            Some(crate::protocol::ReplyReference {
+                room_id,
+                event_id: original_event_id,
+            }),
+            vec![alice_user_id],
+        );
+        let conflict = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                },
+                35,
+                Some(room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                conflicting,
+            )
+            .expect("rich conflict");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+        assert_eq!(
+            engine
+                .store
+                .latest_events(room_id, 10)
+                .expect("events after replay")
+                .len(),
+            2
+        );
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn rich_message_validation_fails_closed_without_event_insertion() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let alice = store
+            .ensure_user(&peer().identity_hash, "Alice", None)
+            .expect("alice");
+        let bob = store.ensure_user(b"peer-b", "Bob", None).expect("bob");
+        let engine = SessionEngine::new(store);
+        let client_instance_id = ClientInstanceId::new([32; 16]);
+        let alice_peer = peer();
+        let context = |reply_mentions| DurableMutationPeerContext {
+            peer: &alice_peer,
+            active_room_peers: &[],
+            durable_notice_ack: true,
+            reply_mentions,
+        };
+
+        let not_negotiated = engine
+            .handle_durable_mutation_with_active_peers(
+                context(false),
+                40,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                rich_message_envelope(room.room_id, 40, None, vec![alice.user_id]),
+            )
+            .expect("not negotiated");
+        assert_eq!(
+            frame_error_code(&not_negotiated.origin),
+            Some(ChatErrorCode::DurableMutationNotNegotiated as u16 as u64)
+        );
+
+        let not_joined = engine
+            .handle_durable_mutation_with_active_peers(
+                context(true),
+                41,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                rich_message_envelope(room.room_id, 41, None, vec![alice.user_id]),
+            )
+            .expect("sender not joined");
+        assert_eq!(
+            frame_error_code(&not_joined.origin),
+            Some(ChatErrorCode::NotJoined as u16 as u64)
+        );
+        engine
+            .store
+            .join_room(room.room_id, alice.user_id)
+            .expect("join alice");
+
+        let missing_reply = engine
+            .handle_durable_mutation_with_active_peers(
+                context(true),
+                42,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                rich_message_envelope(
+                    room.room_id,
+                    42,
+                    Some(crate::protocol::ReplyReference {
+                        room_id: room.room_id,
+                        event_id: 999,
+                    }),
+                    Vec::new(),
+                ),
+            )
+            .expect("missing reply");
+        assert_eq!(
+            frame_error_code(&missing_reply.origin),
+            Some(ChatErrorCode::HistoryUnavailable as u16 as u64)
+        );
+
+        let missing_member_envelope =
+            rich_message_envelope(room.room_id, 43, None, vec![bob.user_id]);
+        let missing_member = engine
+            .handle_durable_mutation_with_active_peers(
+                context(true),
+                43,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                missing_member_envelope.clone(),
+            )
+            .expect("missing mentioned member");
+        assert_eq!(
+            frame_error_code(&missing_member.origin),
+            Some(ChatErrorCode::UserNotFound as u16 as u64)
+        );
+        engine
+            .store
+            .join_room(room.room_id, bob.user_id)
+            .expect("join bob after rejected mutation");
+        let replayed_rejection = engine
+            .handle_durable_mutation_with_active_peers(
+                context(true),
+                46,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                missing_member_envelope,
+            )
+            .expect("replayed validation result");
+        assert_replayed_response(&replayed_rejection.origin, &missing_member.origin, 46);
+        assert!(replayed_rejection.broadcasts.is_empty());
+
+        let cross_room = engine
+            .handle_durable_mutation_with_active_peers(
+                context(true),
+                44,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                rich_message_envelope(
+                    room.room_id,
+                    44,
+                    Some(crate::protocol::ReplyReference {
+                        room_id: room.room_id + 1,
+                        event_id: 1,
+                    }),
+                    Vec::new(),
+                ),
+            )
+            .expect("cross-room reply");
+        assert_eq!(
+            frame_error_code(&cross_room.origin),
+            Some(ChatErrorCode::DurableMutationMalformed as u16 as u64)
+        );
+
+        let deleted = engine
+            .store
+            .append_event(
+                room.room_id,
+                Some(alice.user_id),
+                ServerRoomEventKind::Message {
+                    body: "deleted".into(),
+                },
+            )
+            .expect("deleted target");
+        engine
+            .store
+            .mark_event_deleted_for_test(room.room_id, deleted.event_id)
+            .expect("mark target deleted");
+        let deleted_reply = engine
+            .handle_durable_mutation_with_active_peers(
+                context(true),
+                45,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                rich_message_envelope(
+                    room.room_id,
+                    45,
+                    Some(crate::protocol::ReplyReference {
+                        room_id: room.room_id,
+                        event_id: deleted.event_id,
+                    }),
+                    Vec::new(),
+                ),
+            )
+            .expect("deleted reply");
+        assert_eq!(
+            frame_error_code(&deleted_reply.origin),
+            Some(ChatErrorCode::HistoryUnavailable as u16 as u64)
+        );
+        assert!(engine
+            .store
+            .latest_events(room.room_id, 10)
+            .expect("visible events")
+            .is_empty());
     }
 
     #[test]
@@ -6796,6 +7400,7 @@ mod tests {
                         peer: &peer(),
                         active_room_peers: &[peer(), target_peer.clone()],
                         durable_notice_ack: true,
+                        reply_mentions: false,
                     },
                     110 + index as u32,
                     Some(room.room_id),
@@ -6863,6 +7468,7 @@ mod tests {
                         peer: &peer(),
                         active_room_peers: &[],
                         durable_notice_ack: true,
+                        reply_mentions: false,
                     },
                     120 + index as u32,
                     Some(room.room_id),

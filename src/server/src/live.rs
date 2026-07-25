@@ -6,6 +6,7 @@ use crate::protocol::{
     parse_session_accept_negotiation, parse_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
     DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG, DURABLE_NOTICE_ACK_CAPABILITY,
+    REPLY_MENTIONS_CAPABILITY,
 };
 use crate::session::{DurableMutationPeerContext, ServerPeer, SessionEngine};
 use crate::transport::{
@@ -150,6 +151,7 @@ struct FrameDispatchOutcome {
     session_accepted: bool,
     accepted_client_instance_id: Option<ClientInstanceId>,
     durable_notice_ack_accepted: bool,
+    reply_mentions_accepted: bool,
     part_succeeded: bool,
     moderation_disconnect_succeeded: bool,
 }
@@ -159,6 +161,7 @@ struct DurableSessionBinding {
     identity_hash: Vec<u8>,
     client_instance_id: ClientInstanceId,
     durable_notice_ack: bool,
+    reply_mentions: bool,
 }
 
 impl DurableSessionBinding {
@@ -168,6 +171,7 @@ impl DurableSessionBinding {
             identity_hash,
             client_instance_id,
             durable_notice_ack: false,
+            reply_mentions: false,
         }
     }
 
@@ -177,6 +181,7 @@ impl DurableSessionBinding {
             identity_hash,
             client_instance_id,
             durable_notice_ack: true,
+            reply_mentions: false,
         }
     }
 }
@@ -587,6 +592,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                                     identity_hash: candidate_peer.identity_hash.clone(),
                                     client_instance_id,
                                     durable_notice_ack: dispatch.durable_notice_ack_accepted,
+                                    reply_mentions: dispatch.reply_mentions_accepted,
                                 },
                             );
                         }
@@ -771,6 +777,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         let requested_client_instance_id = requested_durable_client_instance(&frame);
         let notice_ack_requested =
             session_open_requests_capability(&frame, DURABLE_NOTICE_ACK_CAPABILITY);
+        let reply_mentions_requested =
+            session_open_requests_capability(&frame, REPLY_MENTIONS_CAPABILITY);
         let replay_candidate = is_replay_guarded_request(&frame);
         let request_fingerprint = if replay_candidate {
             Some(encode_frame(&frame).map_err(|error| {
@@ -807,9 +815,15 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             }
         }
 
-        let responses =
+        let mut responses =
             self.engine
                 .handle_frame_with_active_peers(peer, frame, active_room_peers)?;
+        let reply_mentions_active = self.durable_sessions.get(&link_id).is_some_and(|binding| {
+            binding.identity_hash == peer.identity_hash && binding.reply_mentions
+        });
+        if request_op == ChatOp::JoinRoom && reply_mentions_active {
+            append_join_accept_user_id(&mut responses, self.engine.local_user_id(peer)?)?;
+        }
         let dispatch = FrameDispatchOutcome {
             session_accepted: request_op == ChatOp::SessionOpen
                 && responses
@@ -821,6 +835,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             ),
             durable_notice_ack_accepted: notice_ack_requested
                 && responses_accept_capability(&responses, DURABLE_NOTICE_ACK_CAPABILITY),
+            reply_mentions_accepted: reply_mentions_requested
+                && responses_accept_capability(&responses, REPLY_MENTIONS_CAPABILITY),
             part_succeeded: request_op == ChatOp::PartRoom
                 && responses.iter().any(is_successful_part_response),
             moderation_disconnect_succeeded: request_op == ChatOp::Command
@@ -919,6 +935,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 peer,
                 active_room_peers,
                 durable_notice_ack: binding.durable_notice_ack,
+                reply_mentions: binding.reply_mentions,
             },
             frame.seq,
             frame.room_id,
@@ -1451,6 +1468,30 @@ fn message_ack_from_room_event(seq: u32, response: &Frame) -> Option<Frame> {
             actor_display_name,
         ]),
     ))
+}
+
+fn append_join_accept_user_id(
+    responses: &mut [Frame],
+    user_id: crate::protocol::UserId,
+) -> ServerResult<()> {
+    let Some(response) = responses
+        .iter_mut()
+        .find(|response| response.op == ChatOp::JoinAccept)
+    else {
+        return Ok(());
+    };
+    let FrameBody::Fields(fields) = &mut response.body else {
+        return Err(crate::error::ServerError::Message(
+            "join acceptance did not contain fields".into(),
+        ));
+    };
+    if fields.len() != 1 {
+        return Err(crate::error::ServerError::Message(
+            "join acceptance already contains unexpected extension fields".into(),
+        ));
+    }
+    fields.push(FrameValue::U64(u64::from(user_id)));
+    Ok(())
 }
 
 fn replay_collision_frame(seq: u32, room_id: Option<RoomId>) -> Frame {
@@ -2742,6 +2783,125 @@ mod tests {
                 .map(|peer| peer.display_name.as_str()),
             Some("Durable Candidate")
         );
+    }
+
+    #[test]
+    fn dormant_reply_binding_exposes_local_user_and_routes_rich_mutation() {
+        let path = temp_store_path("rich-binding");
+        let store = OmenchatStore::open(&path).expect("store");
+        store.ensure_room("lobby", None).expect("lobby");
+        let engine = SessionEngine::new(store);
+        let link_id = [0x52; 16];
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: peer(),
+        })
+        .expect("open identified link");
+        let client_instance_id = ClientInstanceId::new([0x52; 16]);
+        let session_body = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Rich Client".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    REPLY_MENTIONS_CAPABILITY.into(),
+                ],
+                client_instance_id: Some(client_instance_id),
+            },
+        )
+        .expect("rich capability request");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::SessionOpen, 1, None, session_body))
+                .expect("session frame"),
+        })
+        .expect("session response");
+        let binding = live
+            .durable_sessions
+            .get_mut(&link_id)
+            .expect("base durable binding");
+        assert!(
+            !binding.reply_mentions,
+            "production negotiation must remain dormant"
+        );
+        binding.reply_mentions = true;
+
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                2,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("join frame"),
+        })
+        .expect("join response");
+        let join = live
+            .transport()
+            .frames
+            .iter()
+            .filter_map(|captured| decode_frame(&captured.bytes).ok())
+            .find(|frame| frame.op == ChatOp::JoinAccept && frame.seq == 2)
+            .expect("join accept");
+        let FrameBody::Fields(join_fields) = join.body else {
+            panic!("join fields");
+        };
+        let local_user_id = match join_fields.get(1) {
+            Some(FrameValue::U64(user_id)) => *user_id as crate::protocol::UserId,
+            other => panic!("missing negotiated local user id: {other:?}"),
+        };
+
+        let rich_body = crate::protocol::RichMessageBody {
+            body: "hello myself".into(),
+            reply_to: None,
+            mentioned_user_ids: vec![local_user_id],
+        }
+        .into_frame_body()
+        .expect("rich body");
+        let request_hash = crate::protocol::canonical_mutation_request_hash(
+            ChatOp::RoomMessage,
+            Some(1),
+            &rich_body,
+        )
+        .expect("rich hash");
+        let envelope = DurableMutationEnvelope {
+            mutation_id: crate::protocol::MutationId::new([0x53; 16]),
+            request_hash,
+            body: rich_body,
+        }
+        .into_frame_body()
+        .expect("durable envelope");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::RoomMessage, 3, Some(1), envelope))
+                .expect("rich frame"),
+        })
+        .expect("rich response");
+        assert!(live.transport().frames.iter().any(|captured| {
+            decode_frame(&captured.bytes)
+                .is_ok_and(|frame| frame.op == ChatOp::MessageAck && frame.seq == 3)
+        }));
+        drop(live);
+        let store = OmenchatStore::open(&path).expect("reopen rich store");
+        assert_eq!(
+            store
+                .latest_events(1, 10)
+                .expect("rich stored event")
+                .last()
+                .and_then(|event| event.metadata.clone()),
+            Some(crate::protocol::RichMessageEventMetadata {
+                reply_to_event_id: None,
+                mentioned_user_ids: vec![local_user_id],
+            })
+        );
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 
     #[test]

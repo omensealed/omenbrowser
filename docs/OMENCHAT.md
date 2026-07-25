@@ -50,7 +50,10 @@ actor/time index for upload quota planning. Version 3 adds the dormant
 durable-mutation replay table and creation-order index. Version 4 adds nullable
 reply-event and bounded mention-ID metadata plus a partial reply index. The
 reply/mention capability remains unadvertised, so current live writes preserve
-legacy `NULL` metadata. Existing version-0 through version-3 databases migrate
+legacy `NULL` metadata. A dormant durable server path validates same-room live
+reply targets and current numeric mention membership transactionally and uses
+one encoder for fan-out and both history forms. Existing version-0 through
+version-3 databases migrate
 in one immediate transaction. A database from a
 newer omenchatd version is refused without modification instead of being
 silently downgraded.

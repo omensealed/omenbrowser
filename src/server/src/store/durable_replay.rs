@@ -1,13 +1,15 @@
 use rusqlite::OptionalExtension;
 
 use super::{
-    append_event_in_transaction, current_unix_seconds, ensure_user_on, join_room_on,
-    normalize_room_name, room_from_row, user_from_row, OmenchatStore, ServerRoom, ServerRoomEvent,
-    ServerRoomEventKind, ServerUser,
+    append_event_in_transaction, append_event_with_metadata_in_transaction, current_unix_seconds,
+    ensure_user_on, join_room_on, normalize_room_name, room_from_row, user_from_row, OmenchatStore,
+    ServerRoom, ServerRoomEvent, ServerRoomEventKind, ServerUser,
 };
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::codec::decode_frame;
-use crate::protocol::{ClientInstanceId, MutationId, RequestHash, RoomId, UserId};
+use crate::protocol::{
+    ClientInstanceId, EventId, MutationId, RequestHash, RichMessageEventMetadata, RoomId, UserId,
+};
 
 /// Maximum encoded origin response retained for one durable mutation.
 pub const MAX_DURABLE_RESULT_BYTES: usize = 64 * 1024;
@@ -98,6 +100,12 @@ pub enum DurableRoomEventPlan<A> {
         kind: ServerRoomEventKind,
         admission: A,
         result_frame: Vec<u8>,
+    },
+    RichEvent {
+        actor_user_id: Option<UserId>,
+        kind: ServerRoomEventKind,
+        metadata: RichMessageEventMetadata,
+        admission: A,
     },
     Response {
         result_frame: Vec<u8>,
@@ -306,6 +314,40 @@ impl OmenchatStore {
         append_event_in_transaction(transaction, room_id, actor_user_id, kind)
     }
 
+    pub(crate) fn durable_room_event_exists(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        event_id: EventId,
+    ) -> ServerResult<bool> {
+        transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM room_events
+                   WHERE room_id = ?1 AND event_id = ?2 AND deleted = 0
+                 )",
+                (room_id, event_id),
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn durable_room_has_member(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        user_id: UserId,
+    ) -> ServerResult<bool> {
+        transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM room_members
+                   WHERE room_id = ?1 AND user_id = ?2
+                 )",
+                (room_id, user_id),
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn commit_durable_mutation_effect_result<P, E>(
         &self,
         key: DurableMutationKey<'_>,
@@ -392,6 +434,24 @@ impl OmenchatStore {
                 } => {
                     let event =
                         append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
+                    stored_event = Some(event);
+                    stored_admission = Some(admission);
+                    Ok(result_frame)
+                }
+                DurableRoomEventPlan::RichEvent {
+                    actor_user_id,
+                    kind,
+                    metadata,
+                    admission,
+                } => {
+                    let event = append_event_with_metadata_in_transaction(
+                        transaction,
+                        room_id,
+                        actor_user_id,
+                        kind,
+                        Some(metadata),
+                    )?;
+                    let result_frame = encode_result(&event)?;
                     stored_event = Some(event);
                     stored_admission = Some(admission);
                     Ok(result_frame)

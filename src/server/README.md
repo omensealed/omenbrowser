@@ -443,7 +443,13 @@ and their indexes. Version 4 adds nullable reply-event and bounded mention-ID
 metadata to room events plus a partial reply index. Existing event rows retain
 their original columns byte-for-byte and read as messages without metadata.
 The reply/mention capability is not advertised and no live request writes the
-new columns yet. The isolated durable store boundary already enforces exact
+new columns yet. The dormant server path already validates joined senders,
+same-room non-deleted reply targets, and current numeric mention membership in
+the same durable transaction that inserts the event and replay result. Its
+single event encoder preserves metadata across fan-out, inline history, and
+resource history; restart replay cannot duplicate the event. Activation stays
+blocked until the client and mixed-version gates are complete.
+The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental
 deletions per commit. Before deleting a replay result it permanently retires

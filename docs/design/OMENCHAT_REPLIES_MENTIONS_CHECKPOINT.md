@@ -345,6 +345,30 @@ Unit 2 is implemented as a dormant omenchatd storage boundary:
 - preservation, pre-v4 backup, injected rollback, malformed-storage, exact
   round-trip, and non-message refusal tests cover the boundary.
 
-Unit 3—negotiated server validation, transactional durable execution, history,
-and fan-out—remains the next rollback boundary. Capability advertisement stays
-blocked.
+Unit 3 is implemented behind the still-false server activation gate:
+
+- capability dependency and Link-scoped binding plumbing are complete, but
+  production negotiation deliberately omits `reply-mentions-v1`;
+- a rich request is accepted only through a durable authenticated binding with
+  the dormant flag active; exact tagged shape and canonical hash remain
+  mandatory;
+- the sender must already be joined, replies must reference a non-deleted
+  event in the same room, and every numeric mention must be a current member;
+- validation, metadata insertion, exact origin acknowledgement, and durable
+  replay publication share one immediate transaction;
+- validation failures are retained as exact durable results, so a later policy
+  or membership change cannot reinterpret the same mutation;
+- the single room-event encoder preserves metadata across live fan-out,
+  bounded inline history, and resource history;
+- exact replay after restart returns the stored acknowledgement without a
+  second event or broadcast, while changed metadata conflicts;
+- a capable dormant Link receives its server-scoped local user ID in
+  `JoinAccept`; legacy production responses remain unchanged.
+
+Missing, deleted/pruned, cross-room, non-member, non-negotiated, restart,
+resource-history, conflict, and local-user binding tests cover the boundary.
+No new error numbers were needed: the existing typed protocol-v1 errors retain
+their documented meanings.
+
+Unit 4—client model/store parsing and capability state—remains the next rollback
+boundary. Capability advertisement stays blocked.

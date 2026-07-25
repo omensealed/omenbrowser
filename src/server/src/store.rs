@@ -504,6 +504,20 @@ impl OmenchatStore {
         Ok(event)
     }
 
+    #[cfg(test)]
+    pub(crate) fn mark_event_deleted_for_test(
+        &self,
+        room_id: RoomId,
+        event_id: EventId,
+    ) -> ServerResult<()> {
+        self.connection.execute(
+            "UPDATE room_events SET deleted = 1
+             WHERE room_id = ?1 AND event_id = ?2",
+            (room_id, event_id),
+        )?;
+        Ok(())
+    }
+
     pub fn record_upload_file(&self, upload: RecordUploadFile<'_>) -> ServerResult<()> {
         let created_at = current_unix_seconds();
         let transaction = self.connection.unchecked_transaction()?;
@@ -967,7 +981,7 @@ fn append_event_in_transaction(
     append_event_with_metadata_in_transaction(transaction, room_id, actor_user_id, kind, None)
 }
 
-fn append_event_with_metadata_in_transaction(
+pub(super) fn append_event_with_metadata_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     room_id: RoomId,
     actor_user_id: Option<UserId>,

@@ -907,6 +907,12 @@ client-column migrations, guarded rollback, mixed-version behavior, crash
 boundaries, and the staged activation order. No production capability, wire,
 schema, setting, or UI behavior is activated by the checkpoint itself.
 
+Implementation has completed the inert shared contract, dormant omenchatd
+schema-v4 storage, and dormant server validation/transaction/fan-out units.
+Production negotiation still omits `reply-mentions-v1`; the client model,
+storage, presentation, and final mixed-version gates must land before
+activation.
+
 ### Unit 6B — reactions
 
 - Append-only add/remove events keyed by event ID, actor, and bounded reaction.
