@@ -2,6 +2,7 @@ mod app;
 mod browser;
 mod clearweb;
 mod clearweb_state;
+mod command_palette;
 mod constants;
 mod conversation;
 mod conversation_active;
@@ -97,6 +98,10 @@ use crate::workspace::WorkspaceSection;
 pub use app::run;
 #[cfg(feature = "chat-client")]
 pub(in crate::desktop) use clearweb::fetch_clearweb_media_over_socks;
+pub(in crate::desktop) use command_palette::{
+    bounded_command_palette_query, command_palette_input_id, command_palette_message,
+    command_palette_overlay, command_palette_results,
+};
 pub(in crate::desktop) use constants::*;
 pub(in crate::desktop) use conversation_editor::conversation_editor_text;
 use external_browser::*;

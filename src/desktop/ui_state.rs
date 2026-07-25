@@ -40,6 +40,8 @@ impl ShutdownPhase {
 pub(in crate::desktop) struct DesktopUiState {
     pub(in crate::desktop) navigation_open: bool,
     pub(in crate::desktop) identity_delete_confirming: bool,
+    pub(in crate::desktop) command_palette_open: bool,
+    pub(in crate::desktop) command_palette_query: String,
     pub(in crate::desktop) ctrl_down: bool,
     pub(in crate::desktop) shutdown_phase: ShutdownPhase,
 }
@@ -49,6 +51,8 @@ impl Default for DesktopUiState {
         Self {
             navigation_open: true,
             identity_delete_confirming: false,
+            command_palette_open: false,
+            command_palette_query: String::new(),
             ctrl_down: false,
             shutdown_phase: ShutdownPhase::Running,
         }

@@ -240,6 +240,11 @@ pub(in crate::desktop) enum WorkspacePaneMessage {
 pub(in crate::desktop) enum ShellMessage {
     SwitchSection(WorkspaceSection),
     ToggleNavigation,
+    OpenCommandPalette,
+    CloseCommandPalette,
+    CommandPaletteQueryChanged(String),
+    ExecuteFirstCommandPaletteResult,
+    ExecuteCommandPalette(CommandPaletteCommand),
     WorkspaceScrollTick,
     InternalEventsReady,
     PersistenceDeadlineReached,
@@ -254,6 +259,20 @@ pub(in crate::desktop) enum ShellMessage {
         outcome: ShutdownOutcome,
     },
     KeyboardModifiersChanged(keyboard::Modifiers),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) enum CommandPaletteCommand {
+    OpenBrowser,
+    OpenMessages,
+    OpenDirectory,
+    OpenNetworkDoctor,
+    OpenDiagnostics,
+    OpenMonitoring,
+    NewBrowserTab,
+    RequestActiveBrowserPath,
+    InspectActiveBrowserPath,
+    CopyActiveIdentityHash,
 }
 
 #[derive(Clone, Debug)]

@@ -781,6 +781,14 @@ Use existing dependencies or the standard library.
 - Named workspace presets built on current workspace persistence.
 - Consistent evidence labels and valid-action controls.
 
+Phase 5A adds the small GUI command palette without introducing another action
+or networking layer. Its fixed command inventory routes through the existing
+typed desktop messages for workspace switching, browser path actions,
+diagnostics, and identity-hash copying. Query text is bounded to 128 characters
+and 256 bytes, results are capped at eight, and the palette owns no worker,
+timer, persistence, history, or network state. Ctrl+K and the status-strip
+button open it; Escape closes it.
+
 ### TUI
 
 - Search/filter mode.

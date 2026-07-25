@@ -7,7 +7,10 @@ use crate::app::current_epoch_ms;
 use crate::app::InternalEventWake;
 use crate::workspace::WorkspaceSection;
 
-use super::input::{map_browser_field_keyboard_event, map_key_press, map_keyboard_modifier_event};
+use super::input::{
+    map_browser_field_keyboard_event, map_command_palette_key_press, map_key_press,
+    map_keyboard_modifier_event,
+};
 use super::{section_needs_runtime_interface_sample, Message, ShellMessage, DESKTOP_LIVE_TICK_MS};
 
 impl super::DesktopApp {
@@ -17,7 +20,14 @@ impl super::DesktopApp {
         }
         let browser_field_active = self.app.workspace.active_section == WorkspaceSection::Browser
             && self.app.active_browser_field_editor().is_some();
-        let keyboard_subscription = if browser_field_active {
+        let keyboard_subscription = if self.ui.command_palette_open {
+            keyboard::listen().filter_map(|event| match event {
+                keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                    map_command_palette_key_press(key, modifiers)
+                }
+                _ => None,
+            })
+        } else if browser_field_active {
             event::listen_with(map_browser_field_keyboard_event)
         } else {
             keyboard::listen().filter_map(|event| match event {
@@ -25,7 +35,7 @@ impl super::DesktopApp {
                 _ => None,
             })
         };
-        let modifier_subscription = if browser_field_active {
+        let modifier_subscription = if browser_field_active || self.ui.command_palette_open {
             Subscription::none()
         } else {
             event::listen_with(map_keyboard_modifier_event)
