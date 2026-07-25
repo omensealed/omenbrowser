@@ -218,6 +218,24 @@ pub enum PropagationNodeCompatibility {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeSelection {
+    Candidate,
+    Pinned,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeEvidence {
+    Ready,
+    UnverifiedIdentity,
+    StaleAnnounce,
+    UnknownAnnounceAge,
+    PathNotKnown,
+    PathUnknown,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PropagationNodeRecord {
     pub destination_hash: String,
@@ -225,14 +243,17 @@ pub struct PropagationNodeRecord {
     pub display_name: String,
     pub display_name_authenticated: bool,
     pub selected: bool,
+    pub selection: PropagationNodeSelection,
     pub saved: bool,
     pub trusted: bool,
     pub trust_level: TrustLevel,
     pub last_seen: f64,
+    pub announce_age_seconds: Option<u64>,
     pub freshness: PropagationNodeFreshness,
     pub path_state: PropagationNodePathState,
     pub advertised_stamp_cost: Option<u8>,
     pub compatibility: PropagationNodeCompatibility,
+    pub evidence: PropagationNodeEvidence,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -1108,6 +1129,22 @@ fn propagation_node_record(
         .unwrap_or_default();
     let selected =
         selected_hash.is_some_and(|hash| hash.eq_ignore_ascii_case(&entry.destination_hash));
+    let announce_age_seconds =
+        (entry.last_seen > 0.0 && entry.last_seen.is_finite() && now.is_finite())
+            .then(|| (now.max(entry.last_seen) - entry.last_seen).floor() as u64);
+    let evidence = if !metadata_authenticated {
+        PropagationNodeEvidence::UnverifiedIdentity
+    } else {
+        match freshness {
+            PropagationNodeFreshness::Stale => PropagationNodeEvidence::StaleAnnounce,
+            PropagationNodeFreshness::Unknown => PropagationNodeEvidence::UnknownAnnounceAge,
+            PropagationNodeFreshness::Fresh => match path_state {
+                PropagationNodePathState::Known => PropagationNodeEvidence::Ready,
+                PropagationNodePathState::NotKnown => PropagationNodeEvidence::PathNotKnown,
+                PropagationNodePathState::Unknown => PropagationNodeEvidence::PathUnknown,
+            },
+        }
+    };
 
     PropagationNodeRecord {
         destination_hash: entry.destination_hash,
@@ -1115,10 +1152,16 @@ fn propagation_node_record(
         display_name,
         display_name_authenticated: metadata_authenticated,
         selected,
+        selection: if selected {
+            PropagationNodeSelection::Pinned
+        } else {
+            PropagationNodeSelection::Candidate
+        },
         saved: entry.saved,
         trusted: entry.trusted,
         trust_level: entry.trust_level,
         last_seen: entry.last_seen,
+        announce_age_seconds,
         freshness,
         path_state,
         advertised_stamp_cost: metadata_authenticated
@@ -1129,6 +1172,7 @@ fn propagation_node_record(
         } else {
             PropagationNodeCompatibility::Unknown
         },
+        evidence,
     }
 }
 
@@ -1158,7 +1202,7 @@ fn propagation_freshness_rank(freshness: PropagationNodeFreshness) -> u8 {
 }
 
 fn propagation_node_record_bytes(node: &PropagationNodeRecord) -> usize {
-    const FIXED_BYTES: usize = 128;
+    const FIXED_BYTES: usize = 160;
     FIXED_BYTES
         .saturating_add(node.destination_hash.len())
         .saturating_add(node.identity_hash.as_ref().map_or(0, String::len))
@@ -1528,9 +1572,9 @@ mod tests {
     use super::{
         merged_entry, publish_directory_bytes, timestamp_secs, DeliveryFallbackPolicy,
         DirectoryAnnounceMetadata, DirectoryEntry, DirectoryKind, DirectoryService,
-        PreferredDelivery, PropagationNodeCompatibility, PropagationNodeFreshness,
-        PropagationNodePathState, PublishMode, PROPAGATION_NODE_INVENTORY_MAX_BYTES,
-        PROPAGATION_NODE_INVENTORY_MAX_ITEMS,
+        PreferredDelivery, PropagationNodeCompatibility, PropagationNodeEvidence,
+        PropagationNodeFreshness, PropagationNodePathState, PropagationNodeSelection, PublishMode,
+        PROPAGATION_NODE_INVENTORY_MAX_BYTES, PROPAGATION_NODE_INVENTORY_MAX_ITEMS,
     };
 
     fn isolated_directory(label: &str) -> (std::path::PathBuf, DirectoryService) {
@@ -1669,10 +1713,13 @@ mod tests {
         assert_eq!(node.display_name, "Authenticated Relay");
         assert!(node.display_name_authenticated);
         assert!(node.selected);
+        assert_eq!(node.selection, PropagationNodeSelection::Pinned);
+        assert!(node.announce_age_seconds.is_some_and(|age| age <= 1));
         assert_eq!(node.freshness, PropagationNodeFreshness::Fresh);
         assert_eq!(node.path_state, PropagationNodePathState::Known);
         assert_eq!(node.advertised_stamp_cost, Some(13));
         assert_eq!(node.compatibility, PropagationNodeCompatibility::Compatible);
+        assert_eq!(node.evidence, PropagationNodeEvidence::Ready);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1699,6 +1746,8 @@ mod tests {
         assert_eq!(node.advertised_stamp_cost, None);
         assert_eq!(node.path_state, PropagationNodePathState::Unknown);
         assert_eq!(node.compatibility, PropagationNodeCompatibility::Unknown);
+        assert_eq!(node.selection, PropagationNodeSelection::Candidate);
+        assert_eq!(node.evidence, PropagationNodeEvidence::UnverifiedIdentity);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1741,23 +1790,59 @@ mod tests {
 
         let inventory = service.propagation_node_inventory(None, &BTreeMap::new(), now);
 
+        let stale = inventory
+            .nodes
+            .iter()
+            .find(|node| node.destination_hash == "stale-relay")
+            .expect("stale relay");
+        assert_eq!(stale.freshness, PropagationNodeFreshness::Stale);
+        assert_eq!(stale.evidence, PropagationNodeEvidence::StaleAnnounce);
+        assert!(stale
+            .announce_age_seconds
+            .is_some_and(|age| age > super::PROPAGATION_NODE_FRESH_SECONDS as u64));
+        let unknown = inventory
+            .nodes
+            .iter()
+            .find(|node| node.destination_hash == "unknown-relay")
+            .expect("unknown relay");
+        assert_eq!(unknown.freshness, PropagationNodeFreshness::Unknown);
         assert_eq!(
-            inventory
-                .nodes
-                .iter()
-                .find(|node| node.destination_hash == "stale-relay")
-                .expect("stale relay")
-                .freshness,
-            PropagationNodeFreshness::Stale
+            unknown.evidence,
+            PropagationNodeEvidence::UnknownAnnounceAge
         );
+        assert_eq!(unknown.announce_age_seconds, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn propagation_inventory_distinguishes_unknown_and_negative_path_evidence() {
+        let (root, mut service) = isolated_directory("path-evidence");
+        service
+            .ingest_announce_with_identity_metadata(
+                "path-relay",
+                "Path Relay",
+                DirectoryKind::Propagation,
+                DirectoryAnnounceMetadata {
+                    identity_hash: Some("55".repeat(16)),
+                    associated_hash: None,
+                    node_associated_hash: None,
+                    lxmf_stamp_cost: None,
+                },
+            )
+            .expect("ingest relay");
+
+        let unknown = service.propagation_node_inventory(None, &BTreeMap::new(), timestamp_secs());
         assert_eq!(
-            inventory
-                .nodes
-                .iter()
-                .find(|node| node.destination_hash == "unknown-relay")
-                .expect("unknown relay")
-                .freshness,
-            PropagationNodeFreshness::Unknown
+            unknown.nodes[0].evidence,
+            PropagationNodeEvidence::PathUnknown
+        );
+
+        let negative_path =
+            BTreeMap::from([("path-relay".into(), PropagationNodePathState::NotKnown)]);
+        let not_known = service.propagation_node_inventory(None, &negative_path, timestamp_secs());
+        assert_eq!(
+            not_known.nodes[0].evidence,
+            PropagationNodeEvidence::PathNotKnown
         );
         let _ = std::fs::remove_dir_all(root);
     }

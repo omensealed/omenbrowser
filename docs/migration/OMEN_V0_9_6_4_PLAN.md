@@ -719,6 +719,23 @@ The existing signed LXMF ticket implementation remains the sole wire/runtime
 path. This unit adds no retry, worker, timer, dependency, protocol version, or
 database schema migration.
 
+Phase 4G records that an attachment automatic-download threshold is not
+applicable to the current LXMF attachment representation. Attachments are
+bounded inline fields in the signed message, not deferred Resources that can be
+admitted after metadata inspection. Existing per-file, aggregate, item, name,
+wire, and isolated-storage limits remain the correct admission boundary.
+Implementing a real threshold would require a separately negotiated
+resource-reference protocol and mixed-version design, so no inert setting is
+added in this release.
+
+Phase 4H improves the existing bounded propagation-node snapshot without
+changing selection behavior. It labels the persisted selected node as pinned,
+other entries as candidates, records announce age at snapshot time, and derives
+an explicit evidence state from authenticated identity, freshness, and path
+facts. Desktop and TUI render the same evidence. The snapshot remains
+event-driven and subject to the existing item and byte budgets; no scanner,
+timer, request, retry, or automatic failover is added.
+
 ### Propagation-node quality of life
 
 Extend the existing bounded inventory with:

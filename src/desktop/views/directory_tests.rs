@@ -1,7 +1,8 @@
 use super::*;
 use crate::directory::{
     DeliveryFallbackPolicy, DirectoryEntry, PreferredDelivery, PropagationNodeCompatibility,
-    PropagationNodeFreshness, PropagationNodePathState, PropagationNodeRecord, TrustLevel,
+    PropagationNodeEvidence, PropagationNodeFreshness, PropagationNodePathState,
+    PropagationNodeRecord, PropagationNodeSelection, TrustLevel,
 };
 
 const FIXTURE_LXMF_PEER_HASH: &str = "00112233445566778899aabbccddeeff";
@@ -217,18 +218,24 @@ fn propagation_node_state_lines_keep_unknown_and_negative_evidence_distinct() {
         display_name: FIXTURE_LXMF_PEER_HASH.into(),
         display_name_authenticated: false,
         selected: true,
+        selection: PropagationNodeSelection::Pinned,
         saved: true,
         trusted: false,
         trust_level: TrustLevel::Unknown,
         last_seen: 0.0,
+        announce_age_seconds: None,
         freshness: PropagationNodeFreshness::Unknown,
         path_state: PropagationNodePathState::NotKnown,
         advertised_stamp_cost: None,
         compatibility: PropagationNodeCompatibility::Unknown,
+        evidence: PropagationNodeEvidence::UnverifiedIdentity,
     };
     let lines = propagation_node_state_lines(&record).join("\n");
-    assert!(lines.contains("selected=true | freshness=unknown | path=not-known"));
-    assert!(lines.contains("compatibility=unknown | advertised stamp cost=unknown"));
+    assert!(lines
+        .contains("selection=pinned | freshness=unknown | announce age=unknown | path=not-known"));
+    assert!(lines.contains(
+        "compatibility=unknown | evidence=unverified identity | advertised stamp cost=unknown"
+    ));
     assert!(lines.contains("identity: unknown | display name authenticated=false"));
 }
 

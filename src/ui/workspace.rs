@@ -588,10 +588,14 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
                 })
                 .map(|node| {
                     format!(
-                        " | selected={} freshness={:?} path={:?} cost={} compatibility={:?}",
-                        node.selected,
+                        " | selection={:?} freshness={:?} age={} path={:?} evidence={:?} cost={} compatibility={:?}",
+                        node.selection,
                         node.freshness,
+                        node.announce_age_seconds
+                            .map(|age| format!("{age}s"))
+                            .unwrap_or_else(|| "unknown".into()),
                         node.path_state,
+                        node.evidence,
                         node.advertised_stamp_cost
                             .map(|cost| cost.to_string())
                             .unwrap_or_else(|| "unknown".into()),
@@ -663,8 +667,15 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
                     .eq_ignore_ascii_case(&entry.destination_hash)
             }) {
                 lines.push(Line::from(format!(
-                    "propagation selected={} freshness={:?} path={:?} compatibility={:?}",
-                    node.selected, node.freshness, node.path_state, node.compatibility
+                    "propagation selection={:?} freshness={:?} age={} path={:?} evidence={:?} compatibility={:?}",
+                    node.selection,
+                    node.freshness,
+                    node.announce_age_seconds
+                        .map(|age| format!("{age}s"))
+                        .unwrap_or_else(|| "unknown".into()),
+                    node.path_state,
+                    node.evidence,
+                    node.compatibility
                 )));
                 lines.push(Line::from(format!(
                     "identity={} name_authenticated={} stamp_cost={}",

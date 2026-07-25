@@ -299,6 +299,16 @@ only initializes the already-supported signed LXMF reply-ticket field; it does
 not invent a ticket, bypass peer policy, retry a message, or change inbound
 remembered-ticket validation.
 
+The planned per-peer attachment auto-download threshold does not map to the
+current LXMF wire model. File attachments are bounded inline fields inside the
+signed message, so their bytes have already arrived before the application can
+offer a separate download decision. The decoder enforces per-file, aggregate,
+item, name, and wire-size limits and atomically stores accepted files under the
+isolated attachment root. OMENbrowser therefore does not expose a misleading
+“automatic download” policy. A future resource-reference attachment protocol
+would need capability negotiation, mixed-version behavior, and an explicit
+pre-transfer admission boundary before such a threshold becomes meaningful.
+
 The integrated runtime broadcast is consumed by one owned worker and forwarded
 through the existing 256-item application channel. Payload-bearing OMENchat
 events and SDK history pages additionally retain the shared 32 MiB queued-byte

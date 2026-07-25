@@ -1,7 +1,8 @@
 use crate::app::DirectoryScope;
 use crate::directory::{
-    DirectoryEntry, DirectoryKind, PropagationNodeCompatibility, PropagationNodeFreshness,
-    PropagationNodePathState, PropagationNodeRecord,
+    DirectoryEntry, DirectoryKind, PropagationNodeCompatibility, PropagationNodeEvidence,
+    PropagationNodeFreshness, PropagationNodePathState, PropagationNodeRecord,
+    PropagationNodeSelection,
 };
 
 pub(in crate::desktop) fn directory_kind_title(kind: &DirectoryKind) -> &'static str {
@@ -180,22 +181,46 @@ pub(in crate::desktop) fn propagation_node_state_lines(
         .advertised_stamp_cost
         .map(|cost| cost.to_string())
         .unwrap_or_else(|| "unknown".into());
+    let announce_age = node
+        .announce_age_seconds
+        .map(|seconds| format!("{seconds}s"))
+        .unwrap_or_else(|| "unknown".into());
     vec![
         format!(
-            "selected={} | freshness={} | path={}",
-            node.selected,
+            "selection={} | freshness={} | announce age={} | path={}",
+            propagation_selection_label(node.selection),
             propagation_freshness_label(node.freshness),
+            announce_age,
             propagation_path_label(node.path_state)
         ),
         format!(
-            "compatibility={} | advertised stamp cost={stamp_cost}",
-            propagation_compatibility_label(node.compatibility)
+            "compatibility={} | evidence={} | advertised stamp cost={stamp_cost}",
+            propagation_compatibility_label(node.compatibility),
+            propagation_evidence_label(node.evidence)
         ),
         format!(
             "identity: {identity} | display name authenticated={}",
             node.display_name_authenticated
         ),
     ]
+}
+
+fn propagation_selection_label(value: PropagationNodeSelection) -> &'static str {
+    match value {
+        PropagationNodeSelection::Candidate => "candidate",
+        PropagationNodeSelection::Pinned => "pinned",
+    }
+}
+
+fn propagation_evidence_label(value: PropagationNodeEvidence) -> &'static str {
+    match value {
+        PropagationNodeEvidence::Ready => "ready",
+        PropagationNodeEvidence::UnverifiedIdentity => "unverified identity",
+        PropagationNodeEvidence::StaleAnnounce => "stale announce",
+        PropagationNodeEvidence::UnknownAnnounceAge => "unknown announce age",
+        PropagationNodeEvidence::PathNotKnown => "path not known",
+        PropagationNodeEvidence::PathUnknown => "path not checked",
+    }
 }
 
 fn propagation_freshness_label(value: PropagationNodeFreshness) -> &'static str {
