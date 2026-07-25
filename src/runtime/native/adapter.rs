@@ -219,8 +219,6 @@ pub struct NativeNetworkRuntime {
     #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_omenchat_link_coordinator: CleanOmenChatLinkCoordinator,
     #[cfg(not(all(feature = "native-rns-net", any())))]
-    clean_recent_omenchat_announces: Arc<Mutex<BTreeMap<String, CleanOmenChatAnnounce>>>,
-    #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
     #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_destination_app_data: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
@@ -272,14 +270,6 @@ impl CleanOmenChatLinkCoordinator {
             _ = cancel.cancelled() => Err(AppError::from(NativeRuntimeError::Cancelled)),
         }
     }
-}
-
-#[cfg(not(all(feature = "native-rns-net", any())))]
-#[derive(Clone, Copy, Debug)]
-struct CleanOmenChatAnnounce {
-    observed_at: tokio::time::Instant,
-    hops: u8,
-    iface: rns_transport::hash::AddressHash,
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -590,7 +580,6 @@ impl CleanReticulumLxmfWireSubmitter {
                 self.timeout,
                 propagation_cancel,
                 Some(&self.event_tx),
-                None,
             )
             .await?;
             let wire = lxmf::WireMessage::unpack(delivery.wire_bytes.as_slice()).map_err(
@@ -704,7 +693,6 @@ impl CleanReticulumLxmfWireSubmitter {
             self.timeout,
             cancel,
             Some(&self.event_tx),
-            None,
         )
         .await?;
         let link = if method == "propagated" {
@@ -1014,8 +1002,6 @@ impl NativeNetworkRuntime {
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_omenchat_link_coordinator: CleanOmenChatLinkCoordinator::default(),
             #[cfg(not(all(feature = "native-rns-net", any())))]
-            clean_recent_omenchat_announces: Arc::new(Mutex::new(BTreeMap::new())),
-            #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_destination_identities: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_destination_app_data: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1062,8 +1048,6 @@ impl NativeNetworkRuntime {
             clean_omenchat_links: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_omenchat_link_coordinator: CleanOmenChatLinkCoordinator::default(),
-            #[cfg(not(all(feature = "native-rns-net", any())))]
-            clean_recent_omenchat_announces: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_destination_identities: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -1446,8 +1430,6 @@ impl NativeNetworkRuntime {
                 clean_destination_identities: self.clean_destination_identities.clone(),
                 #[cfg(not(all(feature = "native-rns-net", any())))]
                 clean_destination_app_data: self.clean_destination_app_data.clone(),
-                #[cfg(not(all(feature = "native-rns-net", any())))]
-                clean_recent_omenchat_announces: self.clean_recent_omenchat_announces.clone(),
                 event_tx: self.event_tx.clone(),
                 shutdown: shutdown.clone(),
             },
@@ -3063,8 +3045,6 @@ struct NativeAnnounceListenerState {
     clean_destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
     #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_destination_app_data: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
-    #[cfg(not(all(feature = "native-rns-net", any())))]
-    clean_recent_omenchat_announces: Arc<Mutex<BTreeMap<String, CleanOmenChatAnnounce>>>,
     event_tx: broadcast::Sender<RuntimeBusEvent>,
     shutdown: tokio_util::sync::CancellationToken,
 }
@@ -3119,8 +3099,6 @@ fn spawn_announce_listener(
         let clean_destination_identities = state.clean_destination_identities;
         #[cfg(not(all(feature = "native-rns-net", any())))]
         let clean_destination_app_data = state.clean_destination_app_data;
-        #[cfg(not(all(feature = "native-rns-net", any())))]
-        let clean_recent_omenchat_announces = state.clean_recent_omenchat_announces;
         let event_tx = state.event_tx;
         let shutdown = state.shutdown;
         let mut receiver = transport.recv_announces().await;
@@ -3133,10 +3111,6 @@ fn spawn_announce_listener(
                 Ok(event) => {
                     let hops = event.hops;
                     let iface = hex_encode(&event.interface);
-                    #[cfg(not(all(feature = "native-rns-net", any())))]
-                    let iface_hash = rns_transport::hash::AddressHash::new_from_slice(
-                        event.interface.as_slice(),
-                    );
                     #[cfg(not(all(feature = "native-rns-net", any())))]
                     let clean_destination_identity = {
                         let destination = event.destination.lock().await;
@@ -3188,20 +3162,6 @@ fn spawn_announce_listener(
                                 CLEAN_DESTINATION_APP_DATA_MAX_ITEM_BYTES
                             )));
                         }
-                    }
-                    #[cfg(not(all(feature = "native-rns-net", any())))]
-                    if payload.kind == DirectoryKind::OmenChat {
-                        insert_bounded_destination_cache(
-                            &mut clean_recent_omenchat_announces
-                                .lock()
-                                .expect("native recent OMENchat announce lock"),
-                            payload.destination_hash.clone(),
-                            CleanOmenChatAnnounce {
-                                observed_at: tokio::time::Instant::now(),
-                                hops,
-                                iface: iface_hash,
-                            },
-                        );
                     }
                     announces
                         .lock()
@@ -7636,7 +7596,6 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 Duration::from_secs(self.config.request_timeout_secs.max(1)),
                 cancel,
                 Some(&self.event_tx),
-                None,
             )
             .await
             {
@@ -8169,7 +8128,6 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }
             let destination_hash = parse_transport_destination_hash(destination_hash)?;
             let handle = self.active_transport()?;
-            let mut omenchat_announce_rx = self.event_tx.subscribe();
             let identity = clean_wait_for_destination_identity(
                 &handle.transport,
                 &handle.storage_path,
@@ -8188,20 +8146,8 @@ impl NetworkRuntime for NativeNetworkRuntime {
             )
             .map_err(AppError::from)?;
             let pre_wait_path_status = handle.transport.path_status(&destination_hash).await;
-            let needs_fresh_announce = !pre_wait_path_status.path_found
-                || pre_wait_path_status.hops.is_none_or(|hops| hops > 1);
+            let needs_path_discovery = !clean_omenchat_path_is_usable(&pre_wait_path_status);
             let destination_hex = destination_hash.to_hex_string();
-            if needs_fresh_announce && pre_wait_path_status.path_found {
-                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat found stale/high-hop cached path before discovery destination={} hops={:?} iface={}; explicit 0.9 path expiry remains behind the Phase 4 interoperability gate",
-                    destination_hex,
-                    pre_wait_path_status.hops,
-                    pre_wait_path_status
-                        .interface
-                        .map(|hash| hash.to_hex_string())
-                        .unwrap_or_else(|| "-".into())
-                )));
-            }
             let path_dispatch = clean_request_omenchat_paths_on_attached_interfaces(
                 &handle.transport,
                 destination_hash,
@@ -8230,44 +8176,12 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     "native Reticulum 0.9 OMENchat requested fresh path before clean link"
                 );
             }
-            let recent_announce = if needs_fresh_announce {
-                self.clean_recent_omenchat_announces
-                    .lock()
-                    .expect("native recent OMENchat announce lock")
-                    .get(&destination_hex)
-                    .copied()
-                    .filter(|announce| announce.observed_at.elapsed() <= Duration::from_secs(45))
-            } else {
-                None
-            };
-            if let Some(announce) = recent_announce {
-                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat recent announce evidence destination={} hops={} iface={}",
-                    destination_hex,
-                    announce.hops,
-                    announce.iface.to_hex_string()
-                )));
-            }
-            let fresh_announce_seen = if needs_fresh_announce {
-                recent_announce.is_some()
-                    || clean_wait_for_omenchat_fresh_announce(
-                        &mut omenchat_announce_rx,
-                        &destination_hex,
-                        timeout.min(Duration::from_secs(12)),
-                        cancel.clone(),
-                        Some(&self.event_tx),
-                    )
-                    .await?
-            } else {
-                false
-            };
             let has_path = clean_wait_for_destination_path(
                 &handle.transport,
                 destination_hash,
                 timeout.min(Duration::from_secs(10)),
                 cancel.clone(),
                 Some(&self.event_tx),
-                if needs_fresh_announce { Some(1) } else { None },
             )
             .await?;
             if !has_path {
@@ -8276,43 +8190,21 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     destination_hex
                 )));
             }
-            let status_after_wait = handle.transport.path_status(&destination_hash).await;
-            if needs_fresh_announce && status_after_wait.hops.is_none_or(|hops| hops > 1) {
-                let announce_detail = self
-                    .clean_recent_omenchat_announces
-                    .lock()
-                    .expect("native recent OMENchat announce lock")
-                    .get(&destination_hex)
-                    .copied()
-                    .filter(|announce| announce.observed_at.elapsed() <= Duration::from_secs(45))
-                    .map(|announce| {
-                        format!(
-                            "recent_announce_hops={} recent_announce_iface={}",
-                            announce.hops,
-                            announce.iface.to_hex_string()
-                        )
-                    })
-                    .unwrap_or_else(|| "recent_announce=none".into());
-                let message = format!(
-                    "OMENchat clean link blocked: only high-hop/stale path is known destination={} path_found={} hops={:?} next_hop={} iface={} fresh_announce_seen={} {}; wait for a low-hop server announce or verify gateway/IFAC alignment",
+            if needs_path_discovery {
+                let status = handle.transport.path_status(&destination_hash).await;
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.9 OMENchat discovered routed path destination={} hops={:?} next_hop={} iface={}",
                     destination_hex,
-                    status_after_wait.path_found,
-                    status_after_wait.hops,
-                    status_after_wait
+                    status.hops,
+                    status
                         .next_hop
                         .map(|hash| hash.to_hex_string())
                         .unwrap_or_else(|| "-".into()),
-                    status_after_wait
+                    status
                         .interface
                         .map(|hash| hash.to_hex_string())
-                        .unwrap_or_else(|| "-".into()),
-                    fresh_announce_seen,
-                    announce_detail
-                );
-                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 {message}"
+                        .unwrap_or_else(|| "-".into())
                 )));
-                return Err(AppError::Runtime(message));
             }
             let _open_owner = self
                 .clean_omenchat_link_coordinator
@@ -9470,13 +9362,20 @@ async fn clean_wait_for_destination_app_data(
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
+fn clean_omenchat_path_is_usable(status: &rns_transport::transport::TransportPathStatus) -> bool {
+    // A routed Reticulum path is valid regardless of hop count. The transport
+    // owns PATHFINDER_M enforcement, route replacement, timeout expiry, and
+    // rediscovery after a pending link closes.
+    status.path_found
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
 async fn clean_wait_for_destination_path(
     transport: &Arc<reticulum_rs::runtime::Transport>,
     destination_hash: rns_transport::hash::AddressHash,
     timeout: Duration,
     cancel: CancellationToken,
     event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
-    max_hops: Option<u8>,
 ) -> AppResult<bool> {
     let initial_status = transport.path_status(&destination_hash).await;
     if let Some(event_tx) = event_tx {
@@ -9495,7 +9394,7 @@ async fn clean_wait_for_destination_path(
                 .unwrap_or_else(|| "-".into())
         )));
     }
-    if initial_status.path_found && max_hops.is_none_or(|hops| initial_status.hops <= Some(hops)) {
+    if clean_omenchat_path_is_usable(&initial_status) {
         return Ok(true);
     }
 
@@ -9523,12 +9422,11 @@ async fn clean_wait_for_destination_path(
                         .unwrap_or_else(|| "-".into())
                 )));
             }
-            return Ok(final_status.path_found
-                && max_hops.is_none_or(|hops| final_status.hops <= Some(hops)));
+            return Ok(clean_omenchat_path_is_usable(&final_status));
         }
         tokio::time::sleep((deadline - now).min(OMENCHAT_CLEAN_LINK_PATH_WAIT_STEP)).await;
         let status = transport.path_status(&destination_hash).await;
-        if status.path_found && max_hops.is_none_or(|hops| status.hops <= Some(hops)) {
+        if clean_omenchat_path_is_usable(&status) {
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
                     "native Reticulum 0.9 OMENchat clean path acquired destination={} hops={:?} next_hop={} iface={}",
@@ -9595,69 +9493,6 @@ async fn clean_request_omenchat_paths_on_attached_interfaces(
         )));
     }
     sent_or_queued
-}
-
-#[cfg(not(all(feature = "native-rns-net", any())))]
-async fn clean_wait_for_omenchat_fresh_announce(
-    receiver: &mut broadcast::Receiver<RuntimeBusEvent>,
-    destination_hex: &str,
-    timeout: Duration,
-    cancel: CancellationToken,
-    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
-) -> AppResult<bool> {
-    if let Some(event_tx) = event_tx {
-        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-            "native Reticulum 0.9 OMENchat waiting for fresh announce before high-hop clean link destination={} timeout_ms={}",
-            destination_hex,
-            timeout.as_millis()
-        )));
-    }
-
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if cancel.is_cancelled() {
-            return Err(AppError::from(NativeRuntimeError::Cancelled));
-        }
-
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            if let Some(event_tx) = event_tx {
-                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat fresh announce wait timed out destination={}",
-                    destination_hex
-                )));
-            }
-            return Ok(false);
-        }
-
-        let wait = (deadline - now).min(Duration::from_millis(250));
-        match tokio::time::timeout(wait, receiver.recv()).await {
-            Ok(Ok(RuntimeBusEvent::Announce(payload)))
-                if payload.kind == DirectoryKind::OmenChat
-                    && payload
-                        .destination_hash
-                        .eq_ignore_ascii_case(destination_hex) =>
-            {
-                if let Some(event_tx) = event_tx {
-                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                        "native Reticulum 0.9 OMENchat fresh announce observed destination={} display={}",
-                        destination_hex, payload.display_name
-                    )));
-                }
-                return Ok(true);
-            }
-            Ok(Ok(_)) | Err(_) => {}
-            Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
-                if let Some(event_tx) = event_tx {
-                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                        "native Reticulum 0.9 OMENchat fresh announce wait lagged destination={} skipped={}",
-                        destination_hex, skipped
-                    )));
-                }
-            }
-            Ok(Err(broadcast::error::RecvError::Closed)) => return Ok(false),
-        }
-    }
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -12154,6 +11989,37 @@ impl Default for NativeRuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    #[test]
+    fn clean_omenchat_accepts_known_routed_paths_without_app_hop_cutoff() {
+        let destination = rns_transport::hash::AddressHash::new_from_slice(&[1_u8; 16]);
+        let next_hop = rns_transport::hash::AddressHash::new_from_slice(&[2_u8; 16]);
+        let interface = rns_transport::hash::AddressHash::new_from_slice(&[3_u8; 16]);
+
+        for hops in [1, 3, 13, 127] {
+            let status = rns_transport::transport::TransportPathStatus {
+                destination,
+                path_found: true,
+                next_hop: Some(next_hop),
+                interface: Some(interface),
+                hops: Some(hops),
+            };
+            assert!(
+                clean_omenchat_path_is_usable(&status),
+                "{hops}-hop routed path should be delegated to Reticulum"
+            );
+        }
+
+        let unknown = rns_transport::transport::TransportPathStatus {
+            destination,
+            path_found: false,
+            next_hop: None,
+            interface: None,
+            hops: None,
+        };
+        assert!(!clean_omenchat_path_is_usable(&unknown));
+    }
     #[cfg(not(all(feature = "native-rns-net", any())))]
     use crate::browser::PageSource;
     use crate::config::AppPaths;

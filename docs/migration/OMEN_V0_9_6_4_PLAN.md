@@ -555,6 +555,19 @@ final outcome. Existing history bounds and terminal eviction apply. No sync,
 automatic retry, worker, timer, subscription, queue, persistence, protocol, or
 dependency is introduced.
 
+Phase 3O retires the 0.6-era OMENchat one-hop connection cutoff. A known
+Reticulum route is now accepted at any hop count allowed by the locked 0.9.6
+transport, so valid client -> public gateway -> private gateway -> omenchatd
+topologies are not mislabeled as stale. Unknown paths still trigger bounded
+discovery, link establishment retains its timeout and cancellation owner, and
+failed pending links retain close/reset/rediscovery handling. Reticulum 0.9.6
+owns its 128-hop ceiling, path replacement, timeout expiry, and rediscovery
+after an unactivated link closes. Focused regression coverage admits known
+1-, 3-, 13-, and 127-hop paths while rejecting an unknown path. The removed
+recent-announce cache and wait were used only to enforce the obsolete cutoff,
+so this unit reduces retained state and waiting rather than adding a worker,
+timer, queue, cache, protocol, storage, configuration, or dependency.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:

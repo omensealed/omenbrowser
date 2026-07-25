@@ -612,6 +612,25 @@ Follow-up high-hop route guard:
   an upstream transport fix or a sidecar/runtime boundary with complete route
   management.
 
+Reticulum 0.9.6 follow-up:
+
+- The one-hop OMENchat application cutoff has been removed. It was a defensive
+  0.6-era workaround for one observed stale 12-13 hop path, not a Reticulum or
+  OMENchat protocol limit, and it incorrectly rejected valid routed topologies
+  such as client -> public gateway -> private gateway -> omenchatd.
+- OMENbrowser now accepts any path that the locked Reticulum transport reports
+  as known. Reticulum retains its own `PATHFINDER_M` ceiling and owns path
+  selection, timeout expiry, and rediscovery.
+- A pending link that closes without activating is expired and rediscovered by
+  Reticulum 0.9.6. OMENbrowser retains its bounded link timeout, pending-link
+  close/reset, and rediscovery diagnostics instead of imposing a second hop
+  policy.
+- A direct connection from omenchatd to every public gateway is therefore not
+  required. The intermediate private gateway must actually run transport,
+  exchange announces/path requests with the public gateway, and permit the
+  relevant traffic; the client and server still need matching IFAC policy on
+  the interfaces where IFAC is used.
+
 Follow-up OMENchat service-route behavior:
 
 - `omenchatd` now registers announce app-data with the clean Reticulum

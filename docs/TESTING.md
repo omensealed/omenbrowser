@@ -3977,3 +3977,21 @@ The same scheduled workflow also runs the current-product continuous reconnect
 case and the current-product two-client upload/Resource case, retaining only
 their redacted reports. Physical power-loss durability remains separate
 evidence.
+
+## OMENchat routed-path admission
+
+The native adapter regression
+`clean_omenchat_accepts_known_routed_paths_without_app_hop_cutoff` verifies
+that OMENbrowser delegates hop limits to Reticulum 0.9.6. Known 1-, 3-, 13-,
+and 127-hop paths are usable; an unknown path still requires discovery. Run it
+with:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  clean_omenchat_accepts_known_routed_paths_without_app_hop_cutoff
+```
+
+This is a deterministic admission-policy test. It does not prove the
+maintainer's public-gateway/private-gateway deployment, which still requires a
+live announce, path, link, and OMENchat exchange smoke test from an isolated
+client root.
