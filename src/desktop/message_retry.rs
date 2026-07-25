@@ -1,5 +1,23 @@
 use crate::messaging::MessageSummary;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DesktopMessageValidActions {
+    pub(crate) retry: Option<DesktopMessageRetryLabels>,
+    pub(crate) cancel_delivery: bool,
+    pub(crate) propagation_sync: Option<&'static str>,
+}
+
+pub(crate) fn desktop_message_valid_actions(
+    message: &MessageSummary,
+) -> DesktopMessageValidActions {
+    DesktopMessageValidActions {
+        retry: desktop_message_is_retry_candidate(message)
+            .then(|| desktop_message_retry_labels(message)),
+        cancel_delivery: desktop_message_is_cancel_candidate(message),
+        propagation_sync: desktop_message_propagation_sync_label(message),
+    }
+}
+
 pub(crate) fn desktop_message_is_retry_candidate(message: &MessageSummary) -> bool {
     if message.incoming || message.delivered {
         return false;
@@ -103,6 +121,7 @@ pub(crate) fn desktop_message_propagation_sync_label(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DesktopMessageRetryLabels {
     pub(crate) prepare: &'static str,
     pub(crate) send: &'static str,
@@ -342,5 +361,42 @@ mod tests {
 
         message.failed = true;
         assert_eq!(desktop_message_propagation_sync_label(&message), None);
+    }
+
+    #[test]
+    fn valid_actions_share_one_terminal_and_evidence_aware_decision() {
+        let mut message = message_with_fields(BTreeMap::from([(
+            "native_lxmf_sdk_state".into(),
+            "queued".into(),
+        )]));
+        let actions = desktop_message_valid_actions(&message);
+        assert_eq!(actions.retry, None);
+        assert!(actions.cancel_delivery);
+        assert_eq!(actions.propagation_sync, None);
+
+        message.fields.remove("native_lxmf_sdk_state");
+        message
+            .fields
+            .insert("native_lxmf_state".into(), "submitted_unconfirmed".into());
+        let actions = desktop_message_valid_actions(&message);
+        assert_eq!(
+            actions.retry,
+            Some(DesktopMessageRetryLabels {
+                prepare: "Retry unconfirmed",
+                send: "Send retry",
+            })
+        );
+        assert!(!actions.cancel_delivery);
+
+        message.delivered = true;
+        let actions = desktop_message_valid_actions(&message);
+        assert_eq!(
+            actions,
+            DesktopMessageValidActions {
+                retry: None,
+                cancel_delivery: false,
+                propagation_sync: None,
+            }
+        );
     }
 }

@@ -858,6 +858,15 @@ existing restore controls or the preset buttons themselves. Presets add no new
 settings schema, layout engine, worker, timer, queue, dependency, or networking
 behavior.
 
+Phase 5J removes the expanded LXMF message card's raw delivered/failed Boolean
+display and reuses the same evidence-aware summary shown on message bubbles.
+Bubble and detail actions now come from one valid-action decision, so retry,
+cancel, and propagation-sync controls cannot drift between the two views.
+Terminal delivery, useful transport evidence, SDK cancellation support, and
+sync-first states retain their existing conservative gates. This is a
+presentation/routing consolidation only: it adds no state, automatic retry,
+worker, timer, queue, dependency, protocol, or storage change.
+
 ### TUI
 
 - Search/filter mode.
@@ -1030,7 +1039,7 @@ After the candidate is stable:
 - [ ] Legacy/mixed peers retain cautious no-automatic-retry behavior.
 - [ ] Shared bounded Operations/Transfers model drives GUI and TUI.
 - [ ] Delivery/propagation policies have conservative migrated defaults.
-- [ ] Command palette, actionable errors, workspace presets, and selected TUI
+- [x] Command palette, actionable errors, workspace presets, and selected TUI
       QoL pass focus/input/resource tests.
 - [ ] Replies/mentions, reactions, search, invitations, corrections,
       tombstones, pins, moderation history, retention, announcement rooms,

@@ -111,8 +111,7 @@ use layout::*;
 use message::*;
 use message_compact::lxmf_message_compact_status;
 pub(in crate::desktop) use message_retry::{
-    desktop_message_is_cancel_candidate, desktop_message_is_retry_candidate,
-    desktop_message_propagation_sync_label, desktop_message_retry_labels,
+    desktop_message_valid_actions, DesktopMessageRetryLabels,
 };
 use message_stamp::lxmf_message_compact_stamp_status;
 use message_status::lxmf_message_status_lines;
