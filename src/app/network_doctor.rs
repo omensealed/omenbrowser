@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::{compact_hash, current_epoch_ms, hex_lower};
+use crate::operations::presentation::OperationPresentationFilter;
 use crate::runtime::{
     AnnouncePayload, LxmfDeliveryEvidence, OmenChatLinkClosed, OmenChatLinkData,
     OmenChatResourceData, OutboundStatus, PathEvent, RuntimeFacadeEvent,
@@ -8,6 +9,8 @@ use crate::runtime::{
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NetworkDoctorPanelState {
+    pub operations_filter: OperationPresentationFilter,
+    pub operations_search: String,
     pub recent_paths: Vec<NetworkDoctorPathRecentRow>,
     pub recent_links: Vec<NetworkDoctorLinkRecentRow>,
     pub recent_resources: Vec<NetworkDoctorResourceRecentRow>,

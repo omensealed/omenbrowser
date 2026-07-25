@@ -5,8 +5,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::input::InputTarget;
 use crate::operations::presentation::{
-    present_operations, OperationPresentationFilter, OperationPresentationQuery,
+    filter_label, present_operations, OperationPresentationFilter, OperationPresentationQuery,
 };
 use crate::operations::{EvidenceAuthority, OperationHistory};
 
@@ -17,6 +18,7 @@ struct TuiOperationsModel {
     summary: String,
     rows: Vec<TuiOperationRow>,
     empty_message: Option<&'static str>,
+    query_rejected: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -26,13 +28,20 @@ struct TuiOperationRow {
     needs_attention: bool,
 }
 
-fn tui_operations_model(history: &OperationHistory) -> TuiOperationsModel {
-    let query = OperationPresentationQuery::new(
-        OperationPresentationFilter::All,
-        None,
-        TUI_OPERATIONS_MAX_ROWS,
-    )
-    .expect("the fixed TUI Operations query must remain within presentation bounds");
+fn tui_operations_model(
+    history: &OperationHistory,
+    filter: OperationPresentationFilter,
+    search: Option<&str>,
+) -> TuiOperationsModel {
+    let (query, query_rejected) =
+        match OperationPresentationQuery::new(filter, search, TUI_OPERATIONS_MAX_ROWS) {
+            Ok(query) => (query, false),
+            Err(_) => (
+                OperationPresentationQuery::new(filter, None, TUI_OPERATIONS_MAX_ROWS)
+                    .expect("the fixed TUI Operations row limit must remain valid"),
+                true,
+            ),
+        };
     let presentation = present_operations(history, &query);
     let metrics = history.metrics();
     let summary = if presentation.omitted == 0 {
@@ -79,12 +88,42 @@ fn tui_operations_model(history: &OperationHistory) -> TuiOperationsModel {
             .is_empty()
             .then_some("No retained operations or transfers."),
         rows,
+        query_rejected,
     }
 }
 
 pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
-    let model = tui_operations_model(&app.operation_history);
+    let search = app
+        .input
+        .active
+        .as_ref()
+        .filter(|active| active.target == InputTarget::OperationsSearch)
+        .map(|active| active.buffer.as_str())
+        .unwrap_or(&app.network_doctor_state.operations_search);
+    let model = tui_operations_model(
+        &app.operation_history,
+        app.network_doctor_state.operations_filter,
+        Some(search),
+    );
+    let displayed_search = if model.query_rejected {
+        "(invalid query)"
+    } else if search.is_empty() {
+        "(none)"
+    } else {
+        search
+    };
     let mut lines = vec![
+        Line::from(format!(
+            "filter={} | search={}{}",
+            filter_label(app.network_doctor_state.operations_filter),
+            displayed_search,
+            if model.query_rejected {
+                " | invalid query ignored"
+            } else {
+                ""
+            }
+        )),
+        Line::from("/ search | f filter | c clear search | Esc cancel edit"),
         Line::styled(model.summary, Style::default().fg(Color::Gray)),
         Line::from(""),
     ];
@@ -179,7 +218,11 @@ mod tests {
 
     #[test]
     fn empty_tui_model_is_explicit() {
-        let model = tui_operations_model(&OperationHistory::default());
+        let model = tui_operations_model(
+            &OperationHistory::default(),
+            OperationPresentationFilter::All,
+            None,
+        );
 
         assert_eq!(model.summary, "0 retained operation(s) | 0 retained bytes");
         assert_eq!(
@@ -202,7 +245,7 @@ mod tests {
             ))
             .expect("fixture");
 
-        let model = tui_operations_model(&history);
+        let model = tui_operations_model(&history, OperationPresentationFilter::All, None);
         assert!(model.rows[0]
             .headline
             .contains("LXMF message | peer-bravo | transport accepted | authoritative"));
@@ -237,7 +280,7 @@ mod tests {
                 .expect("path fixture");
         }
 
-        let model = tui_operations_model(&history);
+        let model = tui_operations_model(&history, OperationPresentationFilter::All, None);
         assert_eq!(model.rows.len(), TUI_OPERATIONS_MAX_ROWS);
         assert!(model.summary.contains("8 shown / 9 retained operation(s)"));
         assert!(model.summary.contains("1 omitted"));
@@ -276,7 +319,7 @@ mod tests {
             .expect("authoritative fixture");
         history.upsert(uncertain).expect("uncertain fixture");
 
-        let model = tui_operations_model(&history);
+        let model = tui_operations_model(&history, OperationPresentationFilter::All, None);
         assert!(model
             .rows
             .iter()
@@ -337,5 +380,49 @@ mod tests {
         drop(terminal);
         drop(app);
         std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[test]
+    fn tui_model_reuses_shared_search_and_attention_filters() {
+        let mut history = OperationHistory::default();
+        history
+            .upsert(record(
+                OperationId::numeric(OperationDomain::PathDiscovery, 1),
+                "ordinary-path",
+                OperationState::Active,
+                EvidenceAuthority::Authoritative,
+                10,
+            ))
+            .expect("ordinary");
+        history
+            .upsert(record(
+                OperationId::numeric(OperationDomain::OmenChatMutation, 2),
+                "attention-room",
+                OperationState::Reconciling,
+                EvidenceAuthority::Uncertain,
+                20,
+            ))
+            .expect("attention");
+
+        let attention =
+            tui_operations_model(&history, OperationPresentationFilter::NeedsAttention, None);
+        assert_eq!(attention.rows.len(), 1);
+        assert!(attention.rows[0].headline.contains("attention-room"));
+
+        let searched =
+            tui_operations_model(&history, OperationPresentationFilter::All, Some("ordinary"));
+        assert_eq!(searched.rows.len(), 1);
+        assert!(searched.rows[0].headline.contains("ordinary-path"));
+
+        let invalid = "x"
+            .repeat(crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES + 1);
+        let fallback = tui_operations_model(
+            &history,
+            OperationPresentationFilter::NeedsAttention,
+            Some(&invalid),
+        );
+        assert!(fallback.query_rejected);
+        assert_eq!(fallback.rows.len(), 1);
+        assert!(fallback.rows[0].headline.contains("attention-room"));
     }
 }

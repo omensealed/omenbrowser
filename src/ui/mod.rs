@@ -497,6 +497,15 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         {
             app.edit_address_char(ch);
         }
+        (_, KeyCode::Char(ch))
+            if key.modifiers.is_empty()
+                && matches!(
+                    app.input.active.as_ref().map(|active| &active.target),
+                    Some(crate::input::InputTarget::OperationsSearch)
+                ) =>
+        {
+            app.edit_operations_search_char(ch);
+        }
         (_, KeyCode::Char(ch)) if key.modifiers.is_empty() && app.input.active.is_some() => {
             app.edit_address_char(ch);
         }
@@ -614,6 +623,21 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
             if app.workspace.active_section == workspace::WorkspaceSection::Logs =>
         {
             app.cycle_log_source_filter();
+        }
+        (_, KeyCode::Char('/'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.focus_operations_search();
+        }
+        (_, KeyCode::Char('f'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.cycle_operations_filter();
+        }
+        (_, KeyCode::Char('c'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.clear_operations_search();
         }
         (_, KeyCode::Char('P'))
             if app.workspace.active_section == workspace::WorkspaceSection::Diagnostics =>
@@ -1239,6 +1263,75 @@ mod tests {
 
         assert!(app.should_quit());
         assert_eq!(app.paths.root, root);
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[tokio::test]
+    async fn network_doctor_search_and_filter_keys_are_bounded_and_ephemeral() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-operation-search-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        app.switch_section(workspace::WorkspaceSection::NetworkDoctor);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(matches!(
+            app.input.active.as_ref().map(|active| &active.target),
+            Some(crate::input::InputTarget::OperationsSearch)
+        ));
+        for character in "attention room".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            )
+            .await;
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert_eq!(app.network_doctor_state.operations_search, "attention room");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+        )
+        .await;
+        assert_eq!(
+            app.network_doctor_state.operations_filter,
+            crate::operations::presentation::OperationPresentationFilter::Active
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(app.network_doctor_state.operations_search.is_empty());
+
+        app.focus_operations_search();
+        for _ in 0..crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES {
+            assert!(app.edit_operations_search_char('x'));
+        }
+        assert!(!app.edit_operations_search_char('y'));
+        assert_eq!(
+            app.input
+                .active
+                .as_ref()
+                .expect("search input")
+                .buffer
+                .as_str()
+                .len(),
+            crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES
+        );
+
         drop(app);
         std::fs::remove_dir_all(root).expect("remove isolated TUI root");
     }

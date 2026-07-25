@@ -10895,6 +10895,74 @@ impl App {
         self.status.task = "editing structured log startup entries".into();
     }
 
+    pub fn focus_operations_search(&mut self) {
+        self.workspace.active_section = WorkspaceSection::NetworkDoctor;
+        self.workspace.focus = FocusArea::Command;
+        self.input.begin(
+            InputTarget::OperationsSearch,
+            self.network_doctor_state.operations_search.clone(),
+        );
+        self.status.task = "editing Operations search".into();
+    }
+
+    pub fn edit_operations_search_char(&mut self, character: char) -> bool {
+        let Some(active) = self.input.active.as_ref() else {
+            return false;
+        };
+        if active.target != InputTarget::OperationsSearch {
+            return false;
+        }
+        if character.is_control()
+            || active
+                .buffer
+                .as_str()
+                .len()
+                .saturating_add(character.len_utf8())
+                > crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES
+        {
+            self.status.task = format!(
+                "Operations search is limited to {} bytes",
+                crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES
+            );
+            return false;
+        }
+        self.input.insert_char(character)
+    }
+
+    pub fn cycle_operations_filter(&mut self) {
+        use crate::operations::presentation::OperationPresentationFilter;
+
+        self.network_doctor_state.operations_filter = match self
+            .network_doctor_state
+            .operations_filter
+        {
+            OperationPresentationFilter::All => OperationPresentationFilter::Active,
+            OperationPresentationFilter::Active => OperationPresentationFilter::NeedsAttention,
+            OperationPresentationFilter::NeedsAttention => OperationPresentationFilter::Completed,
+            OperationPresentationFilter::Completed | OperationPresentationFilter::Domain(_) => {
+                OperationPresentationFilter::All
+            }
+        };
+        self.status.task = format!(
+            "Operations filter: {}",
+            crate::operations::presentation::filter_label(
+                self.network_doctor_state.operations_filter
+            )
+        );
+    }
+
+    pub fn clear_operations_search(&mut self) {
+        self.network_doctor_state.operations_search.clear();
+        if matches!(
+            self.input.active.as_ref().map(|active| &active.target),
+            Some(InputTarget::OperationsSearch)
+        ) {
+            self.input.cancel();
+            self.workspace.focus = FocusArea::Workspace;
+        }
+        self.status.task = "Operations search cleared".into();
+    }
+
     pub fn cancel_active_input(&mut self) -> bool {
         let Some((target, original)) = self.input.cancel() else {
             return false;
@@ -11000,6 +11068,10 @@ impl App {
             InputTarget::DiagnosticsKnownDestinationsPath => {
                 self.workspace.focus = FocusArea::Workspace;
                 self.submit_known_destinations_preload_path(text);
+            }
+            InputTarget::OperationsSearch => {
+                self.workspace.focus = FocusArea::Workspace;
+                self.submit_operations_search(text);
             }
             InputTarget::SettingsBrowserFormMaxAgeSecs => {
                 self.workspace.focus = FocusArea::Workspace;
@@ -19830,11 +19902,39 @@ impl App {
             | InputTarget::SettingsIdentityPath
             | InputTarget::SettingsReticulumConfigPath
             | InputTarget::DiagnosticsKnownDestinationsPath
+            | InputTarget::OperationsSearch
             | InputTarget::SettingsBrowserFormMaxAgeSecs
             | InputTarget::SettingsLogMaxBytes
             | InputTarget::SettingsLogRetainFiles
             | InputTarget::SettingsLogLoadRecentEntries => {}
         }
+    }
+
+    fn submit_operations_search(&mut self, text: String) -> bool {
+        use crate::operations::presentation::{
+            OperationPresentationQuery, OPERATION_PRESENTATION_DEFAULT_ROWS,
+        };
+
+        if OperationPresentationQuery::new(
+            self.network_doctor_state.operations_filter,
+            Some(&text),
+            OPERATION_PRESENTATION_DEFAULT_ROWS,
+        )
+        .is_err()
+        {
+            self.status.task = "Operations search rejected: maximum 128 bytes, no controls".into();
+            return false;
+        }
+        self.network_doctor_state.operations_search = text.trim().to_string();
+        self.status.task = if self.network_doctor_state.operations_search.is_empty() {
+            "Operations search cleared".into()
+        } else {
+            format!(
+                "Operations search: {}",
+                self.network_doctor_state.operations_search
+            )
+        };
+        true
     }
 
     fn merge_message_into_conversation(&mut self, message: MessageSummary) {

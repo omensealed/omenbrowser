@@ -798,6 +798,14 @@ fabricated where no typed operation-specific route exists. This reuses the
 bounded Operations history and adds no error history, parser, worker, timer, or
 network state.
 
+Phase 5C adds bounded TUI Operations search and filtering on the existing
+Network Doctor view. It reuses `OperationPresentationQuery`: `/` edits an
+ephemeral query capped by the shared 128-byte limit, `f` cycles all, active,
+needs-attention, and completed, and `c` clears the query. Rendering uses the
+active edit buffer without retaining a second history or index. Invalid state
+falls back visibly to the selected filter without panicking. No persistence,
+worker, timer, or networking behavior is added.
+
 ### TUI
 
 - Search/filter mode.
