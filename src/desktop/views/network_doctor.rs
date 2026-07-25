@@ -48,6 +48,7 @@ pub(in crate::desktop) fn network_doctor_view(desktop: &DesktopApp) -> Element<'
     let active_resource_rows =
         network_doctor_active_resource_rows(&desktop.app.network_doctor_state.active_resources);
     let now_epoch_ms = current_epoch_ms();
+    let operations_card = super::operations::operations_panel(desktop);
 
     let health_card = section_card(
         "Health Summary",
@@ -306,6 +307,7 @@ pub(in crate::desktop) fn network_doctor_view(desktop: &DesktopApp) -> Element<'
             text("Network Doctor").size(ui_size(28)),
             wrapped_panel_text("Passive runtime dashboard for Reticulum, LXMF, OMENchat, and NomadNet state. Opening this view does not start probes or touch live user Reticulum/NomadNet/LXMF config directories."),
             health_card,
+            operations_card,
             row![identity_card, runtime_card].spacing(8).wrap(),
             interface_card,
             row![path_card, resource_card].spacing(8).wrap(),

@@ -1,8 +1,9 @@
 # Operations and Transfers model
 
 `src/operations.rs` is the project-owned vocabulary and bounded in-memory
-history intended for both the desktop and terminal frontends. This first Phase
-3 unit does not yet connect production events or add a view.
+history intended for both the desktop and terminal frontends. OMENchat
+restart-recovery is the first production adapter, and Network Doctor now
+contains the first compact read-only desktop surface.
 
 The model deliberately distinguishes:
 
@@ -79,8 +80,8 @@ This avoids stale permission or connection claims in the shared snapshot.
 
 Owner synchronization happens only at recovery and persisted transition
 boundaries. There is no polling, redraw-time mutation, worker, timer,
-subscription, or second persistence layer. GUI/TUI Operations surfaces and
-additional runtime-domain adapters remain follow-up work.
+subscription, or second persistence layer. A fuller desktop workspace, the TUI
+surface, and additional runtime-domain adapters remain follow-up work.
 
 ## Shared presentation rows
 
@@ -104,5 +105,23 @@ typed rather than converted to guessed percentages or clickable strings. The
 projection clones at most the selected bounded rows and creates no retained
 cache, worker, timer, subscription, or redraw trigger.
 
-No GUI or TUI section is added by this unit. Those surfaces must consume these
-rows and labels instead of defining frontend-specific delivery vocabulary.
+## Desktop Network Doctor panel
+
+Network Doctor contains a passive `Operations & Transfers` card backed
+exclusively by the shared presentation projection. It requests at most eight
+attention-first rows, reports the retained and omitted counts, and shows the
+history's retained-byte total. Empty history is explicit.
+
+Each row uses shared domain, state, and authority labels plus the latest bounded
+evidence summary. Opaque operation IDs remain selection-only and are not
+rendered. Byte progress is shown only when the projection carries a typed total
+and the evidence authority is `Authoritative`; the panel never derives or
+animates a percentage. Its reminder explicitly states that transport acceptance
+and receipt evidence are not peer delivery.
+
+The card adds no controls, routing state, workspace preference, cache, worker,
+timer, subscription, persistence, protocol field, or dependency. It is placed
+inside the existing passive Network Doctor surface so this small slice does not
+create an empty TUI workspace or change existing saved-section compatibility.
+The eventual interactive desktop/TUI views must continue to consume the same
+projection rather than define frontend-specific delivery vocabulary.

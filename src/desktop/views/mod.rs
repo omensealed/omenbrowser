@@ -12,6 +12,7 @@ pub(super) mod network_doctor;
 mod network_doctor_model;
 #[cfg(feature = "chat-client")]
 pub(super) mod omenchat;
+mod operations;
 pub(super) mod plugins;
 pub(super) mod settings;
 pub(super) mod shell;

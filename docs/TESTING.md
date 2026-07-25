@@ -2976,7 +2976,8 @@ cargo test --locked --no-default-features --features desktop-product \
   operations::tests --lib
 ```
 
-`App` now owns the bounded history, but GUI/TUI Operations views and general
+`App` owns the bounded history and Network Doctor provides a compact read-only
+desktop consumer. A dedicated desktop workspace, the TUI surface, and general
 runtime event adapters do not exist yet. The owner creates no worker, timer,
 subscription, persistence file, network peer, or user-state access.
 
@@ -3021,8 +3022,22 @@ cargo test --locked --no-default-features --features desktop-product \
 
 This is a pure read-only projection over in-memory bounded history. It does not
 render Iced or Ratatui widgets and does not touch identities, Reticulum,
-OMENchat peers, storage, or network state. Desktop and TUI surface tests remain
-a later gate once those views are added.
+OMENchat peers, storage, or network state.
+
+The first desktop consumer is the passive Network Doctor card. Its model tests
+cover explicit empty state, the fixed eight-row limit and omitted count,
+attention-first ordering, shared transport/authority terminology, opaque-ID
+omission, and authoritative-only byte progress:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::views::operations::tests --lib
+```
+
+These fixtures are entirely in memory and exercise no Iced action, worker,
+timer, subscription, persistent root, identity, Reticulum peer, or OMENchat
+server. The TUI surface and interactive filter/action controls remain later
+gates.
 
 ## OMENchat negotiated durable room and user mutations
 

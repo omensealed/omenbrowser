@@ -423,6 +423,15 @@ delivery distinct. No GUI/TUI section, cache, retained clone, worker, timer,
 subscription, persistence, protocol, or dependency is introduced. The two
 frontends must consume this projection in later surface units.
 
+Phase 3E adds the first minimal desktop consumer as a passive
+`Operations & Transfers` card in Network Doctor. It requests at most eight
+shared rows, reports retained/omitted counts and retained bytes, renders opaque
+IDs nowhere, and displays typed progress only with authoritative evidence. The
+card has no controls and adds no workspace route, saved setting, cache, worker,
+timer, subscription, protocol, storage, or dependency. Keeping it inside the
+existing Network Doctor avoids a desktop-only section while the corresponding
+TUI surface and broader event adapters are still pending.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:
