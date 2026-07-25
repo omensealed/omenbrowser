@@ -897,6 +897,16 @@ negotiation. Mixed-version peers must continue using the existing protocol.
 - Mention highlighting/count and mute-except-mentions.
 - Reject missing, cross-room, oversized, or pruned references safely.
 
+Unit 6A begins with
+`docs/design/OMENCHAT_REPLIES_MENTIONS_CHECKPOINT.md`. Current code confirms
+that an additive `reply-mentions-v1` capability can preserve protocol version
+1 by using a tagged rich `RoomMessage` body and trailing `RoomEvent` fields.
+The checkpoint defines exact item/byte bounds, durable canonical hashing,
+same-room reference and numeric-mention validation, server schema-v4 and
+client-column migrations, guarded rollback, mixed-version behavior, crash
+boundaries, and the staged activation order. No production capability, wire,
+schema, setting, or UI behavior is activated by the checkpoint itself.
+
 ### Unit 6B — reactions
 
 - Append-only add/remove events keyed by event ID, actor, and bounded reaction.
