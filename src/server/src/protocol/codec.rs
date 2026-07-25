@@ -317,7 +317,8 @@ mod tests {
     use crate::protocol::batch::{resource_offer_body, ResourceOffer};
     use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
-    use omenchat_protocol::fixtures::v0_6_0_1;
+    use omenchat_protocol::fixtures::{reply_mentions_v1, v0_6_0_1};
+    use omenchat_protocol::{ReplyReference, RichMessageBody};
 
     #[test]
     fn v0_6_0_1_frame_fixtures_remain_bidirectionally_exact() {
@@ -387,6 +388,34 @@ mod tests {
         let decoded = decode_frame(&encoded).expect("decode frame");
 
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn reply_mentions_v1_fixture_is_bidirectionally_exact_but_inert() {
+        let frame = Frame::new(
+            ChatOp::RoomMessage,
+            7,
+            Some(7),
+            RichMessageBody {
+                body: "hello".into(),
+                reply_to: Some(ReplyReference {
+                    room_id: 7,
+                    event_id: 42,
+                }),
+                mentioned_user_ids: vec![2, 9],
+            }
+            .into_frame_body()
+            .expect("bounded rich message"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode rich message"),
+            reply_mentions_v1::ROOM_MESSAGE
+        );
+        assert_eq!(
+            decode_frame(reply_mentions_v1::ROOM_MESSAGE).expect("decode rich message"),
+            frame
+        );
     }
 
     #[test]

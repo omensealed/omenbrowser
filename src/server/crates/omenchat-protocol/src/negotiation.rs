@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use crate::{ClientInstanceId, FrameBody, FrameValue, DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME};
+use crate::{
+    ClientInstanceId, FrameBody, FrameValue, DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
+    REPLY_MENTIONS_CAPABILITY,
+};
 
 pub const SESSION_CAPABILITY_MAX_ITEMS: usize = 64;
 pub const SESSION_CAPABILITY_MAX_BYTES: usize = 128;
@@ -193,6 +196,9 @@ fn validate_capability_list(capabilities: &[String]) -> Result<(), SessionNegoti
             return Err(SessionNegotiationError::DuplicateCapability);
         }
     }
+    if unique.contains(REPLY_MENTIONS_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
+        return Err(SessionNegotiationError::MissingCapabilityDependency);
+    }
     Ok(())
 }
 
@@ -230,6 +236,8 @@ pub enum SessionNegotiationError {
     CapabilityName,
     #[error("session capability names must be unique")]
     DuplicateCapability,
+    #[error("{REPLY_MENTIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
+    MissingCapabilityDependency,
     #[error(transparent)]
     Durable(#[from] crate::DurableMutationError),
 }
@@ -360,5 +368,26 @@ mod tests {
             with_session_accept_negotiation(current_session_accept(), &invalid),
             Err(SessionNegotiationError::CapabilityName)
         );
+    }
+
+    #[test]
+    fn reply_mentions_capability_requires_durable_mutations() {
+        let missing_base = SessionAcceptNegotiation {
+            accepted_capabilities: vec![REPLY_MENTIONS_CAPABILITY.into()],
+        };
+        assert_eq!(
+            with_session_accept_negotiation(current_session_accept(), &missing_base),
+            Err(SessionNegotiationError::MissingCapabilityDependency)
+        );
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                REPLY_MENTIONS_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("dependent capability set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
     }
 }

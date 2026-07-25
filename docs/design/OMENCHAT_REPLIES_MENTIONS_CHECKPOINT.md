@@ -308,3 +308,25 @@ change. After review, implement as separate rollback units:
 
 Do not advertise `reply-mentions-v1` until all six units pass. Do not combine
 schema activation and user-facing controls into one patch.
+
+## Implementation progress
+
+Unit 1 is implemented as an inert shared-contract foundation:
+
+- `omenchat-protocol` owns the capability/tag constants, typed reply reference,
+  typed rich request, typed event metadata, and content-free validation errors.
+- Requests require the exact four-field shape. Events accept only the legacy
+  six-field or rich eight-field message shape.
+- Bodies are nonempty and capped at 512 KiB. Reply room/event identifiers are
+  nonzero. Mention identifiers are nonzero, strictly increasing, unique, and
+  capped at 16.
+- Negotiation validation rejects `reply-mentions-v1` unless
+  `durable-mutations-v1` is present in the same capability set.
+- The client and standalone server codecs share one exact locked MessagePack
+  vector. Existing v0.6 fixture tests remain unchanged.
+- Canonical durable-request tests prove that changing a reply or mention set
+  changes the request hash.
+
+The live client does not request the capability and omenchatd does not accept
+or advertise it. No runtime branch, database column, configuration field, or
+UI control was added. Unit 2 remains the next rollback boundary.

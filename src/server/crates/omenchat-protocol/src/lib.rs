@@ -5,9 +5,11 @@
 
 mod durable;
 mod negotiation;
+mod rich_message;
 
 pub use durable::*;
 pub use negotiation::*;
+pub use rich_message::*;
 
 pub type ServerId = String;
 pub type RoomId = u32;
@@ -222,6 +224,11 @@ pub enum ProtocolError {
 }
 
 pub mod fixtures {
+    pub mod reply_mentions_v1 {
+        pub const ROOM_MESSAGE: &[u8] =
+            b"\x96\x01\x14\x00\x07\x07\x94\xa5hello\xb1reply-mentions-v1\x92\x07\x2a\x92\x02\x09";
+    }
+
     pub mod v0_6_0_1 {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
