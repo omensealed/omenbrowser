@@ -125,6 +125,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
         )),
         Line::from("/ search | f filter | c clear search | Esc cancel edit"),
         Line::styled(model.summary, Style::default().fg(Color::Gray)),
+        internal_event_queue_line(app),
         Line::from(""),
     ];
     if let Some(empty_message) = model.empty_message {
@@ -180,6 +181,29 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
     if app.network_doctor_state.operation_select_mode {
         render_operation_select_mode(frame, area, app);
     }
+}
+
+fn internal_event_queue_line(app: &App) -> Line<'static> {
+    let metrics = app.internal_event_payload_metrics();
+    let style = if metrics.rejected_events > 0 {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    Line::styled(
+        format!(
+            "app event queue: items={}/{} | payload_items={} bytes={}/{} | payload_rejected={}",
+            metrics.channel_queued_items,
+            metrics.channel_max_items,
+            metrics.queued_items,
+            metrics.queued_bytes,
+            metrics.max_bytes,
+            metrics.rejected_events
+        ),
+        style,
+    )
 }
 
 fn render_operation_select_mode(frame: &mut Frame, area: Rect, app: &App) {
@@ -457,6 +481,43 @@ mod tests {
         assert!(rendered.contains("Operation Copy/Select"));
         assert!(rendered.contains("copyable-path"));
         assert!(rendered.contains("terminal mouse selection enabled"));
+
+        drop(terminal);
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[test]
+    fn operations_render_reports_bounded_event_queue_pressure() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-operation-queue-render-{}-{}",
+            std::process::id(),
+            crate::app::current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        app.workspace.active_section = WorkspaceSection::NetworkDoctor;
+        assert!(app.enqueue_log_event("queued for visibility"));
+
+        let backend = TestBackend::new(120, 35);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::workspace::render(frame, &app))
+            .expect("render queue visibility");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("app event queue: items=1/256"));
+        assert!(rendered.contains("payload_items=0 bytes=0/33554432"));
+        assert!(rendered.contains("payload_rejected=0"));
 
         drop(terminal);
         drop(app);

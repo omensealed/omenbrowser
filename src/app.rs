@@ -95,6 +95,7 @@ const LOCAL_LXMF_ANNOUNCE_COOLDOWN: Duration = Duration::from_secs(30);
 const PROPAGATION_NODE_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const PROPAGATION_NODE_REFRESH_TIMEOUT: Duration = Duration::from_secs(6);
 const UI_PREFERENCE_AUTOSAVE_DELAY_MS: u64 = 500;
+const INTERNAL_EVENT_QUEUE_MAX_ITEMS: usize = 256;
 const INTERNAL_EVENT_QUEUE_MAX_BYTES: usize = 32 * 1024 * 1024;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 const OMENCHAT_STAGED_FRAME_MAX_ITEMS: usize = 256;
@@ -606,8 +607,11 @@ struct InternalEventPayloadPermit {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InternalEventPayloadMetrics {
+    pub channel_queued_items: usize,
+    pub channel_max_items: usize,
     pub queued_items: usize,
     pub queued_bytes: usize,
+    pub max_bytes: usize,
     pub rejected_events: u64,
 }
 
@@ -642,8 +646,11 @@ impl InternalEventPayloadBudget {
 
     fn metrics(&self) -> InternalEventPayloadMetrics {
         InternalEventPayloadMetrics {
+            channel_queued_items: 0,
+            channel_max_items: INTERNAL_EVENT_QUEUE_MAX_ITEMS,
             queued_items: self.queued_items.load(Ordering::Acquire),
             queued_bytes: self.queued_bytes.load(Ordering::Acquire),
+            max_bytes: INTERNAL_EVENT_QUEUE_MAX_BYTES,
             rejected_events: self.rejected_events.load(Ordering::Relaxed),
         }
     }
@@ -5447,7 +5454,7 @@ impl App {
                 warnings: vec![format!("plugin discovery failed: {error}")],
             });
         static NEXT_EVENT_WAKE_ID: AtomicU64 = AtomicU64::new(1);
-        let (raw_event_tx, event_rx) = channel(256);
+        let (raw_event_tx, event_rx) = channel(INTERNAL_EVENT_QUEUE_MAX_ITEMS);
         let (wake_tx, wake_rx) = watch::channel(0);
         let payload_budget = Arc::new(InternalEventPayloadBudget::default());
         let event_tx = InternalEventSender {
@@ -16032,7 +16039,12 @@ impl App {
     }
 
     pub fn internal_event_payload_metrics(&self) -> InternalEventPayloadMetrics {
-        self.event_tx.payload_budget.metrics()
+        let mut metrics = self.event_tx.payload_budget.metrics();
+        metrics.channel_max_items = self.event_tx.sender.max_capacity();
+        metrics.channel_queued_items = metrics
+            .channel_max_items
+            .saturating_sub(self.event_tx.sender.capacity());
+        metrics
     }
 
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -33893,8 +33905,11 @@ side
         assert_eq!(
             app.internal_event_payload_metrics(),
             InternalEventPayloadMetrics {
+                channel_queued_items: 4,
+                channel_max_items: INTERNAL_EVENT_QUEUE_MAX_ITEMS,
                 queued_items: 4,
                 queued_bytes: INTERNAL_EVENT_QUEUE_MAX_BYTES,
+                max_bytes: INTERNAL_EVENT_QUEUE_MAX_BYTES,
                 rejected_events: 1,
             }
         );
@@ -33930,8 +33945,11 @@ side
         assert_eq!(
             app.internal_event_payload_metrics(),
             InternalEventPayloadMetrics {
+                channel_queued_items: INTERNAL_EVENT_QUEUE_MAX_ITEMS,
+                channel_max_items: INTERNAL_EVENT_QUEUE_MAX_ITEMS,
                 queued_items: 0,
                 queued_bytes: 0,
+                max_bytes: INTERNAL_EVENT_QUEUE_MAX_BYTES,
                 rejected_events: 1,
             }
         );

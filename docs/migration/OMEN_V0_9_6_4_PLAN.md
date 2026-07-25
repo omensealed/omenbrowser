@@ -823,6 +823,16 @@ selection is advertised only inside the copy/select view where capture is
 actually released. This is render-only and adds no state, command history,
 worker, timer, persistence, or network behavior.
 
+Phase 5F adds truthful TUI backpressure visibility for the existing bounded
+application event channel. Operations shows total channel occupancy against
+the 256-item bound, payload-bearing item count and bytes against the 32 MiB
+bound, and cumulative payload admission rejections. Payload rejections are
+highlighted without inventing queue progress or delivery evidence. The
+TUI-only product profile does not compile the OMENchat client and therefore
+owns no OMENchat reconnect deadline; no fake reconnect countdown or polling
+clock is added. The desktop OMENchat monitor remains the owner of its existing
+reconnect timers.
+
 ### TUI
 
 - Search/filter mode.
