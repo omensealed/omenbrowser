@@ -8,8 +8,8 @@ use crate::chat::mutation_intent_worker::await_intent_worker_reply;
 use crate::chat::mutation_intents::{
     IntentTransition, OutboundMutationIntent, OutboundMutationState, OwnedPrepareOutboundMutation,
 };
-use crate::chat::protocol::{ChatOp, FrameBody, MutationId};
-use crate::chat::{ChatClientEvent, ChatSessionId};
+use crate::chat::protocol::{ChatOp, FrameBody, MutationId, ReplyReference, RichMessageBody};
+use crate::chat::{ChatClientEvent, ChatEventKind, ChatSessionId};
 
 use super::omenchat_desktop_state::{
     OmenChatMutationRecoveryState, OmenChatMutationResolutionConfirmation,
@@ -278,7 +278,12 @@ impl DesktopApp {
                 }
                 return Task::none();
             }
-            None => (ChatOp::RoomMessage, None, FrameBody::Text(draft)),
+            None => {
+                let Some(body) = self.omenchat_room_message_draft_body(session_id, draft) else {
+                    return Task::none();
+                };
+                (ChatOp::RoomMessage, None, body)
+            }
         };
 
         let Some(client_instance_id) = self.omenchat.omenchat_live_state.client_instance_id()
@@ -359,6 +364,89 @@ impl DesktopApp {
                 },
             ))
         })
+    }
+
+    fn omenchat_room_message_draft_body(
+        &mut self,
+        session_id: ChatSessionId,
+        body: String,
+    ) -> Option<FrameBody> {
+        let reply = self
+            .omenchat
+            .omenchat_reply_drafts
+            .get(&session_id)
+            .copied();
+        let mentions = self
+            .omenchat
+            .omenchat_selected_mentions
+            .get(&session_id)
+            .map(|mentions| mentions.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if reply.is_none() && mentions.is_empty() {
+            return Some(FrameBody::Text(body));
+        }
+        if !self
+            .omenchat
+            .omenchat_live_state
+            .reply_mentions_negotiated(session_id)
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "reply/mention metadata was not sent because reply-mentions-v1 is unavailable"
+                    .into(),
+            );
+            return None;
+        }
+        let Some(session) = self.omenchat.chat_client.session(session_id) else {
+            self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
+            return None;
+        };
+        let room_id = session.active_room.room_id;
+        if reply.is_some_and(|reply| {
+            reply.room_id != room_id
+                || !session.events.iter().any(|event| {
+                    event.room_id == room_id
+                        && event.event_id == reply.event_id
+                        && matches!(
+                            event.kind,
+                            ChatEventKind::Message { .. } | ChatEventKind::RichMessage { .. }
+                        )
+                })
+        }) {
+            self.set_omenchat_session_status(
+                session_id,
+                "the selected reply target is no longer available in this room".into(),
+            );
+            return None;
+        }
+        if mentions.iter().any(|user_id| {
+            *user_id == 0 || !session.users.iter().any(|user| user.user_id == *user_id)
+        }) {
+            self.set_omenchat_session_status(
+                session_id,
+                "a selected mention is no longer a member of this room".into(),
+            );
+            return None;
+        }
+        match (RichMessageBody {
+            body,
+            reply_to: reply.map(|reply| ReplyReference {
+                room_id: reply.room_id,
+                event_id: reply.event_id,
+            }),
+            mentioned_user_ids: mentions,
+        })
+        .into_frame_body()
+        {
+            Ok(body) => Some(body),
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("reply/mention metadata is invalid: {error}"),
+                );
+                None
+            }
+        }
     }
 
     pub(in crate::desktop) fn update_omenchat_mutation_completion(
@@ -716,6 +804,18 @@ impl DesktopApp {
         {
             return Err(
                 "the live OMENchat peer did not negotiate durable mutations; retry is unavailable"
+                    .into(),
+            );
+        }
+        if intent.op == ChatOp::RoomMessage
+            && RichMessageBody::from_frame_body(&intent.body).is_ok()
+            && !self
+                .omenchat
+                .omenchat_live_state
+                .reply_mentions_negotiated(session_id)
+        {
+            return Err(
+                "the live OMENchat peer did not negotiate reply-mentions-v1; this rich mutation was not retried"
                     .into(),
             );
         }
@@ -1106,6 +1206,26 @@ impl DesktopApp {
             .any(|event| matches!(event, ChatClientEvent::Error { .. }));
         if !failed && !recovered {
             self.omenchat.chat_drafts.insert(session_id, String::new());
+            if let Ok(sent) = RichMessageBody::from_frame_body(&intent.body) {
+                let selected_reply =
+                    self.omenchat
+                        .omenchat_reply_drafts
+                        .get(&session_id)
+                        .map(|reply| ReplyReference {
+                            room_id: reply.room_id,
+                            event_id: reply.event_id,
+                        });
+                let selected_mentions = self
+                    .omenchat
+                    .omenchat_selected_mentions
+                    .get(&session_id)
+                    .map(|mentions| mentions.iter().copied().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if selected_reply == sent.reply_to && selected_mentions == sent.mentioned_user_ids {
+                    self.omenchat.omenchat_reply_drafts.remove(&session_id);
+                    self.omenchat.omenchat_selected_mentions.remove(&session_id);
+                }
+            }
         }
         if events.iter().any(|event| {
             matches!(event, ChatClientEvent::RoomsUpdated { .. })
@@ -1337,8 +1457,109 @@ mod tests {
         with_session_accept_negotiation, ClientInstanceId, Frame, FrameValue,
         SessionAcceptNegotiation, DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
     };
-    use crate::chat::{ChatClientRequest, OmenChatDescriptor};
+    use crate::chat::{
+        ChatClientRequest, ChatEvent, ChatRoomSummary, ChatServerSummary, ChatSessionView,
+        ChatUserSummary, OmenChatDescriptor,
+    };
     use crate::desktop::DesktopOmenChatTransport;
+
+    #[test]
+    fn room_message_composer_preserves_legacy_body_and_gates_rich_metadata() {
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths: crate::config::AppPaths::from_root(std::env::temp_dir().join(format!(
+                "omenbrowser-rich-composer-unit-{}-{}",
+                std::process::id(),
+                current_epoch_ms()
+            ))),
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+        let session_id = desktop.omenchat.chat_client.reserve_session_id();
+        desktop.omenchat.chat_client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "server".into(),
+                destination: "destination".into(),
+                display_name: "Server".into(),
+            },
+            rooms: vec![ChatRoomSummary {
+                server_id: "server".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            }],
+            active_room: ChatRoomSummary {
+                server_id: "server".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            users: vec![ChatUserSummary {
+                server_id: "server".into(),
+                user_id: 7,
+                display_name: "Alice".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+            }],
+            events: vec![ChatEvent {
+                server_id: "server".into(),
+                room_id: 1,
+                event_id: 9,
+                actor_user_id: Some(7),
+                actor_display_name: Some("Alice".into()),
+                at_unix: 1,
+                kind: ChatEventKind::Message {
+                    body: "original".into(),
+                },
+            }],
+            status: "ready".into(),
+        });
+
+        assert_eq!(
+            desktop.omenchat_room_message_draft_body(session_id, "plain".into()),
+            Some(FrameBody::Text("plain".into()))
+        );
+        desktop.omenchat.omenchat_reply_drafts.insert(
+            session_id,
+            crate::desktop::omenchat_desktop_state::OmenChatReplyDraft {
+                room_id: 1,
+                event_id: 9,
+            },
+        );
+        desktop
+            .omenchat
+            .omenchat_selected_mentions
+            .entry(session_id)
+            .or_default()
+            .insert(7);
+        assert_eq!(
+            desktop.omenchat_room_message_draft_body(session_id, "blocked".into()),
+            None
+        );
+
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_reply_mentions_negotiated_for_test(session_id, true);
+        let rich = desktop
+            .omenchat_room_message_draft_body(session_id, "rich".into())
+            .expect("rich body");
+        assert_eq!(
+            RichMessageBody::from_frame_body(&rich).expect("decode rich body"),
+            RichMessageBody {
+                body: "rich".into(),
+                reply_to: Some(ReplyReference {
+                    room_id: 1,
+                    event_id: 9,
+                }),
+                mentioned_user_ids: vec![7],
+            }
+        );
+    }
 
     #[tokio::test]
     async fn negotiated_room_send_persists_before_transport_and_persists_ack() {

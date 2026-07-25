@@ -2,8 +2,8 @@ use iced::widget::operation::snap_to;
 use iced::widget::scrollable::RelativeOffset;
 use iced::Task;
 
-use crate::chat::protocol::RoomId;
-use crate::chat::ChatSessionId;
+use crate::chat::protocol::{RoomId, RICH_MESSAGE_MAX_MENTIONS};
+use crate::chat::{ChatEventKind, ChatSessionId};
 use crate::micron::LinkAction;
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -59,6 +59,29 @@ impl DesktopApp {
                 room_id,
                 event_id,
             }) => Ok(self.update_jump_omenchat_to_event(session_id, room_id, event_id)),
+            Message::OmenChat(OmenChatMessage::BeginReply {
+                session_id,
+                room_id,
+                event_id,
+            }) => {
+                self.update_begin_omenchat_reply(session_id, room_id, event_id);
+                Ok(Task::none())
+            }
+            Message::OmenChat(OmenChatMessage::CancelReply(session_id)) => {
+                self.omenchat.omenchat_reply_drafts.remove(&session_id);
+                Ok(Task::none())
+            }
+            Message::OmenChat(OmenChatMessage::ToggleMention {
+                session_id,
+                user_id,
+            }) => {
+                self.update_toggle_omenchat_mention(session_id, user_id);
+                Ok(Task::none())
+            }
+            Message::OmenChat(OmenChatMessage::ClearMentions(session_id)) => {
+                self.omenchat.omenchat_selected_mentions.remove(&session_id);
+                Ok(Task::none())
+            }
             Message::OmenChat(OmenChatMessage::SendDraft(session_id)) => {
                 Ok(self.update_send_omenchat_draft(session_id))
             }
@@ -185,9 +208,127 @@ impl DesktopApp {
         session_id: ChatSessionId,
         room: String,
     ) -> Task<Message> {
+        let previous_room_id = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.active_room.room_id);
         self.join_omenchat_room(session_id, room);
+        let current_room_id = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.active_room.room_id);
+        if previous_room_id != current_room_id {
+            self.omenchat.omenchat_reply_drafts.remove(&session_id);
+            self.omenchat.omenchat_selected_mentions.remove(&session_id);
+        }
         self.schedule_visible_workspace_scroll_restore(2);
         self.restore_omenchat_scroll(session_id)
+    }
+
+    pub(in crate::desktop) fn omenchat_reply_mentions_available(
+        &self,
+        session_id: ChatSessionId,
+    ) -> bool {
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        {
+            self.omenchat
+                .omenchat_live_state
+                .reply_mentions_negotiated(session_id)
+        }
+        #[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
+        {
+            let _ = session_id;
+            false
+        }
+    }
+
+    fn update_begin_omenchat_reply(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    ) {
+        if !self.omenchat_reply_mentions_available(session_id) {
+            self.set_omenchat_session_status(
+                session_id,
+                "replies are unavailable because reply-mentions-v1 was not negotiated".into(),
+            );
+            return;
+        }
+        let valid = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .filter(|session| session.active_room.room_id == room_id)
+            .and_then(|session| {
+                session
+                    .events
+                    .iter()
+                    .find(|event| event.room_id == room_id && event.event_id == event_id)
+            })
+            .is_some_and(|event| {
+                matches!(
+                    event.kind,
+                    ChatEventKind::Message { .. } | ChatEventKind::RichMessage { .. }
+                )
+            });
+        if !valid {
+            self.set_omenchat_session_status(
+                session_id,
+                "that reply target is no longer available in the current room".into(),
+            );
+            return;
+        }
+        self.omenchat.omenchat_reply_drafts.insert(
+            session_id,
+            super::omenchat_desktop_state::OmenChatReplyDraft { room_id, event_id },
+        );
+    }
+
+    fn update_toggle_omenchat_mention(&mut self, session_id: ChatSessionId, user_id: u32) {
+        if !self.omenchat_reply_mentions_available(session_id) {
+            self.set_omenchat_session_status(
+                session_id,
+                "mentions are unavailable because reply-mentions-v1 was not negotiated".into(),
+            );
+            return;
+        }
+        let member_present = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .is_some_and(|session| {
+                user_id != 0
+                    && self.omenchat.chat_client.local_user_id(session_id) != Some(user_id)
+                    && session.users.iter().any(|user| user.user_id == user_id)
+            });
+        if !member_present {
+            self.set_omenchat_session_status(
+                session_id,
+                "that mention target is no longer a member of this room".into(),
+            );
+            return;
+        }
+        let selected = self
+            .omenchat
+            .omenchat_selected_mentions
+            .entry(session_id)
+            .or_default();
+        if !selected.remove(&user_id) {
+            if selected.len() >= RICH_MESSAGE_MAX_MENTIONS {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("a message can mention at most {RICH_MESSAGE_MAX_MENTIONS} members"),
+                );
+                return;
+            }
+            selected.insert(user_id);
+        }
+        if selected.is_empty() {
+            self.omenchat.omenchat_selected_mentions.remove(&session_id);
+        }
     }
 
     pub(super) fn update_omenchat_draft_changed(

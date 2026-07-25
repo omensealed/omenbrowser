@@ -456,6 +456,17 @@ pub(in crate::desktop) enum OmenChatMessage {
         room_id: RoomId,
         event_id: u64,
     },
+    BeginReply {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
+    CancelReply(ChatSessionId),
+    ToggleMention {
+        session_id: ChatSessionId,
+        user_id: u32,
+    },
+    ClearMentions(ChatSessionId),
     SendDraft(ChatSessionId),
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     BeginMutationResolution {

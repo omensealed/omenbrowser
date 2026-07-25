@@ -437,6 +437,28 @@ Unit 5C adds the local unread policy without activating the wire capability:
 - event storage, history reconciliation, moderation/system events, retained
   mention totals, and scroll behavior are unchanged.
 
+Unit 5D adds the bounded composer and durable client-send bridge without
+activating the wire capability:
+
+- Reply actions are offered only for retained non-local message events and only
+  after `reply-mentions-v1` is actually negotiated; action, notice, system,
+  upload, and pending-local-echo rows cannot become reply targets;
+- reply draft state retains only the current room and numeric event ID, while
+  mention selection is a sorted numeric set capped by the protocol limit of 16;
+- mention controls use the current bounded room member catalog, exclude the
+  authenticated local user from the picker, and revalidate membership at send
+  time;
+- switching rooms or closing a session discards its transient rich composer
+  state, and a successful send clears only the exact metadata snapshot that was
+  persisted;
+- an ordinary draft with no metadata remains an exact legacy text body;
+- rich metadata is encoded into the durable mutation intent before transport
+  admission. Capability loss, a missing reply target, or departed member blocks
+  the send instead of silently downgrading it;
+- recovered rich mutations require fresh `reply-mentions-v1` negotiation and
+  are never automatically retried; the pending local echo preserves the reply
+  and numeric mention metadata for truthful presentation.
+
 There is still no separate mention history, notification worker, polling
 subscription, sound, timer, or capability activation. Read markers remain the
 existing room counters; this unit adds no server-authoritative read receipt.
@@ -455,5 +477,8 @@ resource-history, conflict, and local-user binding tests cover the boundary.
 No new error numbers were needed: the existing typed protocol-v1 errors retain
 their documented meanings.
 
-The next rollback boundary is the composer/selector work required before
-capability activation. Capability advertisement stays blocked.
+The next rollback boundary is the mixed-version, reconnect, crash/resource,
+and measurement gate required before a separate capability-activation decision.
+The production client still does not request `reply-mentions-v1`, the server
+activation constant remains false, and all new composer controls therefore
+remain dormant in ordinary releases.

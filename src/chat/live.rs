@@ -7,20 +7,21 @@ use super::client::{
 };
 use super::descriptor::OmenChatDescriptor;
 use super::model::{
-    bounded_chat_text, chat_text_fits, ChatEvent, ChatEventKind, ChatRoomSummary,
-    ChatServerSummary, ChatUserSummary, CHAT_ACTOR_DISPLAY_MAX_BYTES, CHAT_CONTENT_TYPE_MAX_BYTES,
-    CHAT_MOTD_MAX_BYTES, CHAT_RESOURCE_ID_MAX_BYTES, CHAT_ROLE_ADMIN, CHAT_ROLE_MODERATOR,
-    CHAT_ROLE_TRUSTED, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_STATUS_BANNED,
-    CHAT_STATUS_MAX_BYTES, CHAT_STATUS_MUTED, CHAT_UPLOAD_FILENAME_MAX_BYTES,
+    bounded_chat_text, chat_text_fits, ChatEvent, ChatEventKind, ChatMessageMetadata,
+    ChatRoomSummary, ChatServerSummary, ChatUserSummary, CHAT_ACTOR_DISPLAY_MAX_BYTES,
+    CHAT_CONTENT_TYPE_MAX_BYTES, CHAT_MOTD_MAX_BYTES, CHAT_RESOURCE_ID_MAX_BYTES, CHAT_ROLE_ADMIN,
+    CHAT_ROLE_MODERATOR, CHAT_ROLE_TRUSTED, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES,
+    CHAT_STATUS_BANNED, CHAT_STATUS_MAX_BYTES, CHAT_STATUS_MUTED, CHAT_UPLOAD_FILENAME_MAX_BYTES,
     CHAT_USER_DISPLAY_MAX_BYTES,
 };
 use super::mutation_intents::{OutboundMutationIntent, OutboundMutationState};
 use super::protocol::{
     canonical_mutation_request_hash, parse_rich_message_event_metadata,
     parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
-    ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MutationId, RoomId,
-    SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
-    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME, REPLY_MENTIONS_CAPABILITY,
+    ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MutationId,
+    RichMessageBody, RoomId, SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS,
+    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME,
+    REPLY_MENTIONS_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -157,6 +158,19 @@ impl LiveChatClientState {
 
     pub fn reply_mentions_negotiated(&self, session_id: ChatSessionId) -> bool {
         self.reply_mentions_sessions.contains(&session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_reply_mentions_negotiated_for_test(
+        &mut self,
+        session_id: ChatSessionId,
+        negotiated: bool,
+    ) {
+        if negotiated {
+            self.reply_mentions_sessions.insert(session_id);
+        } else {
+            self.reply_mentions_sessions.remove(&session_id);
+        }
     }
 
     pub fn local_user_id(&self, session_id: ChatSessionId) -> Option<u32> {
@@ -791,7 +805,7 @@ fn send_live_room_text<T: ChatLinkTransport>(
         None => {
             if tracks_server_acceptance {
                 let Some(local_echo) =
-                    append_pending_local_echo(client, session_id, room_id, seq, body, op)
+                    append_pending_local_echo(client, session_id, room_id, seq, body, op, None)
                 else {
                     return drain_live_events(client, transport, Some(session_id));
                 };
@@ -873,8 +887,30 @@ pub fn send_uncertain_durable_room_text<T: ChatLinkTransport>(
     ) {
         return error("durable OMENchat mutation request hash does not match its stored request");
     }
-    let body = match &intent.body {
-        FrameBody::Text(body) => body.clone(),
+    let (body, metadata) = match &intent.body {
+        FrameBody::Text(body) => (body.clone(), None),
+        body if intent.op == ChatOp::RoomMessage => {
+            if !state.reply_mentions_negotiated(session_id) {
+                return error(
+                    "durable OMENchat reply/mention retry requires reply-mentions-v1 negotiation",
+                );
+            }
+            let rich = match RichMessageBody::from_frame_body(body) {
+                Ok(rich) => rich,
+                Err(_) => return error("durable OMENchat rich message body is invalid"),
+            };
+            if rich
+                .reply_to
+                .is_some_and(|reference| reference.room_id != room_id)
+            {
+                return error("durable OMENchat reply belongs to a different room");
+            }
+            let metadata = ChatMessageMetadata {
+                reply_to_event_id: rich.reply_to.map(|reference| reference.event_id),
+                mentioned_user_ids: rich.mentioned_user_ids,
+            };
+            (rich.body, Some(metadata))
+        }
         _ => return error("durable OMENchat room text body is invalid"),
     };
     if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
@@ -913,7 +949,7 @@ pub fn send_uncertain_durable_room_text<T: ChatLinkTransport>(
         return vec![event];
     }
     let Some(local_echo) =
-        append_pending_local_echo(client, session_id, room_id, seq, body, intent.op)
+        append_pending_local_echo(client, session_id, room_id, seq, body, intent.op, metadata)
     else {
         return drain_live_events(client, transport, Some(session_id));
     };
@@ -1438,6 +1474,7 @@ fn append_pending_local_echo(
     seq: u32,
     body: String,
     op: ChatOp,
+    metadata: Option<ChatMessageMetadata>,
 ) -> Option<ChatEvent> {
     let server_id = client
         .session(session_id)
@@ -1452,7 +1489,10 @@ fn append_pending_local_echo(
         kind: match op {
             ChatOp::RoomAction => ChatEventKind::Action { body },
             ChatOp::RoomNotice => ChatEventKind::Notice { body },
-            _ => ChatEventKind::Message { body },
+            _ => match metadata {
+                Some(metadata) => ChatEventKind::RichMessage { body, metadata },
+                None => ChatEventKind::Message { body },
+            },
         },
     };
     append_event(client, session_id, event.clone(), false);
@@ -4109,6 +4149,31 @@ mod tests {
         }
     }
 
+    fn durable_rich_room_text_intent(
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+    ) -> OutboundMutationIntent {
+        let body = RichMessageBody {
+            body: "durable reply".into(),
+            reply_to: Some(super::super::protocol::ReplyReference {
+                room_id: 1,
+                event_id: 9,
+            }),
+            mentioned_user_ids: vec![2, 7],
+        }
+        .into_frame_body()
+        .expect("rich message body");
+        let mut intent = durable_room_text_intent(client_instance_id, state);
+        intent.body = body;
+        intent.request_hash = crate::chat::protocol::canonical_mutation_request_hash(
+            intent.op,
+            intent.room_id,
+            &intent.body,
+        )
+        .expect("rich request hash");
+        intent
+    }
+
     fn durable_room_action_intent(
         client_instance_id: ClientInstanceId,
         state: OutboundMutationState,
@@ -4955,6 +5020,73 @@ mod tests {
         );
         assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
         assert!(transport.sent_frames.is_empty());
+    }
+
+    #[test]
+    fn durable_rich_room_text_requires_capability_and_preserves_local_echo_metadata() {
+        let client_instance_id = ClientInstanceId::new([0x22; 16]);
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        let intent =
+            durable_rich_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        let mut transport = CapturedChatTransport::default();
+
+        let blocked = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert!(matches!(
+            blocked.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("reply/mention retry requires")
+        ));
+        assert!(transport.sent_frames.is_empty());
+        assert!(client
+            .session(session_id)
+            .expect("session")
+            .events
+            .is_empty());
+
+        state.reply_mentions_sessions.insert(session_id);
+        let sent = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert_eq!(transport.sent_frames.len(), 1);
+        assert!(sent.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::EventAppended {
+                event: ChatEvent {
+                    kind: ChatEventKind::RichMessage { body, metadata },
+                    ..
+                },
+                ..
+            } if body == "durable reply"
+                && metadata.reply_to_event_id == Some(9)
+                && metadata.mentioned_user_ids == vec![2, 7]
+        )));
     }
 
     #[test]

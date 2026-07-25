@@ -24,6 +24,7 @@ pub(in crate::desktop) struct ChatTimelineBody {
     pub(in crate::desktop) pending_acceptance: bool,
     pub(in crate::desktop) mentions_local_user: bool,
     pub(in crate::desktop) reply: Option<ChatTimelineReply>,
+    pub(in crate::desktop) reply_target: Option<u64>,
     pub(in crate::desktop) upload: Option<ChatTimelineUpload>,
     pub(in crate::desktop) resend: Option<ChatTimelineResend>,
 }
@@ -75,6 +76,12 @@ pub(in crate::desktop) fn chat_event_body(
     local_user_id: Option<u32>,
 ) -> ChatTimelineBody {
     let presentation = chat_message_presentation(&session.events, event, local_user_id);
+    let reply_target = matches!(
+        event.kind,
+        ChatEventKind::Message { .. } | ChatEventKind::RichMessage { .. }
+    )
+    .then_some(event.event_id)
+    .filter(|_| !is_omenchat_local_echo_event(event));
     let reply = presentation.reply.map(|reply| match reply {
         ChatReplyPresentation::Available {
             event_id,
@@ -99,6 +106,7 @@ pub(in crate::desktop) fn chat_event_body(
             pending_acceptance: is_omenchat_local_echo_event(event),
             mentions_local_user: presentation.mentions_local_user,
             reply,
+            reply_target: None,
             upload: None,
             resend: local_echo_resend(session, event, body, true),
         },
@@ -111,6 +119,7 @@ pub(in crate::desktop) fn chat_event_body(
             pending_acceptance: is_omenchat_local_echo_event(event),
             mentions_local_user: presentation.mentions_local_user,
             reply,
+            reply_target,
             upload: None,
             resend: match &event.kind {
                 ChatEventKind::Message { body } => local_echo_resend(session, event, body, false),
@@ -127,6 +136,7 @@ pub(in crate::desktop) fn chat_event_body(
             pending_acceptance: false,
             mentions_local_user: presentation.mentions_local_user,
             reply,
+            reply_target: None,
             upload: Some(ChatTimelineUpload {
                 session_id: session.session_id,
                 resource_id: resource_id.clone(),

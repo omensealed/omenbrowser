@@ -254,6 +254,25 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     resend.body,
                     resend.action,
                 ));
+            } else if let Some(event_id) = body
+                .reply_target
+                .filter(|_| desktop.omenchat_reply_mentions_available(session.session_id))
+            {
+                group_content = group_content.push(
+                    row![
+                        line,
+                        subtle_button_owned(
+                            "Reply".to_string(),
+                            Message::OmenChat(OmenChatMessage::BeginReply {
+                                session_id: session.session_id,
+                                room_id: session.active_room.room_id,
+                                event_id,
+                            }),
+                        )
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
             } else {
                 group_content = group_content.push(line);
             }
@@ -302,8 +321,33 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     let mut userlist = column![text("Users").size(ui_size(16))]
         .spacing(6)
         .width(Length::Fixed(82.0));
+    let rich_composer_available = desktop.omenchat_reply_mentions_available(session.session_id);
+    let local_user_id = desktop
+        .omenchat
+        .chat_client
+        .local_user_id(session.session_id);
     for user in unique_chat_users(&session.users) {
-        userlist = userlist.push(text(user.display_label()).size(ui_size(13)));
+        if rich_composer_available && Some(user.user_id) != local_user_id {
+            let selected = desktop
+                .omenchat
+                .omenchat_selected_mentions
+                .get(&session.session_id)
+                .is_some_and(|mentions| mentions.contains(&user.user_id));
+            let label = if selected {
+                format!("✓ {}", user.display_label())
+            } else {
+                user.display_label()
+            };
+            userlist = userlist.push(subtle_button_owned(
+                label,
+                Message::OmenChat(OmenChatMessage::ToggleMention {
+                    session_id: session.session_id,
+                    user_id: user.user_id,
+                }),
+            ));
+        } else {
+            userlist = userlist.push(text(user.display_label()).size(ui_size(13)));
+        }
     }
 
     let draft = desktop
@@ -351,6 +395,57 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         ),
     ]
     .spacing(8);
+    let mut composer_panel = column![].spacing(6).width(Length::Fill);
+    if let Some(reply) = desktop
+        .omenchat
+        .omenchat_reply_drafts
+        .get(&session.session_id)
+        .filter(|reply| reply.room_id == active_room_id)
+    {
+        let label = if rich_composer_available {
+            format!("Replying to message #{}", reply.event_id)
+        } else {
+            format!(
+                "Reply to message #{} unavailable until capability returns",
+                reply.event_id
+            )
+        };
+        composer_panel = composer_panel.push(
+            row![
+                text(label).size(ui_size(12)),
+                subtle_button_owned(
+                    "Cancel reply".to_string(),
+                    Message::OmenChat(OmenChatMessage::CancelReply(session.session_id)),
+                )
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    let mention_count = desktop
+        .omenchat
+        .omenchat_selected_mentions
+        .get(&session.session_id)
+        .map_or(0, std::collections::BTreeSet::len);
+    if mention_count > 0 {
+        let label = if rich_composer_available {
+            format!("Mentioning {mention_count} member(s)")
+        } else {
+            format!("{mention_count} mention(s) unavailable until capability returns")
+        };
+        composer_panel = composer_panel.push(
+            row![
+                text(label).size(ui_size(12)),
+                subtle_button_owned(
+                    "Clear mentions".to_string(),
+                    Message::OmenChat(OmenChatMessage::ClearMentions(session.session_id)),
+                )
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    composer_panel = composer_panel.push(composer);
 
     let mut timeline_panel = column![].spacing(8).width(Length::Fill);
     if let Some(motd) = desktop
@@ -424,7 +519,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         row![room_list, timeline_panel, userlist]
             .spacing(10)
             .height(Length::Fill),
-        composer
+        composer_panel
     ]
     .spacing(10)
     .padding(10)

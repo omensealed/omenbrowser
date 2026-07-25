@@ -250,6 +250,17 @@ mod tests {
                 room_id,
                 event_id: 3,
             },
+            OmenChatMessage::BeginReply {
+                session_id,
+                room_id,
+                event_id: 3,
+            },
+            OmenChatMessage::CancelReply(session_id),
+            OmenChatMessage::ToggleMention {
+                session_id,
+                user_id: 4,
+            },
+            OmenChatMessage::ClearMentions(session_id),
             OmenChatMessage::SendDraft(session_id),
             OmenChatMessage::ResendLocalEcho {
                 session_id,

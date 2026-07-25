@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,6 +15,12 @@ use super::omenchat_runtime::omenchat_event_counts_by_room;
 use super::omenchat_runtime::DesktopOmenChatTransport;
 use super::startup::OmenChatStartupState;
 use super::DesktopPane;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct OmenChatReplyDraft {
+    pub(in crate::desktop) room_id: RoomId,
+    pub(in crate::desktop) event_id: u64,
+}
 
 #[cfg(feature = "chat-client-gif")]
 pub(in crate::desktop) type OmenChatGifFrames = iced_gif::Frames;
@@ -434,6 +440,8 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) chat_client: ChatClient,
     pub(in crate::desktop) chat_store: Option<SqliteChatStore>,
     pub(in crate::desktop) chat_drafts: HashMap<ChatSessionId, String>,
+    pub(in crate::desktop) omenchat_reply_drafts: HashMap<ChatSessionId, OmenChatReplyDraft>,
+    pub(in crate::desktop) omenchat_selected_mentions: HashMap<ChatSessionId, BTreeSet<u32>>,
     pub(in crate::desktop) chat_event_counts: HashMap<(ChatSessionId, RoomId), usize>,
     pub(in crate::desktop) chat_scroll_offsets: HashMap<(ChatSessionId, RoomId), RelativeOffset>,
     pub(in crate::desktop) chat_scroll_bottom_locks: HashSet<(ChatSessionId, RoomId)>,
@@ -563,6 +571,8 @@ impl OmenChatDesktopState {
             chat_client: startup.chat_client,
             chat_store: startup.chat_store,
             chat_drafts: HashMap::new(),
+            omenchat_reply_drafts: HashMap::new(),
+            omenchat_selected_mentions: HashMap::new(),
             chat_event_counts,
             chat_scroll_offsets,
             chat_scroll_bottom_locks,

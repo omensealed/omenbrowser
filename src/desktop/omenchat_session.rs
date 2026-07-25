@@ -11,6 +11,8 @@ impl DesktopApp {
             .session(session_id)
             .map(|session| session.server.server_id.clone());
         self.omenchat.chat_drafts.remove(&session_id);
+        self.omenchat.omenchat_reply_drafts.remove(&session_id);
+        self.omenchat.omenchat_selected_mentions.remove(&session_id);
         self.omenchat.omenchat_motds.remove(&session_id);
         for cache_key in self
             .omenchat
