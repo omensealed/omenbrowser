@@ -523,6 +523,10 @@ mod tests {
     fn diagnostics_domain_messages_have_one_compile_time_route() {
         for message in [
             DiagnosticsMessage::Show,
+            DiagnosticsMessage::CopyOperationDiagnostics(crate::operations::OperationId::numeric(
+                crate::operations::OperationDomain::PathDiscovery,
+                1,
+            )),
             DiagnosticsMessage::PreviewManagedConfig,
             DiagnosticsMessage::ExportManagedConfig,
             DiagnosticsMessage::PreviewBundle,

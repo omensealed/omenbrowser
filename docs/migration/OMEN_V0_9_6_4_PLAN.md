@@ -789,6 +789,15 @@ and 256 bytes, results are capped at eight, and the palette owns no worker,
 timer, persistence, history, or network state. Ctrl+K and the status-strip
 button open it; Escape closes it.
 
+Phase 5B turns retained shared Operations rows that need attention into compact
+desktop cards. Each card navigates to the already-owned related workspace and,
+when the operation advertises that action, copies a bounded diagnostic for the
+exact retained record. The copied text omits opaque operation identifiers and
+is capped at 2 KiB. Retry, cancel, and reconcile buttons are deliberately not
+fabricated where no typed operation-specific route exists. This reuses the
+bounded Operations history and adds no error history, parser, worker, timer, or
+network state.
+
 ### TUI
 
 - Search/filter mode.

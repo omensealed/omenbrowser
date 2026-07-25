@@ -206,6 +206,7 @@ pub(in crate::desktop) enum InterfaceMessage {
 #[derive(Clone, Debug)]
 pub(in crate::desktop) enum DiagnosticsMessage {
     Show,
+    CopyOperationDiagnostics(crate::operations::OperationId),
     PreviewManagedConfig,
     ExportManagedConfig,
     PreviewBundle,

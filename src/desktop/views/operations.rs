@@ -4,10 +4,14 @@ use iced::Element;
 use crate::operations::presentation::{
     present_operations, OperationPresentationFilter, OperationPresentationQuery,
 };
-use crate::operations::{EvidenceAuthority, OperationHistory};
+use crate::operations::{
+    EvidenceAuthority, OperationAction, OperationDomain, OperationHistory, OperationId,
+};
+use crate::workspace::WorkspaceSection;
 
 use super::super::{
-    human_bytes, section_card, wrapped_panel_text, wrapped_text_owned, DesktopApp, Message,
+    action_grid, human_bytes, section_card, subtle_button, wrapped_panel_text, wrapped_text_owned,
+    DesktopApp, DiagnosticsMessage, Message, ShellMessage,
 };
 
 const OPERATIONS_PANEL_MAX_ROWS: usize = 8;
@@ -21,8 +25,12 @@ struct OperationsPanelModel {
 
 #[derive(Debug, PartialEq, Eq)]
 struct OperationsPanelRow {
+    id: OperationId,
+    domain: OperationDomain,
     headline: String,
     evidence: String,
+    needs_attention: bool,
+    can_copy_diagnostics: bool,
 }
 
 fn operations_panel_model(history: &OperationHistory) -> OperationsPanelModel {
@@ -67,8 +75,14 @@ fn operations_panel_model(history: &OperationHistory) -> OperationsPanelModel {
                 }
             }
             OperationsPanelRow {
+                id: row.id,
+                domain: row.domain,
                 headline,
                 evidence: format!("evidence: {}", row.evidence_summary),
+                needs_attention: row.needs_attention,
+                can_copy_diagnostics: row
+                    .valid_actions
+                    .contains(&OperationAction::CopyDiagnostics),
             }
         })
         .collect::<Vec<_>>();
@@ -89,9 +103,31 @@ pub(in crate::desktop) fn operations_panel(desktop: &DesktopApp) -> Element<'_, 
         body = body.push(wrapped_panel_text(empty_message));
     } else {
         for row in model.rows {
-            body = body
-                .push(wrapped_text_owned(row.headline, 14))
-                .push(wrapped_text_owned(row.evidence, 13));
+            if row.needs_attention {
+                let mut actions = vec![subtle_button(
+                    attention_workspace_label(row.domain),
+                    Message::Shell(ShellMessage::SwitchSection(attention_workspace(row.domain))),
+                )];
+                if row.can_copy_diagnostics {
+                    actions.push(subtle_button(
+                        "Copy diagnostic",
+                        Message::Diagnostics(DiagnosticsMessage::CopyOperationDiagnostics(row.id)),
+                    ));
+                }
+                body = body.push(section_card(
+                    "Needs Attention",
+                    column![
+                        wrapped_text_owned(row.headline, 14),
+                        wrapped_text_owned(row.evidence, 13),
+                        action_grid(actions, 2),
+                    ]
+                    .spacing(4),
+                ));
+            } else {
+                body = body
+                    .push(wrapped_text_owned(row.headline, 14))
+                    .push(wrapped_text_owned(row.evidence, 13));
+            }
         }
     }
     body = body.push(wrapped_panel_text(
@@ -99,6 +135,32 @@ pub(in crate::desktop) fn operations_panel(desktop: &DesktopApp) -> Element<'_, 
     ));
 
     section_card("Operations & Transfers", body)
+}
+
+fn attention_workspace(domain: OperationDomain) -> WorkspaceSection {
+    match domain {
+        OperationDomain::PathDiscovery => WorkspaceSection::Browser,
+        OperationDomain::LinkEstablishment => WorkspaceSection::NetworkDoctor,
+        OperationDomain::LxmfMessage => WorkspaceSection::Messages,
+        OperationDomain::PropagationSync => WorkspaceSection::Directory,
+        OperationDomain::ResourceTransfer => WorkspaceSection::Monitoring,
+        OperationDomain::RuntimeEventStream => WorkspaceSection::Diagnostics,
+        OperationDomain::OmenChatConnection | OperationDomain::OmenChatMutation => {
+            WorkspaceSection::Messages
+        }
+    }
+}
+
+fn attention_workspace_label(domain: OperationDomain) -> &'static str {
+    match attention_workspace(domain) {
+        WorkspaceSection::Browser => "Open Browser",
+        WorkspaceSection::Messages => "Open Messages",
+        WorkspaceSection::Directory => "Open Directory",
+        WorkspaceSection::Monitoring => "Open Monitoring",
+        WorkspaceSection::NetworkDoctor => "Open Network Doctor",
+        WorkspaceSection::Diagnostics => "Open Diagnostics",
+        _ => "Open workspace",
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +268,8 @@ mod tests {
         assert!(model.rows[0]
             .headline
             .contains("public-server / room 7 | reconciling | uncertain"));
+        assert!(model.rows[0].needs_attention);
+        assert!(model.rows[0].can_copy_diagnostics);
         let displayed = model
             .rows
             .iter()
@@ -274,5 +338,21 @@ mod tests {
             .expect("uncertain row");
         assert!(authoritative_row.headline.contains("512 B / 1.0 KiB"));
         assert!(!uncertain_row.headline.contains("512 B / 1.0 KiB"));
+    }
+
+    #[test]
+    fn attention_navigation_uses_existing_domain_workspaces() {
+        assert_eq!(
+            attention_workspace(OperationDomain::PathDiscovery),
+            WorkspaceSection::Browser
+        );
+        assert_eq!(
+            attention_workspace(OperationDomain::OmenChatConnection),
+            WorkspaceSection::Messages
+        );
+        assert_eq!(
+            attention_workspace(OperationDomain::RuntimeEventStream),
+            WorkspaceSection::Diagnostics
+        );
     }
 }

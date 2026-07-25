@@ -10,6 +10,7 @@ pub const OPERATION_PRESENTATION_DEFAULT_ROWS: usize = 64;
 pub const OPERATION_PRESENTATION_SEARCH_MAX_BYTES: usize = 128;
 pub const OPERATION_PRESENTATION_TARGET_MAX_BYTES: usize = 160;
 pub const OPERATION_PRESENTATION_SUMMARY_MAX_BYTES: usize = 256;
+pub const OPERATION_DIAGNOSTICS_MAX_BYTES: usize = 2 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OperationPresentationFilter {
@@ -132,6 +133,48 @@ pub fn present_operations(
         total_matches,
         rows,
     }
+}
+
+pub fn operation_diagnostics_text(record: &OperationRecord) -> String {
+    let actions = if record.valid_actions.is_empty() {
+        "none".into()
+    } else {
+        record
+            .valid_actions
+            .iter()
+            .copied()
+            .map(action_label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let error = record.last_error.as_deref().unwrap_or("none");
+    bounded_display_text(
+        &format!(
+            "OMENbrowser operation diagnostic\n\
+             domain: {}\n\
+             target: {}\n\
+             state: {}\n\
+             evidence authority: {}\n\
+             latest evidence: {}\n\
+             updated epoch ms: {}\n\
+             attempts: {}\n\
+             last error: {}\n\
+             valid actions: {}",
+            domain_label(record.id.domain),
+            bounded_display_text(
+                &record.target.label,
+                OPERATION_PRESENTATION_TARGET_MAX_BYTES
+            ),
+            state_label(record.state),
+            authority_label(record.authority),
+            evidence_summary(&record.evidence),
+            record.updated_at_unix_ms,
+            record.attempt_count,
+            error,
+            actions,
+        ),
+        OPERATION_DIAGNOSTICS_MAX_BYTES,
+    )
 }
 
 fn present_record(record: &OperationRecord) -> OperationPresentationRow {
@@ -619,5 +662,27 @@ mod tests {
             evidence_label(OperationEvidenceKind::ConnectionState),
             "connection state"
         );
+    }
+
+    #[test]
+    fn copied_operation_diagnostic_is_bounded_and_omits_opaque_identifier() {
+        let mut source = record(
+            7,
+            OperationDomain::OmenChatMutation,
+            OperationState::Reconciling,
+            EvidenceAuthority::Uncertain,
+            10,
+            "server / room",
+        );
+        source.id = OperationId::opaque_128(OperationDomain::OmenChatMutation, [0xab; 16]);
+        source.last_error = Some("uncertain response".into());
+        source.valid_actions = vec![OperationAction::Reconcile, OperationAction::CopyDiagnostics];
+
+        let diagnostic = operation_diagnostics_text(&source);
+        assert!(diagnostic.len() <= OPERATION_DIAGNOSTICS_MAX_BYTES);
+        assert!(diagnostic.contains("domain: OMENchat mutation"));
+        assert!(diagnostic.contains("last error: uncertain response"));
+        assert!(diagnostic.contains("valid actions: reconcile, copy diagnostics"));
+        assert!(!diagnostic.contains("abababab"));
     }
 }
