@@ -34,7 +34,7 @@ use crate::config::{AppConfig, AppPaths};
 use crate::diagnostics::{DiagnosticsService, DiagnosticsSnapshot};
 use crate::directory::{
     DeliveryFallbackPolicy, DirectoryEntry, DirectoryKind, DirectoryService, PreferredDelivery,
-    PropagationNodeInventory, TrustLevel,
+    PropagationNodeInventory, TrustLevel, DEFAULT_AUTOMATIC_DIRECT_STAMP_COST,
 };
 use crate::error::AppResult;
 use crate::identity::IdentityManager;
@@ -12015,6 +12015,49 @@ impl App {
         }
     }
 
+    pub fn cycle_selected_directory_direct_stamp_limit(&mut self) -> bool {
+        let Some(entry) = self.selected_directory_entry() else {
+            self.status.task = "no directory entry selected".into();
+            return false;
+        };
+        if entry.kind != DirectoryKind::Peer {
+            self.status.task = "direct stamp limit only applies to LXMF peers".into();
+            return false;
+        }
+        let next = match entry.max_automatic_direct_stamp_cost {
+            None => Some(0),
+            Some(0) => Some(1),
+            Some(1) => Some(2),
+            Some(2) => Some(4),
+            Some(4) => Some(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST),
+            Some(_) => None,
+        };
+        match self
+            .directory_service
+            .set_max_automatic_direct_stamp_cost(&entry.destination_hash, next)
+        {
+            Ok(Some(updated)) => {
+                self.refresh_panels_from_services();
+                let label = next
+                    .map(|cost| cost.to_string())
+                    .unwrap_or_else(|| format!("default ({DEFAULT_AUTOMATIC_DIRECT_STAMP_COST})"));
+                self.status.task = format!(
+                    "directory direct stamp limit: {} {label}",
+                    updated.display_name
+                );
+                true
+            }
+            Ok(None) => {
+                self.status.task = "directory entry no longer exists".into();
+                false
+            }
+            Err(error) => {
+                self.status.task = error.to_string();
+                false
+            }
+        }
+    }
+
     fn sync_runtime_identify_policy_nonblocking(&mut self) -> bool {
         let destinations = self
             .directory_service
@@ -12709,6 +12752,12 @@ impl App {
                 entry.delivery_fallback == DeliveryFallbackPolicy::Automatic
                     && entry.preferred_delivery != Some(PreferredDelivery::DirectOnly)
             });
+        let max_automatic_direct_stamp_cost = self
+            .directory_service
+            .find(self.workspace.conversations[active].peer_hash.trim())
+            .and_then(|entry| entry.max_automatic_direct_stamp_cost)
+            .unwrap_or(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST)
+            .min(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST);
         let (
             conversation_id,
             peer_hash,
@@ -12729,6 +12778,9 @@ impl App {
                 .unwrap_or_else(OutboundOperationIdentity::generate);
             operation.allow_propagation_fallback = allow_propagation_fallback;
             operation.automatic_propagation_fallback = automatic_propagation_fallback;
+            operation.max_automatic_direct_stamp_cost = operation
+                .max_automatic_direct_stamp_cost
+                .min(max_automatic_direct_stamp_cost);
             conversation.pending_send = Some(MessageSendState { generation });
             if !message_pending_placeholder_present(conversation, generation) {
                 conversation.push_message(pending_outbound_message_from_conversation(
@@ -25964,6 +26016,39 @@ side
     }
 
     #[test]
+    fn directory_direct_stamp_limit_cycles_from_existing_default() {
+        let mut app = App::new(test_config("directory-direct-stamp-limit"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.refresh_panels_from_services();
+        app.switch_section(WorkspaceSection::Directory);
+
+        for expected in [Some(0), Some(1), Some(2), Some(4), Some(8), None] {
+            assert!(app.cycle_selected_directory_direct_stamp_limit());
+            assert_eq!(
+                app.directory_service
+                    .find("peer.hash")
+                    .and_then(|entry| entry.max_automatic_direct_stamp_cost),
+                expected
+            );
+        }
+        app.directory_service
+            .set_max_automatic_direct_stamp_cost("peer.hash", Some(2))
+            .expect("persist limit");
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer renamed", DirectoryKind::Peer, None, None)
+            .expect("refresh announce");
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .and_then(|entry| entry.max_automatic_direct_stamp_cost),
+            Some(2),
+            "a fresh announce must not overwrite saved stamp policy"
+        );
+    }
+
+    #[test]
     fn directory_preferred_delivery_initializes_only_new_conversations() {
         let mut app = App::new(test_config("directory-delivery-conversation-default"));
         app.directory_service
@@ -33921,6 +34006,9 @@ side
         app.directory_service
             .set_delivery_fallback(FIXTURE_NODE_HASH, DeliveryFallbackPolicy::Automatic)
             .expect("persist fallback policy");
+        app.directory_service
+            .set_max_automatic_direct_stamp_cost(FIXTURE_NODE_HASH, Some(2))
+            .expect("persist direct stamp limit");
         {
             let conversation = app.active_conversation_mut_for_test();
             conversation.peer_hash = FIXTURE_NODE_HASH.into();
@@ -33935,6 +34023,7 @@ side
                 .expect("pending operation");
         assert!(automatic.allow_propagation_fallback);
         assert!(automatic.automatic_propagation_fallback);
+        assert_eq!(automatic.max_automatic_direct_stamp_cost, 2);
         assert!(app.wait_for_message_task_result().await);
 
         app.directory_service
@@ -33947,6 +34036,41 @@ side
                 .expect("pending strict operation");
         assert!(!strict.allow_propagation_fallback);
         assert!(!strict.automatic_propagation_fallback);
+        assert!(app.wait_for_message_task_result().await);
+    }
+
+    #[tokio::test]
+    async fn prepared_retry_never_raises_its_snapshotted_stamp_ceiling() {
+        let mut app = App::new(test_config("retry-stamp-ceiling"));
+        app.directory_service
+            .ingest_announce(FIXTURE_NODE_HASH, "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_max_automatic_direct_stamp_cost(FIXTURE_NODE_HASH, Some(8))
+            .expect("persist current limit");
+        let mut identity = OutboundOperationIdentity::generate();
+        identity.max_automatic_direct_stamp_cost = 2;
+        {
+            let conversation = app.active_conversation_mut_for_test();
+            conversation.peer_hash = FIXTURE_NODE_HASH.into();
+            conversation.peer_label = "Peer".into();
+            conversation.draft_body = "retry".into();
+            conversation.delivery_mode = DeliveryMode::Direct;
+            conversation.prepared_retry_operation = Some(PreparedRetryOperation {
+                identity,
+                title: String::new(),
+                body: "retry".into(),
+                attachments: Vec::new(),
+                delivery_mode: DeliveryMode::Direct,
+                include_ticket: false,
+            });
+        }
+
+        app.send_active_conversation_draft();
+        let operation =
+            OutboundOperationIdentity::from_message(&app.active_conversation().thread.messages[0])
+                .expect("pending retry operation");
+        assert_eq!(operation.max_automatic_direct_stamp_cost, 2);
         assert!(app.wait_for_message_task_result().await);
     }
 

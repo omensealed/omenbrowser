@@ -14,6 +14,9 @@ pub const OUTBOUND_EXPIRES_AT_FIELD: &str = "native_lxmf_sdk_expires_at_ms";
 pub const OUTBOUND_PROPAGATION_FALLBACK_FIELD: &str = "native_lxmf_allow_propagation_fallback";
 pub const OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD: &str =
     "native_lxmf_automatic_propagation_fallback";
+pub const OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD: &str =
+    "native_lxmf_max_automatic_direct_stamp_cost";
+pub const OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST: u8 = 8;
 pub const OUTBOUND_DEFAULT_TTL_MS: u64 = 86_400_000;
 pub const OUTBOUND_MIN_TTL_MS: u64 = 1_000;
 pub const OUTBOUND_MAX_TTL_MS: u64 = 86_400_000;
@@ -29,10 +32,16 @@ pub struct OutboundOperationIdentity {
     pub allow_propagation_fallback: bool,
     #[serde(default)]
     pub automatic_propagation_fallback: bool,
+    #[serde(default = "default_max_automatic_direct_stamp_cost")]
+    pub max_automatic_direct_stamp_cost: u8,
 }
 
 const fn default_allow_propagation_fallback() -> bool {
     true
+}
+
+const fn default_max_automatic_direct_stamp_cost() -> u8 {
+    OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST
 }
 
 impl OutboundOperationIdentity {
@@ -104,6 +113,13 @@ impl OutboundOperationIdentity {
             Some(_) => return None,
             None => false,
         };
+        operation.max_automatic_direct_stamp_cost = match message
+            .fields
+            .get(OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD)
+        {
+            Some(value) => value.parse().ok()?,
+            None => OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
+        };
         Some(operation)
     }
 
@@ -138,6 +154,7 @@ impl OutboundOperationIdentity {
                 expires_at_ms,
                 allow_propagation_fallback: true,
                 automatic_propagation_fallback: false,
+                max_automatic_direct_stamp_cost: OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
             })
         } else {
             None
@@ -178,6 +195,10 @@ impl OutboundOperationIdentity {
         fields.insert(
             OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD.into(),
             self.automatic_propagation_fallback.to_string(),
+        );
+        fields.insert(
+            OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD.into(),
+            self.max_automatic_direct_stamp_cost.to_string(),
         );
     }
 }
@@ -272,6 +293,7 @@ mod tests {
         let mut first = OutboundOperationIdentity::generate();
         first.allow_propagation_fallback = false;
         first.automatic_propagation_fallback = true;
+        first.max_automatic_direct_stamp_cost = 4;
         let second = OutboundOperationIdentity::generate();
         assert_ne!(first, second);
 
@@ -318,6 +340,23 @@ mod tests {
         message.fields.insert(
             OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD.into(),
             "invalid".into(),
+        );
+        assert!(OutboundOperationIdentity::from_message(&message).is_none());
+        message
+            .fields
+            .remove(OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD);
+        message
+            .fields
+            .remove(OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD);
+        assert_eq!(
+            OutboundOperationIdentity::from_message(&message)
+                .expect("legacy operation metadata")
+                .max_automatic_direct_stamp_cost,
+            OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST
+        );
+        message.fields.insert(
+            OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD.into(),
+            "999".into(),
         );
         assert!(OutboundOperationIdentity::from_message(&message).is_none());
     }

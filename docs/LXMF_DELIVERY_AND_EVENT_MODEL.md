@@ -253,6 +253,25 @@ node. A failure after submission begins remains uncertain and is never
 automatically retried. This boundary prevents a local timeout or lost
 acknowledgement from fabricating a second logical message.
 
+Peers may also set a maximum automatic direct-stamp cost. The migration default
+is 8, matching the existing compiled clean-runtime safety ceiling. An explicit
+zero disables automatic direct-stamp work for that peer; the bounded presets
+then increase through 1, 2, 4, and 8. The effective value is copied into the
+durable operation metadata before dispatch, and the clean integrated runtime
+compares it with authenticated delivery-announce policy before acquiring the
+bounded blocking stamp permit. A required cost above the effective limit is an
+actionable pre-dispatch failure, not an uncertain send. A valid reply ticket
+still takes precedence and requires no stamp. The hard compiled ceiling and
+attempt bound cannot be raised through Directory data. Reusing a prepared
+logical operation may lower its snapshotted ceiling to a newer peer policy but
+never raises it.
+
+This policy currently governs locally generated direct stamps. It does not
+claim control over a separately managed RPC daemon, and it does not change the
+different propagation-node stamp defaults. Confirmation above a threshold and
+propagation cost policy remain separate work so existing propagated delivery
+behavior is not silently changed.
+
 The integrated runtime broadcast is consumed by one owned worker and forwarded
 through the existing 256-item application channel. Payload-bearing OMENchat
 events and SDK history pages additionally retain the shared 32 MiB queued-byte

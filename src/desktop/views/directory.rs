@@ -508,6 +508,10 @@ fn directory_selected_details_card(desktop: &DesktopApp) -> Element<'_, Message>
             "Fallback",
             Message::Directory(DirectoryMessage::CycleFallback(index)),
         ));
+        management_actions.push(subtle_button(
+            "Stamp Limit",
+            Message::Directory(DirectoryMessage::CycleDirectStampLimit(index)),
+        ));
     }
     if entry.kind != DirectoryKind::Propagation {
         management_actions.push(subtle_button(

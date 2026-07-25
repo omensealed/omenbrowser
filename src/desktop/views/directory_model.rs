@@ -125,6 +125,16 @@ pub(in crate::desktop) fn directory_selected_state_lines(entry: &DirectoryEntry)
                 "direct failure: {}",
                 entry.delivery_fallback.label()
             ));
+            lines.push(format!(
+                "automatic direct stamp limit: {}",
+                entry
+                    .max_automatic_direct_stamp_cost
+                    .map(|cost| cost.to_string())
+                    .unwrap_or_else(|| format!(
+                        "default ({})",
+                        crate::directory::DEFAULT_AUTOMATIC_DIRECT_STAMP_COST
+                    ))
+            ));
         }
         DirectoryKind::Propagation => {
             lines.push(format!("propagation candidate rank: {sort_rank}"));

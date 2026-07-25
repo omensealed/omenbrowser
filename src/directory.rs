@@ -28,6 +28,7 @@ pub const DIRECTORY_MAX_DESTINATION_BYTES: usize = 1024;
 pub const DIRECTORY_MAX_DISPLAY_NAME_BYTES: usize = 16 * 1024;
 pub const DIRECTORY_MAX_ASSOCIATED_HASH_BYTES: usize = 1024;
 pub const DIRECTORY_IDENTITY_HASH_BYTES: usize = 32;
+pub const DEFAULT_AUTOMATIC_DIRECT_STAMP_COST: u8 = 8;
 static DIRECTORY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -134,6 +135,8 @@ pub struct DirectoryEntry {
     pub preferred_delivery: Option<PreferredDelivery>,
     #[serde(default)]
     pub delivery_fallback: DeliveryFallbackPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_automatic_direct_stamp_cost: Option<u8>,
     pub sort_rank: Option<i32>,
     pub hosts_node: bool,
     pub associated_hash: Option<String>,
@@ -161,6 +164,7 @@ impl DirectoryEntry {
             identify_on_connect: false,
             preferred_delivery: None,
             delivery_fallback: DeliveryFallbackPolicy::Ask,
+            max_automatic_direct_stamp_cost: None,
             sort_rank: None,
             hosts_node,
             associated_hash: None,
@@ -377,6 +381,7 @@ impl DirectoryService {
             entry.identify_on_connect = existing.identify_on_connect;
             entry.preferred_delivery = existing.preferred_delivery;
             entry.delivery_fallback = existing.delivery_fallback;
+            entry.max_automatic_direct_stamp_cost = existing.max_automatic_direct_stamp_cost;
             entry.sort_rank = existing.sort_rank;
             entry.hosts_node = existing.hosts_node || kind == DirectoryKind::Node;
             entry.associated_hash = associated_hash.or_else(|| existing.associated_hash.clone());
@@ -459,6 +464,7 @@ impl DirectoryService {
         entry.identify_on_connect = false;
         entry.preferred_delivery = None;
         entry.delivery_fallback = DeliveryFallbackPolicy::Ask;
+        entry.max_automatic_direct_stamp_cost = None;
         self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
@@ -540,6 +546,20 @@ impl DirectoryService {
             return Ok(None);
         };
         entry.delivery_fallback = delivery_fallback;
+        entry.saved = true;
+        self.persist_entry_change(destination_hash, entry.clone())?;
+        Ok(Some(entry))
+    }
+
+    pub fn set_max_automatic_direct_stamp_cost(
+        &mut self,
+        destination_hash: &str,
+        cost: Option<u8>,
+    ) -> crate::error::AppResult<Option<DirectoryEntry>> {
+        let Some(mut entry) = self.find(destination_hash) else {
+            return Ok(None);
+        };
+        entry.max_automatic_direct_stamp_cost = cost;
         entry.saved = true;
         self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
@@ -914,6 +934,7 @@ fn is_persistent_entry(entry: &DirectoryEntry) -> bool {
         || entry.identify_on_connect
         || entry.preferred_delivery.is_some()
         || entry.delivery_fallback != DeliveryFallbackPolicy::Ask
+        || entry.max_automatic_direct_stamp_cost.is_some()
 }
 
 fn directory_entries_match_ignoring_last_seen(
@@ -930,6 +951,7 @@ fn directory_entries_match_ignoring_last_seen(
         && left.identify_on_connect == right.identify_on_connect
         && left.preferred_delivery == right.preferred_delivery
         && left.delivery_fallback == right.delivery_fallback
+        && left.max_automatic_direct_stamp_cost == right.max_automatic_direct_stamp_cost
         && left.sort_rank == right.sort_rank
         && left.hosts_node == right.hosts_node
         && left.associated_hash == right.associated_hash
@@ -968,6 +990,13 @@ fn merged_entry(primary: Option<&DirectoryEntry>, secondary: &DirectoryEntry) ->
         } else {
             secondary.delivery_fallback
         };
+    entry.max_automatic_direct_stamp_cost = if primary.saved {
+        primary.max_automatic_direct_stamp_cost
+    } else {
+        primary
+            .max_automatic_direct_stamp_cost
+            .or(secondary.max_automatic_direct_stamp_cost)
+    };
     entry.sort_rank = primary.sort_rank.or(secondary.sort_rank);
     entry.hosts_node = primary.hosts_node || secondary.hosts_node;
     entry.associated_hash = primary
@@ -1508,6 +1537,7 @@ mod tests {
         let decoded: DirectoryEntry =
             serde_json::from_value(legacy).expect("legacy directory entry");
         assert_eq!(decoded.delivery_fallback, DeliveryFallbackPolicy::Ask);
+        assert_eq!(decoded.max_automatic_direct_stamp_cost, None);
     }
 
     #[test]
@@ -1518,15 +1548,24 @@ mod tests {
         let mut automatic = saved.clone();
         automatic.saved = false;
         automatic.delivery_fallback = DeliveryFallbackPolicy::Automatic;
+        automatic.max_automatic_direct_stamp_cost = Some(2);
 
         assert_eq!(
             merged_entry(Some(&saved), &automatic).delivery_fallback,
             DeliveryFallbackPolicy::Ask
         );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).max_automatic_direct_stamp_cost,
+            None
+        );
         saved.saved = false;
         assert_eq!(
             merged_entry(Some(&saved), &automatic).delivery_fallback,
             DeliveryFallbackPolicy::Automatic
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).max_automatic_direct_stamp_cost,
+            Some(2)
         );
     }
 

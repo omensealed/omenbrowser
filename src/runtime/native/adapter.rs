@@ -384,6 +384,7 @@ fn clean_direct_stamp_cost(
     app_data: Option<&[u8]>,
     reply_ticket: Option<&crate::messaging::NativeLxmfReplyTicket>,
     now: f64,
+    configured_max_cost: u8,
 ) -> AppResult<Option<u8>> {
     let valid_reply_ticket = match reply_ticket {
         Some(ticket)
@@ -400,19 +401,20 @@ fn clean_direct_stamp_cost(
         }
         None => false,
     };
+    let effective_max_cost =
+        configured_max_cost.min(crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST);
     match crate::runtime::native_lxmf::codec::delivery_announce_direct_stamp_policy(
         app_data,
         valid_reply_ticket,
     ) {
         crate::runtime::native_lxmf::codec::DirectStampPolicy::Required { cost }
-            if cost <= crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST =>
+            if cost <= effective_max_cost =>
         {
             Ok(Some(cost))
         }
         crate::runtime::native_lxmf::codec::DirectStampPolicy::Required { cost } => {
             Err(AppError::Unsupported(format!(
-                "LXMF peer requires direct stamp cost {cost}, above the automatic safety ceiling {}",
-                crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST
+                "LXMF peer requires direct stamp cost {cost}, above the automatic ceiling {effective_max_cost}"
             )))
         }
         crate::runtime::native_lxmf::codec::DirectStampPolicy::Unsupported => {
@@ -4990,6 +4992,13 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             app_data.as_deref(),
                             envelope.native_reply_ticket.as_ref(),
                             native_unix_timestamp(),
+                            envelope
+                                .operation
+                                .as_ref()
+                                .map(|operation| operation.max_automatic_direct_stamp_cost)
+                                .unwrap_or(
+                                    crate::messaging::OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
+                                ),
                         )?;
                         (cost, policy_source)
                     } else {
@@ -17121,6 +17130,15 @@ enable_transport = No
     #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
     #[test]
     fn clean_direct_stamp_policy_enforces_ceiling_and_ticket_precedence() {
+        assert_eq!(
+            crate::directory::DEFAULT_AUTOMATIC_DIRECT_STAMP_COST,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST
+        );
+        assert_eq!(
+            crate::messaging::OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST
+        );
+
         fn app_data(cost: rmpv::Value) -> Vec<u8> {
             let mut bytes = Vec::new();
             rmpv::encode::write_value(
@@ -17135,25 +17153,46 @@ enable_transport = No
             crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
         ));
         assert_eq!(
-            clean_direct_stamp_cost(Some(&admitted), None, 1_000.0).expect("admitted cost"),
+            clean_direct_stamp_cost(
+                Some(&admitted),
+                None,
+                1_000.0,
+                crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            )
+            .expect("admitted cost"),
             Some(crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST)
         );
         let over = app_data(rmpv::Value::from(
             crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST + 1,
         ));
-        assert!(clean_direct_stamp_cost(Some(&over), None, 1_000.0)
-            .expect_err("cost over ceiling")
+        assert!(clean_direct_stamp_cost(
+            Some(&over),
+            None,
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+        )
+        .expect_err("cost over ceiling")
+        .to_string()
+        .contains("automatic ceiling"));
+        assert!(clean_direct_stamp_cost(Some(&admitted), None, 1_000.0, 4)
+            .expect_err("cost over per-peer ceiling")
             .to_string()
-            .contains("safety ceiling"));
+            .contains("automatic ceiling 4"));
         let unsupported = app_data(rmpv::Value::from(0_u8));
-        assert!(clean_direct_stamp_cost(Some(&unsupported), None, 1_000.0).is_err());
+        assert!(clean_direct_stamp_cost(
+            Some(&unsupported),
+            None,
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+        )
+        .is_err());
 
         let ticket = crate::messaging::NativeLxmfReplyTicket {
             ticket: vec![0x44; 16],
             expires: 2_000.0,
         };
         assert_eq!(
-            clean_direct_stamp_cost(Some(&over), Some(&ticket), 1_000.0)
+            clean_direct_stamp_cost(Some(&over), Some(&ticket), 1_000.0, 0)
                 .expect("ticket precedence"),
             None
         );
@@ -17161,7 +17200,13 @@ enable_transport = No
             expires: 999.0,
             ..ticket
         };
-        assert!(clean_direct_stamp_cost(Some(&admitted), Some(&expired), 1_000.0).is_err());
+        assert!(clean_direct_stamp_cost(
+            Some(&admitted),
+            Some(&expired),
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+        )
+        .is_err());
     }
 
     #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]

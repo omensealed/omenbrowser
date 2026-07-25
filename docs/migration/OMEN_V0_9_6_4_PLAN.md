@@ -685,6 +685,17 @@ requires the existing explicit confirmation; it is never resent
 automatically. `Direct only` always disables fallback. This adds no worker,
 timer, dependency, protocol version, or database migration.
 
+Phase 4D adds a per-peer maximum automatic **direct** stamp cost. Missing and
+older Directory or outbound-operation data uses the existing hard ceiling of
+8, so migration does not increase or decrease automatic work. The Directory
+control cycles through default, disabled (0), 1, 2, 4, and 8. The effective
+limit is snapshotted into the durable outbound operation and checked against
+authenticated peer announce data before acquiring the bounded blocking stamp
+permit. A valid reply ticket retains precedence and avoids stamp generation.
+Values above the compiled hard ceiling are clamped down, never up. This unit
+does not change propagation-stamp defaults, add confirmation UI, or weaken the
+global attempt/concurrency bounds.
+
 ### Propagation-node quality of life
 
 Extend the existing bounded inventory with:
