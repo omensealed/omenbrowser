@@ -432,6 +432,15 @@ timer, subscription, protocol, storage, or dependency. Keeping it inside the
 existing Network Doctor avoids a desktop-only section while the corresponding
 TUI surface and broader event adapters are still pending.
 
+Phase 3F replaces the existing TUI Network Doctor placeholder with a passive
+view over the same shared projection. It uses the same eight-row bound,
+attention ordering, evidence terminology, opaque-ID omission, and
+authoritative-progress rule as the desktop card. The existing route, mouse
+behavior, keyboard behavior, and saved section preference remain unchanged.
+The view adds no action, state machine, update loop, worker, timer,
+subscription, persistence, protocol, storage, or dependency. Interactive
+filter/action controls and broader runtime-domain adapters remain pending.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:

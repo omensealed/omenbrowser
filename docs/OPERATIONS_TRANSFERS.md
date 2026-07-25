@@ -122,6 +122,22 @@ and receipt evidence are not peer delivery.
 The card adds no controls, routing state, workspace preference, cache, worker,
 timer, subscription, persistence, protocol field, or dependency. It is placed
 inside the existing passive Network Doctor surface so this small slice does not
-create an empty TUI workspace or change existing saved-section compatibility.
+change existing saved-section compatibility.
+
+## Terminal Network Doctor view
+
+The existing TUI `NetworkDoctor` route now renders the same shared projection
+instead of its former placeholder. It also requests at most eight
+attention-first rows, reports retained and omitted counts plus exact retained
+bytes, and has an explicit empty state. Attention rows receive presentation
+emphasis, but their state and authority still come directly from the shared
+typed labels.
+
+The TUI renders exact `completed/total` bytes only for authoritative progress
+and does not calculate a percentage. Opaque IDs are not rendered. The view has
+no input action or mouse target, and the existing Network Doctor route and
+saved preference remain unchanged. It adds no update loop, worker, timer,
+subscription, persistence, protocol field, or dependency.
+
 The eventual interactive desktop/TUI views must continue to consume the same
 projection rather than define frontend-specific delivery vocabulary.

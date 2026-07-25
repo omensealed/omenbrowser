@@ -1,4 +1,5 @@
 pub mod mouse;
+mod operations;
 pub mod status;
 pub mod tabs;
 pub mod workspace;

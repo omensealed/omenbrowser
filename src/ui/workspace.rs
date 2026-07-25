@@ -11,7 +11,7 @@ use crate::interfaces::InterfaceKind;
 use crate::micron::render::{document_to_lines_with_focus_and_cursor, rendered_rows_to_lines};
 use crate::plugins::BUILTIN_MICRONPLUS_PLUGIN_ID;
 use crate::storage::settings::RuntimeBackendSetting;
-use crate::ui::{status, tabs};
+use crate::ui::{operations, status, tabs};
 pub use crate::workspace::{FocusArea, WorkspaceSection};
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -110,9 +110,7 @@ fn render_workspace(frame: &mut Frame, area: Rect, app: &App) {
         WorkspaceSection::Monitoring => {
             render_placeholder(frame, area, app.workspace.active_section)
         }
-        WorkspaceSection::NetworkDoctor => {
-            render_placeholder(frame, area, app.workspace.active_section)
-        }
+        WorkspaceSection::NetworkDoctor => operations::render(frame, area, app),
         WorkspaceSection::Settings => render_settings(frame, area, app),
         WorkspaceSection::Diagnostics => render_diagnostics(frame, area, app),
         WorkspaceSection::Logs => render_logs(frame, area, app),

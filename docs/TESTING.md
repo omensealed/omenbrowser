@@ -3036,8 +3036,22 @@ cargo test --locked --no-default-features --features desktop-product \
 
 These fixtures are entirely in memory and exercise no Iced action, worker,
 timer, subscription, persistent root, identity, Reticulum peer, or OMENchat
-server. The TUI surface and interactive filter/action controls remain later
-gates.
+server.
+
+The TUI Network Doctor model and route fixtures cover the same empty state,
+fixed row limit, omissions, attention ordering, terminology, opaque-ID
+omission, and authoritative-progress behavior. The route smoke uses a generated
+temporary application root and proves Network Doctor renders the Operations
+view rather than its previous placeholder:
+
+```bash
+cargo test --locked --no-default-features --features tui \
+  ui::operations::tests --lib
+```
+
+The temporary root is removed after rendering. No runtime backend, identity,
+Reticulum peer, OMENchat server, timer, worker, or input action is started.
+Interactive filter/action controls remain a later gate.
 
 ## OMENchat negotiated durable room and user mutations
 
