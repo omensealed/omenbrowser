@@ -5319,6 +5319,14 @@ struct BrowserTabRestoreContext<'a> {
     directory_service: &'a DirectoryService,
 }
 
+fn propagation_sync_record_matches_node(
+    record: &crate::operations::OperationRecord,
+    destination_hash: &str,
+) -> bool {
+    record.id.domain == crate::operations::OperationDomain::PropagationSync
+        && record.target.label.eq_ignore_ascii_case(destination_hash)
+}
+
 impl App {
     pub fn new(config: AppConfig) -> Self {
         Self::try_new(config).expect("failed to initialize app services")
@@ -13354,6 +13362,7 @@ impl App {
                 format!("propagation Operations projection rejected sync start: {error}"),
             );
         }
+        self.refresh_propagation_node_inventory();
         self.logs.push_with_source(
             LogSeverity::Info,
             LogSource::Messaging,
@@ -16651,6 +16660,7 @@ impl App {
                         event.stage, event.status, event.detail, event.counts
                     ),
                 );
+                self.refresh_propagation_node_inventory();
                 true
             }
             crate::runtime::RuntimeBusEvent::InterfaceStats(stats) => {
@@ -17410,6 +17420,7 @@ impl App {
                         format!("propagation Operations projection rejected sync result: {error}"),
                     );
                 }
+                self.refresh_propagation_node_inventory();
                 self.status.task = if sync_ok && !blocked {
                     format!(
                         "propagation sync complete: state={after_state} messages={message_count} delivery_updates={sync_evidence_count} events={event_count}"
@@ -18803,6 +18814,7 @@ impl App {
             let elapsed = started.elapsed();
             if elapsed < PROPAGATION_NODE_REFRESH_COOLDOWN {
                 let remaining = PROPAGATION_NODE_REFRESH_COOLDOWN.saturating_sub(elapsed);
+                self.refresh_propagation_node_inventory();
                 self.status.task = format!(
                     "propagation refresh cooldown: retry in {}s",
                     remaining.as_secs().saturating_add(1)
@@ -18838,6 +18850,7 @@ impl App {
             started_epoch_ms: Some(started_epoch_ms),
             completed_epoch_ms: None,
         };
+        self.refresh_propagation_node_inventory();
         self.status.task = format!(
             "refreshing propagation node {}",
             compact_hash(&destination_hash)
@@ -19316,11 +19329,81 @@ impl App {
     }
 
     fn refresh_propagation_node_inventory(&mut self) {
-        self.directory_state.propagation_nodes = self.directory_service.propagation_node_inventory(
+        let now_epoch_ms = current_epoch_ms();
+        let mut inventory = self.directory_service.propagation_node_inventory(
             self.settings.preferred_propagation_node_hash.as_deref(),
             &self.propagation_path_evidence,
-            current_epoch_ms() as f64 / 1_000.0,
+            now_epoch_ms as f64 / 1_000.0,
         );
+        let refresh = &self.directory_state.propagation_refresh;
+        let refresh_cooldown_remaining_seconds = self
+            .last_propagation_refresh_started
+            .map(|started| PROPAGATION_NODE_REFRESH_COOLDOWN.saturating_sub(started.elapsed()))
+            .filter(|remaining| !remaining.is_zero())
+            .map(|remaining| remaining.as_secs().saturating_add(1));
+        for node in &mut inventory.nodes {
+            if refresh
+                .destination_hash
+                .as_deref()
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(&node.destination_hash))
+            {
+                node.refresh = match refresh.outcome {
+                    PropagationNodeRefreshOutcome::Idle => None,
+                    PropagationNodeRefreshOutcome::Running => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::Running)
+                    }
+                    PropagationNodeRefreshOutcome::Refreshed => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::Refreshed)
+                    }
+                    PropagationNodeRefreshOutcome::NoPath => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::NoPath)
+                    }
+                    PropagationNodeRefreshOutcome::Cancelled => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::Cancelled)
+                    }
+                    PropagationNodeRefreshOutcome::TimedOut => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::TimedOut)
+                    }
+                    PropagationNodeRefreshOutcome::Failed => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::Failed)
+                    }
+                };
+                node.refresh_observed_epoch_ms =
+                    refresh.completed_epoch_ms.or(refresh.started_epoch_ms);
+                node.refresh_cooldown_remaining_seconds = refresh_cooldown_remaining_seconds;
+            }
+
+            let latest_sync = self.operation_history.records().rev().find(|record| {
+                propagation_sync_record_matches_node(record, &node.destination_hash)
+            });
+            if let Some(latest) = latest_sync {
+                node.sync = Some(match latest.state {
+                    crate::operations::OperationState::Queued => {
+                        crate::directory::PropagationNodeSyncEvidence::Queued
+                    }
+                    crate::operations::OperationState::Completed => {
+                        crate::directory::PropagationNodeSyncEvidence::Succeeded
+                    }
+                    state if state.is_terminal() => {
+                        crate::directory::PropagationNodeSyncEvidence::Failed
+                    }
+                    _ => crate::directory::PropagationNodeSyncEvidence::Running,
+                });
+                node.last_sync_epoch_ms = u64::try_from(latest.updated_at_unix_ms).ok();
+                node.last_sync_error = latest.last_error.clone();
+            }
+            node.last_successful_sync_epoch_ms = self
+                .operation_history
+                .records()
+                .filter(|record| {
+                    propagation_sync_record_matches_node(record, &node.destination_hash)
+                        && record.state == crate::operations::OperationState::Completed
+                })
+                .filter_map(|record| u64::try_from(record.updated_at_unix_ms).ok())
+                .max();
+        }
+        inventory.enforce_bounds();
+        self.directory_state.propagation_nodes = inventory;
     }
 
     pub fn selected_plugin_manifest(&self) -> Option<&PluginManifest> {
@@ -24929,6 +25012,15 @@ side
             app.propagation_node_inventory().nodes[0].path_state,
             crate::directory::PropagationNodePathState::Known
         );
+        let refreshed = &app.propagation_node_inventory().nodes[0];
+        assert_eq!(
+            refreshed.refresh,
+            Some(crate::directory::PropagationNodeRefreshEvidence::Refreshed)
+        );
+        assert!(refreshed.refresh_observed_epoch_ms.is_some());
+        assert!(refreshed
+            .refresh_cooldown_remaining_seconds
+            .is_some_and(|remaining| remaining > 0));
         assert!(!app.refresh_selected_propagation_node());
         assert!(app.status.task.contains("cooldown"));
     }
@@ -32978,6 +33070,16 @@ side
     #[test]
     fn propagation_sync_operations_require_app_correlation_and_finalize_from_task_result() {
         let mut app = App::new(test_config("propagation-sync-operations"));
+        app.directory_service
+            .ingest_announce(
+                FIXTURE_NODE_HASH,
+                "Propagation Node",
+                DirectoryKind::Propagation,
+                None,
+                None,
+            )
+            .expect("propagation announce");
+        app.refresh_panels_from_services();
         let progress_event = || {
             RuntimeBusEvent::PropagationSync(crate::runtime::PropagationSyncEvent {
                 stage: crate::runtime::PropagationSyncStage::LinkEstablish,
@@ -33013,6 +33115,10 @@ side
             .detail
             .as_deref()
             .is_some_and(|detail| detail.contains("private") || detail.contains("99"))));
+        assert_eq!(
+            app.propagation_node_inventory().nodes[0].sync,
+            Some(crate::directory::PropagationNodeSyncEvidence::Running)
+        );
 
         assert!(
             app.apply_message_task_result(MessageTaskResult::PropagationSynced {
@@ -33043,6 +33149,54 @@ side
         );
         assert!(!completed.state.claims_peer_delivery());
         assert!(completed.last_error.is_none());
+        let succeeded = &app.propagation_node_inventory().nodes[0];
+        assert_eq!(
+            succeeded.sync,
+            Some(crate::directory::PropagationNodeSyncEvidence::Succeeded)
+        );
+        let successful_epoch = succeeded
+            .last_successful_sync_epoch_ms
+            .expect("successful sync epoch");
+        assert_eq!(succeeded.last_sync_epoch_ms, Some(successful_epoch));
+        assert!(succeeded.last_sync_error.is_none());
+
+        app.propagation_sync_pending = Some(78);
+        crate::operations::propagation::begin_propagation_sync(
+            &mut app.operation_history,
+            78,
+            Some(FIXTURE_NODE_HASH),
+            i64::try_from(current_epoch_ms()).unwrap_or(i64::MAX),
+        )
+        .expect("begin failed sync");
+        assert!(
+            app.apply_message_task_result(MessageTaskResult::PropagationSynced {
+                generation: 78,
+                report: serde_json::json!({
+                    "report": "native_lxmf_propagation_diagnostics",
+                    "selected_node": FIXTURE_NODE_HASH,
+                    "sync": {"ok": false, "error": "path unavailable"},
+                    "after": {
+                        "has_path": false,
+                        "known_app_data": true,
+                        "transfer_state": "failed"
+                    },
+                    "sync_events": [],
+                    "blocker": "path unavailable"
+                }),
+                messages: Vec::new(),
+            })
+        );
+        let failed = &app.propagation_node_inventory().nodes[0];
+        assert_eq!(
+            failed.sync,
+            Some(crate::directory::PropagationNodeSyncEvidence::Failed)
+        );
+        assert_eq!(
+            failed.last_successful_sync_epoch_ms,
+            Some(successful_epoch),
+            "a later failure must not erase the last successful sync"
+        );
+        assert!(failed.last_sync_error.is_some());
     }
 
     #[test]

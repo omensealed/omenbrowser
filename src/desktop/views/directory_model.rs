@@ -2,7 +2,7 @@ use crate::app::DirectoryScope;
 use crate::directory::{
     DirectoryEntry, DirectoryKind, PropagationNodeCompatibility, PropagationNodeEvidence,
     PropagationNodeFreshness, PropagationNodePathState, PropagationNodeRecord,
-    PropagationNodeSelection,
+    PropagationNodeRefreshEvidence, PropagationNodeSelection, PropagationNodeSyncEvidence,
 };
 
 pub(in crate::desktop) fn directory_kind_title(kind: &DirectoryKind) -> &'static str {
@@ -185,7 +185,7 @@ pub(in crate::desktop) fn propagation_node_state_lines(
         .announce_age_seconds
         .map(|seconds| format!("{seconds}s"))
         .unwrap_or_else(|| "unknown".into());
-    vec![
+    let mut lines = vec![
         format!(
             "selection={} | freshness={} | announce age={} | path={}",
             propagation_selection_label(node.selection),
@@ -202,7 +202,33 @@ pub(in crate::desktop) fn propagation_node_state_lines(
             "identity: {identity} | display name authenticated={}",
             node.display_name_authenticated
         ),
-    ]
+    ];
+    lines.push(format!(
+        "refresh={} | observed={} | cooldown snapshot={}",
+        node.refresh
+            .map(propagation_refresh_label)
+            .unwrap_or("none"),
+        node.refresh_observed_epoch_ms
+            .map(|epoch| epoch.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        node.refresh_cooldown_remaining_seconds
+            .map(|seconds| format!("{seconds}s"))
+            .unwrap_or_else(|| "ready".into())
+    ));
+    lines.push(format!(
+        "sync={} | last={} | last successful={}",
+        node.sync.map(propagation_sync_label).unwrap_or("never"),
+        node.last_sync_epoch_ms
+            .map(|epoch| epoch.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        node.last_successful_sync_epoch_ms
+            .map(|epoch| epoch.to_string())
+            .unwrap_or_else(|| "never".into())
+    ));
+    if let Some(error) = &node.last_sync_error {
+        lines.push(format!("last sync error: {error}"));
+    }
+    lines
 }
 
 fn propagation_selection_label(value: PropagationNodeSelection) -> &'static str {
@@ -220,6 +246,26 @@ fn propagation_evidence_label(value: PropagationNodeEvidence) -> &'static str {
         PropagationNodeEvidence::UnknownAnnounceAge => "unknown announce age",
         PropagationNodeEvidence::PathNotKnown => "path not known",
         PropagationNodeEvidence::PathUnknown => "path not checked",
+    }
+}
+
+fn propagation_refresh_label(value: PropagationNodeRefreshEvidence) -> &'static str {
+    match value {
+        PropagationNodeRefreshEvidence::Running => "running",
+        PropagationNodeRefreshEvidence::Refreshed => "refreshed",
+        PropagationNodeRefreshEvidence::NoPath => "no path",
+        PropagationNodeRefreshEvidence::Cancelled => "cancelled",
+        PropagationNodeRefreshEvidence::TimedOut => "timed out",
+        PropagationNodeRefreshEvidence::Failed => "failed",
+    }
+}
+
+fn propagation_sync_label(value: PropagationNodeSyncEvidence) -> &'static str {
+    match value {
+        PropagationNodeSyncEvidence::Queued => "queued",
+        PropagationNodeSyncEvidence::Running => "running",
+        PropagationNodeSyncEvidence::Succeeded => "succeeded",
+        PropagationNodeSyncEvidence::Failed => "failed",
     }
 }
 

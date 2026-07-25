@@ -685,6 +685,22 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
                         .map(|cost| cost.to_string())
                         .unwrap_or_else(|| "unknown".into())
                 )));
+                lines.push(Line::from(format!(
+                    "refresh={:?} observed={:?} cooldown_snapshot={} sync={:?}",
+                    node.refresh,
+                    node.refresh_observed_epoch_ms,
+                    node.refresh_cooldown_remaining_seconds
+                        .map(|seconds| format!("{seconds}s"))
+                        .unwrap_or_else(|| "ready".into()),
+                    node.sync
+                )));
+                lines.push(Line::from(format!(
+                    "last_sync={:?} last_successful_sync={:?}",
+                    node.last_sync_epoch_ms, node.last_successful_sync_epoch_ms
+                )));
+                if let Some(error) = &node.last_sync_error {
+                    lines.push(Line::from(format!("last_sync_error={error}")));
+                }
             }
             lines
         })

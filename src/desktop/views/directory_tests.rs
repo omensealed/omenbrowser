@@ -2,7 +2,8 @@ use super::*;
 use crate::directory::{
     DeliveryFallbackPolicy, DirectoryEntry, PreferredDelivery, PropagationNodeCompatibility,
     PropagationNodeEvidence, PropagationNodeFreshness, PropagationNodePathState,
-    PropagationNodeRecord, PropagationNodeSelection, TrustLevel,
+    PropagationNodeRecord, PropagationNodeRefreshEvidence, PropagationNodeSelection,
+    PropagationNodeSyncEvidence, TrustLevel,
 };
 
 const FIXTURE_LXMF_PEER_HASH: &str = "00112233445566778899aabbccddeeff";
@@ -229,6 +230,13 @@ fn propagation_node_state_lines_keep_unknown_and_negative_evidence_distinct() {
         advertised_stamp_cost: None,
         compatibility: PropagationNodeCompatibility::Unknown,
         evidence: PropagationNodeEvidence::UnverifiedIdentity,
+        refresh: Some(PropagationNodeRefreshEvidence::NoPath),
+        refresh_observed_epoch_ms: Some(10),
+        refresh_cooldown_remaining_seconds: Some(3),
+        sync: Some(PropagationNodeSyncEvidence::Failed),
+        last_sync_epoch_ms: Some(20),
+        last_successful_sync_epoch_ms: Some(5),
+        last_sync_error: Some("path unavailable".into()),
     };
     let lines = propagation_node_state_lines(&record).join("\n");
     assert!(lines
@@ -237,6 +245,9 @@ fn propagation_node_state_lines_keep_unknown_and_negative_evidence_distinct() {
         "compatibility=unknown | evidence=unverified identity | advertised stamp cost=unknown"
     ));
     assert!(lines.contains("identity: unknown | display name authenticated=false"));
+    assert!(lines.contains("refresh=no path | observed=10 | cooldown snapshot=3s"));
+    assert!(lines.contains("sync=failed | last=20 | last successful=5"));
+    assert!(lines.contains("last sync error: path unavailable"));
 }
 
 #[test]

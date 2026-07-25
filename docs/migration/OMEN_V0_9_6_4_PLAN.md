@@ -736,6 +736,15 @@ facts. Desktop and TUI render the same evidence. The snapshot remains
 event-driven and subject to the existing item and byte budgets; no scanner,
 timer, request, retry, or automatic failover is added.
 
+Phase 4I projects existing propagation refresh and synchronization operations
+into that same bounded inventory. Refresh outcome, observation time, and the
+cooldown remaining at snapshot time come from the existing single-flight
+refresh owner. Sync state, last update, last successful completion, and the
+last bounded error come from the shared Operations history rather than a
+second history. Only records whose normalized target exactly matches a node
+are projected. Start, typed progress, and completion events refresh the
+snapshot; no recurring clock or status polling is introduced.
+
 ### Propagation-node quality of life
 
 Extend the existing bounded inventory with:

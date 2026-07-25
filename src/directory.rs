@@ -236,6 +236,26 @@ pub enum PropagationNodeEvidence {
     PathUnknown,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeRefreshEvidence {
+    Running,
+    Refreshed,
+    NoPath,
+    Cancelled,
+    TimedOut,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeSyncEvidence {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PropagationNodeRecord {
     pub destination_hash: String,
@@ -254,6 +274,13 @@ pub struct PropagationNodeRecord {
     pub advertised_stamp_cost: Option<u8>,
     pub compatibility: PropagationNodeCompatibility,
     pub evidence: PropagationNodeEvidence,
+    pub refresh: Option<PropagationNodeRefreshEvidence>,
+    pub refresh_observed_epoch_ms: Option<u64>,
+    pub refresh_cooldown_remaining_seconds: Option<u64>,
+    pub sync: Option<PropagationNodeSyncEvidence>,
+    pub last_sync_epoch_ms: Option<u64>,
+    pub last_successful_sync_epoch_ms: Option<u64>,
+    pub last_sync_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -262,6 +289,30 @@ pub struct PropagationNodeInventory {
     pub total_candidates: usize,
     pub retained_bytes: usize,
     pub truncated: bool,
+}
+
+impl PropagationNodeInventory {
+    pub(crate) fn enforce_bounds(&mut self) {
+        let nodes = std::mem::take(&mut self.nodes);
+        let mut retained =
+            Vec::with_capacity(nodes.len().min(PROPAGATION_NODE_INVENTORY_MAX_ITEMS));
+        let mut retained_bytes = 0_usize;
+        let mut truncated = self.truncated;
+        for node in nodes {
+            let node_bytes = propagation_node_record_bytes(&node);
+            if retained.len() == PROPAGATION_NODE_INVENTORY_MAX_ITEMS
+                || retained_bytes.saturating_add(node_bytes) > PROPAGATION_NODE_INVENTORY_MAX_BYTES
+            {
+                truncated = true;
+                continue;
+            }
+            retained_bytes = retained_bytes.saturating_add(node_bytes);
+            retained.push(node);
+        }
+        self.nodes = retained;
+        self.retained_bytes = retained_bytes;
+        self.truncated = truncated;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -683,28 +734,14 @@ impl DirectoryService {
         nodes.sort_by(propagation_node_record_order);
 
         let total_candidates = nodes.len();
-        let mut retained =
-            Vec::with_capacity(nodes.len().min(PROPAGATION_NODE_INVENTORY_MAX_ITEMS));
-        let mut retained_bytes = 0_usize;
-        let mut truncated = false;
-        for node in nodes {
-            let node_bytes = propagation_node_record_bytes(&node);
-            if retained.len() == PROPAGATION_NODE_INVENTORY_MAX_ITEMS
-                || retained_bytes.saturating_add(node_bytes) > PROPAGATION_NODE_INVENTORY_MAX_BYTES
-            {
-                truncated = true;
-                continue;
-            }
-            retained_bytes = retained_bytes.saturating_add(node_bytes);
-            retained.push(node);
-        }
-
-        PropagationNodeInventory {
-            nodes: retained,
+        let mut inventory = PropagationNodeInventory {
+            nodes,
             total_candidates,
-            retained_bytes,
-            truncated,
-        }
+            retained_bytes: 0,
+            truncated: false,
+        };
+        inventory.enforce_bounds();
+        inventory
     }
 
     pub fn known_nodes(&self) -> Vec<DirectoryEntry> {
@@ -1173,6 +1210,13 @@ fn propagation_node_record(
             PropagationNodeCompatibility::Unknown
         },
         evidence,
+        refresh: None,
+        refresh_observed_epoch_ms: None,
+        refresh_cooldown_remaining_seconds: None,
+        sync: None,
+        last_sync_epoch_ms: None,
+        last_successful_sync_epoch_ms: None,
+        last_sync_error: None,
     }
 }
 
@@ -1202,11 +1246,12 @@ fn propagation_freshness_rank(freshness: PropagationNodeFreshness) -> u8 {
 }
 
 fn propagation_node_record_bytes(node: &PropagationNodeRecord) -> usize {
-    const FIXED_BYTES: usize = 160;
+    const FIXED_BYTES: usize = 224;
     FIXED_BYTES
         .saturating_add(node.destination_hash.len())
         .saturating_add(node.identity_hash.as_ref().map_or(0, String::len))
         .saturating_add(node.display_name.len())
+        .saturating_add(node.last_sync_error.as_ref().map_or(0, String::len))
 }
 
 fn preferred_display_name(
@@ -1912,7 +1957,7 @@ mod tests {
                 .expect("ingest large relay");
         }
 
-        let inventory = service.propagation_node_inventory(
+        let mut inventory = service.propagation_node_inventory(
             Some("large-relay-0039"),
             &BTreeMap::new(),
             timestamp_secs(),
@@ -1921,6 +1966,14 @@ mod tests {
         assert!(inventory.truncated);
         assert!(inventory.nodes.len() < 40);
         assert!(inventory.retained_bytes <= PROPAGATION_NODE_INVENTORY_MAX_BYTES);
+        assert_eq!(inventory.nodes[0].destination_hash, "large-relay-0039");
+        let before_enrichment = inventory.nodes.len();
+        for node in &mut inventory.nodes {
+            node.last_sync_error = Some("e".repeat(crate::operations::OPERATION_TEXT_MAX_BYTES));
+        }
+        inventory.enforce_bounds();
+        assert!(inventory.retained_bytes <= PROPAGATION_NODE_INVENTORY_MAX_BYTES);
+        assert!(inventory.nodes.len() <= before_enrichment);
         assert_eq!(inventory.nodes[0].destination_hash, "large-relay-0039");
         assert_eq!(
             service

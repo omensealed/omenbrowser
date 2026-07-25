@@ -309,6 +309,16 @@ isolated attachment root. OMENbrowser therefore does not expose a misleading
 would need capability negotiation, mixed-version behavior, and an explicit
 pre-transfer admission boundary before such a threshold becomes meaningful.
 
+Propagation-node diagnostics also project operational evidence already owned
+elsewhere in the application. The current single-flight refresh contributes
+its outcome, observation time, and cooldown remaining at snapshot time. The
+bounded shared Operations history contributes node-correlated sync state, the
+latest sync update, the most recent successful completion, and its bounded
+last error. A later failed sync does not erase the prior successful timestamp.
+Unknown or non-node-correlated operations remain unknown. The projection is
+updated on existing start, typed progress, and completion events and creates no
+polling timer or duplicate operational history.
+
 The integrated runtime broadcast is consumed by one owned worker and forwarded
 through the existing 256-item application channel. Payload-bearing OMENchat
 events and SDK history pages additionally retain the shared 32 MiB queued-byte
