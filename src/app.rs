@@ -15975,6 +15975,15 @@ impl App {
                 format!("path Operations projection rejected an update: {error}"),
             );
         }
+        if let Err(error) =
+            crate::operations::lxmf::record_lxmf_runtime_event(&mut self.operation_history, &event)
+        {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("LXMF Operations projection rejected an update: {error}"),
+            );
+        }
         match event {
             crate::runtime::RuntimeBusEvent::StatusChanged(status) => {
                 self.runtime_status = status.clone();
@@ -22507,6 +22516,64 @@ mod tests {
             Some("path known; 2 hop(s)")
         );
         assert_eq!(app.network_doctor_state.recent_paths[0].state, "known");
+    }
+
+    #[test]
+    fn runtime_handler_projects_typed_sdk_delivery_without_conflating_sent_and_delivered() {
+        let mut app = App::new(test_config("operations-runtime-handler-lxmf"));
+        let update = |state, terminal, last_updated_ms, seq_no| {
+            RuntimeBusEvent::SdkDeliveryUpdated(crate::runtime::RuntimeLxmfDeliveryUpdate {
+                message_id: "sdk-message-id".into(),
+                peer_hash: Some("AABBCCDDEEFF00112233445566778899".into()),
+                previous_state: None,
+                state,
+                terminal,
+                attempts: 1,
+                reason_code: None,
+                last_updated_ms,
+                event_id: format!("event-{seq_no}"),
+                seq_no,
+                cursor: format!("cursor-{seq_no}"),
+            })
+        };
+        let _ = app.handle_runtime_bus_event(update(
+            crate::runtime::RuntimeLxmfDeliveryState::Sent,
+            false,
+            10,
+            1,
+        ));
+        let sent = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("sent operation");
+        assert_eq!(
+            sent.state,
+            crate::operations::OperationState::TransportAccepted
+        );
+        assert!(!sent.state.claims_peer_delivery());
+
+        let _ = app.handle_runtime_bus_event(update(
+            crate::runtime::RuntimeLxmfDeliveryState::Delivered,
+            true,
+            20,
+            2,
+        ));
+        let delivered = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("delivered operation");
+        assert_eq!(
+            delivered.state,
+            crate::operations::OperationState::Delivered
+        );
+        assert!(delivered.state.claims_peer_delivery());
+        assert_eq!(delivered.event_cursor, Some(2));
+        assert_eq!(
+            delivered.evidence.last().map(|evidence| evidence.kind),
+            Some(crate::operations::OperationEvidenceKind::PeerDelivery)
+        );
     }
 
     #[test]

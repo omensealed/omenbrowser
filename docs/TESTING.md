@@ -3099,6 +3099,31 @@ OMENchat server, reconnect over the network, or inspect private identity
 material. Live open/close/reconnect behavior remains covered by the documented
 OMENchat smoke and interoperability gates.
 
+The typed LXMF SDK Operations fixtures prove every v0.9.6 delivery-state
+mapping, backend-dependent terminal-sent behavior, opaque message correlation,
+peer-target retention, bounded reason handling, exact attempts/sequence,
+transition and evidence coalescing, duplicate/stale rejection, terminal
+regression protection, inconsistent terminal-flag rejection, no private event
+metadata retention, and saturation behavior:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::lxmf::tests --lib
+
+cargo test --locked --no-default-features --features tui \
+  operations::lxmf::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_projects_typed_sdk_delivery --lib
+```
+
+These tests construct typed runtime events in memory and use an isolated
+application root. They do not send LXMF, start Reticulum, contact a peer,
+observe a receipt, synchronize propagation, or establish Python
+interoperability. Native `MessageDeliveryUpdated`/`LxmfDeliveryEvidence`
+correlation and live peer-delivery proof remain separate test and migration
+units.
+
 The typed Resource adapter fixtures prove stable opaque correlation, transfer
 identifier and browser-operation redaction, offer/progress coalescing, retained
 authoritative totals, regression and malformed-total rejection, completion

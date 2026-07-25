@@ -5,6 +5,7 @@ use thiserror::Error;
 
 #[cfg(feature = "chat-client")]
 pub mod connection;
+pub mod lxmf;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod omenchat;
 pub mod path;

@@ -176,6 +176,43 @@ are not retained. The adapter adds no transport event, retry, worker, timer,
 subscription, queue, persistence, protocol field, or dependency. Existing
 OMENchat reconnect controls and retry policy remain authoritative.
 
+## Typed LXMF SDK delivery adapter
+
+`src/operations/lxmf.rs` projects the existing
+`RuntimeBusEvent::SdkDeliveryUpdated` surface from the locked lxmf-sdk 0.9.6
+train. The update already carries a typed delivery state, terminal flag,
+attempt count, timestamp, sequence number, message identifier, and optional
+peer. This unit deliberately does not parse human-readable delivery strings.
+
+The mapping preserves delivery boundaries:
+
+- queued is `Queued` with queue-admission evidence;
+- dispatching and in-flight remain `Dispatching`;
+- nonterminal sent is `TransportAccepted`, not delivered;
+- terminal sent is local `Completed` when the backend lacks receipt
+  terminality, never delivered;
+- only typed delivered becomes `Delivered` with authoritative peer-delivery
+  evidence;
+- failed, cancelled, expired, and rejected remain distinct terminal outcomes;
+- unknown becomes uncertain `Reconciling`;
+- inconsistent state/terminal combinations are rejected.
+
+The message identifier is validated and converted to an opaque 128-bit
+operation key; it is never rendered. A known peer is retained as the bounded
+public target and survives a later update that omits peer metadata. Attempts
+and numeric event sequence are retained exactly. Transitions coalesce, bounded
+evidence keeps only the latest 16 entries, duplicate/stale updates are ignored,
+and a terminal record cannot regress to later nonterminal state. Reason codes
+are retained only when control-free and within 512 bytes; otherwise a fixed
+omission notice is stored.
+
+The older native `MessageDeliveryUpdated` and `LxmfDeliveryEvidence` surfaces
+remain unchanged and are not merged into this adapter yet. That reconciliation
+requires explicit correlation and precedence tests so native RNS proof,
+propagation-node acceptance, peer activity, and router delivery do not become
+equivalent evidence accidentally. No send, retry, cancellation, worker, timer,
+subscription, queue, persistence, protocol field, or dependency is added.
+
 ## Reticulum path-observation adapter
 
 `src/operations/path.rs` observes the existing typed `PathUpdated` runtime

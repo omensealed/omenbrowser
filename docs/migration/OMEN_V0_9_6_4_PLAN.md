@@ -482,6 +482,22 @@ Existing reconnect policy and controls remain unchanged. No worker, timer,
 subscription, queue, persistence, protocol, transport behavior, action, or
 dependency is introduced.
 
+Phase 3J adds a bounded adapter for typed lxmf-sdk 0.9.6 delivery updates.
+Queued, dispatching/in-flight, sent, delivered, failed, cancelled, expired,
+rejected, and unknown map to distinct project states and evidence. Nonterminal
+sent is transport acceptance; terminal sent is local completion for backends
+without receipt terminality; only typed delivered claims peer delivery.
+Message IDs become opaque operation keys and are not rendered. Peer targets,
+attempts, timestamps, and numeric sequence are retained within existing
+bounds; event IDs, cursor strings, and message IDs are omitted from
+presentation. Transitions coalesce, evidence is capped, stale/duplicate updates
+and terminal regressions are ignored, impossible state/terminal combinations
+are rejected, and oversized reason codes become a fixed omission notice.
+Legacy native status and evidence events remain a separate correlation unit so
+RNS proof, propagation acceptance, peer activity, and router delivery cannot be
+conflated. No send, retry, cancel, worker, timer, subscription, queue,
+persistence, protocol, or dependency is introduced.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:
