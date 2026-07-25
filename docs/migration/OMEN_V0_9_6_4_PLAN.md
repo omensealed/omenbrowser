@@ -454,6 +454,19 @@ correlation, and transport behavior are unchanged. No worker, timer,
 subscription, queue, cache, persistence, protocol, action, or dependency is
 introduced.
 
+Phase 3H adds a narrow adapter for typed Reticulum `PathUpdated` observations.
+Normalized destinations correlate to opaque project keys; known paths are
+locally `Completed`, unknown paths remain unresolved `Waiting`, and neither
+state is message delivery or a fabricated request failure. Hop evidence appears
+only when supplied by the event. Repeated observations coalesce, route loss can
+reopen a completed record, stale timestamps are ignored, and saturation
+preserves unresolved work. The typed event does not identify request
+initiation, failure, timeout, or reason, so those states remain explicitly
+outside this unit rather than being parsed from logs. Existing path requests,
+warmups, browser retries, Network Doctor behavior, and runtime transport remain
+unchanged. No worker, timer, subscription, queue, persistence, protocol,
+action, or dependency is introduced.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:

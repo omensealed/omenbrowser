@@ -15964,6 +15964,17 @@ impl App {
                 format!("resource Operations projection rejected an update: {error}"),
             );
         }
+        if let Err(error) = crate::operations::path::record_path_runtime_event(
+            &mut self.operation_history,
+            &event,
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("path Operations projection rejected an update: {error}"),
+            );
+        }
         match event {
             crate::runtime::RuntimeBusEvent::StatusChanged(status) => {
                 self.runtime_status = status.clone();
@@ -22442,6 +22453,60 @@ mod tests {
                 && record.state == crate::operations::OperationState::Cancelled
                 && record.last_error.as_deref() == Some("user cancelled")
         }));
+    }
+
+    #[test]
+    fn runtime_handler_projects_path_observations_without_delivery_claims() {
+        let mut app = App::new(test_config("operations-runtime-handler-path"));
+        let destination = "AABBCCDDEEFF00112233445566778899";
+        assert!(app.handle_runtime_bus_event(RuntimeBusEvent::PathUpdated(
+            crate::runtime::PathEvent {
+                destination_hash: destination.into(),
+                known: false,
+                hops: None,
+            },
+        )));
+        let waiting = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::PathDiscovery)
+            .expect("waiting path operation");
+        assert_eq!(waiting.state, crate::operations::OperationState::Waiting);
+        assert_eq!(waiting.target.label, "aabbccddeeff00112233445566778899");
+        assert!(waiting.last_error.is_none());
+        assert_eq!(app.network_doctor_state.recent_paths[0].state, "unknown");
+
+        assert!(app.handle_runtime_bus_event(RuntimeBusEvent::PathUpdated(
+            crate::runtime::PathEvent {
+                destination_hash: destination.into(),
+                known: true,
+                hops: Some(2),
+            },
+        )));
+        assert_eq!(
+            app.operation_history
+                .records()
+                .filter(|record| {
+                    record.id.domain == crate::operations::OperationDomain::PathDiscovery
+                })
+                .count(),
+            1
+        );
+        let completed = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::PathDiscovery)
+            .expect("completed path operation");
+        assert_eq!(
+            completed.state,
+            crate::operations::OperationState::Completed
+        );
+        assert!(!completed.state.claims_peer_delivery());
+        assert_eq!(
+            completed.evidence[0].detail.as_deref(),
+            Some("path known; 2 hop(s)")
+        );
+        assert_eq!(app.network_doctor_state.recent_paths[0].state, "known");
     }
 
     #[test]

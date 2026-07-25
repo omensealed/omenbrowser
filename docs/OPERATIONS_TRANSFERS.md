@@ -144,6 +144,31 @@ subscription, persistence, protocol field, or dependency.
 The eventual interactive desktop/TUI views must continue to consume the same
 projection rather than define frontend-specific delivery vocabulary.
 
+## Reticulum path-observation adapter
+
+`src/operations/path.rs` observes the existing typed `PathUpdated` runtime
+event at the application event boundary. The current upstream-facing event
+contains destination, known/unknown state, and optional hop count. It does not
+contain a typed request identity, request failure, timeout, or reason, so this
+unit does not infer those states from logs or UI task results.
+
+Destination text is trimmed, control-free, byte bounded, and normalized for
+stable case-insensitive correlation. The shared operation key is an opaque
+128-bit digest while the normalized destination remains the public target.
+Repeated observations replace the prior path evidence:
+
+- `known=false` is authoritative unresolved `Waiting`, never `Failed`;
+- `known=true` is locally terminal `Completed`, never `Delivered`;
+- hop count is shown only when the typed known-path event supplies it;
+- a later unknown observation can reopen a completed path after route loss;
+- an observation older than the retained record is ignored;
+- history saturation leaves existing unresolved work intact and logs rejection.
+
+The adapter adds no request, warmup, retry, timeout, path-table mutation,
+worker, timer, subscription, queue, persistence, protocol field, action, or
+dependency. Path-request initiation remains future work until a reliable shared
+typed event boundary exists.
+
 ## Reticulum Resource lifecycle adapter
 
 `src/operations/resource.rs` observes the existing typed

@@ -5,6 +5,7 @@ use thiserror::Error;
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod omenchat;
+pub mod path;
 pub mod presentation;
 pub mod resource;
 
@@ -119,6 +120,7 @@ pub enum OperationEvidenceKind {
     TransportAcceptance,
     Receipt,
     PeerDelivery,
+    PathObservation,
     ResourceOffer,
     ResourceProgress,
     ResourceCompletion,

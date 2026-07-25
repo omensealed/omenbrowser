@@ -3053,6 +3053,30 @@ The temporary root is removed after rendering. No runtime backend, identity,
 Reticulum peer, OMENchat server, timer, worker, or input action is started.
 Interactive filter/action controls remain a later gate.
 
+The typed path-observation adapter fixtures prove destination normalization,
+stable opaque correlation, control/size rejection, known versus unknown
+semantics, hop evidence, coalescing, route-loss reopening, stale-observation
+rejection, unrelated-event omission, no peer-delivery claim, and saturation
+that preserves unresolved work:
+
+```bash
+cargo test --locked --no-default-features --features tui \
+  operations::path::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  operations::path::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_projects_path_observations --lib
+```
+
+These are deterministic in-memory or isolated-root tests. They do not request a
+path, warm a destination, start Reticulum, contact a peer, or touch the
+maintainer's identity/configuration. The adapter intentionally has no fixture
+for typed request failure because `PathUpdated` does not expose request
+identity, timeout, failure, or reason; live path request behavior remains a
+separate smoke/interoperability gate.
+
 The typed Resource adapter fixtures prove stable opaque correlation, transfer
 identifier and browser-operation redaction, offer/progress coalescing, retained
 authoritative totals, regression and malformed-total rejection, completion

@@ -265,6 +265,7 @@ pub fn evidence_label(kind: OperationEvidenceKind) -> &'static str {
         OperationEvidenceKind::TransportAcceptance => "transport acceptance",
         OperationEvidenceKind::Receipt => "receipt",
         OperationEvidenceKind::PeerDelivery => "peer delivery",
+        OperationEvidenceKind::PathObservation => "path observation",
         OperationEvidenceKind::ResourceOffer => "resource offer",
         OperationEvidenceKind::ResourceProgress => "resource progress",
         OperationEvidenceKind::ResourceCompletion => "resource completion",
