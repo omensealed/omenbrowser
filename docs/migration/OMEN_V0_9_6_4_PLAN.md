@@ -568,6 +568,21 @@ recent-announce cache and wait were used only to enforce the obsolete cutoff,
 so this unit reduces retained state and waiting rather than adding a worker,
 timer, queue, cache, protocol, storage, configuration, or dependency.
 
+Phase 3P fixes omenchatd's multi-gateway management boundary. The live runtime
+already parsed, validated, started, monitored, and shut down multiple enabled
+TCP interface sections, but every explicit CLI/TUI client edit regenerated the
+whole Reticulum configuration and silently replaced the previous interface.
+`interfaces tcp-client` and the TUI/line-console gateway action now add a
+uniquely named TCP client while preserving listeners and other clients.
+Redacted `interfaces list` and endpoint-specific `interfaces delete tcp-client`
+commands provide inspection and removal; the line console also accepts
+`tcp-client-delete`. Edits reject duplicates, control-character injection,
+non-regular configuration files, more than 64 interfaces, and more than 2 MiB,
+and retain an owner-only pre-edit recovery copy. Bootstrap-only
+`init/run --tcp-client` overrides deliberately keep their single generated
+configuration behavior. No live worker, identity/storage ownership, IFAC wire
+behavior, protocol, database, dependency, or default interface is changed.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:

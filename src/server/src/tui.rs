@@ -2764,17 +2764,17 @@ impl AdminTui {
             InputMode::EditTcpClient => {
                 let tcp_client = parse_tcp_client_override(&value)
                     .ok_or_else(|| ServerError::Message("invalid gateway host:port".into()))?;
-                config::write_reticulum_tcp_client_config(&self.config, &tcp_client)?;
+                let name = config::add_reticulum_tcp_client_config(&self.config, &tcp_client)?;
                 append_admin_log(
                     &self.config,
                     format!(
-                        "admin wrote TCPClientInterface target={}:{}",
-                        tcp_client.target_host, tcp_client.target_port
+                        "admin added TCPClientInterface name={} target={}:{}",
+                        name, tcp_client.target_host, tcp_client.target_port
                     ),
                 );
                 self.status = format!(
-                    "gateway saved: {}:{}; restart live server, then check Monitoring",
-                    tcp_client.target_host, tcp_client.target_port
+                    "gateway added as {name}: {}:{}; restart live server, then check Monitoring",
+                    tcp_client.target_host, tcp_client.target_port,
                 );
                 self.input_mode = InputMode::Navigate;
             }
@@ -4560,15 +4560,44 @@ fn apply_admin_command_with_database(
             };
             let tcp_client = parse_tcp_client_override(value)
                 .ok_or_else(|| ServerError::Message("invalid gateway host:port".into()))?;
-            config::write_reticulum_tcp_client_config(config, &tcp_client)?;
+            let name = config::add_reticulum_tcp_client_config(config, &tcp_client)?;
             append_admin_log(
                 config,
                 format!(
-                    "admin console wrote TCPClientInterface target={}:{}",
+                    "admin console added TCPClientInterface name={} target={}:{}",
+                    name, tcp_client.target_host, tcp_client.target_port
+                ),
+            );
+            println!(
+                "added {name}: {}:{}",
+                tcp_client.target_host, tcp_client.target_port
+            );
+            Ok(AdminConsoleAction::Continue)
+        }
+        "tcp-client-delete" => {
+            let Some(value) = parts.next() else {
+                return Err(ServerError::Message(
+                    "usage: tcp-client-delete <gateway_host:port>".into(),
+                ));
+            };
+            let tcp_client = parse_tcp_client_override(value)
+                .ok_or_else(|| ServerError::Message("invalid gateway host:port".into()))?;
+            let removed = config::delete_reticulum_tcp_client_config(
+                config,
+                &tcp_client.target_host,
+                tcp_client.target_port,
+            )?;
+            append_admin_log(
+                config,
+                format!(
+                    "admin console removed {removed} TCPClientInterface target={}:{}",
                     tcp_client.target_host, tcp_client.target_port
                 ),
             );
-            println!("updated {}", config.reticulum_config_file().display());
+            println!(
+                "removed {removed} TCP client interface(s) for {}:{}",
+                tcp_client.target_host, tcp_client.target_port
+            );
             Ok(AdminConsoleAction::Continue)
         }
         "ban-user" => {
@@ -6037,7 +6066,10 @@ mod tests {
 
         app.start_input(InputMode::EditTcpClient, "gateway.example:42420".into());
         app.commit_input().expect("tcp client");
-        assert!(app.status.contains("gateway saved: gateway.example:42420"));
+        assert!(app
+            .status
+            .contains("gateway added as OMENchat TCP Client 1"));
+        assert!(app.status.contains("gateway.example:42420"));
         assert!(app.status.contains("restart live server"));
         assert!(app.status.contains("check Monitoring"));
 

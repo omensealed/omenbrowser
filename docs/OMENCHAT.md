@@ -84,6 +84,20 @@ Add a TCP gateway:
 omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-test
 ```
 
+That command adds a client without replacing other configured TCP clients or
+listeners. Multiple enabled TCP clients are started independently. Inspect the
+redacted list or delete one exact endpoint with:
+
+```bash
+omenchatd interfaces list --home /tmp/omenchatd-test
+omenchatd interfaces delete tcp-client <gateway-host:port> \
+  --home /tmp/omenchatd-test
+```
+
+The generated configuration is bounded to 64 interface sections and 2 MiB.
+Add/delete writes retain an owner-only `config.before-interface-edit.bak`
+recovery copy, and take effect after the live server restarts.
+
 For IFAC-protected gateways:
 
 ```bash

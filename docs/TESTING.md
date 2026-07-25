@@ -3995,3 +3995,23 @@ This is a deterministic admission-policy test. It does not prove the
 maintainer's public-gateway/private-gateway deployment, which still requires a
 live announce, path, link, and OMENchat exchange smoke test from an isolated
 client root.
+
+## omenchatd multiple TCP clients
+
+The standalone server config tests add two TCP clients, retain an unrelated
+TCP listener, list only redacted endpoint/IFAC state, delete one endpoint, and
+verify the owner-only recovery backup. The live Reticulum test parses the
+generated configuration, starts two independent loopback TCP client workers,
+and requires bounded shutdown to join both workers:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full tcp_client
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  live_runtime_owns_two_configured_tcp_client_workers
+```
+
+These tests use isolated temporary server homes. The loopback workers prove
+multi-interface ownership and shutdown, not connectivity through the
+maintainer's WNS/private-gateway topology.

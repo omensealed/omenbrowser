@@ -2068,7 +2068,7 @@ fn validate_reticulum_interfaces(interfaces: &[ReticulumInterface]) -> ServerRes
             Some("TCPServerInterface") | Some("tcp_server") => {
                 if interface.network_name.is_some() || interface.passphrase.is_some() {
                     return Err(ServerError::Message(format!(
-                        "enabled TCP server interface {} configures IFAC, but the published reticulum-rs 0.9.5 TCP server does not enforce the Python IFAC wire transform; use an IFAC TCP client or disable this interface",
+                        "enabled TCP server interface {} configures IFAC, but the published reticulum-rs 0.9.6 TCP server does not enforce the Python IFAC wire transform; use an IFAC TCP client or disable this interface",
                         interface.name
                     )));
                 }
@@ -2570,6 +2570,77 @@ mod tests {
             .expect_err("stock TCP server must not claim IFAC enforcement");
         assert!(error.to_string().contains("does not enforce"));
         assert!(!error.to_string().contains("public-test-fixture"));
+    }
+
+    #[test]
+    fn generated_multi_client_config_is_accepted_by_live_runtime_parser() {
+        let config = test_config("multiple-tcp-clients");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("init isolated config");
+        for (host, port) in [("private.example", 42420), ("wns.example", 42421)] {
+            crate::config::add_reticulum_tcp_client_config(
+                &config,
+                &crate::TcpClientOverride {
+                    target_host: host.into(),
+                    target_port: port,
+                    network_name: None,
+                    passphrase: None,
+                },
+            )
+            .expect("add TCP client");
+        }
+
+        let interfaces =
+            parse_reticulum_interfaces(&config.reticulum_config_file()).expect("parse interfaces");
+        validate_reticulum_interfaces(&interfaces).expect("validate interfaces");
+        let clients = interfaces
+            .iter()
+            .filter(|interface| interface.kind.as_deref() == Some("TCPClientInterface"))
+            .collect::<Vec<_>>();
+        assert_eq!(clients.len(), 2);
+        assert_eq!(clients[0].target_host.as_deref(), Some("private.example"));
+        assert_eq!(clients[1].target_host.as_deref(), Some("wns.example"));
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
+    #[tokio::test]
+    async fn live_runtime_owns_two_configured_tcp_client_workers() {
+        let config = test_config("multiple-live-tcp-clients");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("init isolated config");
+        for port in [42431, 42432] {
+            crate::config::add_reticulum_tcp_client_config(
+                &config,
+                &crate::TcpClientOverride {
+                    target_host: "127.0.0.1".into(),
+                    target_port: port,
+                    network_name: None,
+                    passphrase: None,
+                },
+            )
+            .expect("add TCP client");
+        }
+
+        let mut runtime = start_live_server(&config)
+            .await
+            .expect("start live runtime");
+        let interfaces = runtime.interface_stats_lines();
+        assert_eq!(interfaces.len(), 2);
+        assert!(interfaces
+            .iter()
+            .any(|line| line.contains("127.0.0.1:42431")));
+        assert!(interfaces
+            .iter()
+            .any(|line| line.contains("127.0.0.1:42432")));
+        assert_eq!(runtime.owned_tasks.len(), 6);
+
+        tokio::time::timeout(Duration::from_secs(5), runtime.shutdown(&config))
+            .await
+            .expect("shutdown must be bounded")
+            .expect("shutdown");
+        assert!(runtime.owned_tasks.is_empty());
+        assert!(crate::server_log::flush(Duration::from_secs(1)));
+        let _ = std::fs::remove_dir_all(config.root_dir());
     }
 
     #[test]

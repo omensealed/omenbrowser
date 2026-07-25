@@ -43,8 +43,10 @@ pub enum CliCommand {
     RoomsAdd(ServerOptions, RoomAddOptions),
     RoomsSetTopic(ServerOptions, RoomTopicOptions),
     RoomsArchive(ServerOptions, RoomSelectOptions),
+    InterfacesList(ServerOptions),
     InterfacesTcpServer(ServerOptions, TcpServerOverride),
     InterfacesTcpClient(ServerOptions, TcpClientOverride),
+    InterfacesDeleteTcpClient(ServerOptions, TcpClientOverride),
     Invalid(String),
     Help,
     Version,
@@ -366,8 +368,48 @@ impl Omenchatd {
             CliCommand::InterfacesTcpClient(options, tcp_client) => {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
-                config::write_reticulum_tcp_client_config(&config, &tcp_client)?;
-                println!("updated {}", config.reticulum_config_file().display());
+                let name = config::add_reticulum_tcp_client_config(&config, &tcp_client)?;
+                println!(
+                    "added {name}: {}:{}",
+                    tcp_client.target_host, tcp_client.target_port
+                );
+                Ok(())
+            }
+            CliCommand::InterfacesList(options) => {
+                let config = config_from_options(&options)?;
+                config::init_files(&config)?;
+                let interfaces = config::list_reticulum_tcp_client_configs(&config)?;
+                if interfaces.is_empty() {
+                    println!("no TCP client interfaces configured");
+                } else {
+                    for interface in interfaces {
+                        println!(
+                            "{}\t{}:{}\tifac={}",
+                            interface.name,
+                            interface.target_host,
+                            interface.target_port,
+                            if interface.ifac_configured {
+                                "configured"
+                            } else {
+                                "none"
+                            }
+                        );
+                    }
+                }
+                Ok(())
+            }
+            CliCommand::InterfacesDeleteTcpClient(options, tcp_client) => {
+                let config = config_from_options(&options)?;
+                config::init_files(&config)?;
+                let removed = config::delete_reticulum_tcp_client_config(
+                    &config,
+                    &tcp_client.target_host,
+                    tcp_client.target_port,
+                )?;
+                println!(
+                    "removed {removed} TCP client interface(s) for {}:{}",
+                    tcp_client.target_host, tcp_client.target_port
+                );
                 Ok(())
             }
             CliCommand::Invalid(error) => Err(crate::error::ServerError::Message(error)),
@@ -495,6 +537,7 @@ fn parse_interfaces_command(args: impl IntoIterator<Item = String>) -> CliComman
         return CliCommand::Help;
     };
     match command.as_str() {
+        "list" => CliCommand::InterfacesList(parse_options(args)),
         "tcp-server" => {
             let Some(value) = args.next() else {
                 return CliCommand::Help;
@@ -514,6 +557,27 @@ fn parse_interfaces_command(args: impl IntoIterator<Item = String>) -> CliComman
             };
             apply_ifac_options(&mut tcp_client, ifac);
             CliCommand::InterfacesTcpClient(options, tcp_client)
+        }
+        "delete-tcp-client" => {
+            let Some(value) = args.next() else {
+                return CliCommand::Help;
+            };
+            let Some(tcp_client) = parse_tcp_client_override(&value) else {
+                return CliCommand::Help;
+            };
+            CliCommand::InterfacesDeleteTcpClient(parse_options(args), tcp_client)
+        }
+        "delete" => {
+            if args.next().as_deref() != Some("tcp-client") {
+                return CliCommand::Help;
+            }
+            let Some(value) = args.next() else {
+                return CliCommand::Help;
+            };
+            let Some(tcp_client) = parse_tcp_client_override(&value) else {
+                return CliCommand::Help;
+            };
+            CliCommand::InterfacesDeleteTcpClient(parse_options(args), tcp_client)
         }
         _ => CliCommand::Help,
     }
@@ -878,8 +942,10 @@ fn print_help() {
     println!("  rooms add <name> [--topic <topic>] [--home <path>]");
     println!("  rooms topic <room_id> [--topic <topic>] [--home <path>]");
     println!("  rooms archive <room_id> [--home <path>]");
+    println!("  interfaces list [--home <path>]");
     println!("  interfaces tcp-server <listen_ip:port> [--home <path>]");
-    println!("  interfaces tcp-client <host:port> [--home <path>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]");
+    println!("  interfaces tcp-client <host:port> [--home <path>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]  # add without replacing existing clients");
+    println!("  interfaces delete tcp-client <host:port> [--home <path>]");
     println!("  --passphrase <pass> is deprecated because argv may be visible to other processes");
     if cfg!(feature = "tui") {
         println!("  tui [--home <path>]");
@@ -981,7 +1047,7 @@ fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
             "version": env!("CARGO_PKG_VERSION"),
         },
         "dependency_train": {
-            "reticulum_rs": "0.9.5",
+            "reticulum_rs": "0.9.6",
             "lxmf": null,
         },
         "runtime": {
@@ -1466,7 +1532,7 @@ mod tests {
             status_value["application"]["version"],
             env!("CARGO_PKG_VERSION")
         );
-        assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.5");
+        assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.6");
         assert_eq!(status_value["runtime"]["mode"], runtime_mode_label());
 
         let doctor = render_doctor_json(&config).expect("doctor json");
@@ -1787,6 +1853,47 @@ mod tests {
             CliCommand::InterfacesTcpClient(
                 ServerOptions {
                     home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                TcpClientOverride {
+                    target_host: "gateway.example".into(),
+                    target_port: 42420,
+                    network_name: None,
+                    passphrase: None,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_parses_interface_list_and_tcp_client_delete_commands() {
+        let home = PathBuf::from("/tmp/omenchatd-admin");
+        assert_eq!(
+            CliCommand::parse([
+                "interfaces".into(),
+                "list".into(),
+                "--home".into(),
+                home.display().to_string(),
+            ]),
+            CliCommand::InterfacesList(ServerOptions {
+                home: Some(home.clone()),
+                tcp_server: None,
+                tcp_client: None,
+            })
+        );
+        assert_eq!(
+            CliCommand::parse([
+                "interfaces".into(),
+                "delete".into(),
+                "tcp-client".into(),
+                "gateway.example:42420".into(),
+                "--home".into(),
+                home.display().to_string(),
+            ]),
+            CliCommand::InterfacesDeleteTcpClient(
+                ServerOptions {
+                    home: Some(home),
                     tcp_server: None,
                     tcp_client: None,
                 },

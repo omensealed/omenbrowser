@@ -49,9 +49,25 @@ omenchatd rooms list
 omenchatd rooms add field-ops --topic "Field operations"
 omenchatd interfaces tcp-server 127.0.0.1:42420
 omenchatd interfaces tcp-client gateway.example:42420
+omenchatd interfaces list
 omenchatd tui
 omenchatd run
 ```
+
+`interfaces tcp-client` adds a TCP client without replacing existing TCP
+clients or listeners. List the redacted endpoints and remove one exact endpoint
+with:
+
+```bash
+omenchatd interfaces list
+omenchatd interfaces delete tcp-client gateway.example:42420
+```
+
+Interface edits are capped at 64 sections and a 2 MiB configuration. Before an
+add/delete edit, omenchatd writes an owner-only
+`config.before-interface-edit.bak` recovery copy. Restart the live server after
+editing interfaces. The runtime already starts every enabled supported
+interface in the resulting configuration.
 
 `omenchatd run` arms its platform signal handlers before advertising readiness,
 then handles Ctrl-C/SIGINT on all supported platforms and SIGTERM on Unix.
@@ -101,7 +117,7 @@ omenchatd interfaces tcp-client gateway.example:42420 \
 
 IFAC is currently enforced only by omenchatd's project-local TCP **client**
 adapter. A `TCPServerInterface` containing `network_name` or `passphrase` is
-rejected at startup because the published reticulum-rs 0.9.5 stock TCP server
+rejected at startup because the published reticulum-rs 0.9.6 stock TCP server
 does not apply the Python IFAC wire transform. Run the enforcing gateway as the
 server and connect omenchatd to it as shown above.
 
@@ -212,6 +228,7 @@ delete-user 7
 prune-stale-users
 tcp-server 127.0.0.1:42420
 tcp-client gateway.example:42420
+tcp-client-delete gateway.example:42420
 show-config
 quit
 ```

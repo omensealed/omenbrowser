@@ -16,6 +16,8 @@ pub const NOMADNET_PORTAL_PATH: &str = "/page/index.mu";
 pub const DEFAULT_UPLOAD_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_MAX_FILE_BYTES: u64 = 512 * 1024;
 pub const DEFAULT_PING_INTERVAL_SECONDS: u64 = 30;
+pub const RETICULUM_CONFIG_MAX_BYTES: usize = 2 * 1024 * 1024;
+pub const RETICULUM_CONFIG_MAX_INTERFACES: usize = 64;
 static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Default, Deserialize)]
@@ -126,6 +128,14 @@ pub struct ServerLimitsConfig {
     pub large_batch_threshold_bytes: usize,
     pub rate_messages_per_minute: usize,
     pub rate_commands_per_minute: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TcpClientInterfaceSummary {
+    pub name: String,
+    pub target_host: String,
+    pub target_port: u16,
+    pub ifac_configured: bool,
 }
 
 impl Default for ServerLimitsConfig {
@@ -842,6 +852,91 @@ pub fn write_reticulum_tcp_client_config(
     Ok(())
 }
 
+pub fn add_reticulum_tcp_client_config(
+    config: &ServerConfig,
+    tcp_client: &TcpClientOverride,
+) -> ServerResult<String> {
+    validate_tcp_client_override(tcp_client)?;
+    std::fs::create_dir_all(&config.reticulum_config_path)?;
+    let config_path = config.reticulum_config_file();
+    let current = read_reticulum_config_bounded(&config_path)?;
+    let blocks = reticulum_interface_blocks(&current);
+    if blocks.len() >= RETICULUM_CONFIG_MAX_INTERFACES {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration already contains the {RETICULUM_CONFIG_MAX_INTERFACES} interface limit"
+        )));
+    }
+    let summaries = checked_tcp_client_summaries(&current)?;
+    if let Some(existing) = summaries.into_iter().find(|existing| {
+        existing
+            .target_host
+            .eq_ignore_ascii_case(&tcp_client.target_host)
+            && existing.target_port == tcp_client.target_port
+    }) {
+        return Err(ServerError::Message(format!(
+            "TCP client {}:{} is already configured as {}",
+            tcp_client.target_host, tcp_client.target_port, existing.name
+        )));
+    }
+
+    let name = next_tcp_client_interface_name(&blocks);
+    let mut rendered = current;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    if !rendered.ends_with("\n\n") {
+        rendered.push('\n');
+    }
+    rendered.push_str(&render_reticulum_tcp_client_section(&name, tcp_client));
+    write_reticulum_config_edit(config, rendered.as_bytes())?;
+    Ok(name)
+}
+
+pub fn delete_reticulum_tcp_client_config(
+    config: &ServerConfig,
+    target_host: &str,
+    target_port: u16,
+) -> ServerResult<usize> {
+    validate_tcp_client_endpoint(target_host, target_port)?;
+    let config_path = config.reticulum_config_file();
+    let current = read_reticulum_config_bounded(&config_path)?;
+    let blocks = reticulum_interface_blocks(&current);
+    let removals = blocks
+        .iter()
+        .filter(|block| {
+            block.kind.as_deref() == Some("TCPClientInterface")
+                && block
+                    .target_host
+                    .as_deref()
+                    .is_some_and(|host| host.eq_ignore_ascii_case(target_host))
+                && block.target_port == Some(target_port)
+        })
+        .map(|block| (block.start, block.end))
+        .collect::<Vec<_>>();
+    if removals.is_empty() {
+        return Err(ServerError::Message(format!(
+            "TCP client {target_host}:{target_port} is not configured"
+        )));
+    }
+
+    let mut rendered = String::with_capacity(current.len());
+    let mut cursor = 0;
+    for (start, end) in &removals {
+        rendered.push_str(&current[cursor..*start]);
+        cursor = *end;
+    }
+    rendered.push_str(&current[cursor..]);
+    write_reticulum_config_edit(config, rendered.as_bytes())?;
+    Ok(removals.len())
+}
+
+pub fn list_reticulum_tcp_client_configs(
+    config: &ServerConfig,
+) -> ServerResult<Vec<TcpClientInterfaceSummary>> {
+    let current = read_reticulum_config_bounded(&config.reticulum_config_file())?;
+    checked_tcp_client_summaries(&current)
+}
+
 fn render_reticulum_base_config(config: &ServerConfig) -> String {
     format!(
         r#"[reticulum]
@@ -916,6 +1011,27 @@ loglevel = 4
         target_host = tcp_client.target_host,
         target_port = tcp_client.target_port
     );
+    append_tcp_client_ifac_fields(&mut rendered, tcp_client);
+    rendered
+}
+
+fn render_reticulum_tcp_client_section(name: &str, tcp_client: &TcpClientOverride) -> String {
+    let mut rendered = format!(
+        r#"  [[{name}]]
+    type = TCPClientInterface
+    enabled = Yes
+    interface_enabled = true
+    target_host = {target_host}
+    target_port = {target_port}
+"#,
+        target_host = tcp_client.target_host,
+        target_port = tcp_client.target_port
+    );
+    append_tcp_client_ifac_fields(&mut rendered, tcp_client);
+    rendered
+}
+
+fn append_tcp_client_ifac_fields(rendered: &mut String, tcp_client: &TcpClientOverride) {
     if let Some(network_name) = tcp_client
         .network_name
         .as_deref()
@@ -932,7 +1048,208 @@ loglevel = 4
     {
         rendered.push_str(&format!("    passphrase = {passphrase}\n"));
     }
-    rendered
+}
+
+#[derive(Debug)]
+struct ReticulumInterfaceBlock {
+    start: usize,
+    end: usize,
+    name: String,
+    kind: Option<String>,
+    target_host: Option<String>,
+    target_port: Option<u16>,
+    network_name: Option<String>,
+    passphrase_configured: bool,
+}
+
+fn read_reticulum_config_bounded(path: &std::path::Path) -> ServerResult<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration {} must be a regular non-symlink file",
+            path.display()
+        )));
+    }
+    if metadata.len() > RETICULUM_CONFIG_MAX_BYTES as u64 {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration exceeds the {RETICULUM_CONFIG_MAX_BYTES} byte limit"
+        )));
+    }
+    let contents = std::fs::read_to_string(path)?;
+    if contents.len() > RETICULUM_CONFIG_MAX_BYTES {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration exceeds the {RETICULUM_CONFIG_MAX_BYTES} byte limit"
+        )));
+    }
+    Ok(contents)
+}
+
+fn reticulum_interface_blocks(contents: &str) -> Vec<ReticulumInterfaceBlock> {
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in contents.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[[") && trimmed.ends_with("]]") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    if offset < contents.len() {
+        let trimmed = contents[offset..].trim();
+        if trimmed.starts_with("[[") && trimmed.ends_with("]]") {
+            starts.push(offset);
+        }
+    }
+
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = starts.get(index + 1).copied().unwrap_or(contents.len());
+            let text = &contents[*start..end];
+            let name = text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches("[[")
+                .trim_end_matches("]]")
+                .trim()
+                .to_string();
+            let mut block = ReticulumInterfaceBlock {
+                start: *start,
+                end,
+                name,
+                kind: None,
+                target_host: None,
+                target_port: None,
+                network_name: None,
+                passphrase_configured: false,
+            };
+            for line in text.lines().skip(1) {
+                let Some((key, value)) = parse_reticulum_assignment(line) else {
+                    continue;
+                };
+                match key {
+                    "type" => block.kind = Some(value),
+                    "target_host" => block.target_host = Some(value),
+                    "target_port" => block.target_port = value.parse().ok(),
+                    "network_name" => block.network_name = Some(value),
+                    "passphrase" => block.passphrase_configured = !value.is_empty(),
+                    _ => {}
+                }
+            }
+            block
+        })
+        .collect()
+}
+
+fn parse_reticulum_assignment(line: &str) -> Option<(&str, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('[') {
+        return None;
+    }
+    let (key, value) = trimmed.split_once('=')?;
+    let value = value
+        .trim()
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or_else(|| value.trim())
+        .to_string();
+    Some((key.trim(), value))
+}
+
+fn tcp_client_summaries(contents: &str) -> Vec<TcpClientInterfaceSummary> {
+    reticulum_interface_blocks(contents)
+        .into_iter()
+        .filter_map(|block| {
+            if block.kind.as_deref() != Some("TCPClientInterface") {
+                return None;
+            }
+            Some(TcpClientInterfaceSummary {
+                name: block.name,
+                target_host: block.target_host?,
+                target_port: block.target_port?,
+                ifac_configured: block.network_name.is_some() || block.passphrase_configured,
+            })
+        })
+        .collect()
+}
+
+fn checked_tcp_client_summaries(contents: &str) -> ServerResult<Vec<TcpClientInterfaceSummary>> {
+    let summaries = tcp_client_summaries(contents);
+    for summary in &summaries {
+        validate_reticulum_config_value(&summary.name, 256, "interface name")?;
+        validate_tcp_client_endpoint(&summary.target_host, summary.target_port)?;
+    }
+    Ok(summaries)
+}
+
+fn next_tcp_client_interface_name(blocks: &[ReticulumInterfaceBlock]) -> String {
+    for number in 1..=RETICULUM_CONFIG_MAX_INTERFACES {
+        let candidate = format!("OMENchat TCP Client {number}");
+        if blocks.iter().all(|block| block.name != candidate) {
+            return candidate;
+        }
+    }
+    "OMENchat TCP Client".into()
+}
+
+fn validate_tcp_client_override(tcp_client: &TcpClientOverride) -> ServerResult<()> {
+    validate_tcp_client_endpoint(&tcp_client.target_host, tcp_client.target_port)?;
+    if let Some(network_name) = tcp_client.network_name.as_deref() {
+        validate_reticulum_config_value(network_name, 4096, "network name")?;
+    }
+    if let Some(passphrase) = tcp_client.passphrase.as_deref() {
+        validate_reticulum_config_value(passphrase, 4096, "passphrase")?;
+    }
+    Ok(())
+}
+
+fn validate_tcp_client_endpoint(target_host: &str, target_port: u16) -> ServerResult<()> {
+    validate_reticulum_config_value(target_host, 255, "target host")?;
+    if !target_host.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, '.' | '-' | '_' | ':' | '[' | ']' | '%')
+    }) {
+        return Err(ServerError::Message(
+            "Reticulum target host contains unsupported characters".into(),
+        ));
+    }
+    if target_port == 0 {
+        return Err(ServerError::Message(
+            "TCP client target port must be nonzero".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reticulum_config_value(value: &str, max_bytes: usize, label: &str) -> ServerResult<()> {
+    if value.is_empty() || value.len() > max_bytes {
+        return Err(ServerError::Message(format!(
+            "Reticulum {label} must contain 1..={max_bytes} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(ServerError::Message(format!(
+            "Reticulum {label} contains an unsafe control character"
+        )));
+    }
+    Ok(())
+}
+
+fn write_reticulum_config_edit(config: &ServerConfig, bytes: &[u8]) -> ServerResult<()> {
+    if bytes.len() > RETICULUM_CONFIG_MAX_BYTES {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration would exceed the {RETICULUM_CONFIG_MAX_BYTES} byte limit"
+        )));
+    }
+    let path = config.reticulum_config_file();
+    let previous = read_reticulum_config_bounded(&path)?;
+    let backup = path.with_extension("before-interface-edit.bak");
+    write_private_atomic(&backup, previous.as_bytes())?;
+    write_private_atomic(&path, bytes)?;
+    Ok(())
 }
 
 pub fn render_status(config: &ServerConfig) -> String {
@@ -1338,6 +1655,110 @@ mod tests {
         assert!(rendered.contains("target_port = 42420"));
         assert!(rendered.contains("network_name = private_ret"));
         assert!(rendered.contains("passphrase = test-passphrase"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tcp_client_management_adds_lists_and_deletes_without_replacing_other_interfaces() {
+        let root = temp_root("tcp-client-multiple");
+        let config = ServerConfig::for_root(root.clone());
+        init_files(&config).expect("init");
+        write_reticulum_tcp_server_config(
+            &config,
+            &TcpServerOverride {
+                listen_ip: "127.0.0.1".into(),
+                listen_port: 42420,
+            },
+        )
+        .expect("write server");
+
+        let private_name = add_reticulum_tcp_client_config(
+            &config,
+            &TcpClientOverride {
+                target_host: "private.example".into(),
+                target_port: 42420,
+                network_name: Some("private-net".into()),
+                passphrase: Some("private-passphrase".into()),
+            },
+        )
+        .expect("add private");
+        let public_name = add_reticulum_tcp_client_config(
+            &config,
+            &TcpClientOverride {
+                target_host: "wns.example".into(),
+                target_port: 42420,
+                network_name: None,
+                passphrase: None,
+            },
+        )
+        .expect("add public");
+
+        assert_ne!(private_name, public_name);
+        let listed = list_reticulum_tcp_client_configs(&config).expect("list");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].target_host, "private.example");
+        assert!(listed[0].ifac_configured);
+        assert_eq!(listed[1].target_host, "wns.example");
+        assert!(!listed[1].ifac_configured);
+        let rendered =
+            std::fs::read_to_string(config.reticulum_config_file()).expect("read config");
+        assert!(rendered.contains("type = TCPServerInterface"));
+        assert!(rendered.contains("target_host = private.example"));
+        assert!(rendered.contains("target_host = wns.example"));
+
+        assert_eq!(
+            delete_reticulum_tcp_client_config(&config, "private.example", 42420)
+                .expect("delete private"),
+            1
+        );
+        let remaining = list_reticulum_tcp_client_configs(&config).expect("list remaining");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].target_host, "wns.example");
+        let rendered =
+            std::fs::read_to_string(config.reticulum_config_file()).expect("read remaining");
+        assert!(rendered.contains("type = TCPServerInterface"));
+        assert!(!rendered.contains("private.example"));
+        assert!(rendered.contains("wns.example"));
+        assert!(config
+            .reticulum_config_file()
+            .with_extension("before-interface-edit.bak")
+            .is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tcp_client_management_rejects_duplicates_and_config_injection() {
+        let root = temp_root("tcp-client-validation");
+        let config = ServerConfig::for_root(root.clone());
+        init_files(&config).expect("init");
+        let client = TcpClientOverride {
+            target_host: "gateway.example".into(),
+            target_port: 42420,
+            network_name: None,
+            passphrase: None,
+        };
+        add_reticulum_tcp_client_config(&config, &client).expect("add");
+
+        let duplicate =
+            add_reticulum_tcp_client_config(&config, &client).expect_err("duplicate rejected");
+        assert!(duplicate.to_string().contains("already configured"));
+        let injected = add_reticulum_tcp_client_config(
+            &config,
+            &TcpClientOverride {
+                target_host: "gateway.example\n[[Injected]]".into(),
+                target_port: 42421,
+                network_name: None,
+                passphrase: None,
+            },
+        )
+        .expect_err("injection rejected");
+        assert!(injected.to_string().contains("unsafe control character"));
+        assert_eq!(
+            list_reticulum_tcp_client_configs(&config)
+                .expect("list")
+                .len(),
+            1
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
