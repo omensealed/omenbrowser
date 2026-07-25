@@ -43,9 +43,9 @@ use crate::interfaces::{
     GatewayProfileCreateOutcome, InterfaceConfigService, InterfaceKind, ReticulumInterfaceProfile,
 };
 use crate::messaging::{
-    Conversation, ConversationThread, DeliveryMode, LxmfCancellationUpdate, MessageSendState,
-    MessageStore, MessageSummary, MessagingService, OutboundComposeRequest,
-    OutboundOperationIdentity, PreparedRetryOperation, TransportMethod,
+    Conversation, ConversationThread, DeliveryMode, DirectStampConfirmation,
+    LxmfCancellationUpdate, MessageSendState, MessageStore, MessageSummary, MessagingService,
+    OutboundComposeRequest, OutboundOperationIdentity, PreparedRetryOperation, TransportMethod,
 };
 use crate::micron::parser::DEFAULT_FG_DARK;
 use crate::micron::render::{
@@ -12058,6 +12058,49 @@ impl App {
         }
     }
 
+    pub fn cycle_selected_directory_direct_stamp_confirmation(&mut self) -> bool {
+        let Some(entry) = self.selected_directory_entry() else {
+            self.status.task = "no directory entry selected".into();
+            return false;
+        };
+        if entry.kind != DirectoryKind::Peer {
+            self.status.task = "direct stamp confirmation only applies to LXMF peers".into();
+            return false;
+        }
+        let next = match entry.ask_above_direct_stamp_cost {
+            None => Some(0),
+            Some(0) => Some(1),
+            Some(1) => Some(2),
+            Some(2) => Some(4),
+            Some(4) => Some(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST),
+            Some(_) => None,
+        };
+        match self
+            .directory_service
+            .set_ask_above_direct_stamp_cost(&entry.destination_hash, next)
+        {
+            Ok(Some(updated)) => {
+                self.refresh_panels_from_services();
+                let label = next
+                    .map(|cost| format!("ask above {cost}"))
+                    .unwrap_or_else(|| "disabled".into());
+                self.status.task = format!(
+                    "directory direct stamp confirmation: {} {label}",
+                    updated.display_name
+                );
+                true
+            }
+            Ok(None) => {
+                self.status.task = "directory entry no longer exists".into();
+                false
+            }
+            Err(error) => {
+                self.status.task = error.to_string();
+                false
+            }
+        }
+    }
+
     fn sync_runtime_identify_policy_nonblocking(&mut self) -> bool {
         let destinations = self
             .directory_service
@@ -12694,6 +12737,55 @@ impl App {
     }
 
     pub fn send_active_conversation_draft(&mut self) {
+        self.send_active_conversation_draft_with_stamp_approval(None);
+    }
+
+    pub fn confirm_active_conversation_direct_stamp(&mut self) -> bool {
+        let active = self.workspace.active_conversation;
+        let Some(confirmation) = self.workspace.conversations[active]
+            .direct_stamp_confirmation
+            .clone()
+        else {
+            self.status.task = "no direct stamp cost is awaiting confirmation".into();
+            return false;
+        };
+        if !confirmation.matches_draft(&self.workspace.conversations[active]) {
+            self.workspace.conversations[active].direct_stamp_confirmation = None;
+            self.status.task = "direct stamp confirmation expired because the draft changed".into();
+            return false;
+        }
+        if self.active_direct_stamp_confirmation_requirement()
+            != Some((confirmation.advertised_cost, confirmation.ask_above))
+        {
+            self.workspace.conversations[active].direct_stamp_confirmation = None;
+            self.status.task =
+                "direct stamp confirmation expired because peer policy changed".into();
+            return false;
+        }
+        self.workspace.conversations[active].direct_stamp_confirmation = None;
+        self.send_active_conversation_draft_with_stamp_approval(Some(confirmation.advertised_cost));
+        true
+    }
+
+    pub fn cancel_active_conversation_direct_stamp(&mut self) -> bool {
+        let active = self.workspace.active_conversation;
+        if self.workspace.conversations[active]
+            .direct_stamp_confirmation
+            .take()
+            .is_some()
+        {
+            self.status.task = "direct stamp send cancelled; draft preserved".into();
+            true
+        } else {
+            self.status.task = "no direct stamp cost is awaiting confirmation".into();
+            false
+        }
+    }
+
+    fn send_active_conversation_draft_with_stamp_approval(
+        &mut self,
+        approved_direct_stamp_cost: Option<u8>,
+    ) {
         if self.input.active.is_some() {
             self.submit_active_input();
         }
@@ -12737,6 +12829,32 @@ impl App {
             }
             return;
         }
+        if let Some((advertised_cost, ask_above)) =
+            self.active_direct_stamp_confirmation_requirement()
+        {
+            if approved_direct_stamp_cost != Some(advertised_cost) {
+                let conversation = &mut self.workspace.conversations[active];
+                conversation.direct_stamp_confirmation = Some(DirectStampConfirmation {
+                    peer_hash: conversation.peer_hash.clone(),
+                    title: conversation.draft_title.clone(),
+                    body: conversation.draft_body.clone(),
+                    attachments: conversation.attachments.clone(),
+                    delivery_mode: conversation.delivery_mode.clone(),
+                    include_ticket: conversation.include_ticket,
+                    advertised_cost,
+                    ask_above,
+                });
+                self.workspace.active_section = WorkspaceSection::Messages;
+                self.status.task = format!(
+                    "direct stamp cost {advertised_cost} requires confirmation (ask above {ask_above})"
+                );
+                return;
+            }
+        } else if approved_direct_stamp_cost.is_some() {
+            self.status.task =
+                "direct stamp confirmation expired because peer policy changed".into();
+            return;
+        }
 
         let generation = self.next_message_generation;
         self.next_message_generation += 1;
@@ -12758,6 +12876,10 @@ impl App {
             .and_then(|entry| entry.max_automatic_direct_stamp_cost)
             .unwrap_or(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST)
             .min(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST);
+        let ask_above_direct_stamp_cost = self
+            .directory_service
+            .find(self.workspace.conversations[active].peer_hash.trim())
+            .and_then(|entry| entry.ask_above_direct_stamp_cost);
         let (
             conversation_id,
             peer_hash,
@@ -12781,6 +12903,9 @@ impl App {
             operation.max_automatic_direct_stamp_cost = operation
                 .max_automatic_direct_stamp_cost
                 .min(max_automatic_direct_stamp_cost);
+            operation.ask_above_direct_stamp_cost = ask_above_direct_stamp_cost;
+            operation.approved_direct_stamp_cost = approved_direct_stamp_cost;
+            conversation.direct_stamp_confirmation = None;
             conversation.pending_send = Some(MessageSendState { generation });
             if !message_pending_placeholder_present(conversation, generation) {
                 conversation.push_message(pending_outbound_message_from_conversation(
@@ -13541,6 +13666,38 @@ impl App {
             );
         }
         None
+    }
+
+    fn active_direct_stamp_confirmation_requirement(&self) -> Option<(u8, u8)> {
+        let conversation = self.active_conversation();
+        if !self.active_conversation_uses_native_lxmf()
+            || !matches!(conversation.delivery_mode, DeliveryMode::Direct)
+            || self.settings.native_lxmf_sdk_rpc_endpoint.is_some()
+        {
+            return None;
+        }
+        if self
+            .message_store
+            .latest_valid_lxmf_reply_ticket(
+                conversation.peer_hash.trim(),
+                current_epoch_ms() as f64 / 1_000.0,
+            )
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return None;
+        }
+        let entry = self.directory_service.find(conversation.peer_hash.trim())?;
+        entry.identity_hash.as_ref()?;
+        let advertised_cost = entry.lxmf_stamp_cost?;
+        let ask_above = entry.ask_above_direct_stamp_cost?;
+        let max_cost = entry
+            .max_automatic_direct_stamp_cost
+            .unwrap_or(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST)
+            .min(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST);
+        (advertised_cost > ask_above && advertised_cost <= max_cost)
+            .then_some((advertised_cost, ask_above))
     }
 
     fn active_conversation_needs_peer_inspection(&self) -> bool {
@@ -26049,6 +26206,26 @@ side
     }
 
     #[test]
+    fn directory_direct_stamp_confirmation_cycles_from_disabled() {
+        let mut app = App::new(test_config("directory-direct-stamp-confirmation"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.refresh_panels_from_services();
+        app.switch_section(WorkspaceSection::Directory);
+
+        for expected in [Some(0), Some(1), Some(2), Some(4), Some(8), None] {
+            assert!(app.cycle_selected_directory_direct_stamp_confirmation());
+            assert_eq!(
+                app.directory_service
+                    .find("peer.hash")
+                    .and_then(|entry| entry.ask_above_direct_stamp_cost),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn directory_preferred_delivery_initializes_only_new_conversations() {
         let mut app = App::new(test_config("directory-delivery-conversation-default"));
         app.directory_service
@@ -34039,6 +34216,109 @@ side
         assert!(app.wait_for_message_task_result().await);
     }
 
+    #[cfg(feature = "native-reticulum")]
+    #[tokio::test]
+    async fn authenticated_direct_stamp_cost_requires_exact_one_send_confirmation() {
+        let mut app = make_native_send_ready_app("direct-stamp-confirmation");
+        app.directory_service
+            .ingest_announce_with_identity_metadata(
+                FIXTURE_NODE_HASH,
+                "Peer",
+                DirectoryKind::Peer,
+                crate::directory::DirectoryAnnounceMetadata {
+                    identity_hash: Some("11".repeat(16)),
+                    associated_hash: None,
+                    node_associated_hash: None,
+                    lxmf_stamp_cost: Some(8),
+                },
+            )
+            .expect("authenticated announce");
+        app.directory_service
+            .set_max_automatic_direct_stamp_cost(FIXTURE_NODE_HASH, Some(8))
+            .expect("persist ceiling");
+        app.directory_service
+            .set_ask_above_direct_stamp_cost(FIXTURE_NODE_HASH, Some(4))
+            .expect("persist confirmation threshold");
+        app.lxmf_peer_inspection = Some(LxmfPeerInspectionState {
+            conversation_id: app.active_conversation().id,
+            generation: 1,
+            peer_hash: FIXTURE_NODE_HASH.into(),
+            pending: false,
+            inspection: Some(DestinationInspection {
+                destination_hash: FIXTURE_NODE_HASH.into(),
+                valid_length: true,
+                has_path: true,
+                hops: Some(1),
+                first_hop_timeout: None,
+                known_identity: true,
+                known_app_data: true,
+                propagation_usable: Some(true),
+            }),
+            error: None,
+        });
+
+        app.send_active_conversation_draft();
+        let confirmation = app
+            .active_conversation()
+            .direct_stamp_confirmation
+            .as_ref()
+            .expect("confirmation");
+        assert_eq!(confirmation.advertised_cost, 8);
+        assert!(app.active_conversation().pending_send.is_none());
+        assert_eq!(app.active_conversation().draft_body, "Body");
+
+        assert!(app.confirm_active_conversation_direct_stamp());
+        assert!(app
+            .active_conversation()
+            .direct_stamp_confirmation
+            .is_none());
+        assert!(app.active_conversation().pending_send.is_some());
+        let operation =
+            OutboundOperationIdentity::from_message(&app.active_conversation().thread.messages[0])
+                .expect("approved pending operation");
+        assert_eq!(operation.ask_above_direct_stamp_cost, Some(4));
+        assert_eq!(operation.approved_direct_stamp_cost, Some(8));
+        let _ = app.wait_for_message_task_result().await;
+    }
+
+    #[cfg(feature = "native-reticulum")]
+    #[test]
+    fn direct_stamp_confirmation_cancels_or_expires_without_losing_draft() {
+        let mut app = make_native_send_ready_app("direct-stamp-confirmation-cancel");
+        let conversation = app.active_conversation_mut_for_test();
+        conversation.direct_stamp_confirmation = Some(DirectStampConfirmation {
+            peer_hash: conversation.peer_hash.clone(),
+            title: conversation.draft_title.clone(),
+            body: conversation.draft_body.clone(),
+            attachments: Vec::new(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            advertised_cost: 4,
+            ask_above: 2,
+        });
+
+        assert!(app.cancel_active_conversation_direct_stamp());
+        assert_eq!(app.active_conversation().draft_body, "Body");
+        let conversation = app.active_conversation_mut_for_test();
+        conversation.direct_stamp_confirmation = Some(DirectStampConfirmation {
+            peer_hash: conversation.peer_hash.clone(),
+            title: conversation.draft_title.clone(),
+            body: conversation.draft_body.clone(),
+            attachments: Vec::new(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            advertised_cost: 4,
+            ask_above: 2,
+        });
+        conversation.draft_body.push_str(" edited");
+        assert!(!app.confirm_active_conversation_direct_stamp());
+        assert!(app
+            .active_conversation()
+            .direct_stamp_confirmation
+            .is_none());
+        assert_eq!(app.active_conversation().draft_body, "Body edited");
+    }
+
     #[tokio::test]
     async fn prepared_retry_never_raises_its_snapshotted_stamp_ceiling() {
         let mut app = App::new(test_config("retry-stamp-ceiling"));
@@ -34071,6 +34351,7 @@ side
             OutboundOperationIdentity::from_message(&app.active_conversation().thread.messages[0])
                 .expect("pending retry operation");
         assert_eq!(operation.max_automatic_direct_stamp_cost, 2);
+        assert_eq!(operation.approved_direct_stamp_cost, None);
         assert!(app.wait_for_message_task_result().await);
     }
 

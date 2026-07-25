@@ -464,6 +464,12 @@ async fn apply_mouse_action(app: &mut App, action: MouseAction) {
         MouseAction::ToggleMessageDeliveryMode => app.toggle_active_conversation_delivery_mode(),
         MouseAction::ToggleMessageTicket => app.toggle_active_conversation_ticket(),
         MouseAction::SendMessageDraft => app.send_active_conversation_draft(),
+        MouseAction::ConfirmDirectStamp => {
+            app.confirm_active_conversation_direct_stamp();
+        }
+        MouseAction::CancelDirectStamp => {
+            app.cancel_active_conversation_direct_stamp();
+        }
     }
 }
 
@@ -542,6 +548,16 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         (KeyModifiers::CONTROL, KeyCode::Char('y')) => app.focus_message_title(),
         (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.focus_message_body(),
         (KeyModifiers::CONTROL, KeyCode::Char('s')) => app.send_active_conversation_draft(),
+        (KeyModifiers::CONTROL, KeyCode::Char('a'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Messages =>
+        {
+            app.confirm_active_conversation_direct_stamp();
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('x'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Messages =>
+        {
+            app.cancel_active_conversation_direct_stamp();
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('g')) => app.sync_runtime_messages(),
         (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
             app.toggle_active_conversation_delivery_mode()

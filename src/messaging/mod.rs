@@ -6,7 +6,7 @@ pub mod service;
 pub mod store;
 
 #[allow(unused_imports)]
-pub use conversation::{Conversation, ConversationThread};
+pub use conversation::{Conversation, ConversationThread, DirectStampConfirmation};
 #[allow(unused_imports)]
 pub use conversation::{MessageSendState, PreparedRetryOperation};
 #[allow(unused_imports)]

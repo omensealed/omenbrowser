@@ -32,6 +32,29 @@ pub struct PreparedRetryOperation {
     pub include_ticket: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DirectStampConfirmation {
+    pub peer_hash: String,
+    pub title: String,
+    pub body: String,
+    pub attachments: Vec<PathBuf>,
+    pub delivery_mode: DeliveryMode,
+    pub include_ticket: bool,
+    pub advertised_cost: u8,
+    pub ask_above: u8,
+}
+
+impl DirectStampConfirmation {
+    pub fn matches_draft(&self, conversation: &Conversation) -> bool {
+        self.peer_hash == conversation.peer_hash
+            && self.title == conversation.draft_title
+            && self.body == conversation.draft_body
+            && self.attachments == conversation.attachments
+            && self.delivery_mode == conversation.delivery_mode
+            && self.include_ticket == conversation.include_ticket
+    }
+}
+
 impl PreparedRetryOperation {
     pub fn matches_draft(&self, conversation: &Conversation) -> bool {
         self.title == conversation.draft_title
@@ -56,6 +79,7 @@ pub struct Conversation {
     pub unread_at_open: u32,
     pub pending_send: Option<MessageSendState>,
     pub prepared_retry_operation: Option<PreparedRetryOperation>,
+    pub direct_stamp_confirmation: Option<DirectStampConfirmation>,
     pub selected_message_key: Option<String>,
     pub dismissed_message_keys: BTreeSet<String>,
 }
@@ -85,6 +109,7 @@ impl Conversation {
             unread_at_open: 0,
             pending_send: None,
             prepared_retry_operation: None,
+            direct_stamp_confirmation: None,
             selected_message_key: None,
             dismissed_message_keys: BTreeSet::new(),
         }

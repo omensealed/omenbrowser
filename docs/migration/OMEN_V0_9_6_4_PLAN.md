@@ -696,6 +696,19 @@ Values above the compiled hard ceiling are clamped down, never up. This unit
 does not change propagation-stamp defaults, add confirmation UI, or weaken the
 global attempt/concurrency bounds.
 
+Phase 4E adds an optional per-peer direct-stamp confirmation threshold. It is
+disabled for missing and older Directory data. Presets ask above 0, 1, 2, 4,
+or 8. Only authenticated peer announce cost evidence can open a confirmation,
+and a valid reply ticket bypasses it because no stamp work is needed. Desktop
+and TUI preserve the draft and state explicitly that nothing was sent; both
+offer Confirm and Cancel actions. The durable operation carries the threshold
+and exact approved cost, and the integrated runtime rejects a required cost
+above the threshold unless that exact cost was approved. Draft changes, peer
+policy changes, cancellation, and prepared retries clear approval. The
+automatic ceiling still wins, so confirmation cannot authorize cost above it.
+This adds no timer, worker, retry, dependency, protocol version, or database
+schema migration.
+
 ### Propagation-node quality of life
 
 Extend the existing bounded inventory with:

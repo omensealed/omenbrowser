@@ -487,6 +487,18 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let conversation = app.active_conversation();
+    let composer_controls = conversation
+        .direct_stamp_confirmation
+        .as_ref()
+        .map(|confirmation| {
+            format!(
+                "STAMP COST {} > {}: Ctrl-A Confirm | Ctrl-X Cancel | no message sent",
+                confirmation.advertised_cost, confirmation.ask_above
+            )
+        })
+        .unwrap_or_else(|| {
+            "Ctrl-Y Title | Ctrl-E Body | Ctrl-P Mode | Ctrl-U Ticket | Ctrl-S Send | Ctrl-G Sync | Enter Commit | Esc Cancel".into()
+        });
     let body = if conversation.thread.messages.is_empty() {
         "No messages yet in this mock conversation.".to_string()
     } else {
@@ -508,12 +520,13 @@ fn render_messages(frame: &mut Frame, area: Rect, app: &App) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "Title: {}\nBody: {}\nMode: {:?} | Ticket: {} | Pending: {}\nCtrl-Y Title | Ctrl-E Body | Ctrl-P Mode | Ctrl-U Ticket | Ctrl-S Send | Ctrl-G Sync | Enter Commit | Esc Cancel",
+            "Title: {}\nBody: {}\nMode: {:?} | Ticket: {} | Pending: {}\n{}",
             composer_title(app),
             composer_body(app),
             conversation.delivery_mode,
             conversation.include_ticket,
-            conversation.pending_send.is_some()
+            conversation.pending_send.is_some(),
+            composer_controls
         ))
         .block(Block::default().borders(Borders::ALL).title(" Composer ")),
         chunks[2],

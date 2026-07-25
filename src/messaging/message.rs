@@ -16,6 +16,10 @@ pub const OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD: &str =
     "native_lxmf_automatic_propagation_fallback";
 pub const OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD: &str =
     "native_lxmf_max_automatic_direct_stamp_cost";
+pub const OUTBOUND_ASK_ABOVE_DIRECT_STAMP_COST_FIELD: &str =
+    "native_lxmf_ask_above_direct_stamp_cost";
+pub const OUTBOUND_APPROVED_DIRECT_STAMP_COST_FIELD: &str =
+    "native_lxmf_approved_direct_stamp_cost";
 pub const OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST: u8 = 8;
 pub const OUTBOUND_DEFAULT_TTL_MS: u64 = 86_400_000;
 pub const OUTBOUND_MIN_TTL_MS: u64 = 1_000;
@@ -34,6 +38,10 @@ pub struct OutboundOperationIdentity {
     pub automatic_propagation_fallback: bool,
     #[serde(default = "default_max_automatic_direct_stamp_cost")]
     pub max_automatic_direct_stamp_cost: u8,
+    #[serde(default)]
+    pub ask_above_direct_stamp_cost: Option<u8>,
+    #[serde(default)]
+    pub approved_direct_stamp_cost: Option<u8>,
 }
 
 const fn default_allow_propagation_fallback() -> bool {
@@ -120,6 +128,10 @@ impl OutboundOperationIdentity {
             Some(value) => value.parse().ok()?,
             None => OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
         };
+        operation.ask_above_direct_stamp_cost =
+            parse_optional_u8_field(&message.fields, OUTBOUND_ASK_ABOVE_DIRECT_STAMP_COST_FIELD)?;
+        operation.approved_direct_stamp_cost =
+            parse_optional_u8_field(&message.fields, OUTBOUND_APPROVED_DIRECT_STAMP_COST_FIELD)?;
         Some(operation)
     }
 
@@ -155,6 +167,8 @@ impl OutboundOperationIdentity {
                 allow_propagation_fallback: true,
                 automatic_propagation_fallback: false,
                 max_automatic_direct_stamp_cost: OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
+                ask_above_direct_stamp_cost: None,
+                approved_direct_stamp_cost: None,
             })
         } else {
             None
@@ -200,6 +214,28 @@ impl OutboundOperationIdentity {
             OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD.into(),
             self.max_automatic_direct_stamp_cost.to_string(),
         );
+        if let Some(cost) = self.ask_above_direct_stamp_cost {
+            fields.insert(
+                OUTBOUND_ASK_ABOVE_DIRECT_STAMP_COST_FIELD.into(),
+                cost.to_string(),
+            );
+        }
+        if let Some(cost) = self.approved_direct_stamp_cost {
+            fields.insert(
+                OUTBOUND_APPROVED_DIRECT_STAMP_COST_FIELD.into(),
+                cost.to_string(),
+            );
+        }
+    }
+}
+
+fn parse_optional_u8_field(
+    fields: &std::collections::BTreeMap<String, String>,
+    name: &str,
+) -> Option<Option<u8>> {
+    match fields.get(name) {
+        Some(value) => Some(Some(value.parse().ok()?)),
+        None => Some(None),
     }
 }
 
@@ -294,6 +330,8 @@ mod tests {
         first.allow_propagation_fallback = false;
         first.automatic_propagation_fallback = true;
         first.max_automatic_direct_stamp_cost = 4;
+        first.ask_above_direct_stamp_cost = Some(1);
+        first.approved_direct_stamp_cost = Some(4);
         let second = OutboundOperationIdentity::generate();
         assert_ne!(first, second);
 
@@ -348,15 +386,32 @@ mod tests {
         message
             .fields
             .remove(OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD);
+        message
+            .fields
+            .remove(OUTBOUND_ASK_ABOVE_DIRECT_STAMP_COST_FIELD);
+        message
+            .fields
+            .remove(OUTBOUND_APPROVED_DIRECT_STAMP_COST_FIELD);
+        let legacy =
+            OutboundOperationIdentity::from_message(&message).expect("legacy operation metadata");
         assert_eq!(
-            OutboundOperationIdentity::from_message(&message)
-                .expect("legacy operation metadata")
-                .max_automatic_direct_stamp_cost,
+            legacy.max_automatic_direct_stamp_cost,
             OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST
         );
+        assert_eq!(legacy.ask_above_direct_stamp_cost, None);
+        assert_eq!(legacy.approved_direct_stamp_cost, None);
         message.fields.insert(
             OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD.into(),
             "999".into(),
+        );
+        assert!(OutboundOperationIdentity::from_message(&message).is_none());
+        message.fields.insert(
+            OUTBOUND_MAX_AUTOMATIC_DIRECT_STAMP_COST_FIELD.into(),
+            "8".into(),
+        );
+        message.fields.insert(
+            OUTBOUND_ASK_ABOVE_DIRECT_STAMP_COST_FIELD.into(),
+            "invalid".into(),
         );
         assert!(OutboundOperationIdentity::from_message(&message).is_none());
     }

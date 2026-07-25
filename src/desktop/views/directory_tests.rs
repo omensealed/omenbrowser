@@ -182,6 +182,7 @@ fn directory_selected_state_lines_are_kind_specific() {
     assert!(peer_lines.contains("preferred LXMF delivery: propagated preferred"));
     assert!(peer_lines.contains("direct failure: ask before fallback"));
     assert!(peer_lines.contains("automatic direct stamp limit: default (8)"));
+    assert!(peer_lines.contains("direct stamp confirmation: disabled"));
     assert!(!peer_lines.contains("identify on connect"));
 
     peer.preferred_delivery = Some(PreferredDelivery::DirectOnly);
@@ -189,9 +190,11 @@ fn directory_selected_state_lines_are_kind_specific() {
     assert!(peer_lines.contains("preferred LXMF delivery: direct only"));
     peer.delivery_fallback = DeliveryFallbackPolicy::Automatic;
     peer.max_automatic_direct_stamp_cost = Some(2);
+    peer.ask_above_direct_stamp_cost = Some(1);
     let peer_lines = directory_selected_state_lines(&peer).join("\n");
     assert!(peer_lines.contains("direct failure: automatic safe fallback"));
     assert!(peer_lines.contains("automatic direct stamp limit: 2"));
+    assert!(peer_lines.contains("direct stamp confirmation: ask above 1"));
 
     let mut omenchat = DirectoryEntry::new("chat.hash", "Chat", DirectoryKind::OmenChat);
     omenchat.identity_hash = Some("00112233445566778899aabbccddeeff".into());

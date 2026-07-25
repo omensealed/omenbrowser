@@ -164,6 +164,7 @@ pub(in crate::desktop) enum DirectoryMessage {
     CycleDelivery(usize),
     CycleFallback(usize),
     CycleDirectStampLimit(usize),
+    CycleDirectStampConfirmation(usize),
     RequestPath(usize),
     RefreshPropagation(usize),
     CancelPropagationRefresh,
@@ -335,6 +336,8 @@ pub(in crate::desktop) enum ConversationMessage {
     TogglePaneDeliveryMode(u64),
     TogglePaneTicket(u64),
     SendPaneDraft(u64),
+    ConfirmPaneDirectStamp(u64),
+    CancelPaneDirectStamp(u64),
     PrepareLatestRetryForConversation(u64),
     SendLatestRetryForConversation(u64),
     SelectPaneRow {

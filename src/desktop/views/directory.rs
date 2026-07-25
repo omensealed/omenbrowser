@@ -512,6 +512,10 @@ fn directory_selected_details_card(desktop: &DesktopApp) -> Element<'_, Message>
             "Stamp Limit",
             Message::Directory(DirectoryMessage::CycleDirectStampLimit(index)),
         ));
+        management_actions.push(subtle_button(
+            "Stamp Ask",
+            Message::Directory(DirectoryMessage::CycleDirectStampConfirmation(index)),
+        ));
     }
     if entry.kind != DirectoryKind::Propagation {
         management_actions.push(subtle_button(

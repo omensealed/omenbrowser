@@ -268,9 +268,26 @@ never raises it.
 
 This policy currently governs locally generated direct stamps. It does not
 claim control over a separately managed RPC daemon, and it does not change the
-different propagation-node stamp defaults. Confirmation above a threshold and
-propagation cost policy remain separate work so existing propagated delivery
-behavior is not silently changed.
+different propagation-node stamp defaults. Propagation cost policy remains
+separate work so existing propagated delivery behavior is not silently
+changed.
+
+An optional per-peer threshold can require confirmation above a direct-stamp
+cost. It is disabled by default; bounded presets ask above 0, 1, 2, 4, or 8.
+Only identity-bound authenticated delivery-announce evidence can trigger the
+prompt. Desktop presents explicit Confirm/Cancel controls. The TUI presents
+the same evidence and uses Ctrl-A to confirm or Ctrl-X to cancel, with mouse
+actions over the confirmation row. In either frontend, the original draft
+remains intact and the prompt states that no message has been sent.
+
+Confirmation authorizes only the exact advertised cost for that dispatch. The
+threshold and approved cost are included in the durable outbound operation,
+and the clean runtime checks them again before acquiring the blocking stamp
+permit. A different cost, an edited draft, changed peer policy, cancellation,
+or a prepared retry requires a new decision. Confirmation never overrides the
+maximum automatic cost. A valid reply ticket bypasses confirmation because it
+avoids direct-stamp generation. External RPC mode is not presented as locally
+enforced cost confirmation.
 
 The integrated runtime broadcast is consumed by one owned worker and forwarded
 through the existing 256-item application channel. Payload-bearing OMENchat

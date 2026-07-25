@@ -92,6 +92,14 @@ impl DesktopApp {
                 self.update_send_conversation_pane_draft(conversation_id);
                 Ok(Task::none())
             }
+            Message::Conversation(ConversationMessage::ConfirmPaneDirectStamp(conversation_id)) => {
+                self.update_confirm_conversation_pane_direct_stamp(conversation_id);
+                Ok(Task::none())
+            }
+            Message::Conversation(ConversationMessage::CancelPaneDirectStamp(conversation_id)) => {
+                self.update_cancel_conversation_pane_direct_stamp(conversation_id);
+                Ok(Task::none())
+            }
             Message::Conversation(ConversationMessage::PrepareLatestRetryForConversation(
                 conversation_id,
             )) => {

@@ -385,6 +385,8 @@ fn clean_direct_stamp_cost(
     reply_ticket: Option<&crate::messaging::NativeLxmfReplyTicket>,
     now: f64,
     configured_max_cost: u8,
+    ask_above_cost: Option<u8>,
+    approved_cost: Option<u8>,
 ) -> AppResult<Option<u8>> {
     let valid_reply_ticket = match reply_ticket {
         Some(ticket)
@@ -407,21 +409,24 @@ fn clean_direct_stamp_cost(
         app_data,
         valid_reply_ticket,
     ) {
-        crate::runtime::native_lxmf::codec::DirectStampPolicy::Required { cost }
-            if cost <= effective_max_cost =>
-        {
+        crate::runtime::native_lxmf::codec::DirectStampPolicy::Required { cost } => {
+            if cost > effective_max_cost {
+                return Err(AppError::Unsupported(format!(
+                    "LXMF peer requires direct stamp cost {cost}, above the automatic ceiling {effective_max_cost}"
+                )));
+            }
+            if ask_above_cost.is_some_and(|threshold| cost > threshold)
+                && approved_cost != Some(cost)
+            {
+                return Err(AppError::Unsupported(format!(
+                    "LXMF peer requires direct stamp cost {cost}; explicit confirmation is required"
+                )));
+            }
             Ok(Some(cost))
         }
-        crate::runtime::native_lxmf::codec::DirectStampPolicy::Required { cost } => {
-            Err(AppError::Unsupported(format!(
-                "LXMF peer requires direct stamp cost {cost}, above the automatic ceiling {effective_max_cost}"
-            )))
-        }
-        crate::runtime::native_lxmf::codec::DirectStampPolicy::Unsupported => {
-            Err(AppError::Unsupported(
-                "LXMF peer announced an unsupported direct stamp policy".into(),
-            ))
-        }
+        crate::runtime::native_lxmf::codec::DirectStampPolicy::Unsupported => Err(
+            AppError::Unsupported("LXMF peer announced an unsupported direct stamp policy".into()),
+        ),
         crate::runtime::native_lxmf::codec::DirectStampPolicy::Unknown
         | crate::runtime::native_lxmf::codec::DirectStampPolicy::NotRequired
         | crate::runtime::native_lxmf::codec::DirectStampPolicy::TicketAccepted => Ok(None),
@@ -4999,6 +5004,14 @@ impl NetworkRuntime for NativeNetworkRuntime {
                                 .unwrap_or(
                                     crate::messaging::OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
                                 ),
+                            envelope
+                                .operation
+                                .as_ref()
+                                .and_then(|operation| operation.ask_above_direct_stamp_cost),
+                            envelope
+                                .operation
+                                .as_ref()
+                                .and_then(|operation| operation.approved_direct_stamp_cost),
                         )?;
                         (cost, policy_source)
                     } else {
@@ -17158,6 +17171,8 @@ enable_transport = No
                 None,
                 1_000.0,
                 crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+                None,
+                None,
             )
             .expect("admitted cost"),
             Some(crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST)
@@ -17170,20 +17185,58 @@ enable_transport = No
             None,
             1_000.0,
             crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            None,
+            None,
         )
         .expect_err("cost over ceiling")
         .to_string()
         .contains("automatic ceiling"));
-        assert!(clean_direct_stamp_cost(Some(&admitted), None, 1_000.0, 4)
-            .expect_err("cost over per-peer ceiling")
-            .to_string()
-            .contains("automatic ceiling 4"));
+        assert!(
+            clean_direct_stamp_cost(Some(&admitted), None, 1_000.0, 4, None, None)
+                .expect_err("cost over per-peer ceiling")
+                .to_string()
+                .contains("automatic ceiling 4")
+        );
+        assert!(clean_direct_stamp_cost(
+            Some(&admitted),
+            None,
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            Some(4),
+            None,
+        )
+        .expect_err("unapproved cost")
+        .to_string()
+        .contains("explicit confirmation"));
+        assert_eq!(
+            clean_direct_stamp_cost(
+                Some(&admitted),
+                None,
+                1_000.0,
+                crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+                Some(4),
+                Some(crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST),
+            )
+            .expect("exact approved cost"),
+            Some(crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST)
+        );
+        assert!(clean_direct_stamp_cost(
+            Some(&admitted),
+            None,
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            Some(4),
+            Some(7),
+        )
+        .is_err());
         let unsupported = app_data(rmpv::Value::from(0_u8));
         assert!(clean_direct_stamp_cost(
             Some(&unsupported),
             None,
             1_000.0,
             crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            None,
+            None,
         )
         .is_err());
 
@@ -17192,7 +17245,7 @@ enable_transport = No
             expires: 2_000.0,
         };
         assert_eq!(
-            clean_direct_stamp_cost(Some(&over), Some(&ticket), 1_000.0, 0)
+            clean_direct_stamp_cost(Some(&over), Some(&ticket), 1_000.0, 0, Some(0), None)
                 .expect("ticket precedence"),
             None
         );
@@ -17205,6 +17258,8 @@ enable_transport = No
             Some(&expired),
             1_000.0,
             crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            None,
+            None,
         )
         .is_err());
     }

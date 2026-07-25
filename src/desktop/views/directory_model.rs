@@ -135,6 +135,13 @@ pub(in crate::desktop) fn directory_selected_state_lines(entry: &DirectoryEntry)
                         crate::directory::DEFAULT_AUTOMATIC_DIRECT_STAMP_COST
                     ))
             ));
+            lines.push(format!(
+                "direct stamp confirmation: {}",
+                entry
+                    .ask_above_direct_stamp_cost
+                    .map(|cost| format!("ask above {cost}"))
+                    .unwrap_or_else(|| "disabled".into())
+            ));
         }
         DirectoryKind::Propagation => {
             lines.push(format!("propagation candidate rank: {sort_rank}"));

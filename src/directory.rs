@@ -137,6 +137,8 @@ pub struct DirectoryEntry {
     pub delivery_fallback: DeliveryFallbackPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_automatic_direct_stamp_cost: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_above_direct_stamp_cost: Option<u8>,
     pub sort_rank: Option<i32>,
     pub hosts_node: bool,
     pub associated_hash: Option<String>,
@@ -165,6 +167,7 @@ impl DirectoryEntry {
             preferred_delivery: None,
             delivery_fallback: DeliveryFallbackPolicy::Ask,
             max_automatic_direct_stamp_cost: None,
+            ask_above_direct_stamp_cost: None,
             sort_rank: None,
             hosts_node,
             associated_hash: None,
@@ -382,6 +385,7 @@ impl DirectoryService {
             entry.preferred_delivery = existing.preferred_delivery;
             entry.delivery_fallback = existing.delivery_fallback;
             entry.max_automatic_direct_stamp_cost = existing.max_automatic_direct_stamp_cost;
+            entry.ask_above_direct_stamp_cost = existing.ask_above_direct_stamp_cost;
             entry.sort_rank = existing.sort_rank;
             entry.hosts_node = existing.hosts_node || kind == DirectoryKind::Node;
             entry.associated_hash = associated_hash.or_else(|| existing.associated_hash.clone());
@@ -465,6 +469,7 @@ impl DirectoryService {
         entry.preferred_delivery = None;
         entry.delivery_fallback = DeliveryFallbackPolicy::Ask;
         entry.max_automatic_direct_stamp_cost = None;
+        entry.ask_above_direct_stamp_cost = None;
         self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
@@ -560,6 +565,20 @@ impl DirectoryService {
             return Ok(None);
         };
         entry.max_automatic_direct_stamp_cost = cost;
+        entry.saved = true;
+        self.persist_entry_change(destination_hash, entry.clone())?;
+        Ok(Some(entry))
+    }
+
+    pub fn set_ask_above_direct_stamp_cost(
+        &mut self,
+        destination_hash: &str,
+        cost: Option<u8>,
+    ) -> crate::error::AppResult<Option<DirectoryEntry>> {
+        let Some(mut entry) = self.find(destination_hash) else {
+            return Ok(None);
+        };
+        entry.ask_above_direct_stamp_cost = cost;
         entry.saved = true;
         self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
@@ -935,6 +954,7 @@ fn is_persistent_entry(entry: &DirectoryEntry) -> bool {
         || entry.preferred_delivery.is_some()
         || entry.delivery_fallback != DeliveryFallbackPolicy::Ask
         || entry.max_automatic_direct_stamp_cost.is_some()
+        || entry.ask_above_direct_stamp_cost.is_some()
 }
 
 fn directory_entries_match_ignoring_last_seen(
@@ -952,6 +972,7 @@ fn directory_entries_match_ignoring_last_seen(
         && left.preferred_delivery == right.preferred_delivery
         && left.delivery_fallback == right.delivery_fallback
         && left.max_automatic_direct_stamp_cost == right.max_automatic_direct_stamp_cost
+        && left.ask_above_direct_stamp_cost == right.ask_above_direct_stamp_cost
         && left.sort_rank == right.sort_rank
         && left.hosts_node == right.hosts_node
         && left.associated_hash == right.associated_hash
@@ -996,6 +1017,13 @@ fn merged_entry(primary: Option<&DirectoryEntry>, secondary: &DirectoryEntry) ->
         primary
             .max_automatic_direct_stamp_cost
             .or(secondary.max_automatic_direct_stamp_cost)
+    };
+    entry.ask_above_direct_stamp_cost = if primary.saved {
+        primary.ask_above_direct_stamp_cost
+    } else {
+        primary
+            .ask_above_direct_stamp_cost
+            .or(secondary.ask_above_direct_stamp_cost)
     };
     entry.sort_rank = primary.sort_rank.or(secondary.sort_rank);
     entry.hosts_node = primary.hosts_node || secondary.hosts_node;
@@ -1538,6 +1566,7 @@ mod tests {
             serde_json::from_value(legacy).expect("legacy directory entry");
         assert_eq!(decoded.delivery_fallback, DeliveryFallbackPolicy::Ask);
         assert_eq!(decoded.max_automatic_direct_stamp_cost, None);
+        assert_eq!(decoded.ask_above_direct_stamp_cost, None);
     }
 
     #[test]
@@ -1549,6 +1578,7 @@ mod tests {
         automatic.saved = false;
         automatic.delivery_fallback = DeliveryFallbackPolicy::Automatic;
         automatic.max_automatic_direct_stamp_cost = Some(2);
+        automatic.ask_above_direct_stamp_cost = Some(1);
 
         assert_eq!(
             merged_entry(Some(&saved), &automatic).delivery_fallback,
@@ -1556,6 +1586,10 @@ mod tests {
         );
         assert_eq!(
             merged_entry(Some(&saved), &automatic).max_automatic_direct_stamp_cost,
+            None
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).ask_above_direct_stamp_cost,
             None
         );
         saved.saved = false;
@@ -1566,6 +1600,10 @@ mod tests {
         assert_eq!(
             merged_entry(Some(&saved), &automatic).max_automatic_direct_stamp_cost,
             Some(2)
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).ask_above_direct_stamp_cost,
+            Some(1)
         );
     }
 
