@@ -18,6 +18,7 @@ pub struct MockChatStore {
     servers: BTreeMap<ServerId, ChatServerSummary>,
     active_rooms: BTreeMap<ServerId, RoomId>,
     local_user_ids: BTreeMap<ServerId, u32>,
+    mute_except_mentions: BTreeMap<(ServerId, RoomId), bool>,
     rooms: BTreeMap<(ServerId, RoomId), ChatRoomSummary>,
     users: BTreeMap<(ServerId, RoomId), Vec<ChatUserSummary>>,
     events: BTreeMap<(ServerId, RoomId), Vec<ChatEvent>>,
@@ -634,6 +635,8 @@ impl ChatStore for MockChatStore {
         let deleted = self.servers.remove(server_id).is_some();
         self.active_rooms.remove(server_id);
         self.local_user_ids.remove(server_id);
+        self.mute_except_mentions
+            .retain(|(stored_server_id, _), _| stored_server_id != server_id);
         self.rooms
             .retain(|(stored_server_id, _), _| stored_server_id != server_id);
         self.users
@@ -673,6 +676,42 @@ impl ChatStore for MockChatStore {
         self.rooms
             .insert((room.server_id.clone(), room.room_id), room);
         Ok(())
+    }
+
+    fn set_room_mute_except_mentions(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.rooms.contains_key(&(server_id.clone(), room_id)),
+            "cannot update OMENchat notification policy for an unknown room"
+        );
+        if enabled {
+            self.mute_except_mentions
+                .insert((server_id.clone(), room_id), true);
+        } else {
+            self.mute_except_mentions
+                .remove(&(server_id.clone(), room_id));
+        }
+        Ok(())
+    }
+
+    fn room_mute_except_mentions(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            self.rooms.contains_key(&(server_id.clone(), room_id)),
+            "cannot read OMENchat notification policy for an unknown room"
+        );
+        Ok(self
+            .mute_except_mentions
+            .get(&(server_id.clone(), room_id))
+            .copied()
+            .unwrap_or(false))
     }
 
     fn rooms_for_server(&self, server_id: &ServerId) -> anyhow::Result<Vec<ChatRoomSummary>> {

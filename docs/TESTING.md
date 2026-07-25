@@ -4015,3 +4015,20 @@ cargo test --locked --manifest-path src/server/Cargo.toml \
 These tests use isolated temporary server homes. The loopback workers prove
 multi-interface ownership and shutdown, not connectivity through the
 maintainer's WNS/private-gateway topology.
+
+## OMENchat mentions-only unread policy
+
+The client-store, model, live reducer, and hidden-pane regressions verify that
+the per-room preference defaults off, survives an isolated SQLite reopen,
+rejects invalid stored booleans, and accepts only an exact bound numeric
+mention while enabled:
+
+```bash
+cargo test --locked --no-default-features --features desktop-dev mute_except
+cargo test --locked --no-default-features --features desktop-dev \
+  hidden_omenchat_muted_room_counts_only_authoritative_mentions_as_unread
+```
+
+These tests do not activate `reply-mentions-v1`, send a live notification, or
+claim server-authoritative read receipts. They prove local bounded unread
+presentation and persistence only.

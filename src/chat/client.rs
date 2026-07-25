@@ -12,7 +12,7 @@ pub use super::model::{
 };
 use super::protocol::{EventId, RoomId, ServerId};
 use super::store::ChatStore;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const CHAT_SESSION_HISTORY_MAX_EVENTS: usize = 1_024;
 pub const CHAT_SESSION_HISTORY_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -410,6 +410,7 @@ pub struct ChatClient {
     next_session_id: ChatSessionId,
     sessions: Vec<ChatSessionView>,
     local_user_ids: std::collections::BTreeMap<ServerId, super::protocol::UserId>,
+    mute_except_mentions: BTreeMap<ServerId, BTreeSet<RoomId>>,
 }
 
 impl ChatClient {
@@ -418,6 +419,7 @@ impl ChatClient {
             next_session_id: 1,
             sessions: Vec::new(),
             local_user_ids: std::collections::BTreeMap::new(),
+            mute_except_mentions: BTreeMap::new(),
         }
     }
 
@@ -479,6 +481,65 @@ impl ChatClient {
         )
     }
 
+    pub fn room_mute_except_mentions(&self, session_id: ChatSessionId, room_id: RoomId) -> bool {
+        self.session(session_id).is_some_and(|session| {
+            self.mute_except_mentions
+                .get(&session.server.server_id)
+                .is_some_and(|rooms| rooms.contains(&room_id))
+        })
+    }
+
+    pub fn set_room_mute_except_mentions(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        enabled: bool,
+    ) -> bool {
+        let Some(session) = self.session(session_id) else {
+            return false;
+        };
+        if session.active_room.room_id != room_id
+            && !session.rooms.iter().any(|room| room.room_id == room_id)
+        {
+            return false;
+        }
+        let server_id = session.server.server_id.clone();
+        if enabled {
+            let rooms = self.mute_except_mentions.entry(server_id).or_default();
+            if !rooms.contains(&room_id) && rooms.len() >= CHAT_SESSION_MAX_ROOMS {
+                return false;
+            }
+            rooms.insert(room_id);
+        } else {
+            let remove_server =
+                self.mute_except_mentions
+                    .get_mut(&server_id)
+                    .is_some_and(|rooms| {
+                        rooms.remove(&room_id);
+                        rooms.is_empty()
+                    });
+            if remove_server {
+                self.mute_except_mentions.remove(&server_id);
+            }
+        }
+        true
+    }
+
+    pub fn event_allows_unread(&self, session_id: ChatSessionId, event: &ChatEvent) -> bool {
+        if !self.room_mute_except_mentions(session_id, event.room_id) {
+            return true;
+        }
+        let Some(local_user_id) = self.local_user_id(session_id) else {
+            return false;
+        };
+        event.message_metadata().is_some_and(|metadata| {
+            metadata
+                .mentioned_user_ids
+                .binary_search(&local_user_id)
+                .is_ok()
+        })
+    }
+
     pub(crate) fn enforce_status_bounds(&mut self) {
         for session in &mut self.sessions {
             let status = std::mem::take(&mut session.status);
@@ -517,6 +578,7 @@ impl ChatClient {
             .any(|session| session.server.server_id == removed.server.server_id)
         {
             self.local_user_ids.remove(&removed.server.server_id);
+            self.mute_except_mentions.remove(&removed.server.server_id);
         }
         Some(removed)
     }
@@ -707,6 +769,12 @@ impl ChatClient {
             let session_id = self.reserve_session_id();
             let local_user_id = store.local_user_id(&server.server_id)?;
             let server_id = server.server_id.clone();
+            let mut muted_rooms = Vec::new();
+            for known_room in &rooms {
+                if store.room_mute_except_mentions(&server_id, known_room.room_id)? {
+                    muted_rooms.push(known_room.room_id);
+                }
+            }
             if !self.push_session(ChatSessionView {
                 session_id,
                 server,
@@ -719,7 +787,13 @@ impl ChatClient {
                 break;
             }
             if let Some(user_id) = local_user_id {
-                self.local_user_ids.insert(server_id, user_id);
+                self.local_user_ids.insert(server_id.clone(), user_id);
+            }
+            for room_id in muted_rooms {
+                self.mute_except_mentions
+                    .entry(server_id.clone())
+                    .or_default()
+                    .insert(room_id);
             }
             restored += 1;
         }
@@ -1272,6 +1346,7 @@ mod tests {
             status: "test".into(),
         });
         assert!(client.bind_local_user_id(session_id, 1));
+        assert!(client.set_room_mute_except_mentions(session_id, 2, true));
         store
             .append_events(vec![ChatEvent {
                 server_id: "server-a".into(),
@@ -1288,6 +1363,9 @@ mod tests {
         client
             .persist_session(&mut store, session_id)
             .expect("persist session");
+        store
+            .set_room_mute_except_mentions(&"server-a".into(), 2, true)
+            .expect("persist room notification policy");
 
         let mut restored = ChatClient::new();
         assert_eq!(
@@ -1298,6 +1376,8 @@ mod tests {
         );
         let session = restored.sessions().first().expect("restored session");
         assert_eq!(restored.local_user_id(session.session_id), Some(1));
+        assert!(restored.room_mute_except_mentions(session.session_id, 2));
+        assert!(!restored.room_mute_except_mentions(session.session_id, 1));
         assert_eq!(session.server.display_name, "Server A");
         assert_eq!(session.active_room.name, "lobby");
         assert!(session.active_room.joined);
@@ -1311,6 +1391,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(1, 1), (2, 1)]
         );
+    }
+
+    #[test]
+    fn mute_except_mentions_requires_exact_bound_numeric_mention_for_unread() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(bounded_history_session(session_id, Vec::new())));
+        assert!(client.bind_local_user_id(session_id, 7));
+        assert!(client.set_room_mute_except_mentions(session_id, 1, true));
+
+        let event = |mentioned_user_ids| ChatEvent {
+            server_id: "server-a".into(),
+            room_id: 1,
+            event_id: 1,
+            actor_user_id: Some(2),
+            actor_display_name: Some("Peer".into()),
+            at_unix: 1,
+            kind: ChatEventKind::RichMessage {
+                body: "@tester".into(),
+                metadata: super::super::model::ChatMessageMetadata {
+                    reply_to_event_id: None,
+                    mentioned_user_ids,
+                },
+            },
+        };
+        assert!(!client.event_allows_unread(session_id, &event(Vec::new())));
+        assert!(!client.event_allows_unread(session_id, &event(vec![6, 8])));
+        assert!(client.event_allows_unread(session_id, &event(vec![7])));
+
+        assert!(client.set_room_mute_except_mentions(session_id, 1, false));
+        assert!(client.event_allows_unread(session_id, &event(Vec::new())));
     }
 
     #[test]

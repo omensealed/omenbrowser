@@ -21,6 +21,17 @@ pub trait ChatStore {
     ) -> anyhow::Result<()>;
     fn local_user_id(&self, server_id: &ServerId) -> anyhow::Result<Option<UserId>>;
     fn save_room(&mut self, room: ChatRoomSummary) -> anyhow::Result<()>;
+    fn set_room_mute_except_mentions(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        enabled: bool,
+    ) -> anyhow::Result<()>;
+    fn room_mute_except_mentions(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+    ) -> anyhow::Result<bool>;
     fn rooms_for_server(&self, server_id: &ServerId) -> anyhow::Result<Vec<ChatRoomSummary>>;
     fn replace_userlist(
         &mut self,
@@ -97,6 +108,11 @@ impl SqliteChatStore {
             "saved_servers",
             "local_user_id",
             "ALTER TABLE saved_servers ADD COLUMN local_user_id INTEGER",
+        )?;
+        self.add_column_if_missing(
+            "rooms",
+            "mute_except_mentions",
+            "ALTER TABLE rooms ADD COLUMN mute_except_mentions INTEGER NOT NULL DEFAULT 0",
         )?;
         Ok(())
     }
@@ -254,6 +270,44 @@ impl ChatStore for SqliteChatStore {
             ),
         )?;
         Ok(())
+    }
+
+    fn set_room_mute_except_mentions(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        let updated = self.connection.execute(
+            "UPDATE rooms
+             SET mute_except_mentions = ?3
+             WHERE server_id = ?1 AND room_id = ?2",
+            (server_id, room_id, i64::from(enabled)),
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "cannot update OMENchat notification policy for an unknown room"
+        );
+        Ok(())
+    }
+
+    fn room_mute_except_mentions(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+    ) -> anyhow::Result<bool> {
+        let value = self.connection.query_row(
+            "SELECT mute_except_mentions
+             FROM rooms
+             WHERE server_id = ?1 AND room_id = ?2",
+            (server_id, room_id),
+            |row| row.get::<_, i64>(0),
+        )?;
+        match value {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => anyhow::bail!("stored OMENchat mute-except-mentions value must be 0 or 1"),
+        }
     }
 
     fn rooms_for_server(&self, server_id: &ServerId) -> anyhow::Result<Vec<ChatRoomSummary>> {
@@ -667,6 +721,50 @@ mod tests {
             destination: "abcd1234".into(),
             display_name: "Server A".into(),
         }
+    }
+
+    #[test]
+    fn room_mute_except_mentions_defaults_off_and_survives_restart() {
+        let path = isolated_store_path("mute-except-mentions");
+        {
+            let mut store = SqliteChatStore::open(&path).expect("store");
+            let server = sample_server();
+            store.save_server(server.clone()).expect("server");
+            store
+                .save_room(ChatRoomSummary {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    name: "lobby".into(),
+                    topic: None,
+                    unread: 0,
+                    joined: true,
+                })
+                .expect("room");
+            assert!(!store
+                .room_mute_except_mentions(&server.server_id, 1)
+                .expect("default"));
+            store
+                .set_room_mute_except_mentions(&server.server_id, 1, true)
+                .expect("enable");
+        }
+        {
+            let store = SqliteChatStore::open(&path).expect("reopen");
+            assert!(store
+                .room_mute_except_mentions(&sample_server().server_id, 1)
+                .expect("restored"));
+            store
+                .connection
+                .execute(
+                    "UPDATE rooms SET mute_except_mentions = 2
+                     WHERE server_id = ?1 AND room_id = 1",
+                    [sample_server().server_id],
+                )
+                .expect("inject invalid setting");
+            assert!(store
+                .room_mute_except_mentions(&sample_server().server_id, 1)
+                .is_err());
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

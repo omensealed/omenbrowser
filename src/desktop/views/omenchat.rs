@@ -171,12 +171,33 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 subtle_button_owned(label, message)
             });
         }
-        room_column
-            .push(subtle_button(
-                "Load Older",
-                Message::OmenChat(OmenChatMessage::LoadOlderHistory(session.session_id)),
-            ))
-            .width(Length::Shrink)
+        room_column = room_column.push(subtle_button(
+            "Load Older",
+            Message::OmenChat(OmenChatMessage::LoadOlderHistory(session.session_id)),
+        ));
+        if desktop
+            .omenchat
+            .chat_client
+            .local_user_id(session.session_id)
+            .is_some()
+        {
+            let mute_except_mentions = desktop
+                .omenchat
+                .chat_client
+                .room_mute_except_mentions(session.session_id, session.active_room.room_id);
+            room_column = room_column.push(subtle_button_owned(
+                if mute_except_mentions {
+                    "Mentions only: On".to_string()
+                } else {
+                    "Mentions only: Off".to_string()
+                },
+                Message::OmenChat(OmenChatMessage::ToggleMuteExceptMentions {
+                    session_id: session.session_id,
+                    room_id: session.active_room.room_id,
+                }),
+            ));
+        }
+        room_column.width(Length::Shrink)
     } else {
         column![].width(Length::Shrink)
     };

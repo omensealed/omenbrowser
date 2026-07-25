@@ -228,6 +228,10 @@ mod tests {
                 session_id,
                 room: "lobby".into(),
             },
+            OmenChatMessage::ToggleMuteExceptMentions {
+                session_id,
+                room_id,
+            },
             OmenChatMessage::DraftChanged {
                 session_id,
                 value: "message".into(),

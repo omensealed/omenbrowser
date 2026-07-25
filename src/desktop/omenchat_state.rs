@@ -311,7 +311,7 @@ impl DesktopApp {
     pub(in crate::desktop) fn mark_hidden_omenchat_room_unread(
         &mut self,
         session_id: ChatSessionId,
-        room_id: RoomId,
+        event: &crate::chat::ChatEvent,
     ) {
         if self
             .find_workspace_pane(&DesktopPane::OmenChat(session_id))
@@ -319,10 +319,17 @@ impl DesktopApp {
         {
             return;
         }
+        if !self
+            .omenchat
+            .chat_client
+            .event_allows_unread(session_id, event)
+        {
+            return;
+        }
         let Some(session) = self.omenchat.chat_client.session_mut(session_id) else {
             return;
         };
-        if session.active_room.room_id != room_id {
+        if session.active_room.room_id != event.room_id {
             self.persist_omenchat_session(session_id);
             return;
         }
@@ -330,11 +337,83 @@ impl DesktopApp {
         if let Some(room) = session
             .rooms
             .iter_mut()
-            .find(|room| room.room_id == room_id)
+            .find(|room| room.room_id == event.room_id)
         {
             room.unread = room.unread.saturating_add(1);
         }
         self.persist_omenchat_session(session_id);
+    }
+
+    #[cfg(feature = "chat-client")]
+    pub(in crate::desktop) fn update_toggle_omenchat_mute_except_mentions(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) {
+        let Some((server_id, room_name)) =
+            self.omenchat
+                .chat_client
+                .session(session_id)
+                .and_then(|session| {
+                    session
+                        .rooms
+                        .iter()
+                        .find(|room| room.room_id == room_id)
+                        .or_else(|| {
+                            (session.active_room.room_id == room_id).then_some(&session.active_room)
+                        })
+                        .map(|room| (session.server.server_id.clone(), room.name.clone()))
+                })
+        else {
+            self.app.status.task = "cannot change notification policy: room is unavailable".into();
+            return;
+        };
+        if self
+            .omenchat
+            .chat_client
+            .local_user_id(session_id)
+            .is_none()
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "mute except mentions requires a negotiated local OMENchat user identity".into(),
+            );
+            return;
+        }
+        let enabled = !self
+            .omenchat
+            .chat_client
+            .room_mute_except_mentions(session_id, room_id);
+        if !self
+            .omenchat
+            .chat_client
+            .set_room_mute_except_mentions(session_id, room_id, enabled)
+        {
+            self.app.status.task = "cannot change notification policy: room is unavailable".into();
+            return;
+        }
+        let persist_result = self.omenchat.chat_store.as_mut().map_or(Ok(()), |store| {
+            store.set_room_mute_except_mentions(&server_id, room_id, enabled)
+        });
+        if let Err(error) = persist_result {
+            let _ = self
+                .omenchat
+                .chat_client
+                .set_room_mute_except_mentions(session_id, room_id, !enabled);
+            self.set_omenchat_session_status(
+                session_id,
+                format!("could not save notification policy: {error}"),
+            );
+            return;
+        }
+        self.set_omenchat_session_status(
+            session_id,
+            if enabled {
+                format!("#{room_name} will count only authoritative mentions as unread")
+            } else {
+                format!("#{room_name} will count all new events as unread")
+            },
+        );
     }
 
     #[cfg(feature = "chat-client")]
@@ -465,7 +544,7 @@ impl DesktopApp {
                     }
                 }
                 ChatClientEvent::EventAppended { session_id, event } => {
-                    self.mark_hidden_omenchat_room_unread(*session_id, event.room_id);
+                    self.mark_hidden_omenchat_room_unread(*session_id, event);
                     if !is_omenchat_local_echo_event(event) {
                         self.persist_omenchat_session(*session_id);
                     }

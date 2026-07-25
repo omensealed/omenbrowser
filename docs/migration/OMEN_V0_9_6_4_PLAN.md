@@ -912,9 +912,13 @@ schema-v4 storage, dormant server validation/transaction/fan-out, and dormant
 client model/storage/parsing units. Read-only bounded reply previews, retained
 jump targeting, and authoritative numeric mention presentation are also in
 place. The server-scoped local user binding now persists with cached sessions,
-and room labels derive saturating mention totals only from bounded retained
-history. Production negotiation still omits `reply-mentions-v1`; composer
-actions/settings and the final mixed-version gates must land before activation.
+room labels derive saturating mention totals only from bounded retained
+history, and the default-off per-room mentions-only preference now gates both
+inactive-room and hidden-pane unread increments on the exact numeric binding.
+The preference is additive local SQLite state and does not suppress event
+storage, history reconciliation, or moderation/system events.
+Production negotiation still omits `reply-mentions-v1`; composer actions and
+the final mixed-version gates must land before activation.
 
 ### Unit 6B — reactions
 

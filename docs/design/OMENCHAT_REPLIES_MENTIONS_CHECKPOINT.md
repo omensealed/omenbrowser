@@ -400,9 +400,8 @@ Unit 5A implements read-only presentation without activating mutation:
 - machine-readable OMENchat smoke/TUI output includes the reply event ID and
   bounded numeric mention IDs for rich events.
 
-The Reply composer action, member mention picker, mute-except-mentions setting,
-capability request, and server activation remain deferred to later Unit 5
-slices.
+The Reply composer action, member mention picker, capability request, and
+server activation remain deferred to later Unit 5 slices.
 
 Unit 5B persists the local identity evidence and adds bounded counts:
 
@@ -420,9 +419,30 @@ Unit 5B persists the local identity evidence and adds bounded counts:
   local ID. This is explicitly a retained-history count, not a global,
   server-authoritative, or unread notification count.
 
+Unit 5C adds the local unread policy without activating the wire capability:
+
+- `chat.sqlite.rooms.mute_except_mentions` is an additive boolean column,
+  defaults off, and restores with the already bounded saved-room catalog;
+- in-memory enabled-room keys are bounded by the existing per-session and
+  per-room catalog limits and are removed with the last session for a server;
+- invalid stored values fail visibly instead of silently changing notification
+  behavior;
+- the preference is available only after a nonzero negotiated local user ID is
+  known, and the room-list toggle writes the model and SQLite value together;
+- inactive-room live events and hidden-active-room desktop events consult the
+  same project-owned rule;
+- while enabled, only rich metadata containing the exact bound numeric user ID
+  increments unread. Display-name text, ordinary messages, replies without the
+  ID, and other numeric IDs do not;
+- event storage, history reconciliation, moderation/system events, retained
+  mention totals, and scroll behavior are unchanged.
+
 There is still no separate mention history, notification worker, polling
-subscription, sound, timer, or capability activation. Per-room
-mute-except-mentions and read/unread mention accounting remain deferred.
+subscription, sound, timer, or capability activation. Read markers remain the
+existing room counters; this unit adds no server-authoritative read receipt.
+
+Across the already dormant server/client boundary:
+
 - the single room-event encoder preserves metadata across live fan-out,
   bounded inline history, and resource history;
 - exact replay after restart returns the stored acknowledgement without a
@@ -435,5 +455,5 @@ resource-history, conflict, and local-user binding tests cover the boundary.
 No new error numbers were needed: the existing typed protocol-v1 errors retain
 their documented meanings.
 
-Unit 4—client model/store parsing and capability state—remains the next rollback
-boundary. Capability advertisement stays blocked.
+The next rollback boundary is the composer/selector work required before
+capability activation. Capability advertisement stays blocked.

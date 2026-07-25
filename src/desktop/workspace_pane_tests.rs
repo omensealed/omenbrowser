@@ -2,6 +2,8 @@ use super::*;
 use iced::widget::scrollable::RelativeOffset;
 
 use crate::app::App;
+#[cfg(feature = "chat-client")]
+use crate::chat::store::ChatStore;
 use crate::desktop::{BrowserMessage, ConversationMessage};
 use crate::storage::settings::{
     DesktopWorkspaceLayoutNode, DesktopWorkspacePaneKind, DesktopWorkspacePaneSettings,
@@ -566,6 +568,78 @@ fn hidden_omenchat_event_marks_restore_tab_unread_until_restored() {
         .expect("session");
     assert_eq!(session.active_room.unread, 0);
     assert_eq!(session.rooms[0].unread, 0);
+}
+
+#[cfg(feature = "chat-client")]
+#[test]
+fn hidden_omenchat_muted_room_counts_only_authoritative_mentions_as_unread() {
+    let mut desktop =
+        desktop_with_temp_root("omenbrowser-rs-desktop-hidden-omenchat-mentions-only");
+    let session_id = open_test_omenchat_session(&mut desktop);
+    assert!(desktop
+        .omenchat
+        .chat_client
+        .bind_local_user_id(session_id, 7));
+    desktop.persist_omenchat_session(session_id);
+    let _ = desktop.update(Message::OmenChat(
+        crate::desktop::OmenChatMessage::ToggleMuteExceptMentions {
+            session_id,
+            room_id: 1,
+        },
+    ));
+    assert!(desktop
+        .omenchat
+        .chat_client
+        .room_mute_except_mentions(session_id, 1));
+    assert!(desktop
+        .omenchat
+        .chat_store
+        .as_ref()
+        .expect("chat store")
+        .room_mute_except_mentions(&FIXTURE_CHAT_SERVER_HASH.to_owned(), 1)
+        .expect("stored policy"));
+    let _ = desktop.restore_desktop_pane(DesktopPane::OmenChat(session_id));
+    let pane = desktop
+        .find_workspace_pane(&DesktopPane::OmenChat(session_id))
+        .expect("omenchat pane");
+    desktop.close_workspace_pane(pane);
+
+    let event = |event_id, mentioned_user_ids| crate::chat::ChatClientEvent::EventAppended {
+        session_id,
+        event: crate::chat::ChatEvent {
+            server_id: FIXTURE_CHAT_SERVER_HASH.into(),
+            room_id: 1,
+            event_id,
+            actor_user_id: Some(2),
+            actor_display_name: Some("Peer".into()),
+            at_unix: event_id as i64,
+            kind: crate::chat::ChatEventKind::RichMessage {
+                body: "message".into(),
+                metadata: crate::chat::model::ChatMessageMetadata {
+                    reply_to_event_id: None,
+                    mentioned_user_ids,
+                },
+            },
+        },
+    };
+    desktop.apply_omenchat_client_events_status(&[event(2, Vec::new())]);
+    assert_eq!(
+        desktop
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.active_room.unread),
+        Some(0)
+    );
+
+    desktop.apply_omenchat_client_events_status(&[event(3, vec![7])]);
+    let session = desktop
+        .omenchat
+        .chat_client
+        .session(session_id)
+        .expect("session");
+    assert_eq!(session.active_room.unread, 1);
+    assert_eq!(session.rooms[0].unread, 1);
 }
 
 #[cfg(feature = "chat-client")]

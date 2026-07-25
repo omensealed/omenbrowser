@@ -3354,6 +3354,7 @@ fn append_event(
     event: ChatEvent,
     sort_after: bool,
 ) -> bool {
+    let event_allows_unread = client.event_allows_unread(session_id, &event);
     {
         let Some(session) = client.session_mut(session_id) else {
             return false;
@@ -3365,7 +3366,7 @@ fn append_event(
         }
         if event.room_id == session.active_room.room_id {
             clear_room_unread(session, event.room_id);
-        } else {
+        } else if event_allows_unread {
             increment_room_unread(session, event.room_id);
         }
     }
@@ -8051,6 +8052,72 @@ mod tests {
 
         assert_eq!(event.actor_user_id, Some(7));
         assert_eq!(event.actor_display_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn live_inactive_room_unread_respects_mute_except_authoritative_mentions() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "server".into(),
+                destination: "server".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("server", 1, "lobby"),
+            rooms: vec![
+                room_summary("server", 1, "lobby"),
+                room_summary("server", 2, "help"),
+            ],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        }));
+        assert!(client.bind_local_user_id(session_id, 7));
+        assert!(client.set_room_mute_except_mentions(session_id, 2, true));
+
+        let event = |event_id, mentioned_user_ids| ChatEvent {
+            server_id: "server".into(),
+            room_id: 2,
+            event_id,
+            actor_user_id: Some(2),
+            actor_display_name: Some("Peer".into()),
+            at_unix: event_id as i64,
+            kind: ChatEventKind::RichMessage {
+                body: "message".into(),
+                metadata: super::super::model::ChatMessageMetadata {
+                    reply_to_event_id: None,
+                    mentioned_user_ids,
+                },
+            },
+        };
+        assert!(append_event(
+            &mut client,
+            session_id,
+            event(1, Vec::new()),
+            false
+        ));
+        assert_eq!(
+            client
+                .session(session_id)
+                .and_then(|session| session.rooms.iter().find(|room| room.room_id == 2))
+                .map(|room| room.unread),
+            Some(0)
+        );
+        assert!(append_event(
+            &mut client,
+            session_id,
+            event(2, vec![7]),
+            false
+        ));
+        assert_eq!(
+            client
+                .session(session_id)
+                .and_then(|session| session.rooms.iter().find(|room| room.room_id == 2))
+                .map(|room| room.unread),
+            Some(1)
+        );
     }
 
     #[test]

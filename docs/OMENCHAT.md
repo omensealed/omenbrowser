@@ -57,6 +57,13 @@ version-3 databases migrate
 in one immediate transaction. A database from a
 newer omenchatd version is refused without modification instead of being
 silently downgraded.
+
+The desktop client's independent `chat.sqlite` adds a default-off
+`rooms.mute_except_mentions` preference. It is shown only when a negotiated
+nonzero local OMENchat user ID is known. When enabled, exact numeric rich
+message metadata for that ID is required to increment the local room unread
+counter; ordinary events remain stored and reconciled normally. This preference
+does not advertise or enable the dormant reply/mention wire capability.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
 `omenchat.sqlite.pre-v4-from-v<old>.bak`. It never overwrites an existing backup;

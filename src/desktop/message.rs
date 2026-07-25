@@ -434,6 +434,10 @@ pub(in crate::desktop) enum OmenChatMessage {
         session_id: ChatSessionId,
         room: String,
     },
+    ToggleMuteExceptMentions {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    },
     DraftChanged {
         session_id: ChatSessionId,
         value: String,

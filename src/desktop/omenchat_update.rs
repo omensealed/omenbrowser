@@ -34,6 +34,13 @@ impl DesktopApp {
             Message::OmenChat(OmenChatMessage::JoinRoom { session_id, room }) => {
                 Ok(self.update_join_omenchat_room(session_id, room))
             }
+            Message::OmenChat(OmenChatMessage::ToggleMuteExceptMentions {
+                session_id,
+                room_id,
+            }) => {
+                self.update_toggle_omenchat_mute_except_mentions(session_id, room_id);
+                Ok(Task::none())
+            }
             Message::OmenChat(OmenChatMessage::DraftChanged { session_id, value }) => {
                 self.update_omenchat_draft_changed(session_id, value);
                 Ok(Task::none())
