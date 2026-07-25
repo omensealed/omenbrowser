@@ -22631,6 +22631,57 @@ mod tests {
     }
 
     #[test]
+    fn runtime_handler_projects_legacy_lxmf_status_without_parsing_raw_evidence() {
+        let mut app = App::new(test_config("operations-runtime-handler-legacy-lxmf"));
+        let status = |state, delivered, failed| {
+            RuntimeBusEvent::MessageDeliveryUpdated(crate::runtime::OutboundStatus {
+                peer_hash: "AABBCCDDEEFF00112233445566778899".into(),
+                message_id: Some("legacy-message-id".into()),
+                delivered,
+                failed,
+                state,
+                evidence: Some("packet_hash:private;failure_reason:private".into()),
+                rtt: Some(0.25),
+            })
+        };
+        let _ = app.handle_runtime_bus_event(status(
+            crate::runtime::OutboundDeliveryState::SubmittedToRnsNet,
+            false,
+            false,
+        ));
+        let submitted = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("submitted operation");
+        assert_eq!(
+            submitted.state,
+            crate::operations::OperationState::TransportAccepted
+        );
+        assert!(!submitted.state.claims_peer_delivery());
+        assert!(!submitted.evidence.iter().any(|item| item
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private"))));
+
+        let _ = app.handle_runtime_bus_event(status(
+            crate::runtime::OutboundDeliveryState::Delivered,
+            true,
+            false,
+        ));
+        let delivered = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("delivered operation");
+        assert_eq!(
+            delivered.state,
+            crate::operations::OperationState::Delivered
+        );
+        assert!(delivered.state.claims_peer_delivery());
+    }
+
+    #[test]
     fn nomadnet_resource_status_distinguishes_request_and_response_transfer_direction() {
         let mut app = App::new(test_config("nomadnet-resource-direction-status"));
 

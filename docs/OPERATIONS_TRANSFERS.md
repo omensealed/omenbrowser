@@ -221,10 +221,19 @@ prior failure. The raw detail and RTT fields are not retained because detail
 may embed packet, link, resource, node, and failure data. Evidence without an
 exact message ID is omitted rather than correlated by peer.
 
-Legacy `MessageDeliveryUpdated` remains outside this adapter. Merging that
-coarser status requires a separate precedence unit. No send, retry,
-cancellation, worker, timer, subscription, queue, persistence, protocol field,
-or dependency is added.
+The coarser legacy `MessageDeliveryUpdated` surface is also correlated only by
+exact message ID. Submitted-to-runtime is queue admission,
+submitted-to-Reticulum is transport acceptance, and unknown status remains
+uncertain. Explicit delivered/failed states must agree with their legacy
+boolean flags. For compatibility with older serialized events where the state
+field was absent, default-unknown plus exactly one delivered/failed boolean is
+accepted. Mutually true flags and every other contradiction are rejected.
+
+Legacy status uses application observation time, preserves stronger receipt
+evidence, cannot replace delivery with a later failure, and may resolve a prior
+failure with a later consistent delivery. Its raw evidence and RTT are not
+retained or parsed. No send, retry, cancellation, worker, timer, subscription,
+queue, persistence, protocol field, or dependency is added.
 
 ## Reticulum path-observation adapter
 

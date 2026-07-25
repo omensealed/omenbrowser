@@ -1,7 +1,9 @@
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::runtime::{LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind};
+use crate::runtime::{
+    LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind, OutboundDeliveryState, OutboundStatus,
+};
 use crate::runtime::{RuntimeBusEvent, RuntimeLxmfDeliveryState, RuntimeLxmfDeliveryUpdate};
 
 use super::{
@@ -30,6 +32,9 @@ pub fn record_lxmf_runtime_event_at(
         RuntimeBusEvent::SdkDeliveryUpdated(update) => record_sdk_delivery_update(history, update),
         RuntimeBusEvent::LxmfDeliveryEvidence(evidence) => {
             record_native_delivery_evidence(history, evidence, observed_at_unix_ms)
+        }
+        RuntimeBusEvent::MessageDeliveryUpdated(status) => {
+            record_legacy_outbound_status(history, status, observed_at_unix_ms)
         }
         _ => Ok(false),
     }
@@ -182,6 +187,151 @@ fn record_native_delivery_evidence(
     };
     history.upsert(record)?;
     Ok(true)
+}
+
+fn record_legacy_outbound_status(
+    history: &mut OperationHistory,
+    status: &OutboundStatus,
+    observed_at_unix_ms: i64,
+) -> Result<bool, LxmfOperationError> {
+    let Some(message_id) = status.message_id.as_deref() else {
+        return Ok(false);
+    };
+    if observed_at_unix_ms < 0 {
+        return Err(LxmfOperationError::InvalidTimestamp);
+    }
+    let message_id = validate_identifier(message_id)?;
+    let id = lxmf_operation_id(message_id);
+    let existing = history.records().find(|record| record.id == id).cloned();
+    let target = normalize_peer(&status.peer_hash)?;
+    let (projected_state, authority, evidence_kind, detail) = legacy_status_projection(status)?;
+    if existing.as_ref().is_some_and(|record| {
+        observed_at_unix_ms < record.updated_at_unix_ms
+            || (record.state.is_terminal() && projected_state != OperationState::Delivered)
+            || record.evidence.last().is_some_and(|last| {
+                last.at_unix_ms == observed_at_unix_ms && last.kind == evidence_kind
+            })
+    }) {
+        return Ok(false);
+    }
+    let created_at_unix_ms = existing
+        .as_ref()
+        .map_or(observed_at_unix_ms, |record| record.created_at_unix_ms);
+    let mut evidence = existing
+        .as_ref()
+        .map(|record| record.evidence.clone())
+        .unwrap_or_default();
+    if evidence.len() >= OPERATION_EVIDENCE_MAX_ITEMS {
+        evidence.remove(0);
+    }
+    evidence.push(OperationEvidence {
+        kind: evidence_kind,
+        authority,
+        at_unix_ms: observed_at_unix_ms,
+        detail: Some(detail.into()),
+    });
+    let state = if projected_state == OperationState::Reconciling {
+        existing
+            .as_ref()
+            .map_or(projected_state, |record| record.state)
+    } else {
+        existing
+            .as_ref()
+            .map(|record| preserve_stronger_nonterminal_state(record.state, projected_state))
+            .unwrap_or(projected_state)
+    };
+    let record_authority = if state != projected_state {
+        existing
+            .as_ref()
+            .map_or(authority, |record| record.authority)
+    } else {
+        authority
+    };
+    let record = OperationRecord {
+        id,
+        target: OperationTarget {
+            kind: OperationTargetKind::Peer,
+            label: target,
+        },
+        state,
+        authority: record_authority,
+        evidence,
+        progress: None,
+        attempt_count: existing.as_ref().map_or(0, |record| record.attempt_count),
+        stamp_cost: None,
+        propagation_node: None,
+        created_at_unix_ms,
+        updated_at_unix_ms: observed_at_unix_ms,
+        last_error: (projected_state == OperationState::Failed).then(|| detail.into()),
+        event_cursor: existing.as_ref().and_then(|record| record.event_cursor),
+        valid_actions: vec![OperationAction::CopyDiagnostics],
+    };
+    history.upsert(record)?;
+    Ok(true)
+}
+
+fn legacy_status_projection(
+    status: &OutboundStatus,
+) -> Result<
+    (
+        OperationState,
+        EvidenceAuthority,
+        OperationEvidenceKind,
+        &'static str,
+    ),
+    LxmfOperationError,
+> {
+    if status.delivered && status.failed {
+        return Err(LxmfOperationError::InconsistentLegacyStatus);
+    }
+    match status.state {
+        OutboundDeliveryState::Unknown if status.delivered => Ok((
+            OperationState::Delivered,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::PeerDelivery,
+            "legacy LXMF status reports delivery",
+        )),
+        OutboundDeliveryState::Unknown if status.failed => Ok((
+            OperationState::Failed,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::Failure,
+            "legacy LXMF status reports failure",
+        )),
+        OutboundDeliveryState::Unknown => Ok((
+            OperationState::Reconciling,
+            EvidenceAuthority::Uncertain,
+            OperationEvidenceKind::Reconciliation,
+            "legacy LXMF delivery status is unknown",
+        )),
+        OutboundDeliveryState::SubmittedToRuntime if !status.delivered && !status.failed => Ok((
+            OperationState::Queued,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::QueueAdmission,
+            "LXMF runtime accepted outbound work; transport unconfirmed",
+        )),
+        OutboundDeliveryState::SubmittedToRnsNet if !status.delivered && !status.failed => Ok((
+            OperationState::TransportAccepted,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::TransportAcceptance,
+            "message submitted to Reticulum transport; peer delivery unconfirmed",
+        )),
+        OutboundDeliveryState::Delivered if status.delivered && !status.failed => Ok((
+            OperationState::Delivered,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::PeerDelivery,
+            "legacy LXMF status reports delivery",
+        )),
+        OutboundDeliveryState::Failed if status.failed && !status.delivered => Ok((
+            OperationState::Failed,
+            EvidenceAuthority::Authoritative,
+            OperationEvidenceKind::Failure,
+            "legacy LXMF status reports failure",
+        )),
+        OutboundDeliveryState::SubmittedToRuntime
+        | OutboundDeliveryState::SubmittedToRnsNet
+        | OutboundDeliveryState::Delivered
+        | OutboundDeliveryState::Failed => Err(LxmfOperationError::InconsistentLegacyStatus),
+    }
 }
 
 fn native_evidence_timestamp(
@@ -440,6 +590,8 @@ pub enum LxmfOperationError {
     InconsistentTerminalState,
     #[error("LXMF delivery update timestamp exceeds the supported range")]
     InvalidTimestamp,
+    #[error("legacy LXMF status has contradictory state or delivered/failed flags")]
+    InconsistentLegacyStatus,
     #[error(transparent)]
     Model(#[from] OperationModelError),
 }
@@ -482,6 +634,23 @@ mod tests {
             detail: Some("private_packet:secret;private_link:secret;private_failure:secret".into()),
             rtt: Some(0.25),
             observed_at,
+        })
+    }
+
+    fn legacy_status(
+        state: OutboundDeliveryState,
+        delivered: bool,
+        failed: bool,
+        message_id: Option<&str>,
+    ) -> RuntimeBusEvent {
+        RuntimeBusEvent::MessageDeliveryUpdated(OutboundStatus {
+            peer_hash: "AABBCCDDEEFF00112233445566778899".into(),
+            message_id: message_id.map(str::to_string),
+            delivered,
+            failed,
+            state,
+            evidence: Some("packet_hash:private;failure_reason:private".into()),
+            rtt: Some(0.25),
         })
     }
 
@@ -977,5 +1146,237 @@ mod tests {
             ),
             Err(LxmfOperationError::InvalidTimestamp)
         );
+    }
+
+    #[test]
+    fn legacy_status_shapes_map_without_conflating_transport_and_delivery() {
+        let cases = [
+            (
+                OutboundDeliveryState::Unknown,
+                false,
+                false,
+                OperationState::Reconciling,
+                OperationEvidenceKind::Reconciliation,
+            ),
+            (
+                OutboundDeliveryState::SubmittedToRuntime,
+                false,
+                false,
+                OperationState::Queued,
+                OperationEvidenceKind::QueueAdmission,
+            ),
+            (
+                OutboundDeliveryState::SubmittedToRnsNet,
+                false,
+                false,
+                OperationState::TransportAccepted,
+                OperationEvidenceKind::TransportAcceptance,
+            ),
+            (
+                OutboundDeliveryState::Delivered,
+                true,
+                false,
+                OperationState::Delivered,
+                OperationEvidenceKind::PeerDelivery,
+            ),
+            (
+                OutboundDeliveryState::Failed,
+                false,
+                true,
+                OperationState::Failed,
+                OperationEvidenceKind::Failure,
+            ),
+            (
+                OutboundDeliveryState::Unknown,
+                true,
+                false,
+                OperationState::Delivered,
+                OperationEvidenceKind::PeerDelivery,
+            ),
+            (
+                OutboundDeliveryState::Unknown,
+                false,
+                true,
+                OperationState::Failed,
+                OperationEvidenceKind::Failure,
+            ),
+        ];
+        for (state, delivered, failed, operation_state, evidence_kind) in cases {
+            let mut history = OperationHistory::default();
+            record_lxmf_runtime_event_at(
+                &mut history,
+                &legacy_status(state, delivered, failed, Some("private-message-id")),
+                10,
+            )
+            .expect("legacy status");
+            let record = only_record(&history);
+            assert_eq!(record.state, operation_state);
+            assert_eq!(record.evidence[0].kind, evidence_kind);
+            assert_eq!(
+                record.state.claims_peer_delivery(),
+                operation_state == OperationState::Delivered
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_status_requires_exact_identity_and_consistent_flags() {
+        assert!(!record_lxmf_runtime_event_at(
+            &mut OperationHistory::default(),
+            &legacy_status(OutboundDeliveryState::SubmittedToRnsNet, false, false, None,),
+            10,
+        )
+        .expect("uncorrelated status omitted"));
+        for (state, delivered, failed) in [
+            (OutboundDeliveryState::Unknown, true, true),
+            (OutboundDeliveryState::SubmittedToRuntime, true, false),
+            (OutboundDeliveryState::SubmittedToRnsNet, false, true),
+            (OutboundDeliveryState::Delivered, false, false),
+            (OutboundDeliveryState::Failed, false, false),
+        ] {
+            assert_eq!(
+                record_lxmf_runtime_event_at(
+                    &mut OperationHistory::default(),
+                    &legacy_status(state, delivered, failed, Some("private-message-id")),
+                    10,
+                ),
+                Err(LxmfOperationError::InconsistentLegacyStatus)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_status_omits_raw_evidence_and_obeys_stronger_precedence() {
+        let mut history = OperationHistory::default();
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &legacy_status(
+                OutboundDeliveryState::SubmittedToRnsNet,
+                false,
+                false,
+                Some("private-message-id"),
+            ),
+            10,
+        )
+        .expect("submitted");
+        let record = only_record(&history);
+        assert_eq!(record.state, OperationState::TransportAccepted);
+        assert!(!record.state.claims_peer_delivery());
+        assert!(!record
+            .evidence
+            .iter()
+            .filter_map(|evidence| evidence.detail.as_deref())
+            .any(|detail| detail.contains("private")));
+
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &native_evidence(
+                LxmfDeliveryEvidenceKind::RnsPacketProof,
+                Some("private-message-id"),
+                Some(0.020),
+            ),
+            20,
+        )
+        .expect("proof");
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &legacy_status(
+                OutboundDeliveryState::SubmittedToRnsNet,
+                false,
+                false,
+                Some("private-message-id"),
+            ),
+            30,
+        )
+        .expect("coarse status");
+        assert_eq!(only_record(&history).state, OperationState::ReceiptObserved);
+        assert_eq!(
+            only_record(&history).authority,
+            EvidenceAuthority::Authoritative
+        );
+
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &legacy_status(
+                OutboundDeliveryState::Unknown,
+                false,
+                false,
+                Some("private-message-id"),
+            ),
+            35,
+        )
+        .expect("unknown status");
+        assert_eq!(only_record(&history).state, OperationState::ReceiptObserved);
+        assert_eq!(
+            only_record(&history).authority,
+            EvidenceAuthority::Authoritative
+        );
+
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &legacy_status(
+                OutboundDeliveryState::Delivered,
+                true,
+                false,
+                Some("private-message-id"),
+            ),
+            40,
+        )
+        .expect("delivered");
+        assert_eq!(only_record(&history).state, OperationState::Delivered);
+        assert!(only_record(&history).state.claims_peer_delivery());
+        assert!(!record_lxmf_runtime_event_at(
+            &mut history,
+            &legacy_status(
+                OutboundDeliveryState::Failed,
+                false,
+                true,
+                Some("private-message-id"),
+            ),
+            50,
+        )
+        .expect("delivery resists later failure"));
+    }
+
+    #[test]
+    fn legacy_status_rejects_invalid_time_and_can_resolve_prior_failure() {
+        assert_eq!(
+            record_lxmf_runtime_event_at(
+                &mut OperationHistory::default(),
+                &legacy_status(
+                    OutboundDeliveryState::SubmittedToRuntime,
+                    false,
+                    false,
+                    Some("private-message-id"),
+                ),
+                -1,
+            ),
+            Err(LxmfOperationError::InvalidTimestamp)
+        );
+        let mut history = OperationHistory::default();
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &legacy_status(
+                OutboundDeliveryState::Failed,
+                false,
+                true,
+                Some("private-message-id"),
+            ),
+            10,
+        )
+        .expect("failed");
+        record_lxmf_runtime_event_at(
+            &mut history,
+            &legacy_status(
+                OutboundDeliveryState::Delivered,
+                true,
+                false,
+                Some("private-message-id"),
+            ),
+            20,
+        )
+        .expect("delivered");
+        assert_eq!(only_record(&history).state, OperationState::Delivered);
+        assert!(only_record(&history).last_error.is_none());
     }
 }

@@ -3107,7 +3107,8 @@ regression protection, inconsistent terminal-flag rejection, no private event
 metadata retention, exact native-evidence correlation, RNS-proof and
 propagation-acceptance boundaries, uncertain peer activity/no-receipt
 semantics, raw-detail omission, timestamp fallback, terminal precedence, and
-saturation behavior:
+legacy status compatibility, contradictory-flag rejection, stronger-evidence
+precedence, and saturation behavior:
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
@@ -3121,13 +3122,16 @@ cargo test --locked --no-default-features --features desktop-product \
 
 cargo test --locked --no-default-features --features desktop-product \
   runtime_handler_correlates_native_lxmf_evidence --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_projects_legacy_lxmf_status --lib
 ```
 
 These tests construct typed runtime events in memory and use an isolated
 application root. They do not send LXMF, start Reticulum, contact a peer,
 observe a live receipt, synchronize propagation, or establish Python
-interoperability. Legacy `MessageDeliveryUpdated` correlation and live
-peer-delivery proof remain separate test and migration units.
+interoperability. Live peer-delivery proof remains a separate smoke and
+interoperability gate.
 
 The typed Resource adapter fixtures prove stable opaque correlation, transfer
 identifier and browser-operation redaction, offer/progress coalescing, retained

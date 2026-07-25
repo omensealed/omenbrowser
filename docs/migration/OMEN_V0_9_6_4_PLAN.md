@@ -513,6 +513,19 @@ The coarser legacy `MessageDeliveryUpdated` event remains separate. No send,
 retry, cancellation, worker, timer, subscription, queue, persistence, protocol,
 or dependency is introduced.
 
+Phase 3L completes the current LXMF status boundary by reconciling the coarser
+legacy `MessageDeliveryUpdated` event only with exact message identity.
+Submitted-to-runtime is queue admission, submitted-to-Reticulum is transport
+acceptance, and unknown remains uncertain. Delivered/failed enum states must
+agree with their boolean flags. Backward-compatible default-unknown events may
+use exactly one legacy delivered/failed boolean; contradictory combinations
+are rejected. Application observation time orders updates, stronger receipt
+evidence is not regressed by a coarse submitted status, delivery resists later
+failure, and later consistent delivery may resolve prior failure. Raw evidence
+and RTT are omitted rather than parsed. No send, retry, cancellation, worker,
+timer, subscription, queue, persistence, protocol, or dependency is
+introduced.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:
