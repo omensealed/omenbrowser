@@ -814,6 +814,15 @@ can perform its normal text selection/copy, then restores capture on Esc or q.
 PageUp/PageDown or j/k scroll the preview. No clipboard crate, OSC-52 sequence,
 diagnostic copy, persistence, worker, timer, or additional history is added.
 
+Phase 5E replaces the stale one-size-fits-all TUI help text with a contextual
+shortcut overlay built from the active workspace. It documents the existing
+browser, messaging, Network Doctor, diagnostics, settings, logs, and other
+section key routes without creating another command registry or action layer.
+The footer now describes normal mouse use as navigation; terminal text
+selection is advertised only inside the copy/select view where capture is
+actually released. This is render-only and adds no state, command history,
+worker, timer, persistence, or network behavior.
+
 ### TUI
 
 - Search/filter mode.

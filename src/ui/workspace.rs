@@ -29,7 +29,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_footer(frame, root[2], app);
 
     if app.workspace.show_help {
-        render_help(frame, centered_rect(70, 50, frame.area()));
+        render_help(frame, centered_rect(74, 60, frame.area()), app);
     }
 }
 
@@ -1954,44 +1954,89 @@ fn render_placeholder(frame: &mut Frame, area: Rect, section: WorkspaceSection) 
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let help = Line::from(vec![
-        Span::raw(" q/Ctrl-c quit | Tab focus | mouse select | PgUp/PgDn scroll | Ctrl-t tab | Ctrl-w close | Ctrl-f partials | Ctrl-n convo | ? help "),
+        Span::raw(" q/Ctrl-c quit | Tab focus | mouse navigate | Ctrl-t browser tab | Ctrl-n conversation | ? contextual shortcuts "),
     ]);
     let lines = vec![status::status_line(&app.status), help];
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_help(frame: &mut Frame, area: Rect) {
+fn shortcut_help_lines(section: WorkspaceSection) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::styled(
+            format!("{} shortcuts", section.label()),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from("q or Ctrl-c exits | ? closes shortcuts | Tab cycles focus"),
+        Line::from("F1-F8 switches primary workspaces | mouse navigates visible controls"),
+    ];
+    lines.extend(match section {
+        WorkspaceSection::Browser => vec![
+            Line::from("Ctrl-l edits address | Enter opens | Ctrl-r reloads | Ctrl-d downloads"),
+            Line::from("Ctrl-t creates a tab | Ctrl-w closes | Left/Right switches tabs"),
+            Line::from("Tab/Shift-Tab moves page control focus | Enter/Space activates"),
+            Line::from("PgUp/PgDn scrolls | Ctrl-j/Ctrl-k scrolls one line"),
+            Line::from("Ctrl-f refreshes partials | D discovers path | R retries after discovery"),
+            Line::from("o cycles status overlay | O expands overlay | N runs inline page probe"),
+        ],
+        WorkspaceSection::Messages => vec![
+            Line::from("Ctrl-n creates a conversation"),
+            Line::from("Ctrl-y edits title | Ctrl-e edits body | Ctrl-s sends"),
+            Line::from("Ctrl-p toggles direct/propagated | Ctrl-u toggles reply ticket"),
+            Line::from("Ctrl-a confirms a direct stamp | Ctrl-x cancels confirmation"),
+            Line::from("Ctrl-g syncs runtime messages"),
+        ],
+        WorkspaceSection::NetworkDoctor => vec![
+            Line::from("/ edits bounded Operations search | f cycles filter | c clears search"),
+            Line::from("Up/Down or j/k selects one of the eight visible operation rows"),
+            Line::from("Enter or v opens the redacted, bounded diagnostic"),
+            Line::from("Copy/select view: terminal mouse selects text; Esc or q returns"),
+            Line::from("Copy/select view: PgUp/PgDn or j/k scrolls"),
+        ],
+        WorkspaceSection::Directory => vec![
+            Line::from("Up/Down selects an entry | Enter opens its primary action"),
+            Line::from("k cycles the selected peer reply-ticket default"),
+        ],
+        WorkspaceSection::Interfaces => vec![
+            Line::from("Up/Down selects an interface | e enables/disables | x deletes"),
+            Line::from("a adds TCP | 1/2 adds RMap/WNS preset | i adds I2P | v adds RNode"),
+            Line::from("n edits name | h/p edits TCP host/port | r edits I2P peers"),
+            Line::from("P previews config | E exports config | G runs native quickstart"),
+        ],
+        WorkspaceSection::Settings => vec![
+            Line::from("Up/Down selects a setting | Enter edits or activates"),
+            Line::from("I creates a managed identity | i attaches an identity path"),
+            Line::from("G runs native Reticulum quickstart"),
+        ],
+        WorkspaceSection::Diagnostics => vec![
+            Line::from("P previews diagnostics | E exports | C clears preview"),
+            Line::from("N/X probes page fetch | I/O previews/exports interop"),
+            Line::from("S/L runs dry/live native smoke | G runs quickstart"),
+        ],
+        WorkspaceSection::Logs => vec![Line::from("f cycles severity | s cycles source")],
+        WorkspaceSection::Plugins => vec![Line::from(
+            "Up/Down selects a plugin | Enter activates the selected action",
+        )],
+        WorkspaceSection::Identities | WorkspaceSection::Monitoring | WorkspaceSection::Help => {
+            vec![Line::from(
+                "This workspace currently has no additional section-specific shortcuts.",
+            )]
+        }
+    });
+    lines
+}
+
+fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, area);
-    let help = Paragraph::new(vec![
-        Line::from("OMENbrowser_rs starter keys"),
-        Line::from("q or Ctrl-c exits"),
-        Line::from("Tab cycles focus"),
-        Line::from("In browser workspace, Tab cycles Micron controls when controls are present"),
-        Line::from("Ctrl-t creates a browser tab"),
-        Line::from("Ctrl-w closes the active browser tab when more than one exists"),
-        Line::from("Left/Right cycles browser tabs"),
-        Line::from("Ctrl-f refreshes active page partials"),
-        Line::from("PageUp/PageDown scroll browser content; Ctrl-j/Ctrl-k scroll one line"),
-        Line::from("Ctrl-n creates a conversation window"),
-        Line::from("Up/Down moves sidebar selection"),
-        Line::from(
-            "Mouse selects header sections, sidebar rows, tabs, address, and composer fields",
-        ),
-        Line::from(
-            "Ctrl-s sends a message draft; Ctrl-p toggles direct/propagated; Ctrl-u toggles ticket",
-        ),
-        Line::from("Ctrl-g syncs mock/runtime inbound messages into conversation tabs"),
-        Line::from("Directory: k cycles the selected peer reply-ticket default"),
-        Line::from("Settings: I creates a managed identity; i attaches an existing identity path"),
-        Line::from("Interfaces/Settings/Diagnostics: G runs native Reticulum quickstart"),
-        Line::from("? toggles this help"),
-    ])
-    .block(
-        Block::default()
-            .title(" Help ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
+    let help = Paragraph::new(shortcut_help_lines(app.workspace.active_section))
+        .block(
+            Block::default()
+                .title(" Shortcuts ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
     frame.render_widget(help, area);
 }
 
@@ -2016,7 +2061,33 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostics_live_fetch_summary, masked_passphrase_status};
+    use super::{
+        diagnostics_live_fetch_summary, masked_passphrase_status, shortcut_help_lines,
+        WorkspaceSection,
+    };
+
+    fn help_text(section: WorkspaceSection) -> String {
+        shortcut_help_lines(section)
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn shortcut_overlay_is_scoped_to_the_active_workspace() {
+        let operations = help_text(WorkspaceSection::NetworkDoctor);
+        assert!(operations.contains("/ edits bounded Operations search"));
+        assert!(operations.contains("Enter or v opens the redacted, bounded diagnostic"));
+        assert!(operations.contains("terminal mouse selects text"));
+        assert!(!operations.contains("Ctrl-l edits address"));
+
+        let browser = help_text(WorkspaceSection::Browser);
+        assert!(browser.contains("Ctrl-l edits address"));
+        assert!(browser.contains("D discovers path"));
+        assert!(!browser.contains("Operations search"));
+    }
 
     #[test]
     fn passphrase_status_never_renders_the_active_secret() {
