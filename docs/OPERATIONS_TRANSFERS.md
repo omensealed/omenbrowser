@@ -12,6 +12,8 @@ The model deliberately distinguishes:
 - transport acceptance;
 - receipt observation;
 - peer delivery;
+- locally completed non-message work;
+- Resource offer and completion;
 - authoritative Resource progress;
 - cancellation, rejection, expiry, and failure;
 - event gaps and reconciliation.
@@ -141,3 +143,36 @@ subscription, persistence, protocol field, or dependency.
 
 The eventual interactive desktop/TUI views must continue to consume the same
 projection rather than define frontend-specific delivery vocabulary.
+
+## Reticulum Resource lifecycle adapter
+
+`src/operations/resource.rs` observes the existing typed
+`ResourceProgress` and `ResourceLifecycle` runtime events at the application
+event boundary. It changes no Resource transport, browser correlation,
+Network Doctor tracking, retry, cancellation, or shutdown behavior.
+
+The adapter derives a stable opaque 128-bit project key from the bounded
+transfer identifier. The original transfer identifier and browser operation
+correlation are not retained in the shared presentation record. Public target
+text is assembled only from available source, purpose, direction, and peer
+metadata and remains subject to the shared record and presentation bounds.
+
+Mapping is deliberately conservative:
+
+- an offer is authoritative `Waiting` work with `resource offer` evidence;
+- progress is authoritative `Transferring` work, with exact byte progress only
+  when a nonzero valid total exists;
+- a previously observed authoritative total may be reused when a later update
+  omits it, but byte regressions and malformed totals are not applied;
+- Resource completion is terminal `Completed` with `resource completion`
+  evidence, never `Delivered` or peer-delivery evidence;
+- failure and cancellation remain distinct terminal outcomes and preserve the
+  last valid progress when available;
+- progress or offers after a terminal outcome are ignored;
+- repeated progress replaces the prior progress evidence instead of growing
+  history.
+
+Admission failure leaves the prior authoritative record and all other
+unresolved Operations intact and emits a bounded warning through the existing
+application log. No worker, timer, subscription, queue, cache, persistence,
+protocol field, action, or dependency is added.

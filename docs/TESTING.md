@@ -3053,6 +3053,34 @@ The temporary root is removed after rendering. No runtime backend, identity,
 Reticulum peer, OMENchat server, timer, worker, or input action is started.
 Interactive filter/action controls remain a later gate.
 
+The typed Resource adapter fixtures prove stable opaque correlation, transfer
+identifier and browser-operation redaction, offer/progress coalescing, retained
+authoritative totals, regression and malformed-total rejection, completion
+without a peer-delivery claim, distinct failure/cancellation, terminal
+precedence over late progress, and saturation that preserves unresolved work:
+
+```bash
+cargo test --locked --no-default-features --features tui \
+  operations::resource::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  operations::resource::tests --lib
+```
+
+The existing application Resource handler tests additionally verify that typed
+events populate both Network Doctor and the shared owner without changing
+status or browser-correlation behavior:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  network_doctor_runtime_handler_records --lib
+```
+
+All fixtures are generated in memory or under the existing isolated test
+roots. They do not start Reticulum, transfer a Resource, contact an OMENchat
+server, or touch the maintainer's application data. Live Resource
+interoperability remains a separate smoke/release gate.
+
 ## OMENchat negotiated durable room and user mutations
 
 Negotiated `/me` sends must persist a `RoomAction` intent before transport,

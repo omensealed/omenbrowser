@@ -237,6 +237,7 @@ pub fn state_label(state: OperationState) -> &'static str {
         OperationState::TransportAccepted => "transport accepted",
         OperationState::ReceiptObserved => "receipt observed",
         OperationState::Delivered => "delivered",
+        OperationState::Completed => "completed",
         OperationState::Transferring => "transferring",
         OperationState::Active => "active",
         OperationState::Reconciling => "reconciling",
@@ -264,7 +265,9 @@ pub fn evidence_label(kind: OperationEvidenceKind) -> &'static str {
         OperationEvidenceKind::TransportAcceptance => "transport acceptance",
         OperationEvidenceKind::Receipt => "receipt",
         OperationEvidenceKind::PeerDelivery => "peer delivery",
+        OperationEvidenceKind::ResourceOffer => "resource offer",
         OperationEvidenceKind::ResourceProgress => "resource progress",
+        OperationEvidenceKind::ResourceCompletion => "resource completion",
         OperationEvidenceKind::Cancellation => "cancellation",
         OperationEvidenceKind::Failure => "failure",
         OperationEvidenceKind::Expiration => "expiration",
@@ -427,8 +430,13 @@ mod tests {
             "receipt observed"
         );
         assert_eq!(state_label(OperationState::Delivered), "delivered");
+        assert_eq!(state_label(OperationState::Completed), "completed");
         assert_ne!(
             state_label(OperationState::TransportAccepted),
+            state_label(OperationState::Delivered)
+        );
+        assert_ne!(
+            state_label(OperationState::Completed),
             state_label(OperationState::Delivered)
         );
     }

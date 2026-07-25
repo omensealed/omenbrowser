@@ -15952,6 +15952,18 @@ impl App {
         for facade_event in network_doctor_facade_events_from_runtime_bus_event(&event) {
             self.network_doctor_state.record_facade_event(&facade_event);
         }
+        let observed_at_unix_ms = i64::try_from(current_epoch_ms()).unwrap_or(i64::MAX);
+        if let Err(error) = crate::operations::resource::record_resource_runtime_event(
+            &mut self.operation_history,
+            &event,
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("resource Operations projection rejected an update: {error}"),
+            );
+        }
         match event {
             crate::runtime::RuntimeBusEvent::StatusChanged(status) => {
                 self.runtime_status = status.clone();
@@ -22247,6 +22259,23 @@ mod tests {
         assert!(app.network_doctor_state.recent_resources[0]
             .detail
             .contains("omenchat | 64/128"));
+        let resource_operation = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::ResourceTransfer)
+            .expect("resource progress operation");
+        assert_eq!(
+            resource_operation.state,
+            crate::operations::OperationState::Transferring
+        );
+        assert_eq!(
+            resource_operation.progress,
+            Some(crate::operations::AuthoritativeProgress {
+                completed_bytes: 64,
+                total_bytes: 128,
+            })
+        );
+        assert!(resource_operation.target.label.contains("peer=link-1"));
 
         assert!(
             app.handle_runtime_bus_event(RuntimeBusEvent::InterfaceStats(InterfaceStats {
@@ -22308,6 +22337,11 @@ mod tests {
         assert_eq!(offered.purpose.as_deref(), Some("history-batch"));
         assert_eq!(offered.peer.as_deref(), Some("link-0"));
         assert!(app.status.task.contains("offered"));
+        assert!(app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::ResourceTransfer
+                && record.state == crate::operations::OperationState::Waiting
+                && record.target.label.contains("purpose=history-batch")
+        }));
 
         assert!(
             app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
@@ -22336,6 +22370,12 @@ mod tests {
         assert_eq!(complete.purpose.as_deref(), Some("omenchat-resource"));
         assert!(complete.detail.contains("peer=link-1"));
         assert!(app.status.task.contains("complete"));
+        assert!(app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::ResourceTransfer
+                && record.state == crate::operations::OperationState::Completed
+                && !record.state.claims_peer_delivery()
+                && record.target.label.contains("purpose=omenchat-resource")
+        }));
 
         let errors_before = app.monitoring_state.runtime_errors;
         assert!(
@@ -22364,6 +22404,11 @@ mod tests {
         assert_eq!(failed.peer.as_deref(), Some("prop-node"));
         assert!(failed.detail.contains("timeout"));
         assert!(app.status.task.contains("failed"));
+        assert!(app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::ResourceTransfer
+                && record.state == crate::operations::OperationState::Failed
+                && record.last_error.as_deref() == Some("timeout")
+        }));
 
         let errors_after_failure = app.monitoring_state.runtime_errors;
         assert!(
@@ -22392,6 +22437,11 @@ mod tests {
         assert!(cancelled.detail.contains("cancelled"));
         assert!(cancelled.detail.contains("user cancelled"));
         assert!(app.status.task.contains("cancelled"));
+        assert!(app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::ResourceTransfer
+                && record.state == crate::operations::OperationState::Cancelled
+                && record.last_error.as_deref() == Some("user cancelled")
+        }));
     }
 
     #[test]

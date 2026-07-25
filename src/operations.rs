@@ -6,6 +6,7 @@ use thiserror::Error;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod omenchat;
 pub mod presentation;
+pub mod resource;
 
 pub const OPERATION_HISTORY_MAX_ITEMS: usize = 512;
 pub const OPERATION_HISTORY_MAX_BYTES: usize = 512 * 1024;
@@ -82,6 +83,7 @@ pub enum OperationState {
     TransportAccepted,
     ReceiptObserved,
     Delivered,
+    Completed,
     Transferring,
     Active,
     Reconciling,
@@ -96,7 +98,12 @@ impl OperationState {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Delivered | Self::Cancelled | Self::Failed | Self::Expired | Self::Rejected
+            Self::Delivered
+                | Self::Completed
+                | Self::Cancelled
+                | Self::Failed
+                | Self::Expired
+                | Self::Rejected
         )
     }
 
@@ -112,7 +119,9 @@ pub enum OperationEvidenceKind {
     TransportAcceptance,
     Receipt,
     PeerDelivery,
+    ResourceOffer,
     ResourceProgress,
+    ResourceCompletion,
     Cancellation,
     Failure,
     Expiration,
@@ -537,6 +546,8 @@ mod tests {
         }
         assert!(OperationState::Delivered.claims_peer_delivery());
         assert!(OperationState::Delivered.is_terminal());
+        assert!(OperationState::Completed.is_terminal());
+        assert!(!OperationState::Completed.claims_peer_delivery());
         let mut unsupported_claim = record(9, OperationState::Active, 2);
         unsupported_claim.state = OperationState::Delivered;
         assert_eq!(

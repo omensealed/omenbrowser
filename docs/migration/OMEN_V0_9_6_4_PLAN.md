@@ -441,6 +441,19 @@ The view adds no action, state machine, update loop, worker, timer,
 subscription, persistence, protocol, storage, or dependency. Interactive
 filter/action controls and broader runtime-domain adapters remain pending.
 
+Phase 3G adds the first typed runtime-domain adapter for Reticulum Resource
+progress and lifecycle events. A stable opaque key coalesces offers and
+progress without retaining the raw transfer or browser-correlation identifier.
+Typed valid totals remain exact; regressions and malformed totals preserve the
+last valid record. Local Resource completion uses a new terminal `Completed`
+state and `resource completion` evidence so it cannot be confused with peer
+message delivery. Failure and cancellation remain distinct, terminal events
+win over late progress, and history saturation leaves unresolved work intact
+with a visible warning. The existing runtime, Network Doctor, browser transfer
+correlation, and transport behavior are unchanged. No worker, timer,
+subscription, queue, cache, persistence, protocol, action, or dependency is
+introduced.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:
