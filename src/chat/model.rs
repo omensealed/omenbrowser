@@ -218,6 +218,28 @@ pub fn chat_message_presentation(
     }
 }
 
+pub fn retained_local_mention_count(
+    events: &[ChatEvent],
+    server_id: &ServerId,
+    room_id: RoomId,
+    local_user_id: Option<UserId>,
+) -> u32 {
+    let Some(local_user_id) = local_user_id else {
+        return 0;
+    };
+    events
+        .iter()
+        .filter(|event| event.server_id == *server_id && event.room_id == room_id)
+        .filter_map(ChatEvent::message_metadata)
+        .filter(|metadata| {
+            metadata
+                .mentioned_user_ids
+                .binary_search(&local_user_id)
+                .is_ok()
+        })
+        .fold(0_u32, |count, _| count.saturating_add(1))
+}
+
 fn chat_event_preview_text(event: &ChatEvent) -> &str {
     match &event.kind {
         ChatEventKind::Message { body }
@@ -337,6 +359,44 @@ mod tests {
         assert!(
             !chat_message_presentation(std::slice::from_ref(&rich), &rich, None)
                 .mentions_local_user
+        );
+    }
+
+    #[test]
+    fn retained_mention_count_is_server_room_and_numeric_identity_scoped() {
+        let rich = |server: &str, room_id, event_id, mentions: Vec<u32>| ChatEvent {
+            server_id: server.into(),
+            room_id,
+            event_id,
+            actor_user_id: Some(2),
+            actor_display_name: Some("Bob".into()),
+            at_unix: 1,
+            kind: ChatEventKind::RichMessage {
+                body: "@display text is not evidence".into(),
+                metadata: ChatMessageMetadata {
+                    reply_to_event_id: None,
+                    mentioned_user_ids: mentions,
+                },
+            },
+        };
+        let events = vec![
+            rich("server", 1, 1, vec![7]),
+            rich("server", 1, 2, vec![3, 7]),
+            rich("server", 2, 3, vec![7]),
+            rich("other", 1, 4, vec![7]),
+            message_event(5, "@Alice"),
+        ];
+        assert_eq!(
+            retained_local_mention_count(&events, &"server".into(), 1, Some(7)),
+            2
+        );
+        assert_eq!(
+            retained_local_mention_count(&events, &"server".into(), 1, Some(8)),
+            0
+        );
+        assert_eq!(
+            retained_local_mention_count(&events, &"server".into(), 1, None),
+            0
         );
     }
 }

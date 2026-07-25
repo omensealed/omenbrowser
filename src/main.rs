@@ -2312,6 +2312,14 @@ fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_jso
                 }
             })
         }
+        omenbrowser_rs::chat::ChatClientEvent::LocalUserBound {
+            session_id,
+            user_id,
+        } => serde_json::json!({
+            "event": "local_user_bound",
+            "session_id": session_id,
+            "user_id": user_id,
+        }),
         omenbrowser_rs::chat::ChatClientEvent::UploadAccepted {
             session_id,
             resource_id,

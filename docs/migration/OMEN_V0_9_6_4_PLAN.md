@@ -911,7 +911,9 @@ Implementation has completed the inert shared contract, dormant omenchatd
 schema-v4 storage, dormant server validation/transaction/fan-out, and dormant
 client model/storage/parsing units. Read-only bounded reply previews, retained
 jump targeting, and authoritative numeric mention presentation are also in
-place. Production negotiation still omits `reply-mentions-v1`; composer
+place. The server-scoped local user binding now persists with cached sessions,
+and room labels derive saturating mention totals only from bounded retained
+history. Production negotiation still omits `reply-mentions-v1`; composer
 actions/settings and the final mixed-version gates must land before activation.
 
 ### Unit 6B — reactions

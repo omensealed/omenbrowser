@@ -290,3 +290,28 @@ fn omenchat_ui_refuses_session_overload_without_creating_a_pane_target() {
     );
     assert!(desktop.app.status.task.contains("session limit reached"));
 }
+
+#[test]
+fn authenticated_local_user_event_persists_through_existing_session_store() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-local-user");
+    let session_id = open_mock_session(&mut desktop);
+    desktop.apply_omenchat_client_events_status(&[ChatClientEvent::LocalUserBound {
+        session_id,
+        user_id: 7,
+    }]);
+
+    assert_eq!(
+        desktop.omenchat.chat_client.local_user_id(session_id),
+        Some(7)
+    );
+    assert_eq!(
+        desktop
+            .omenchat
+            .chat_store
+            .as_ref()
+            .expect("chat store")
+            .local_user_id(&"mockchatdestination".into())
+            .expect("stored binding"),
+        Some(7)
+    );
+}

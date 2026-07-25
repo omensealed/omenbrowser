@@ -142,15 +142,24 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         let mut room_column = column![].spacing(8);
         room_column = room_column.push(text("Rooms").size(ui_size(16)));
         for room in rooms {
+            let mention_count = desktop
+                .omenchat
+                .chat_client
+                .retained_mention_count(session.session_id, room.room_id);
+            let mention_label = if mention_count > 0 {
+                format!(" · @{mention_count}")
+            } else {
+                String::new()
+            };
             let unread = if room.unread > 0 {
                 format!(" ({})", room.unread)
             } else {
                 String::new()
             };
             let label = if room.room_id == session.active_room.room_id {
-                format!("[#{}]", room.name)
+                format!("[#{}{}]", room.name, mention_label)
             } else {
-                format!("#{}{}", room.name, unread)
+                format!("#{}{}{}", room.name, unread, mention_label)
             };
             let message = Message::OmenChat(OmenChatMessage::JoinRoom {
                 session_id: session.session_id,
@@ -173,13 +182,10 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     };
 
     let mut timeline = column![].spacing(8).width(Length::Fill);
-    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     let local_user_id = desktop
         .omenchat
-        .omenchat_live_state
+        .chat_client
         .local_user_id(session.session_id);
-    #[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
-    let local_user_id = None;
     for group in chat_timeline_groups_for_local_user(session, local_user_id) {
         let header = row![
             text(group.actor).size(ui_size(12)),

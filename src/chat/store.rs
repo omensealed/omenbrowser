@@ -5,7 +5,7 @@ use super::model::{
     CHAT_SESSION_MAX_ROOMS, CHAT_SESSION_MAX_ROOM_BYTES, CHAT_SESSION_MAX_USERS,
     CHAT_SESSION_MAX_USER_BYTES, CHAT_USER_DISPLAY_MAX_BYTES,
 };
-use super::protocol::{EventId, RoomId, ServerId};
+use super::protocol::{EventId, RoomId, ServerId, UserId};
 use anyhow::Context;
 
 pub trait ChatStore {
@@ -14,6 +14,12 @@ pub trait ChatStore {
     fn delete_server(&mut self, server_id: &ServerId) -> anyhow::Result<bool>;
     fn set_active_room(&mut self, server_id: &ServerId, room_id: RoomId) -> anyhow::Result<()>;
     fn active_room_id(&self, server_id: &ServerId) -> anyhow::Result<Option<RoomId>>;
+    fn set_local_user_id(
+        &mut self,
+        server_id: &ServerId,
+        user_id: Option<UserId>,
+    ) -> anyhow::Result<()>;
+    fn local_user_id(&self, server_id: &ServerId) -> anyhow::Result<Option<UserId>>;
     fn save_room(&mut self, room: ChatRoomSummary) -> anyhow::Result<()>;
     fn rooms_for_server(&self, server_id: &ServerId) -> anyhow::Result<Vec<ChatRoomSummary>>;
     fn replace_userlist(
@@ -86,6 +92,11 @@ impl SqliteChatStore {
             "room_events",
             "mention_user_ids",
             "ALTER TABLE room_events ADD COLUMN mention_user_ids BLOB",
+        )?;
+        self.add_column_if_missing(
+            "saved_servers",
+            "local_user_id",
+            "ALTER TABLE saved_servers ADD COLUMN local_user_id INTEGER",
         )?;
         Ok(())
     }
@@ -192,6 +203,38 @@ impl ChatStore for SqliteChatStore {
         Ok(row
             .get::<_, Option<i64>>(0)?
             .map(|room_id| room_id as RoomId))
+    }
+
+    fn set_local_user_id(
+        &mut self,
+        server_id: &ServerId,
+        user_id: Option<UserId>,
+    ) -> anyhow::Result<()> {
+        let updated = self.connection.execute(
+            "UPDATE saved_servers SET local_user_id = ?2 WHERE server_id = ?1",
+            (server_id, user_id.map(i64::from)),
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "cannot bind an OMENchat local user to an unknown server"
+        );
+        Ok(())
+    }
+
+    fn local_user_id(&self, server_id: &ServerId) -> anyhow::Result<Option<UserId>> {
+        let value = self.connection.query_row(
+            "SELECT local_user_id FROM saved_servers WHERE server_id = ?1",
+            [server_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        value
+            .map(|value| {
+                u32::try_from(value)
+                    .ok()
+                    .filter(|value| *value != 0)
+                    .context("stored OMENchat local user id must be a positive u32")
+            })
+            .transpose()
     }
 
     fn save_room(&mut self, room: ChatRoomSummary) -> anyhow::Result<()> {
@@ -1062,6 +1105,17 @@ mod tests {
             .expect("columns");
         assert!(columns.iter().any(|column| column == "reply_to_event_id"));
         assert!(columns.iter().any(|column| column == "mention_user_ids"));
+        assert!(store
+            .connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM pragma_table_info('saved_servers')
+                   WHERE name = 'local_user_id'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("saved server columns"));
         drop(store);
         std::fs::remove_file(path).expect("remove store");
     }
@@ -1079,5 +1133,38 @@ mod tests {
             )
             .expect("seed malformed metadata");
         assert!(store.latest_events(&"server-a".into(), 1, 10).is_err());
+    }
+
+    #[test]
+    fn local_user_binding_is_server_scoped_and_survives_store_restart() {
+        let path = isolated_store_path("local-user");
+        {
+            let mut store = SqliteChatStore::open(&path).expect("create store");
+            store.save_server(sample_server()).expect("save server");
+            store
+                .set_local_user_id(&"server-a".into(), Some(7))
+                .expect("bind user");
+            assert_eq!(
+                store.local_user_id(&"server-a".into()).expect("read user"),
+                Some(7)
+            );
+        }
+        let store = SqliteChatStore::open(&path).expect("reopen store");
+        assert_eq!(
+            store
+                .local_user_id(&"server-a".into())
+                .expect("restart user"),
+            Some(7)
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE saved_servers SET local_user_id = -1 WHERE server_id = 'server-a'",
+                [],
+            )
+            .expect("seed invalid user");
+        assert!(store.local_user_id(&"server-a".into()).is_err());
+        drop(store);
+        std::fs::remove_file(path).expect("remove store");
     }
 }

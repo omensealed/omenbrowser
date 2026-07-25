@@ -221,6 +221,10 @@ pub enum ChatClientEvent {
         session_id: ChatSessionId,
         user: ChatUserSummary,
     },
+    LocalUserBound {
+        session_id: ChatSessionId,
+        user_id: super::protocol::UserId,
+    },
     EventAppended {
         session_id: ChatSessionId,
         event: ChatEvent,
@@ -405,6 +409,7 @@ pub(crate) enum HistoryWindowEdge {
 pub struct ChatClient {
     next_session_id: ChatSessionId,
     sessions: Vec<ChatSessionView>,
+    local_user_ids: std::collections::BTreeMap<ServerId, super::protocol::UserId>,
 }
 
 impl ChatClient {
@@ -412,6 +417,7 @@ impl ChatClient {
         Self {
             next_session_id: 1,
             sessions: Vec::new(),
+            local_user_ids: std::collections::BTreeMap::new(),
         }
     }
 
@@ -435,6 +441,42 @@ impl ChatClient {
         self.sessions
             .iter_mut()
             .find(|session| session.session_id == session_id)
+    }
+
+    pub fn bind_local_user_id(
+        &mut self,
+        session_id: ChatSessionId,
+        user_id: super::protocol::UserId,
+    ) -> bool {
+        if user_id == 0 {
+            return false;
+        }
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.clone())
+        else {
+            return false;
+        };
+        self.local_user_ids.insert(server_id, user_id);
+        true
+    }
+
+    pub fn local_user_id(&self, session_id: ChatSessionId) -> Option<super::protocol::UserId> {
+        self.session(session_id)
+            .and_then(|session| self.local_user_ids.get(&session.server.server_id))
+            .copied()
+    }
+
+    pub fn retained_mention_count(&self, session_id: ChatSessionId, room_id: RoomId) -> u32 {
+        let Some(session) = self.session(session_id) else {
+            return 0;
+        };
+        super::model::retained_local_mention_count(
+            &session.events,
+            &session.server.server_id,
+            room_id,
+            self.local_user_id(session_id),
+        )
     }
 
     pub(crate) fn enforce_status_bounds(&mut self) {
@@ -468,7 +510,15 @@ impl ChatClient {
             .sessions
             .iter()
             .position(|session| session.session_id == session_id)?;
-        Some(self.sessions.remove(index))
+        let removed = self.sessions.remove(index);
+        if !self
+            .sessions
+            .iter()
+            .any(|session| session.server.server_id == removed.server.server_id)
+        {
+            self.local_user_ids.remove(&removed.server.server_id);
+        }
+        Some(removed)
     }
 
     pub fn persist_session<S: ChatStore>(
@@ -480,6 +530,9 @@ impl ChatClient {
             return Ok(());
         };
         store.save_server(session.server.clone())?;
+        if let Some(user_id) = self.local_user_id(session_id) {
+            store.set_local_user_id(&session.server.server_id, Some(user_id))?;
+        }
         for room in &session.rooms {
             store.save_room(room.clone())?;
         }
@@ -652,6 +705,8 @@ impl ChatClient {
             events.sort_by_key(|event| (event.room_id, event.event_id));
             events.dedup_by_key(|event| (event.room_id, event.event_id));
             let session_id = self.reserve_session_id();
+            let local_user_id = store.local_user_id(&server.server_id)?;
+            let server_id = server.server_id.clone();
             if !self.push_session(ChatSessionView {
                 session_id,
                 server,
@@ -662,6 +717,9 @@ impl ChatClient {
                 status: "restored from local cache".into(),
             }) {
                 break;
+            }
+            if let Some(user_id) = local_user_id {
+                self.local_user_ids.insert(server_id, user_id);
             }
             restored += 1;
         }
@@ -1213,6 +1271,7 @@ mod tests {
             }],
             status: "test".into(),
         });
+        assert!(client.bind_local_user_id(session_id, 1));
         store
             .append_events(vec![ChatEvent {
                 server_id: "server-a".into(),
@@ -1238,6 +1297,7 @@ mod tests {
             1
         );
         let session = restored.sessions().first().expect("restored session");
+        assert_eq!(restored.local_user_id(session.session_id), Some(1));
         assert_eq!(session.server.display_name, "Server A");
         assert_eq!(session.active_room.name, "lobby");
         assert!(session.active_room.joined);

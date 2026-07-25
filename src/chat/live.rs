@@ -2103,6 +2103,7 @@ fn apply_frame_with_state(
                 });
                 return;
             };
+            let mut local_user_id = None;
             if let Some(state) = state.as_deref_mut() {
                 if state.reply_mentions_sessions.contains(&session_id) {
                     match body_values(&frame.body)
@@ -2113,6 +2114,7 @@ fn apply_frame_with_state(
                     {
                         Some(user_id) => {
                             state.local_user_ids.insert(session_id, user_id);
+                            local_user_id = Some(user_id);
                         }
                         None => {
                             state.reply_mentions_sessions.remove(&session_id);
@@ -2135,6 +2137,14 @@ fn apply_frame_with_state(
                 session.users.clear();
                 session.enforce_catalog_bounds();
                 session.status = "joined live room".into();
+            }
+            if let Some(user_id) = local_user_id {
+                if client.bind_local_user_id(session_id, user_id) {
+                    events.push(ChatClientEvent::LocalUserBound {
+                        session_id,
+                        user_id,
+                    });
+                }
             }
             events.push(ChatClientEvent::RoomJoined {
                 session_id,
@@ -8148,10 +8158,19 @@ mod tests {
             &mut events,
         );
         assert_eq!(state.local_user_id(session_id), Some(7));
+        assert_eq!(client.local_user_id(session_id), Some(7));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::LocalUserBound {
+                session_id: bound_session,
+                user_id: 7,
+            } if *bound_session == session_id
+        )));
 
         state.retire_session_link_state(session_id);
         assert!(!state.reply_mentions_negotiated(session_id));
         assert_eq!(state.local_user_id(session_id), None);
+        assert_eq!(client.local_user_id(session_id), Some(7));
     }
 
     #[test]

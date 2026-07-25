@@ -400,9 +400,29 @@ Unit 5A implements read-only presentation without activating mutation:
 - machine-readable OMENchat smoke/TUI output includes the reply event ID and
   bounded numeric mention IDs for rich events.
 
-The Reply composer action, member mention picker, mention count,
-mute-except-mentions setting, capability request, and server activation remain
-deferred to later Unit 5 slices.
+The Reply composer action, member mention picker, mute-except-mentions setting,
+capability request, and server activation remain deferred to later Unit 5
+slices.
+
+Unit 5B persists the local identity evidence and adds bounded counts:
+
+- a negotiated capable `JoinAccept` emits one typed `LocalUserBound` event
+  after validating the nonzero `u32` server user ID;
+- `ChatClient` owns the binding by server ID, and identity-scoped
+  `chat.sqlite.saved_servers.local_user_id` restores it with cached sessions;
+- invalid stored IDs fail visibly, deleting a saved server removes the
+  binding, and retiring or downgrading a live Link clears transient capability
+  state without erasing historical server-scoped evidence;
+- mention totals are derived with saturating arithmetic from the existing
+  item/byte-bounded retained event window and exact numeric IDs; plain
+  `@display-name` text never contributes;
+- room labels show `@N` only when retained validated events mention the bound
+  local ID. This is explicitly a retained-history count, not a global,
+  server-authoritative, or unread notification count.
+
+There is still no separate mention history, notification worker, polling
+subscription, sound, timer, or capability activation. Per-room
+mute-except-mentions and read/unread mention accounting remain deferred.
 - the single room-event encoder preserves metadata across live fan-out,
   bounded inline history, and resource history;
 - exact replay after restart returns the stored acknowledgement without a

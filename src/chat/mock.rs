@@ -17,6 +17,7 @@ use super::store::ChatStore;
 pub struct MockChatStore {
     servers: BTreeMap<ServerId, ChatServerSummary>,
     active_rooms: BTreeMap<ServerId, RoomId>,
+    local_user_ids: BTreeMap<ServerId, u32>,
     rooms: BTreeMap<(ServerId, RoomId), ChatRoomSummary>,
     users: BTreeMap<(ServerId, RoomId), Vec<ChatUserSummary>>,
     events: BTreeMap<(ServerId, RoomId), Vec<ChatEvent>>,
@@ -632,6 +633,7 @@ impl ChatStore for MockChatStore {
     fn delete_server(&mut self, server_id: &ServerId) -> anyhow::Result<bool> {
         let deleted = self.servers.remove(server_id).is_some();
         self.active_rooms.remove(server_id);
+        self.local_user_ids.remove(server_id);
         self.rooms
             .retain(|(stored_server_id, _), _| stored_server_id != server_id);
         self.users
@@ -648,6 +650,23 @@ impl ChatStore for MockChatStore {
 
     fn active_room_id(&self, server_id: &ServerId) -> anyhow::Result<Option<RoomId>> {
         Ok(self.active_rooms.get(server_id).copied())
+    }
+
+    fn set_local_user_id(
+        &mut self,
+        server_id: &ServerId,
+        user_id: Option<u32>,
+    ) -> anyhow::Result<()> {
+        if let Some(user_id) = user_id {
+            self.local_user_ids.insert(server_id.clone(), user_id);
+        } else {
+            self.local_user_ids.remove(server_id);
+        }
+        Ok(())
+    }
+
+    fn local_user_id(&self, server_id: &ServerId) -> anyhow::Result<Option<u32>> {
+        Ok(self.local_user_ids.get(server_id).copied())
     }
 
     fn save_room(&mut self, room: ChatRoomSummary) -> anyhow::Result<()> {

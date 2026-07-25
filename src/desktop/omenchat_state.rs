@@ -452,6 +452,18 @@ impl DesktopApp {
                 ChatClientEvent::UserUpdated { session_id, .. } => {
                     self.persist_omenchat_session(*session_id);
                 }
+                ChatClientEvent::LocalUserBound {
+                    session_id,
+                    user_id,
+                } => {
+                    if self
+                        .omenchat
+                        .chat_client
+                        .bind_local_user_id(*session_id, *user_id)
+                    {
+                        self.persist_omenchat_session(*session_id);
+                    }
+                }
                 ChatClientEvent::EventAppended { session_id, event } => {
                     self.mark_hidden_omenchat_room_unread(*session_id, event.room_id);
                     if !is_omenchat_local_echo_event(event) {
