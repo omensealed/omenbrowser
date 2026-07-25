@@ -12,6 +12,8 @@ pub const OUTBOUND_TTL_FIELD: &str = "native_lxmf_sdk_ttl_ms";
 pub const OUTBOUND_CREATED_AT_FIELD: &str = "native_lxmf_sdk_created_at_ms";
 pub const OUTBOUND_EXPIRES_AT_FIELD: &str = "native_lxmf_sdk_expires_at_ms";
 pub const OUTBOUND_PROPAGATION_FALLBACK_FIELD: &str = "native_lxmf_allow_propagation_fallback";
+pub const OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD: &str =
+    "native_lxmf_automatic_propagation_fallback";
 pub const OUTBOUND_DEFAULT_TTL_MS: u64 = 86_400_000;
 pub const OUTBOUND_MIN_TTL_MS: u64 = 1_000;
 pub const OUTBOUND_MAX_TTL_MS: u64 = 86_400_000;
@@ -25,6 +27,8 @@ pub struct OutboundOperationIdentity {
     pub expires_at_ms: u64,
     #[serde(default = "default_allow_propagation_fallback")]
     pub allow_propagation_fallback: bool,
+    #[serde(default)]
+    pub automatic_propagation_fallback: bool,
 }
 
 const fn default_allow_propagation_fallback() -> bool {
@@ -91,6 +95,15 @@ impl OutboundOperationIdentity {
                 Some(_) => return None,
                 None => true,
             };
+        operation.automatic_propagation_fallback = match message
+            .fields
+            .get(OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD)
+        {
+            Some(value) if value == "true" => true,
+            Some(value) if value == "false" => false,
+            Some(_) => return None,
+            None => false,
+        };
         Some(operation)
     }
 
@@ -124,6 +137,7 @@ impl OutboundOperationIdentity {
                 ttl_ms,
                 expires_at_ms,
                 allow_propagation_fallback: true,
+                automatic_propagation_fallback: false,
             })
         } else {
             None
@@ -160,6 +174,10 @@ impl OutboundOperationIdentity {
         fields.insert(
             OUTBOUND_PROPAGATION_FALLBACK_FIELD.into(),
             self.allow_propagation_fallback.to_string(),
+        );
+        fields.insert(
+            OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD.into(),
+            self.automatic_propagation_fallback.to_string(),
         );
     }
 }
@@ -253,6 +271,7 @@ mod tests {
     fn outbound_operation_identity_is_unique_and_round_trips_through_message_fields() {
         let mut first = OutboundOperationIdentity::generate();
         first.allow_propagation_fallback = false;
+        first.automatic_propagation_fallback = true;
         let second = OutboundOperationIdentity::generate();
         assert_ne!(first, second);
 
@@ -281,12 +300,26 @@ mod tests {
             .insert(OUTBOUND_PROPAGATION_FALLBACK_FIELD.into(), "invalid".into());
         assert!(OutboundOperationIdentity::from_message(&message).is_none());
         message.fields.remove(OUTBOUND_PROPAGATION_FALLBACK_FIELD);
+        let legacy =
+            OutboundOperationIdentity::from_message(&message).expect("legacy operation metadata");
         assert!(
-            OutboundOperationIdentity::from_message(&message)
-                .expect("legacy operation metadata")
-                .allow_propagation_fallback,
+            legacy.allow_propagation_fallback,
             "operation metadata written before the policy field must preserve legacy fallback"
         );
+        message
+            .fields
+            .remove(OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD);
+        assert!(
+            !OutboundOperationIdentity::from_message(&message)
+                .expect("legacy operation metadata")
+                .automatic_propagation_fallback,
+            "legacy operation metadata must never opt into automatic fallback"
+        );
+        message.fields.insert(
+            OUTBOUND_AUTOMATIC_PROPAGATION_FALLBACK_FIELD.into(),
+            "invalid".into(),
+        );
+        assert!(OutboundOperationIdentity::from_message(&message).is_none());
     }
 
     #[test]

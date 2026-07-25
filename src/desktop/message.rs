@@ -162,6 +162,7 @@ pub(in crate::desktop) enum DirectoryMessage {
     ToggleTrust(usize),
     ToggleIdentify(usize),
     CycleDelivery(usize),
+    CycleFallback(usize),
     RequestPath(usize),
     RefreshPropagation(usize),
     CancelPropagationRefresh,

@@ -1,7 +1,7 @@
 use super::*;
 use crate::directory::{
-    DirectoryEntry, PreferredDelivery, PropagationNodeCompatibility, PropagationNodeFreshness,
-    PropagationNodePathState, PropagationNodeRecord, TrustLevel,
+    DeliveryFallbackPolicy, DirectoryEntry, PreferredDelivery, PropagationNodeCompatibility,
+    PropagationNodeFreshness, PropagationNodePathState, PropagationNodeRecord, TrustLevel,
 };
 
 const FIXTURE_LXMF_PEER_HASH: &str = "00112233445566778899aabbccddeeff";
@@ -180,11 +180,15 @@ fn directory_selected_state_lines_are_kind_specific() {
     peer.preferred_delivery = Some(PreferredDelivery::Propagated);
     let peer_lines = directory_selected_state_lines(&peer).join("\n");
     assert!(peer_lines.contains("preferred LXMF delivery: propagated preferred"));
+    assert!(peer_lines.contains("direct failure: ask before fallback"));
     assert!(!peer_lines.contains("identify on connect"));
 
     peer.preferred_delivery = Some(PreferredDelivery::DirectOnly);
     let peer_lines = directory_selected_state_lines(&peer).join("\n");
     assert!(peer_lines.contains("preferred LXMF delivery: direct only"));
+    peer.delivery_fallback = DeliveryFallbackPolicy::Automatic;
+    let peer_lines = directory_selected_state_lines(&peer).join("\n");
+    assert!(peer_lines.contains("direct failure: automatic safe fallback"));
 
     let mut omenchat = DirectoryEntry::new("chat.hash", "Chat", DirectoryKind::OmenChat);
     omenchat.identity_hash = Some("00112233445566778899aabbccddeeff".into());

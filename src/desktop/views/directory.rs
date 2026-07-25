@@ -504,6 +504,10 @@ fn directory_selected_details_card(desktop: &DesktopApp) -> Element<'_, Message>
             "Delivery",
             Message::Directory(DirectoryMessage::CycleDelivery(index)),
         ));
+        management_actions.push(subtle_button(
+            "Fallback",
+            Message::Directory(DirectoryMessage::CycleFallback(index)),
+        ));
     }
     if entry.kind != DirectoryKind::Propagation {
         management_actions.push(subtle_button(

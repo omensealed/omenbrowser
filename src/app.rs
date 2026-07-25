@@ -33,8 +33,8 @@ use crate::browser::{BrowserAddress, BrowserPage, BrowserSession, DownloadedFile
 use crate::config::{AppConfig, AppPaths};
 use crate::diagnostics::{DiagnosticsService, DiagnosticsSnapshot};
 use crate::directory::{
-    DirectoryEntry, DirectoryKind, DirectoryService, PreferredDelivery, PropagationNodeInventory,
-    TrustLevel,
+    DeliveryFallbackPolicy, DirectoryEntry, DirectoryKind, DirectoryService, PreferredDelivery,
+    PropagationNodeInventory, TrustLevel,
 };
 use crate::error::AppResult;
 use crate::identity::IdentityManager;
@@ -11978,6 +11978,43 @@ impl App {
         }
     }
 
+    pub fn cycle_selected_directory_delivery_fallback(&mut self) -> bool {
+        let Some(entry) = self.selected_directory_entry() else {
+            self.status.task = "no directory entry selected".into();
+            return false;
+        };
+        if entry.kind != DirectoryKind::Peer {
+            self.status.task = "fallback policy only applies to LXMF peers".into();
+            return false;
+        }
+        let next = match entry.delivery_fallback {
+            DeliveryFallbackPolicy::Ask => DeliveryFallbackPolicy::Automatic,
+            DeliveryFallbackPolicy::Automatic => DeliveryFallbackPolicy::Ask,
+        };
+        match self
+            .directory_service
+            .set_delivery_fallback(&entry.destination_hash, next)
+        {
+            Ok(Some(updated)) => {
+                self.refresh_panels_from_services();
+                self.status.task = format!(
+                    "directory fallback: {} {}",
+                    updated.display_name,
+                    next.label()
+                );
+                true
+            }
+            Ok(None) => {
+                self.status.task = "directory entry no longer exists".into();
+                false
+            }
+            Err(error) => {
+                self.status.task = error.to_string();
+                false
+            }
+        }
+    }
+
     fn sync_runtime_identify_policy_nonblocking(&mut self) -> bool {
         let destinations = self
             .directory_service
@@ -12665,6 +12702,13 @@ impl App {
             .find(self.workspace.conversations[active].peer_hash.trim())
             .and_then(|entry| entry.preferred_delivery)
             != Some(PreferredDelivery::DirectOnly);
+        let automatic_propagation_fallback = self
+            .directory_service
+            .find(self.workspace.conversations[active].peer_hash.trim())
+            .is_some_and(|entry| {
+                entry.delivery_fallback == DeliveryFallbackPolicy::Automatic
+                    && entry.preferred_delivery != Some(PreferredDelivery::DirectOnly)
+            });
         let (
             conversation_id,
             peer_hash,
@@ -12684,6 +12728,7 @@ impl App {
                 .map(|prepared| prepared.identity)
                 .unwrap_or_else(OutboundOperationIdentity::generate);
             operation.allow_propagation_fallback = allow_propagation_fallback;
+            operation.automatic_propagation_fallback = automatic_propagation_fallback;
             conversation.pending_send = Some(MessageSendState { generation });
             if !message_pending_placeholder_present(conversation, generation) {
                 conversation.push_message(pending_outbound_message_from_conversation(
@@ -25888,6 +25933,37 @@ side
     }
 
     #[test]
+    fn directory_fallback_policy_cycles_from_safe_default() {
+        let mut app = App::new(test_config("directory-fallback-policy"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.refresh_panels_from_services();
+        app.switch_section(WorkspaceSection::Directory);
+
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .map(|entry| entry.delivery_fallback),
+            Some(DeliveryFallbackPolicy::Ask)
+        );
+        assert!(app.cycle_selected_directory_delivery_fallback());
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .map(|entry| entry.delivery_fallback),
+            Some(DeliveryFallbackPolicy::Automatic)
+        );
+        assert!(app.cycle_selected_directory_delivery_fallback());
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .map(|entry| entry.delivery_fallback),
+            Some(DeliveryFallbackPolicy::Ask)
+        );
+    }
+
+    #[test]
     fn directory_preferred_delivery_initializes_only_new_conversations() {
         let mut app = App::new(test_config("directory-delivery-conversation-default"));
         app.directory_service
@@ -33834,6 +33910,44 @@ side
             TransportMethod::Propagated
         );
         assert_eq!(app.status.task, "message delivered");
+    }
+
+    #[tokio::test]
+    async fn send_snapshots_automatic_fallback_without_weakening_direct_only() {
+        let mut app = App::new(test_config("send-fallback-snapshot"));
+        app.directory_service
+            .ingest_announce(FIXTURE_NODE_HASH, "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_delivery_fallback(FIXTURE_NODE_HASH, DeliveryFallbackPolicy::Automatic)
+            .expect("persist fallback policy");
+        {
+            let conversation = app.active_conversation_mut_for_test();
+            conversation.peer_hash = FIXTURE_NODE_HASH.into();
+            conversation.peer_label = "Peer".into();
+            conversation.draft_body = "automatic".into();
+            conversation.delivery_mode = DeliveryMode::Direct;
+        }
+
+        app.send_active_conversation_draft();
+        let automatic =
+            OutboundOperationIdentity::from_message(&app.active_conversation().thread.messages[0])
+                .expect("pending operation");
+        assert!(automatic.allow_propagation_fallback);
+        assert!(automatic.automatic_propagation_fallback);
+        assert!(app.wait_for_message_task_result().await);
+
+        app.directory_service
+            .set_preferred_delivery(FIXTURE_NODE_HASH, Some(PreferredDelivery::DirectOnly))
+            .expect("persist strict policy");
+        app.active_conversation_mut_for_test().draft_body = "strict".into();
+        app.send_active_conversation_draft();
+        let strict =
+            OutboundOperationIdentity::from_message(&app.active_conversation().thread.messages[1])
+                .expect("pending strict operation");
+        assert!(!strict.allow_propagation_fallback);
+        assert!(!strict.automatic_propagation_fallback);
+        assert!(app.wait_for_message_task_result().await);
     }
 
     #[tokio::test]

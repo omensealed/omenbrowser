@@ -241,6 +241,18 @@ operation records default to the prior fallback-permitted behavior. Malformed
 policy metadata is not reused. Strict policy does not trigger a fallback,
 retry, path request, propagation sync, or stamp expenditure.
 
+Each peer also has a fallback policy. `Ask before fallback` is the migration
+default and retains the explicit `Retry via propagation` action after a direct
+failure. `Automatic safe fallback` is opt-in and is copied into the durable
+operation metadata before dispatch. It enables the upstream 0.9.6 typed
+`try_propagation_on_fail` option for direct delivery only. In the integrated
+clean runtime, automatic fallback is restricted to failures before the
+transport observes packet or Resource submission. The same signed LXMF message
+and logical operation identity are then submitted to the selected propagation
+node. A failure after submission begins remains uncertain and is never
+automatically retried. This boundary prevents a local timeout or lost
+acknowledgement from fabricating a second logical message.
+
 The integrated runtime broadcast is consumed by one owned worker and forwarded
 through the existing 256-item application channel. Payload-bearing OMENchat
 events and SDK history pages additionally retain the shared 32 MiB queued-byte

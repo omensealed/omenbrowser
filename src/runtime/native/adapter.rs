@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 #[cfg(feature = "native-lxmf")]
 use std::path::PathBuf;
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "native-lxmf")]
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
@@ -489,6 +491,19 @@ fn clean_lxmf_direct_payload(delivery: &NativeLxmfSdkWireDelivery) -> Cow<'_, [u
 }
 
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+fn clean_lxmf_should_auto_fallback(
+    method: Option<&str>,
+    requested: bool,
+    submission_observed: bool,
+    propagation_node_available: bool,
+) -> bool {
+    method.unwrap_or("direct") == "direct"
+        && requested
+        && !submission_observed
+        && propagation_node_available
+}
+
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
 impl CleanReticulumLxmfWireSubmitter {
     fn new(
         transport: Arc<reticulum_rs::runtime::Transport>,
@@ -516,9 +531,10 @@ impl CleanReticulumLxmfWireSubmitter {
         })
     }
 
-    async fn submit_wire_async(
+    async fn submit_wire_once_async(
         &self,
         delivery: &NativeLxmfSdkWireDelivery,
+        submission_observed: &AtomicBool,
     ) -> AppResult<CleanLxmfSubmitOutcome> {
         let method = delivery.method.as_deref().unwrap_or("direct");
         if !matches!(method, "direct" | "propagated") {
@@ -753,6 +769,7 @@ impl CleanReticulumLxmfWireSubmitter {
             &link,
             send_payload.as_ref(),
             |packet| {
+                submission_observed.store(true, Ordering::Release);
                 let packet_hash = hex_encode(packet.hash().as_slice());
                 self.pending_lxmf_proofs
                     .lock()
@@ -767,6 +784,7 @@ impl CleanReticulumLxmfWireSubmitter {
                 receipt_hash = Some(packet_hash);
             },
             |hash| {
+                submission_observed.store(true, Ordering::Release);
                 let hash = hex_encode(hash.as_slice());
                 let submitted_at = native_unix_timestamp();
                 self.pending_lxmf_proofs
@@ -846,6 +864,44 @@ impl CleanReticulumLxmfWireSubmitter {
             resource_hash,
             propagation_stamp,
         })
+    }
+
+    async fn submit_wire_async(
+        &self,
+        delivery: &NativeLxmfSdkWireDelivery,
+    ) -> AppResult<CleanLxmfSubmitOutcome> {
+        let submission_observed = AtomicBool::new(false);
+        let propagation_node_available = self
+            .outbound_propagation_node
+            .lock()
+            .expect("native propagation node lock")
+            .is_some();
+        match self
+            .submit_wire_once_async(delivery, &submission_observed)
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(direct_error)
+                if clean_lxmf_should_auto_fallback(
+                    delivery.method.as_deref(),
+                    delivery.try_propagation_on_fail,
+                    submission_observed.load(Ordering::Acquire),
+                    propagation_node_available,
+                ) =>
+            {
+                let mut propagated = delivery.clone();
+                propagated.method = Some("propagated".into());
+                propagated.try_propagation_on_fail = false;
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.9 LXMF safe automatic fallback destination={} message_id={} direct_error={direct_error}",
+                    delivery.destination_hash, delivery.message_id
+                )));
+                let propagation_observed = AtomicBool::new(false);
+                self.submit_wire_once_async(&propagated, &propagation_observed)
+                    .await
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -17014,6 +17070,7 @@ enable_transport = No
             message_id: "message-id".into(),
             destination_hash: "00112233445566778899aabbccddeeff".into(),
             method: Some("direct".into()),
+            try_propagation_on_fail: false,
             include_ticket: false,
             reply_ticket_used: false,
             direct_stamp: None,
@@ -17024,6 +17081,41 @@ enable_transport = No
 
         assert!(matches!(payload, Cow::Borrowed(_)));
         assert_eq!(payload.as_ptr(), wire_ptr);
+    }
+
+    #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+    #[test]
+    fn clean_automatic_fallback_stops_at_submission_boundary() {
+        assert!(clean_lxmf_should_auto_fallback(
+            Some("direct"),
+            true,
+            false,
+            true
+        ));
+        assert!(!clean_lxmf_should_auto_fallback(
+            Some("direct"),
+            true,
+            true,
+            true
+        ));
+        assert!(!clean_lxmf_should_auto_fallback(
+            Some("direct"),
+            false,
+            false,
+            true
+        ));
+        assert!(!clean_lxmf_should_auto_fallback(
+            Some("propagated"),
+            true,
+            false,
+            true
+        ));
+        assert!(!clean_lxmf_should_auto_fallback(
+            Some("direct"),
+            true,
+            false,
+            false
+        ));
     }
 
     #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]

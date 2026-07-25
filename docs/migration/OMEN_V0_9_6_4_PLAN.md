@@ -673,6 +673,18 @@ the prior permitted behavior and malformed metadata is rejected. This unit
 adds no automatic fallback, retry, stamp spending, worker, timer, schema
 version, protocol, or dependency.
 
+Phase 4C adds a per-peer `Ask before fallback` / `Automatic safe fallback`
+choice. Missing and older Directory data defaults to asking, which preserves
+the existing explicit `Retry via propagation` flow. Automatic fallback is
+snapshotted into the durable outbound operation and activates the typed 0.9.6
+SDK/RPC `try_propagation_on_fail` option only for a direct send that also
+permits propagation. The integrated clean sender retries the same signed LXMF
+message through the selected propagation node only when no packet or Resource
+submission was observed. Once submission begins, failure remains uncertain and
+requires the existing explicit confirmation; it is never resent
+automatically. `Direct only` always disables fallback. This adds no worker,
+timer, dependency, protocol version, or database migration.
+
 ### Propagation-node quality of life
 
 Extend the existing bounded inventory with:

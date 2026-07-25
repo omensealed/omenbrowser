@@ -103,6 +103,23 @@ impl PreferredDelivery {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryFallbackPolicy {
+    #[default]
+    Ask,
+    Automatic,
+}
+
+impl DeliveryFallbackPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "ask before fallback",
+            Self::Automatic => "automatic safe fallback",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DirectoryEntry {
     pub destination_hash: String,
@@ -115,6 +132,8 @@ pub struct DirectoryEntry {
     pub saved: bool,
     pub identify_on_connect: bool,
     pub preferred_delivery: Option<PreferredDelivery>,
+    #[serde(default)]
+    pub delivery_fallback: DeliveryFallbackPolicy,
     pub sort_rank: Option<i32>,
     pub hosts_node: bool,
     pub associated_hash: Option<String>,
@@ -141,6 +160,7 @@ impl DirectoryEntry {
             saved: false,
             identify_on_connect: false,
             preferred_delivery: None,
+            delivery_fallback: DeliveryFallbackPolicy::Ask,
             sort_rank: None,
             hosts_node,
             associated_hash: None,
@@ -356,6 +376,7 @@ impl DirectoryService {
             entry.saved = existing.saved;
             entry.identify_on_connect = existing.identify_on_connect;
             entry.preferred_delivery = existing.preferred_delivery;
+            entry.delivery_fallback = existing.delivery_fallback;
             entry.sort_rank = existing.sort_rank;
             entry.hosts_node = existing.hosts_node || kind == DirectoryKind::Node;
             entry.associated_hash = associated_hash.or_else(|| existing.associated_hash.clone());
@@ -437,6 +458,7 @@ impl DirectoryService {
         entry.trust_level = TrustLevel::Unknown;
         entry.identify_on_connect = false;
         entry.preferred_delivery = None;
+        entry.delivery_fallback = DeliveryFallbackPolicy::Ask;
         self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
@@ -504,6 +526,20 @@ impl DirectoryService {
             return Ok(None);
         };
         entry.preferred_delivery = preferred_delivery;
+        entry.saved = true;
+        self.persist_entry_change(destination_hash, entry.clone())?;
+        Ok(Some(entry))
+    }
+
+    pub fn set_delivery_fallback(
+        &mut self,
+        destination_hash: &str,
+        delivery_fallback: DeliveryFallbackPolicy,
+    ) -> crate::error::AppResult<Option<DirectoryEntry>> {
+        let Some(mut entry) = self.find(destination_hash) else {
+            return Ok(None);
+        };
+        entry.delivery_fallback = delivery_fallback;
         entry.saved = true;
         self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
@@ -873,7 +909,11 @@ impl DirectoryService {
 }
 
 fn is_persistent_entry(entry: &DirectoryEntry) -> bool {
-    entry.saved || entry.trusted || entry.identify_on_connect || entry.preferred_delivery.is_some()
+    entry.saved
+        || entry.trusted
+        || entry.identify_on_connect
+        || entry.preferred_delivery.is_some()
+        || entry.delivery_fallback != DeliveryFallbackPolicy::Ask
 }
 
 fn directory_entries_match_ignoring_last_seen(
@@ -889,6 +929,7 @@ fn directory_entries_match_ignoring_last_seen(
         && left.saved == right.saved
         && left.identify_on_connect == right.identify_on_connect
         && left.preferred_delivery == right.preferred_delivery
+        && left.delivery_fallback == right.delivery_fallback
         && left.sort_rank == right.sort_rank
         && left.hosts_node == right.hosts_node
         && left.associated_hash == right.associated_hash
@@ -921,6 +962,12 @@ fn merged_entry(primary: Option<&DirectoryEntry>, secondary: &DirectoryEntry) ->
     entry.saved = primary.saved || secondary.saved;
     entry.identify_on_connect = primary.identify_on_connect || secondary.identify_on_connect;
     entry.preferred_delivery = primary.preferred_delivery.or(secondary.preferred_delivery);
+    entry.delivery_fallback =
+        if primary.saved || primary.delivery_fallback != DeliveryFallbackPolicy::Ask {
+            primary.delivery_fallback
+        } else {
+            secondary.delivery_fallback
+        };
     entry.sort_rank = primary.sort_rank.or(secondary.sort_rank);
     entry.hosts_node = primary.hosts_node || secondary.hosts_node;
     entry.associated_hash = primary
@@ -1397,10 +1444,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        publish_directory_bytes, timestamp_secs, DirectoryAnnounceMetadata, DirectoryKind,
-        DirectoryService, PreferredDelivery, PropagationNodeCompatibility,
-        PropagationNodeFreshness, PropagationNodePathState, PublishMode,
-        PROPAGATION_NODE_INVENTORY_MAX_BYTES, PROPAGATION_NODE_INVENTORY_MAX_ITEMS,
+        merged_entry, publish_directory_bytes, timestamp_secs, DeliveryFallbackPolicy,
+        DirectoryAnnounceMetadata, DirectoryEntry, DirectoryKind, DirectoryService,
+        PreferredDelivery, PropagationNodeCompatibility, PropagationNodeFreshness,
+        PropagationNodePathState, PublishMode, PROPAGATION_NODE_INVENTORY_MAX_BYTES,
+        PROPAGATION_NODE_INVENTORY_MAX_ITEMS,
     };
 
     fn isolated_directory(label: &str) -> (std::path::PathBuf, DirectoryService) {
@@ -1441,6 +1489,45 @@ mod tests {
         assert!(PreferredDelivery::Direct.allows_propagated());
         assert!(!PreferredDelivery::DirectOnly.allows_propagated());
         assert!(!PreferredDelivery::PropagatedOnly.allows_direct());
+
+        let legacy = serde_json::json!({
+            "destination_hash": "peer",
+            "display_name": "Peer",
+            "kind": "peer",
+            "trusted": false,
+            "trust_level": 2,
+            "saved": true,
+            "identify_on_connect": false,
+            "preferred_delivery": "direct",
+            "sort_rank": null,
+            "hosts_node": false,
+            "associated_hash": null,
+            "node_associated_hash": null,
+            "last_seen": 0.0
+        });
+        let decoded: DirectoryEntry =
+            serde_json::from_value(legacy).expect("legacy directory entry");
+        assert_eq!(decoded.delivery_fallback, DeliveryFallbackPolicy::Ask);
+    }
+
+    #[test]
+    fn explicit_ask_fallback_wins_directory_merge() {
+        let mut saved = DirectoryEntry::new("peer", "Peer", DirectoryKind::Peer);
+        saved.saved = true;
+        saved.delivery_fallback = DeliveryFallbackPolicy::Ask;
+        let mut automatic = saved.clone();
+        automatic.saved = false;
+        automatic.delivery_fallback = DeliveryFallbackPolicy::Automatic;
+
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).delivery_fallback,
+            DeliveryFallbackPolicy::Ask
+        );
+        saved.saved = false;
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).delivery_fallback,
+            DeliveryFallbackPolicy::Automatic
+        );
     }
 
     #[test]

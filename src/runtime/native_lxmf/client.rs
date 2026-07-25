@@ -72,6 +72,7 @@ pub struct NativeLxmfSdkWireDelivery {
     pub message_id: String,
     pub destination_hash: String,
     pub method: Option<String>,
+    pub try_propagation_on_fail: bool,
     pub include_ticket: bool,
     pub reply_ticket_used: bool,
     pub direct_stamp: Option<NativeLxmfSdkDirectStamp>,
@@ -558,6 +559,7 @@ fn build_sdk_wire_delivery_with_policy_fields(
         message_id: hex_bytes(&message_id),
         destination_hash: record.destination.clone(),
         method: options.method.clone(),
+        try_propagation_on_fail: options.try_propagation_on_fail,
         include_ticket: options.include_ticket,
         reply_ticket_used,
         direct_stamp,
@@ -1449,8 +1451,10 @@ pub fn build_sdk_send_plan(
     };
     let try_propagation_on_fail = matches!(
         envelope.delivery_mode,
-        crate::messaging::DeliveryMode::Propagated
-    );
+        crate::messaging::DeliveryMode::Direct
+    ) && envelope.operation.as_ref().is_some_and(|operation| {
+        operation.allow_propagation_fallback && operation.automatic_propagation_fallback
+    });
     let reply_ticket_hex = envelope
         .native_reply_ticket
         .as_ref()
@@ -1636,6 +1640,44 @@ mod tests {
     }
 
     #[test]
+    fn sdk_send_plan_enables_only_snapshotted_safe_direct_fallback() {
+        let mut operation =
+            OutboundOperationIdentity::validated("idem-automatic".into(), "corr-automatic".into())
+                .expect("valid operation");
+        operation.automatic_propagation_fallback = true;
+        let envelope = MessageEnvelope {
+            peer_hash: "peer".into(),
+            title: String::new(),
+            body: "automatic fallback".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: Some(operation.clone()),
+            attachments: Vec::new(),
+        };
+
+        let plan = build_sdk_send_plan(&envelope, "source", None);
+        assert_eq!(plan.send_request.try_propagation_on_fail, Some(true));
+        assert!(plan.rpc_delivery.try_propagation_on_fail);
+        assert_eq!(
+            plan.send_request.idempotency_key.as_deref(),
+            Some(operation.idempotency_key.as_str())
+        );
+
+        operation.allow_propagation_fallback = false;
+        let strict = build_sdk_send_plan(
+            &MessageEnvelope {
+                operation: Some(operation),
+                ..envelope
+            },
+            "source",
+            None,
+        );
+        assert_eq!(strict.send_request.try_propagation_on_fail, Some(false));
+        assert!(!strict.rpc_delivery.try_propagation_on_fail);
+    }
+
+    #[test]
     fn sdk_send_plan_maps_propagated_message_to_propagation_method() {
         let envelope = MessageEnvelope {
             peer_hash: "peer".into(),
@@ -1656,11 +1698,11 @@ mod tests {
         );
         assert_eq!(plan.send_request.stamp_cost, None);
         assert_eq!(plan.send_request.include_ticket, Some(false));
-        assert_eq!(plan.send_request.try_propagation_on_fail, Some(true));
+        assert_eq!(plan.send_request.try_propagation_on_fail, Some(false));
         assert_eq!(plan.rpc_delivery.method.as_deref(), Some("propagated"));
         assert_eq!(plan.rpc_delivery.stamp_cost, None);
         assert!(!plan.rpc_delivery.include_ticket);
-        assert!(plan.rpc_delivery.try_propagation_on_fail);
+        assert!(!plan.rpc_delivery.try_propagation_on_fail);
         assert_eq!(plan.rpc_delivery.ticket, None);
     }
 
@@ -1735,11 +1777,11 @@ mod tests {
 
     #[test]
     fn sdk_send_plan_covers_direct_and_propagated_ticket_matrix() {
-        for (delivery_mode, expected_method, include_ticket, expected_retry) in [
-            (DeliveryMode::Direct, "direct", false, false),
-            (DeliveryMode::Direct, "direct", true, false),
-            (DeliveryMode::Propagated, "propagated", false, true),
-            (DeliveryMode::Propagated, "propagated", true, true),
+        for (delivery_mode, expected_method, include_ticket) in [
+            (DeliveryMode::Direct, "direct", false),
+            (DeliveryMode::Direct, "direct", true),
+            (DeliveryMode::Propagated, "propagated", false),
+            (DeliveryMode::Propagated, "propagated", true),
         ] {
             let envelope = MessageEnvelope {
                 peer_hash: "peer".into(),
@@ -1761,11 +1803,8 @@ mod tests {
             assert_eq!(plan.rpc_delivery.method.as_deref(), Some(expected_method));
             assert_eq!(plan.send_request.include_ticket, Some(include_ticket));
             assert_eq!(plan.rpc_delivery.include_ticket, include_ticket);
-            assert_eq!(
-                plan.send_request.try_propagation_on_fail,
-                Some(expected_retry)
-            );
-            assert_eq!(plan.rpc_delivery.try_propagation_on_fail, expected_retry);
+            assert_eq!(plan.send_request.try_propagation_on_fail, Some(false));
+            assert!(!plan.rpc_delivery.try_propagation_on_fail);
         }
     }
 
@@ -1993,7 +2032,7 @@ mod tests {
         assert_eq!(delivery.options.method.as_deref(), Some("propagated"));
         assert_eq!(delivery.options.stamp_cost, Some(12));
         assert!(delivery.options.include_ticket);
-        assert!(delivery.options.try_propagation_on_fail);
+        assert!(!delivery.options.try_propagation_on_fail);
         assert_eq!(delivery.options.ticket, None);
         assert_eq!(delivery.ticket.as_deref(), Some("aabb"));
         assert!(delivery.record.fields.is_none());
@@ -2381,6 +2420,7 @@ mod tests {
         let delivery = &deliveries[0];
         assert_eq!(delivery.destination_hash, destination_hash);
         assert_eq!(delivery.method.as_deref(), Some("propagated"));
+        assert!(delivery.try_propagation_on_fail);
         assert!(delivery.reply_ticket_used);
         assert!(!delivery.include_ticket);
         let message = lxmf::Message::from_wire(delivery.wire_bytes.as_slice()).expect("message");
@@ -2403,11 +2443,11 @@ mod tests {
         );
         let sender = EmbeddedNativeLxmfSdkSender::new(daemon);
 
-        for (delivery_mode, expected_method, include_ticket, expected_retry) in [
-            (DeliveryMode::Direct, "direct", false, false),
-            (DeliveryMode::Direct, "direct", true, false),
-            (DeliveryMode::Propagated, "propagated", false, true),
-            (DeliveryMode::Propagated, "propagated", true, true),
+        for (delivery_mode, expected_method, include_ticket) in [
+            (DeliveryMode::Direct, "direct", false),
+            (DeliveryMode::Direct, "direct", true),
+            (DeliveryMode::Propagated, "propagated", false),
+            (DeliveryMode::Propagated, "propagated", true),
         ] {
             let envelope = MessageEnvelope {
                 peer_hash: "peer".into(),
@@ -2429,7 +2469,7 @@ mod tests {
                 .expect("daemon should hand off each delivery");
             assert_eq!(delivery.options.method.as_deref(), Some(expected_method));
             assert_eq!(delivery.options.include_ticket, include_ticket);
-            assert_eq!(delivery.options.try_propagation_on_fail, expected_retry);
+            assert!(!delivery.options.try_propagation_on_fail);
             assert_eq!(delivery.record.content, "matrix body");
         }
     }

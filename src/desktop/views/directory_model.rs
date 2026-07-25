@@ -121,6 +121,10 @@ pub(in crate::desktop) fn directory_selected_state_lines(entry: &DirectoryEntry)
                 .map(|delivery| delivery.label().to_string())
                 .unwrap_or_else(|| "default".into());
             lines.push(format!("preferred LXMF delivery: {preferred_delivery}"));
+            lines.push(format!(
+                "direct failure: {}",
+                entry.delivery_fallback.label()
+            ));
         }
         DirectoryKind::Propagation => {
             lines.push(format!("propagation candidate rank: {sort_rank}"));
