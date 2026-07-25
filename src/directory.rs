@@ -139,6 +139,8 @@ pub struct DirectoryEntry {
     pub max_automatic_direct_stamp_cost: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_above_direct_stamp_cost: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer_reply_ticket: Option<bool>,
     pub sort_rank: Option<i32>,
     pub hosts_node: bool,
     pub associated_hash: Option<String>,
@@ -168,6 +170,7 @@ impl DirectoryEntry {
             delivery_fallback: DeliveryFallbackPolicy::Ask,
             max_automatic_direct_stamp_cost: None,
             ask_above_direct_stamp_cost: None,
+            offer_reply_ticket: None,
             sort_rank: None,
             hosts_node,
             associated_hash: None,
@@ -470,6 +473,7 @@ impl DirectoryService {
         entry.delivery_fallback = DeliveryFallbackPolicy::Ask;
         entry.max_automatic_direct_stamp_cost = None;
         entry.ask_above_direct_stamp_cost = None;
+        entry.offer_reply_ticket = None;
         self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
@@ -579,6 +583,20 @@ impl DirectoryService {
             return Ok(None);
         };
         entry.ask_above_direct_stamp_cost = cost;
+        entry.saved = true;
+        self.persist_entry_change(destination_hash, entry.clone())?;
+        Ok(Some(entry))
+    }
+
+    pub fn set_offer_reply_ticket(
+        &mut self,
+        destination_hash: &str,
+        offer: Option<bool>,
+    ) -> crate::error::AppResult<Option<DirectoryEntry>> {
+        let Some(mut entry) = self.find(destination_hash) else {
+            return Ok(None);
+        };
+        entry.offer_reply_ticket = offer;
         entry.saved = true;
         self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
@@ -955,6 +973,7 @@ fn is_persistent_entry(entry: &DirectoryEntry) -> bool {
         || entry.delivery_fallback != DeliveryFallbackPolicy::Ask
         || entry.max_automatic_direct_stamp_cost.is_some()
         || entry.ask_above_direct_stamp_cost.is_some()
+        || entry.offer_reply_ticket.is_some()
 }
 
 fn directory_entries_match_ignoring_last_seen(
@@ -973,6 +992,7 @@ fn directory_entries_match_ignoring_last_seen(
         && left.delivery_fallback == right.delivery_fallback
         && left.max_automatic_direct_stamp_cost == right.max_automatic_direct_stamp_cost
         && left.ask_above_direct_stamp_cost == right.ask_above_direct_stamp_cost
+        && left.offer_reply_ticket == right.offer_reply_ticket
         && left.sort_rank == right.sort_rank
         && left.hosts_node == right.hosts_node
         && left.associated_hash == right.associated_hash
@@ -1024,6 +1044,11 @@ fn merged_entry(primary: Option<&DirectoryEntry>, secondary: &DirectoryEntry) ->
         primary
             .ask_above_direct_stamp_cost
             .or(secondary.ask_above_direct_stamp_cost)
+    };
+    entry.offer_reply_ticket = if primary.saved {
+        primary.offer_reply_ticket
+    } else {
+        primary.offer_reply_ticket.or(secondary.offer_reply_ticket)
     };
     entry.sort_rank = primary.sort_rank.or(secondary.sort_rank);
     entry.hosts_node = primary.hosts_node || secondary.hosts_node;
@@ -1567,6 +1592,7 @@ mod tests {
         assert_eq!(decoded.delivery_fallback, DeliveryFallbackPolicy::Ask);
         assert_eq!(decoded.max_automatic_direct_stamp_cost, None);
         assert_eq!(decoded.ask_above_direct_stamp_cost, None);
+        assert_eq!(decoded.offer_reply_ticket, None);
     }
 
     #[test]
@@ -1579,6 +1605,7 @@ mod tests {
         automatic.delivery_fallback = DeliveryFallbackPolicy::Automatic;
         automatic.max_automatic_direct_stamp_cost = Some(2);
         automatic.ask_above_direct_stamp_cost = Some(1);
+        automatic.offer_reply_ticket = Some(true);
 
         assert_eq!(
             merged_entry(Some(&saved), &automatic).delivery_fallback,
@@ -1590,6 +1617,10 @@ mod tests {
         );
         assert_eq!(
             merged_entry(Some(&saved), &automatic).ask_above_direct_stamp_cost,
+            None
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).offer_reply_ticket,
             None
         );
         saved.saved = false;
@@ -1604,6 +1635,10 @@ mod tests {
         assert_eq!(
             merged_entry(Some(&saved), &automatic).ask_above_direct_stamp_cost,
             Some(1)
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).offer_reply_ticket,
+            Some(true)
         );
     }
 

@@ -12101,6 +12101,46 @@ impl App {
         }
     }
 
+    pub fn cycle_selected_directory_reply_ticket_preference(&mut self) -> bool {
+        let Some(entry) = self.selected_directory_entry() else {
+            self.status.task = "no directory entry selected".into();
+            return false;
+        };
+        if entry.kind != DirectoryKind::Peer {
+            self.status.task = "reply ticket preference only applies to LXMF peers".into();
+            return false;
+        }
+        let next = match entry.offer_reply_ticket {
+            None => Some(true),
+            Some(true) => Some(false),
+            Some(false) => None,
+        };
+        match self
+            .directory_service
+            .set_offer_reply_ticket(&entry.destination_hash, next)
+        {
+            Ok(Some(updated)) => {
+                self.refresh_panels_from_services();
+                let label = match next {
+                    Some(true) => "offer by default",
+                    Some(false) => "do not offer",
+                    None => "default (off)",
+                };
+                self.status.task =
+                    format!("directory reply ticket: {} {label}", updated.display_name);
+                true
+            }
+            Ok(None) => {
+                self.status.task = "directory entry no longer exists".into();
+                false
+            }
+            Err(error) => {
+                self.status.task = error.to_string();
+                false
+            }
+        }
+    }
+
     fn sync_runtime_identify_policy_nonblocking(&mut self) -> bool {
         let destinations = self
             .directory_service
@@ -18712,6 +18752,10 @@ impl App {
                 DeliveryMode::Direct
             }
         };
+        conversation.include_ticket = directory_entry
+            .as_ref()
+            .and_then(|entry| entry.offer_reply_ticket)
+            .unwrap_or(false);
         self.workspace.conversations.push(conversation);
         self.workspace.active_conversation = self.workspace.conversations.len() - 1;
         self.switch_section(WorkspaceSection::Messages);
@@ -26226,6 +26270,26 @@ side
     }
 
     #[test]
+    fn directory_reply_ticket_preference_cycles_from_safe_default() {
+        let mut app = App::new(test_config("directory-reply-ticket-preference"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.refresh_panels_from_services();
+        app.switch_section(WorkspaceSection::Directory);
+
+        for expected in [Some(true), Some(false), None] {
+            assert!(app.cycle_selected_directory_reply_ticket_preference());
+            assert_eq!(
+                app.directory_service
+                    .find("peer.hash")
+                    .and_then(|entry| entry.offer_reply_ticket),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn directory_preferred_delivery_initializes_only_new_conversations() {
         let mut app = App::new(test_config("directory-delivery-conversation-default"));
         app.directory_service
@@ -26247,6 +26311,27 @@ side
             app.active_conversation().delivery_mode,
             DeliveryMode::Direct,
             "reopening an existing tab must preserve its explicit mode"
+        );
+    }
+
+    #[test]
+    fn directory_reply_ticket_preference_initializes_only_new_conversations() {
+        let mut app = App::new(test_config("directory-reply-ticket-conversation-default"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_offer_reply_ticket("peer.hash", Some(true))
+            .expect("persist preference");
+
+        app.open_directory_peer_conversation("peer.hash");
+        assert!(app.active_conversation().include_ticket);
+
+        app.active_conversation_mut_for_test().include_ticket = false;
+        app.open_directory_peer_conversation("peer.hash");
+        assert!(
+            !app.active_conversation().include_ticket,
+            "reopening an existing tab must preserve its explicit ticket choice"
         );
     }
 

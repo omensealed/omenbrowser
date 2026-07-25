@@ -709,6 +709,16 @@ automatic ceiling still wins, so confirmation cannot authorize cost above it.
 This adds no timer, worker, retry, dependency, protocol version, or database
 schema migration.
 
+Phase 4F makes the existing reply-ticket composer choice available as a
+per-peer default. Missing and older Directory data remains off. A peer can use
+the application default, offer a reply ticket, or explicitly not offer one.
+The preference initializes only a newly opened conversation; existing and
+restored tabs retain their explicit choice. Desktop and TUI use the same
+vocabulary, and users can still change the composer choice before each send.
+The existing signed LXMF ticket implementation remains the sole wire/runtime
+path. This unit adds no retry, worker, timer, dependency, protocol version, or
+database schema migration.
+
 ### Propagation-node quality of life
 
 Extend the existing bounded inventory with:

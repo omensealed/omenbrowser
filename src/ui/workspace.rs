@@ -618,7 +618,7 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect::<Vec<_>>();
     let title = format!(
-        " Directory | filter: {} | entries: {} | propagation={}/{} bytes={} truncated={} refresh={:?} | Enter open | s save | t trust | r refresh | x cancel | p use | g sync ",
+        " Directory | filter: {} | entries: {} | propagation={}/{} bytes={} truncated={} refresh={:?} | Enter open | s save | t trust | k ticket | r refresh | x cancel | p use | g sync ",
         app.directory_state.filter,
         app.directory_state.entries.len(),
         propagation_inventory.nodes.len(),
@@ -648,6 +648,16 @@ fn render_directory(frame: &mut Frame, area: Rect, app: &App) {
                     .into_iter()
                     .map(Line::from),
             );
+            if entry.kind == crate::directory::DirectoryKind::Peer {
+                lines.push(Line::from(format!(
+                    "reply ticket default={}",
+                    match entry.offer_reply_ticket {
+                        Some(true) => "offer",
+                        Some(false) => "do not offer",
+                        None => "default (off)",
+                    }
+                )));
+            }
             if let Some(node) = propagation_inventory.nodes.iter().find(|node| {
                 node.destination_hash
                     .eq_ignore_ascii_case(&entry.destination_hash)
@@ -1944,6 +1954,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
             "Ctrl-s sends a message draft; Ctrl-p toggles direct/propagated; Ctrl-u toggles ticket",
         ),
         Line::from("Ctrl-g syncs mock/runtime inbound messages into conversation tabs"),
+        Line::from("Directory: k cycles the selected peer reply-ticket default"),
         Line::from("Settings: I creates a managed identity; i attaches an existing identity path"),
         Line::from("Interfaces/Settings/Diagnostics: G runs native Reticulum quickstart"),
         Line::from("? toggles this help"),

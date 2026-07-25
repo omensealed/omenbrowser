@@ -516,6 +516,10 @@ fn directory_selected_details_card(desktop: &DesktopApp) -> Element<'_, Message>
             "Stamp Ask",
             Message::Directory(DirectoryMessage::CycleDirectStampConfirmation(index)),
         ));
+        management_actions.push(subtle_button(
+            "Reply Ticket",
+            Message::Directory(DirectoryMessage::CycleReplyTicketPreference(index)),
+        ));
     }
     if entry.kind != DirectoryKind::Propagation {
         management_actions.push(subtle_button(

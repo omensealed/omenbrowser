@@ -165,6 +165,7 @@ pub(in crate::desktop) enum DirectoryMessage {
     CycleFallback(usize),
     CycleDirectStampLimit(usize),
     CycleDirectStampConfirmation(usize),
+    CycleReplyTicketPreference(usize),
     RequestPath(usize),
     RefreshPropagation(usize),
     CancelPropagationRefresh,

@@ -764,6 +764,11 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         {
             app.sync_propagation_messages_now();
         }
+        (_, KeyCode::Char('k'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
+        {
+            app.cycle_selected_directory_reply_ticket_preference();
+        }
         (_, KeyCode::Char('e'))
             if app.workspace.active_section == workspace::WorkspaceSection::Interfaces =>
         {

@@ -142,6 +142,14 @@ pub(in crate::desktop) fn directory_selected_state_lines(entry: &DirectoryEntry)
                     .map(|cost| format!("ask above {cost}"))
                     .unwrap_or_else(|| "disabled".into())
             ));
+            lines.push(format!(
+                "reply ticket default: {}",
+                match entry.offer_reply_ticket {
+                    Some(true) => "offer",
+                    Some(false) => "do not offer",
+                    None => "default (off)",
+                }
+            ));
         }
         DirectoryKind::Propagation => {
             lines.push(format!("propagation candidate rank: {sort_rank}"));

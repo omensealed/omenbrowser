@@ -289,6 +289,16 @@ maximum automatic cost. A valid reply ticket bypasses confirmation because it
 avoids direct-stamp generation. External RPC mode is not presented as locally
 enforced cost confirmation.
 
+Peers may also persist a reply-ticket default for newly opened conversations:
+use the existing application default (off), offer a ticket, or explicitly do
+not offer one. Desktop exposes the setting in Directory, while the TUI shows
+the same vocabulary and cycles it with `k` on a selected peer. Existing and
+restored conversation tabs keep their current composer ticket choice, and the
+normal composer control remains available after a tab opens. This preference
+only initializes the already-supported signed LXMF reply-ticket field; it does
+not invent a ticket, bypass peer policy, retry a message, or change inbound
+remembered-ticket validation.
+
 The integrated runtime broadcast is consumed by one owned worker and forwarded
 through the existing 256-item application channel. Payload-bearing OMENchat
 events and SDK history pages additionally retain the shared 32 MiB queued-byte
