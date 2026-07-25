@@ -3008,6 +3008,22 @@ cargo test --locked --no-default-features --features desktop-product \
   --lib
 ```
 
+The shared presentation-model fixtures verify deterministic attention-first
+sorting, row limits and omission counts, active/attention/completed/domain
+filter semantics, bounded ASCII-insensitive search, opaque-ID exclusion,
+control-character sanitization, UTF-8-safe target/evidence truncation, exact
+authoritative progress, valid-action preservation, and stable shared labels:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::presentation::tests --lib
+```
+
+This is a pure read-only projection over in-memory bounded history. It does not
+render Iced or Ratatui widgets and does not touch identities, Reticulum,
+OMENchat peers, storage, or network state. Desktop and TUI surface tests remain
+a later gate once those views are added.
+
 ## OMENchat negotiated durable room and user mutations
 
 Negotiated `/me` sends must persist a `RoomAction` intent before transport,

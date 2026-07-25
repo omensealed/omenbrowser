@@ -5,6 +5,7 @@ use thiserror::Error;
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod omenchat;
+pub mod presentation;
 
 pub const OPERATION_HISTORY_MAX_ITEMS: usize = 512;
 pub const OPERATION_HISTORY_MAX_BYTES: usize = 512 * 1024;

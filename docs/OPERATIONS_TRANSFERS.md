@@ -81,3 +81,28 @@ Owner synchronization happens only at recovery and persisted transition
 boundaries. There is no polling, redraw-time mutation, worker, timer,
 subscription, or second persistence layer. GUI/TUI Operations surfaces and
 additional runtime-domain adapters remain follow-up work.
+
+## Shared presentation rows
+
+`src/operations/presentation.rs` is the frontend-neutral read-only projection
+used by future desktop and terminal surfaces. It supplies the same domain,
+state, evidence-authority, evidence-kind, filter, and action labels to both
+frontends. In particular, `transport accepted`, `receipt observed`, and
+`delivered` remain distinct terms.
+
+Each projection returns at most 128 rows (64 by default), reports the total
+matching and omitted counts, sorts attention work first with deterministic
+tie-breaking, and supports all/active/attention/completed/domain filters.
+Optional search is limited to 128 bytes and matches only public target and
+presentation/evidence text. Opaque operation IDs remain selection keys and are
+never included in searchable or display text.
+
+Row targets are control-character sanitized and capped at 160 UTF-8 bytes.
+Evidence summaries retain only the latest bounded evidence description and are
+capped at 256 UTF-8 bytes. Authoritative byte progress and valid actions remain
+typed rather than converted to guessed percentages or clickable strings. The
+projection clones at most the selected bounded rows and creates no retained
+cache, worker, timer, subscription, or redraw trigger.
+
+No GUI or TUI section is added by this unit. Those surfaces must consume these
+rows and labels instead of defining frontend-specific delivery vocabulary.

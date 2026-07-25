@@ -413,6 +413,16 @@ transmission actions conservative because live capability/connection state is
 not yet an owned Operations-domain input. GUI/TUI surfaces and broader runtime
 adapters remain separate follow-ups.
 
+Phase 3D adds the frontend-neutral read-only presentation projection. It caps
+output at 128 rows, reports omitted matches, provides deterministic
+attention-first sorting and bounded filtering/search, sanitizes controls,
+UTF-8 truncates target/evidence text, keeps opaque IDs only as non-display
+selection keys, and preserves typed authoritative progress and valid actions.
+Shared labels keep queue, transport acceptance, receipt observation, and peer
+delivery distinct. No GUI/TUI section, cache, retained clone, worker, timer,
+subscription, persistence, protocol, or dependency is introduced. The two
+frontends must consume this projection in later surface units.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:
