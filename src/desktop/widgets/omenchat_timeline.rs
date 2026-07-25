@@ -1,6 +1,9 @@
 use crate::app::current_epoch_ms;
 use crate::chat::protocol::RoomId;
-use crate::chat::{ChatEvent, ChatEventKind, ChatSessionId, ChatSessionView};
+use crate::chat::{
+    chat_message_presentation, ChatEvent, ChatEventKind, ChatReplyPresentation, ChatSessionId,
+    ChatSessionView,
+};
 
 use super::super::{
     format_epoch_secs, OMENCHAT_LOCAL_ECHO_RESEND_SECS, OMENCHAT_MESSAGE_GROUP_GAP_SECS,
@@ -19,8 +22,22 @@ pub(in crate::desktop) struct ChatTimelineBody {
     pub(in crate::desktop) text: String,
     pub(in crate::desktop) is_action: bool,
     pub(in crate::desktop) pending_acceptance: bool,
+    pub(in crate::desktop) mentions_local_user: bool,
+    pub(in crate::desktop) reply: Option<ChatTimelineReply>,
     pub(in crate::desktop) upload: Option<ChatTimelineUpload>,
     pub(in crate::desktop) resend: Option<ChatTimelineResend>,
+}
+
+pub(in crate::desktop) enum ChatTimelineReply {
+    Available {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+        label: String,
+    },
+    Unavailable {
+        event_id: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -55,12 +72,33 @@ pub(in crate::desktop) fn chat_event_actor_key(
 pub(in crate::desktop) fn chat_event_body(
     session: &ChatSessionView,
     event: &ChatEvent,
+    local_user_id: Option<u32>,
 ) -> ChatTimelineBody {
+    let presentation = chat_message_presentation(&session.events, event, local_user_id);
+    let reply = presentation.reply.map(|reply| match reply {
+        ChatReplyPresentation::Available {
+            event_id,
+            actor_display_name,
+            preview,
+        } => ChatTimelineReply::Available {
+            session_id: session.session_id,
+            room_id: event.room_id,
+            event_id,
+            label: actor_display_name
+                .map(|actor| format!("↳ {actor}: {preview}"))
+                .unwrap_or_else(|| format!("↳ {preview}")),
+        },
+        ChatReplyPresentation::Unavailable { event_id } => {
+            ChatTimelineReply::Unavailable { event_id }
+        }
+    });
     match &event.kind {
         ChatEventKind::Action { body } => ChatTimelineBody {
             text: format!("* {} {body}", chat_event_actor_label(session, event)),
             is_action: true,
             pending_acceptance: is_omenchat_local_echo_event(event),
+            mentions_local_user: presentation.mentions_local_user,
+            reply,
             upload: None,
             resend: local_echo_resend(session, event, body, true),
         },
@@ -71,6 +109,8 @@ pub(in crate::desktop) fn chat_event_body(
             text: body.clone(),
             is_action: false,
             pending_acceptance: is_omenchat_local_echo_event(event),
+            mentions_local_user: presentation.mentions_local_user,
+            reply,
             upload: None,
             resend: match &event.kind {
                 ChatEventKind::Message { body } => local_echo_resend(session, event, body, false),
@@ -85,6 +125,8 @@ pub(in crate::desktop) fn chat_event_body(
             text: format!("uploaded {} ({})", filename, human_bytes(*bytes)),
             is_action: false,
             pending_acceptance: false,
+            mentions_local_user: presentation.mentions_local_user,
+            reply,
             upload: Some(ChatTimelineUpload {
                 session_id: session.session_id,
                 resource_id: resource_id.clone(),
@@ -95,11 +137,14 @@ pub(in crate::desktop) fn chat_event_body(
 }
 
 pub(in crate::desktop) fn chat_timeline_body_text(body: &ChatTimelineBody) -> String {
-    if body.pending_acceptance {
-        format!("{}  [queued · awaiting server acceptance]", body.text)
-    } else {
-        body.text.clone()
+    let mut text = body.text.clone();
+    if body.mentions_local_user {
+        text.push_str("  [mentioned you]");
     }
+    if body.pending_acceptance {
+        text.push_str("  [queued · awaiting server acceptance]");
+    }
+    text
 }
 
 pub(in crate::desktop) fn local_echo_resend(
@@ -137,6 +182,13 @@ pub(in crate::desktop) fn chat_event_time_label(at_unix: i64) -> String {
 pub(in crate::desktop) fn chat_timeline_groups(
     session: &ChatSessionView,
 ) -> Vec<ChatTimelineGroup> {
+    chat_timeline_groups_for_local_user(session, None)
+}
+
+pub(in crate::desktop) fn chat_timeline_groups_for_local_user(
+    session: &ChatSessionView,
+    local_user_id: Option<u32>,
+) -> Vec<ChatTimelineGroup> {
     let mut groups: Vec<ChatTimelineGroup> = Vec::new();
     for event in session
         .events
@@ -144,7 +196,7 @@ pub(in crate::desktop) fn chat_timeline_groups(
         .filter(|event| event.room_id == session.active_room.room_id)
     {
         let actor_key = chat_event_actor_key(session, event);
-        let body = chat_event_body(session, event);
+        let body = chat_event_body(session, event, local_user_id);
         if let Some(last) = groups.last_mut() {
             if last.actor_key == actor_key
                 && chat_events_fit_same_group(last.last_at_unix, event.at_unix)
@@ -178,7 +230,7 @@ pub(in crate::desktop) fn chat_events_fit_same_group(
 #[cfg(all(test, feature = "chat-client"))]
 mod tests {
     use super::*;
-    use crate::chat::{ChatRoomSummary, ChatServerSummary, ChatUserSummary};
+    use crate::chat::{ChatMessageMetadata, ChatRoomSummary, ChatServerSummary, ChatUserSummary};
 
     fn timeline_session(active_room_id: RoomId, events: Vec<ChatEvent>) -> ChatSessionView {
         ChatSessionView {
@@ -322,5 +374,63 @@ mod tests {
         let groups = chat_timeline_groups(&session);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].bodies[0].text, "help visible");
+    }
+
+    #[test]
+    fn rich_timeline_uses_retained_reply_and_authoritative_mention() {
+        let original = message(1, 10, 1, "original");
+        let rich = ChatEvent {
+            server_id: "server-a".into(),
+            room_id: 1,
+            event_id: 11,
+            actor_user_id: Some(8),
+            actor_display_name: Some("Bob".into()),
+            at_unix: 2,
+            kind: ChatEventKind::RichMessage {
+                body: "reply".into(),
+                metadata: ChatMessageMetadata {
+                    reply_to_event_id: Some(10),
+                    mentioned_user_ids: vec![7],
+                },
+            },
+        };
+        let session = timeline_session(1, vec![original, rich]);
+        let groups = chat_timeline_groups_for_local_user(&session, Some(7));
+        let body = &groups[1].bodies[0];
+        assert!(body.mentions_local_user);
+        assert_eq!(chat_timeline_body_text(body), "reply  [mentioned you]");
+        assert!(matches!(
+            body.reply,
+            Some(ChatTimelineReply::Available {
+                event_id: 10,
+                ref label,
+                ..
+            }) if label == "↳ original"
+        ));
+    }
+
+    #[test]
+    fn rich_timeline_marks_pruned_original_without_network_work() {
+        let rich = ChatEvent {
+            server_id: "server-a".into(),
+            room_id: 1,
+            event_id: 11,
+            actor_user_id: Some(8),
+            actor_display_name: Some("Bob".into()),
+            at_unix: 2,
+            kind: ChatEventKind::RichMessage {
+                body: "reply".into(),
+                metadata: ChatMessageMetadata {
+                    reply_to_event_id: Some(10),
+                    mentioned_user_ids: Vec::new(),
+                },
+            },
+        };
+        let session = timeline_session(1, vec![rich]);
+        let groups = chat_timeline_groups(&session);
+        assert!(matches!(
+            groups[0].bodies[0].reply,
+            Some(ChatTimelineReply::Unavailable { event_id: 10 })
+        ));
     }
 }

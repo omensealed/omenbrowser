@@ -12,6 +12,7 @@ pub const CHAT_ROOM_NAME_MAX_BYTES: usize = 64;
 pub const CHAT_ROOM_TOPIC_MAX_BYTES: usize = 4 * 1024;
 pub const CHAT_USER_DISPLAY_MAX_BYTES: usize = 256;
 pub const CHAT_ACTOR_DISPLAY_MAX_BYTES: usize = 256;
+pub const CHAT_REPLY_PREVIEW_MAX_BYTES: usize = 160;
 pub const CHAT_MOTD_MAX_BYTES: usize = 16 * 1024;
 pub const CHAT_STATUS_MAX_BYTES: usize = 4 * 1024;
 pub const CHAT_RESOURCE_ID_MAX_BYTES: usize = 4 * 1024;
@@ -154,6 +155,80 @@ pub struct ChatMessageMetadata {
     pub mentioned_user_ids: Vec<UserId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatMessagePresentation {
+    pub reply: Option<ChatReplyPresentation>,
+    pub mentions_local_user: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatReplyPresentation {
+    Available {
+        event_id: EventId,
+        actor_display_name: Option<String>,
+        preview: String,
+    },
+    Unavailable {
+        event_id: EventId,
+    },
+}
+
+impl ChatEvent {
+    pub fn message_metadata(&self) -> Option<&ChatMessageMetadata> {
+        match &self.kind {
+            ChatEventKind::RichMessage { metadata, .. } => Some(metadata),
+            _ => None,
+        }
+    }
+}
+
+pub fn chat_message_presentation(
+    events: &[ChatEvent],
+    event: &ChatEvent,
+    local_user_id: Option<UserId>,
+) -> ChatMessagePresentation {
+    let Some(metadata) = event.message_metadata() else {
+        return ChatMessagePresentation {
+            reply: None,
+            mentions_local_user: false,
+        };
+    };
+    let reply = metadata.reply_to_event_id.map(|event_id| {
+        events
+            .iter()
+            .find(|candidate| {
+                candidate.server_id == event.server_id
+                    && candidate.room_id == event.room_id
+                    && candidate.event_id == event_id
+            })
+            .map(|original| ChatReplyPresentation::Available {
+                event_id,
+                actor_display_name: original.actor_display_name.clone(),
+                preview: bounded_chat_text(
+                    chat_event_preview_text(original),
+                    CHAT_REPLY_PREVIEW_MAX_BYTES,
+                ),
+            })
+            .unwrap_or(ChatReplyPresentation::Unavailable { event_id })
+    });
+    ChatMessagePresentation {
+        reply,
+        mentions_local_user: local_user_id
+            .is_some_and(|user_id| metadata.mentioned_user_ids.binary_search(&user_id).is_ok()),
+    }
+}
+
+fn chat_event_preview_text(event: &ChatEvent) -> &str {
+    match &event.kind {
+        ChatEventKind::Message { body }
+        | ChatEventKind::RichMessage { body, .. }
+        | ChatEventKind::Action { body }
+        | ChatEventKind::Notice { body }
+        | ChatEventKind::System { body } => body,
+        ChatEventKind::Upload { filename, .. } => filename,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +272,71 @@ mod tests {
             )
             .display_label(),
             "Alice [admin] (banned)"
+        );
+    }
+
+    fn message_event(event_id: EventId, body: &str) -> ChatEvent {
+        ChatEvent {
+            server_id: "server".into(),
+            room_id: 1,
+            event_id,
+            actor_user_id: Some(1),
+            actor_display_name: Some("Alice".into()),
+            at_unix: 1,
+            kind: ChatEventKind::Message { body: body.into() },
+        }
+    }
+
+    #[test]
+    fn rich_message_presentation_uses_only_retained_same_room_evidence() {
+        let original = message_event(10, &"x".repeat(CHAT_REPLY_PREVIEW_MAX_BYTES + 20));
+        let rich = ChatEvent {
+            event_id: 11,
+            actor_user_id: Some(2),
+            actor_display_name: Some("Bob".into()),
+            kind: ChatEventKind::RichMessage {
+                body: "reply".into(),
+                metadata: ChatMessageMetadata {
+                    reply_to_event_id: Some(10),
+                    mentioned_user_ids: vec![1, 9],
+                },
+            },
+            ..message_event(11, "reply")
+        };
+        let presentation =
+            chat_message_presentation(&[original.clone(), rich.clone()], &rich, Some(1));
+        assert!(presentation.mentions_local_user);
+        assert!(matches!(
+            presentation.reply,
+            Some(ChatReplyPresentation::Available {
+                event_id: 10,
+                actor_display_name: Some(ref actor),
+                ref preview,
+            }) if actor == "Alice"
+                && preview.len() <= CHAT_REPLY_PREVIEW_MAX_BYTES
+                && preview.ends_with('…')
+        ));
+
+        let unavailable = chat_message_presentation(std::slice::from_ref(&rich), &rich, Some(1));
+        assert_eq!(
+            unavailable.reply,
+            Some(ChatReplyPresentation::Unavailable { event_id: 10 })
+        );
+        let wrong_room = ChatEvent {
+            room_id: 2,
+            ..original
+        };
+        assert_eq!(
+            chat_message_presentation(&[wrong_room, rich.clone()], &rich, Some(1)).reply,
+            Some(ChatReplyPresentation::Unavailable { event_id: 10 })
+        );
+        assert!(
+            !chat_message_presentation(std::slice::from_ref(&rich), &rich, Some(8))
+                .mentions_local_user
+        );
+        assert!(
+            !chat_message_presentation(std::slice::from_ref(&rich), &rich, None)
+                .mentions_local_user
         );
     }
 }

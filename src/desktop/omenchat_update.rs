@@ -47,6 +47,11 @@ impl DesktopApp {
                 session_id,
                 room_id,
             }) => Ok(self.update_jump_omenchat_to_present(session_id, room_id)),
+            Message::OmenChat(OmenChatMessage::JumpToEvent {
+                session_id,
+                room_id,
+                event_id,
+            }) => Ok(self.update_jump_omenchat_to_event(session_id, room_id, event_id)),
             Message::OmenChat(OmenChatMessage::SendDraft(session_id)) => {
                 Ok(self.update_send_omenchat_draft(session_id))
             }
@@ -218,6 +223,41 @@ impl DesktopApp {
         snap_to(
             omenchat_scroll_id(session_id, room_id),
             RelativeOffset { x: 0.0, y: 0.0 },
+        )
+    }
+
+    pub(super) fn update_jump_omenchat_to_event(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    ) -> Task<Message> {
+        let Some(session) = self.omenchat.chat_client.session(session_id) else {
+            return Task::none();
+        };
+        if session.active_room.room_id != room_id {
+            return Task::none();
+        }
+        let retained = session
+            .events
+            .iter()
+            .filter(|event| event.room_id == room_id)
+            .collect::<Vec<_>>();
+        let Some(index) = retained.iter().position(|event| event.event_id == event_id) else {
+            return Task::none();
+        };
+        let y = if retained.len() <= 1 {
+            0.0
+        } else {
+            index as f32 / (retained.len() - 1) as f32
+        };
+        let offset = RelativeOffset { x: 0.0, y };
+        self.omenchat
+            .chat_scroll_offsets
+            .insert((session_id, room_id), offset);
+        snap_to(
+            omenchat_scroll_id(session_id, room_id),
+            super::workspace_scroll_omenchat::omenchat_offset_to_bottom_anchored_widget(offset),
         )
     }
 

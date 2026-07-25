@@ -2419,6 +2419,10 @@ fn format_chat_timeline_event(event: &omenbrowser_rs::chat::ChatEvent) -> serde_
         value["filename"] = serde_json::json!(filename);
         value["bytes"] = serde_json::json!(bytes);
     }
+    if let omenbrowser_rs::chat::ChatEventKind::RichMessage { metadata, .. } = &event.kind {
+        value["reply_to_event_id"] = serde_json::json!(metadata.reply_to_event_id);
+        value["mentioned_user_ids"] = serde_json::json!(metadata.mentioned_user_ids);
+    }
     value
 }
 

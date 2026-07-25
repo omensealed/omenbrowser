@@ -447,6 +447,11 @@ pub(in crate::desktop) enum OmenChatMessage {
         session_id: ChatSessionId,
         room_id: RoomId,
     },
+    JumpToEvent {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
     SendDraft(ChatSessionId),
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     BeginMutationResolution {

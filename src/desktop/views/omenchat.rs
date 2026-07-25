@@ -70,6 +70,34 @@ fn compact_recovery_destination(destination: &str) -> String {
     }
 }
 
+fn omenchat_reply_line<'a>(
+    reply: &ChatTimelineReply,
+    _view_owner: &'a DesktopApp,
+) -> Element<'a, Message> {
+    match reply {
+        ChatTimelineReply::Available {
+            session_id,
+            room_id,
+            event_id,
+            label,
+        } => subtle_button_owned(
+            label.clone(),
+            Message::OmenChat(OmenChatMessage::JumpToEvent {
+                session_id: *session_id,
+                room_id: *room_id,
+                event_id: *event_id,
+            }),
+        )
+        .width(Length::Fill)
+        .into(),
+        ChatTimelineReply::Unavailable { event_id } => safe_timeline_text(
+            format!("↳ Original message unavailable (event {event_id})"),
+            11,
+        )
+        .into(),
+    }
+}
+
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn recovered_mutation_notice(count: usize, connection: crate::chat::ChatConnectionState) -> String {
     let noun = if count == 1 { "send" } else { "sends" };
@@ -145,15 +173,26 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     };
 
     let mut timeline = column![].spacing(8).width(Length::Fill);
-    for group in chat_timeline_groups(session) {
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    let local_user_id = desktop
+        .omenchat
+        .omenchat_live_state
+        .local_user_id(session.session_id);
+    #[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
+    let local_user_id = None;
+    for group in chat_timeline_groups_for_local_user(session, local_user_id) {
         let header = row![
             text(group.actor).size(ui_size(12)),
             text(chat_event_time_label(group.at_unix)).size(ui_size(11)),
         ]
         .spacing(8)
         .wrap();
-        let mut group_content = column![header].spacing(1).width(Length::Fill);
+        let mut group_content: iced::widget::Column<'_, Message> =
+            column![header].spacing(1).width(Length::Fill);
         for body in group.bodies {
+            if let Some(reply) = body.reply.as_ref() {
+                group_content = group_content.push(omenchat_reply_line(reply, desktop));
+            }
             let media_hints = omenchat_media_hints(
                 &body.text,
                 &desktop.app.settings.clearweb,

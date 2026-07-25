@@ -909,9 +909,10 @@ schema, setting, or UI behavior is activated by the checkpoint itself.
 
 Implementation has completed the inert shared contract, dormant omenchatd
 schema-v4 storage, dormant server validation/transaction/fan-out, and dormant
-client model/storage/parsing units. Production negotiation still omits
-`reply-mentions-v1`; composer presentation and the final mixed-version gates
-must land before activation.
+client model/storage/parsing units. Read-only bounded reply previews, retained
+jump targeting, and authoritative numeric mention presentation are also in
+place. Production negotiation still omits `reply-mentions-v1`; composer
+actions/settings and the final mixed-version gates must land before activation.
 
 ### Unit 6B — reactions
 

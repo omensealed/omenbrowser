@@ -383,6 +383,26 @@ Unit 4 is implemented as a dormant client model and persistence boundary:
 The production client still does not request `reply-mentions-v1`, the server
 activation constant remains false, and there is no Reply or mention composer
 control yet.
+
+Unit 5A implements read-only presentation without activating mutation:
+
+- one project-owned helper derives reply and local-mention presentation from
+  the already bounded retained room history;
+- reply previews are capped at 160 UTF-8 bytes and never copy into storage;
+- a retained same-server/same-room original exposes a jump target, while a
+  missing or pruned original renders `Original message unavailable` and starts
+  no fetch, retry, timer, or history expansion;
+- jump targeting updates the existing room-specific bottom-anchored scroll
+  state only when the target remains in the active room;
+- `mentioned you` is shown only when validated numeric metadata contains the
+  authenticated local user ID learned on the negotiated Link; display-name
+  text remains non-authoritative;
+- machine-readable OMENchat smoke/TUI output includes the reply event ID and
+  bounded numeric mention IDs for rich events.
+
+The Reply composer action, member mention picker, mention count,
+mute-except-mentions setting, capability request, and server activation remain
+deferred to later Unit 5 slices.
 - the single room-event encoder preserves metadata across live fan-out,
   bounded inline history, and resource history;
 - exact replay after restart returns the stored acknowledgement without a

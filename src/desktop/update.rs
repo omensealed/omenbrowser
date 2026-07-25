@@ -241,6 +241,11 @@ mod tests {
                 session_id,
                 room_id,
             },
+            OmenChatMessage::JumpToEvent {
+                session_id,
+                room_id,
+                event_id: 3,
+            },
             OmenChatMessage::SendDraft(session_id),
             OmenChatMessage::ResendLocalEcho {
                 session_id,

@@ -98,6 +98,50 @@ fn omenchat_bottom_anchor_offsets_preserve_existing_storage_semantics() {
 }
 
 #[test]
+fn omenchat_jump_to_original_targets_only_retained_active_room_event() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-jump-original");
+    let session_id = open_test_omenchat_session(&mut desktop);
+    let session = desktop
+        .omenchat
+        .chat_client
+        .session_mut(session_id)
+        .expect("session");
+    for event_id in [10, 20, 30] {
+        session.events.push(crate::chat::ChatEvent {
+            server_id: session.server.server_id.clone(),
+            room_id: 1,
+            event_id,
+            actor_user_id: Some(2),
+            actor_display_name: Some("Peer".into()),
+            at_unix: event_id as i64,
+            kind: crate::chat::ChatEventKind::Message {
+                body: format!("event {event_id}"),
+            },
+        });
+    }
+
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::JumpToEvent {
+        session_id,
+        room_id: 1,
+        event_id: 20,
+    }));
+    assert_eq!(
+        desktop.omenchat.chat_scroll_offsets.get(&(session_id, 1)),
+        Some(&RelativeOffset { x: 0.0, y: 0.5 })
+    );
+
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::JumpToEvent {
+        session_id,
+        room_id: 1,
+        event_id: 999,
+    }));
+    assert_eq!(
+        desktop.omenchat.chat_scroll_offsets.get(&(session_id, 1)),
+        Some(&RelativeOffset { x: 0.0, y: 0.5 })
+    );
+}
+
+#[test]
 fn resizing_workspace_pane_preserves_visible_chat_scrollback_position() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-resize-scroll-bottom");
     let conversation_id = desktop.app.active_conversation().id;
