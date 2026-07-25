@@ -118,8 +118,7 @@ pub(in crate::desktop) fn directory_selected_state_lines(entry: &DirectoryEntry)
         DirectoryKind::Peer => {
             let preferred_delivery = entry
                 .preferred_delivery
-                .as_ref()
-                .map(|delivery| format!("{delivery:?}"))
+                .map(|delivery| delivery.label().to_string())
                 .unwrap_or_else(|| "default".into());
             lines.push(format!("preferred LXMF delivery: {preferred_delivery}"));
         }

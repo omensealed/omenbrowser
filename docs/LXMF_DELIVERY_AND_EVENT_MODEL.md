@@ -230,6 +230,17 @@ or legacy preference remains Direct. This is a local composer default, not
 automatic fallback policy, delivery evidence, or permission to retry an
 uncertain send.
 
+The additive `Direct only` and `Propagated only` policies reuse the existing
+bounded Directory entry and JSON field. They initialize new conversations to
+the permitted transport, prevent the composer from switching to the forbidden
+transport, and are checked again immediately before a native send. Legacy
+`direct` and `propagated` JSON values retain preferred—not exclusive—semantics.
+The outbound operation snapshot records whether propagation fallback is
+permitted so an explicit retry cannot silently weaken `Direct only`; older
+operation records default to the prior fallback-permitted behavior. Malformed
+policy metadata is not reused. Strict policy does not trigger a fallback,
+retry, path request, propagation sync, or stamp expenditure.
+
 The integrated runtime broadcast is consumed by one owned worker and forwarded
 through the existing 256-item application channel. Payload-bearing OMENchat
 events and SDK history pages additionally retain the shared 32 MiB queued-byte

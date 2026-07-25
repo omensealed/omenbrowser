@@ -663,6 +663,16 @@ conversation. Existing and restored conversation tabs preserve their explicit
 mode, and an unset preference remains Direct. This adds no automatic fallback,
 retry, setting, schema, protocol, worker, timer, or dependency.
 
+Phase 4B adds `Direct only` and `Propagated only` as additive values in that
+same bounded field. New conversations start in the permitted mode; manual
+composer switching and the native pre-send boundary both enforce exclusivity.
+The legacy `direct` and `propagated` encodings retain preferred semantics and
+allow either manual mode. The retry-safe outbound operation snapshot records
+whether propagation fallback is permitted; missing legacy metadata preserves
+the prior permitted behavior and malformed metadata is rejected. This unit
+adds no automatic fallback, retry, stamp spending, worker, timer, schema
+version, protocol, or dependency.
+
 ### Propagation-node quality of life
 
 Extend the existing bounded inventory with:

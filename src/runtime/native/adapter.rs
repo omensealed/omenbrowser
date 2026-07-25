@@ -4241,6 +4241,12 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .send_propagated_lxmf_message(envelope, &identity_bytes, None)
                     .await;
             }
+            let propagation_fallback_node = envelope
+                .operation
+                .as_ref()
+                .is_none_or(|operation| operation.allow_propagation_fallback)
+                .then(|| self.selected_propagation_node())
+                .flatten();
             let peer_destination = parse_rns_net_destination_hash(&envelope.peer_hash)?;
             let handle = self
                 .rns_net
@@ -4322,7 +4328,6 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 let packet_hash_hex = hex_encode(&packet_hash);
                 let message_id = packet_hash_hex.clone();
                 let submitted_at = native_unix_timestamp();
-                let propagation_fallback_node = self.selected_propagation_node();
                 self.pending_lxmf_proofs
                     .lock()
                     .expect("native LXMF proof map lock")
@@ -4437,7 +4442,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }
             if !has_path {
                 handle.client.request_path(peer_destination).await?;
-                if self.selected_propagation_node().is_some() {
+                if propagation_fallback_node.is_some() {
                     return self
                         .send_propagated_lxmf_message(
                             envelope,
@@ -4466,7 +4471,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .await
             {
                 Ok(link) => link,
-                Err(error) if self.selected_propagation_node().is_some() => {
+                Err(error) if propagation_fallback_node.is_some() => {
                     return self
                         .send_propagated_lxmf_message(
                             envelope,
@@ -4487,7 +4492,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .await
                 {
                     Ok(()) => {}
-                    Err(error) if self.selected_propagation_node().is_some() => {
+                    Err(error) if propagation_fallback_node.is_some() => {
                         let _ = handle.client.teardown_link(link.link_id).await;
                         return self
                             .send_propagated_lxmf_message(
@@ -4504,7 +4509,6 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 let evidence_detail = format!(
                     "direct_transfer_state:link_packet_sent;direct_link_id:{link_hex};submitted_at:{submitted_at:.3};receipt_state:direct_link_packet_sent_peer_unconfirmed;delivery_state:peer_delivery_unconfirmed;direct_representation:link_packet"
                 );
-                let propagation_fallback_node = self.selected_propagation_node();
                 self.pending_lxmf_proofs
                     .lock()
                     .expect("native LXMF proof map lock")
@@ -4635,7 +4639,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .await
             {
                 Ok(()) => {}
-                Err(error) if self.selected_propagation_node().is_some() => {
+                Err(error) if propagation_fallback_node.is_some() => {
                     let _ = handle.client.teardown_link(link.link_id).await;
                     return self
                         .send_propagated_lxmf_message(
@@ -4734,7 +4738,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             .into(),
                     ),
                 ]);
-            if let Some(propagation_node) = self.selected_propagation_node() {
+            if let Some(propagation_node) = propagation_fallback_node {
                 fields.insert(
                     "native_lxmf_propagation_fallback_available".into(),
                     "true".into(),
@@ -14969,6 +14973,23 @@ enable_transport = No
             .fields
             .get("native_lxmf_failure_reason")
             .is_some_and(|reason| reason.contains("direct path missing")));
+
+        let mut direct_only_operation = crate::messaging::OutboundOperationIdentity::generate();
+        direct_only_operation.allow_propagation_fallback = false;
+        let error = runtime
+            .send_message(MessageEnvelope {
+                peer_hash: peer_hash.into(),
+                title: "Direct only".into(),
+                body: "No propagation fallback".into(),
+                delivery_mode: crate::messaging::DeliveryMode::Direct,
+                include_ticket: false,
+                native_reply_ticket: None,
+                operation: Some(direct_only_operation),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect_err("direct-only send must not use selected propagation node");
+        assert!(error.to_string().contains("path is not known"));
     }
 
     #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]

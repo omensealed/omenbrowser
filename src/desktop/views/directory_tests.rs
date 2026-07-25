@@ -179,8 +179,12 @@ fn directory_selected_state_lines_are_kind_specific() {
     let mut peer = DirectoryEntry::new("peer.hash", "Peer", DirectoryKind::Peer);
     peer.preferred_delivery = Some(PreferredDelivery::Propagated);
     let peer_lines = directory_selected_state_lines(&peer).join("\n");
-    assert!(peer_lines.contains("preferred LXMF delivery: Propagated"));
+    assert!(peer_lines.contains("preferred LXMF delivery: propagated preferred"));
     assert!(!peer_lines.contains("identify on connect"));
+
+    peer.preferred_delivery = Some(PreferredDelivery::DirectOnly);
+    let peer_lines = directory_selected_state_lines(&peer).join("\n");
+    assert!(peer_lines.contains("preferred LXMF delivery: direct only"));
 
     let mut omenchat = DirectoryEntry::new("chat.hash", "Chat", DirectoryKind::OmenChat);
     omenchat.identity_hash = Some("00112233445566778899aabbccddeeff".into());

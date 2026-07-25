@@ -75,11 +75,32 @@ impl TryFrom<u8> for TrustLevel {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PreferredDelivery {
     Direct,
     Propagated,
+    DirectOnly,
+    PropagatedOnly,
+}
+
+impl PreferredDelivery {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct preferred",
+            Self::Propagated => "propagated preferred",
+            Self::DirectOnly => "direct only",
+            Self::PropagatedOnly => "propagated only",
+        }
+    }
+
+    pub fn allows_direct(self) -> bool {
+        !matches!(self, Self::PropagatedOnly)
+    }
+
+    pub fn allows_propagated(self) -> bool {
+        !matches!(self, Self::DirectOnly)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -334,7 +355,7 @@ impl DirectoryService {
             entry.trusted = existing.trusted;
             entry.saved = existing.saved;
             entry.identify_on_connect = existing.identify_on_connect;
-            entry.preferred_delivery = existing.preferred_delivery.clone();
+            entry.preferred_delivery = existing.preferred_delivery;
             entry.sort_rank = existing.sort_rank;
             entry.hosts_node = existing.hosts_node || kind == DirectoryKind::Node;
             entry.associated_hash = associated_hash.or_else(|| existing.associated_hash.clone());
@@ -899,10 +920,7 @@ fn merged_entry(primary: Option<&DirectoryEntry>, secondary: &DirectoryEntry) ->
     };
     entry.saved = primary.saved || secondary.saved;
     entry.identify_on_connect = primary.identify_on_connect || secondary.identify_on_connect;
-    entry.preferred_delivery = primary
-        .preferred_delivery
-        .clone()
-        .or_else(|| secondary.preferred_delivery.clone());
+    entry.preferred_delivery = primary.preferred_delivery.or(secondary.preferred_delivery);
     entry.sort_rank = primary.sort_rank.or(secondary.sort_rank);
     entry.hosts_node = primary.hosts_node || secondary.hosts_node;
     entry.associated_hash = primary
@@ -1380,9 +1398,9 @@ mod tests {
 
     use super::{
         publish_directory_bytes, timestamp_secs, DirectoryAnnounceMetadata, DirectoryKind,
-        DirectoryService, PropagationNodeCompatibility, PropagationNodeFreshness,
-        PropagationNodePathState, PublishMode, PROPAGATION_NODE_INVENTORY_MAX_BYTES,
-        PROPAGATION_NODE_INVENTORY_MAX_ITEMS,
+        DirectoryService, PreferredDelivery, PropagationNodeCompatibility,
+        PropagationNodeFreshness, PropagationNodePathState, PublishMode,
+        PROPAGATION_NODE_INVENTORY_MAX_BYTES, PROPAGATION_NODE_INVENTORY_MAX_ITEMS,
     };
 
     fn isolated_directory(label: &str) -> (std::path::PathBuf, DirectoryService) {
@@ -1394,6 +1412,35 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create isolated root");
         let service = DirectoryService::new(root.join("directory.json")).expect("directory");
         (root, service)
+    }
+
+    #[test]
+    fn delivery_policy_preserves_legacy_json_and_adds_strict_modes() {
+        assert_eq!(
+            serde_json::from_str::<PreferredDelivery>("\"direct\"").expect("legacy direct"),
+            PreferredDelivery::Direct
+        );
+        assert_eq!(
+            serde_json::from_str::<PreferredDelivery>("\"propagated\"").expect("legacy propagated"),
+            PreferredDelivery::Propagated
+        );
+        for (encoded, policy) in [
+            ("\"direct_only\"", PreferredDelivery::DirectOnly),
+            ("\"propagated_only\"", PreferredDelivery::PropagatedOnly),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<PreferredDelivery>(encoded).expect("strict policy"),
+                policy
+            );
+            assert_eq!(
+                serde_json::to_string(&policy).expect("encode strict policy"),
+                encoded
+            );
+        }
+        assert!(PreferredDelivery::Direct.allows_direct());
+        assert!(PreferredDelivery::Direct.allows_propagated());
+        assert!(!PreferredDelivery::DirectOnly.allows_propagated());
+        assert!(!PreferredDelivery::PropagatedOnly.allows_direct());
     }
 
     #[test]

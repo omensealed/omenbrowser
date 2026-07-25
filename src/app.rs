@@ -11591,11 +11591,30 @@ impl App {
     }
 
     pub fn toggle_active_conversation_delivery_mode(&mut self) {
-        let conversation = &mut self.workspace.conversations[self.workspace.active_conversation];
-        conversation.delivery_mode = match conversation.delivery_mode {
+        let active = self.workspace.active_conversation;
+        let peer_hash = self.workspace.conversations[active].peer_hash.trim();
+        let policy = self
+            .directory_service
+            .find(peer_hash)
+            .and_then(|entry| entry.preferred_delivery);
+        let next = match self.workspace.conversations[active].delivery_mode {
             DeliveryMode::Direct => DeliveryMode::Propagated,
             DeliveryMode::Propagated => DeliveryMode::Direct,
         };
+        if let Some(policy) = policy {
+            let allowed = match next {
+                DeliveryMode::Direct => policy.allows_direct(),
+                DeliveryMode::Propagated => policy.allows_propagated(),
+            };
+            if !allowed {
+                self.workspace.active_section = WorkspaceSection::Messages;
+                self.status.task =
+                    format!("delivery mode blocked by peer policy: {}", policy.label());
+                return;
+            }
+        }
+        let conversation = &mut self.workspace.conversations[active];
+        conversation.delivery_mode = next;
         self.workspace.active_section = WorkspaceSection::Messages;
         self.status.task = format!("delivery mode: {:?}", conversation.delivery_mode);
         self.persist_ui_preferences("workspace section");
@@ -11930,18 +11949,20 @@ impl App {
         let next = match entry.preferred_delivery {
             None => Some(PreferredDelivery::Direct),
             Some(PreferredDelivery::Direct) => Some(PreferredDelivery::Propagated),
-            Some(PreferredDelivery::Propagated) => None,
+            Some(PreferredDelivery::Propagated) => Some(PreferredDelivery::DirectOnly),
+            Some(PreferredDelivery::DirectOnly) => Some(PreferredDelivery::PropagatedOnly),
+            Some(PreferredDelivery::PropagatedOnly) => None,
         };
         match self
             .directory_service
-            .set_preferred_delivery(&entry.destination_hash, next.clone())
+            .set_preferred_delivery(&entry.destination_hash, next)
         {
             Ok(Some(updated)) => {
                 self.refresh_panels_from_services();
                 self.status.task = format!(
                     "directory delivery: {} {}",
                     updated.display_name,
-                    next.map(|delivery| format!("{delivery:?}"))
+                    next.map(|delivery| delivery.label().to_string())
                         .unwrap_or_else(|| "default".into())
                 );
                 true
@@ -12639,6 +12660,11 @@ impl App {
 
         let generation = self.next_message_generation;
         self.next_message_generation += 1;
+        let allow_propagation_fallback = self
+            .directory_service
+            .find(self.workspace.conversations[active].peer_hash.trim())
+            .and_then(|entry| entry.preferred_delivery)
+            != Some(PreferredDelivery::DirectOnly);
         let (
             conversation_id,
             peer_hash,
@@ -12651,12 +12677,13 @@ impl App {
             operation,
         ) = {
             let conversation = &mut self.workspace.conversations[active];
-            let operation = conversation
+            let mut operation = conversation
                 .prepared_retry_operation
                 .take()
                 .filter(|prepared| prepared.matches_draft(conversation))
                 .map(|prepared| prepared.identity)
                 .unwrap_or_else(OutboundOperationIdentity::generate);
+            operation.allow_propagation_fallback = allow_propagation_fallback;
             conversation.pending_send = Some(MessageSendState { generation });
             if !message_pending_placeholder_present(conversation, generation) {
                 conversation.push_message(pending_outbound_message_from_conversation(
@@ -13335,6 +13362,22 @@ impl App {
         }
         if self.runtime_status.active_identity.is_none() {
             return Some("LXMF send blocked: no active identity is attached".into());
+        }
+        if let Some(policy) = self
+            .directory_service
+            .find(peer_hash)
+            .and_then(|entry| entry.preferred_delivery)
+        {
+            let allowed = match conversation.delivery_mode {
+                DeliveryMode::Direct => policy.allows_direct(),
+                DeliveryMode::Propagated => policy.allows_propagated(),
+            };
+            if !allowed {
+                return Some(format!(
+                    "LXMF send blocked by peer delivery policy: {}",
+                    policy.label()
+                ));
+            }
         }
 
         if matches!(conversation.delivery_mode, DeliveryMode::Propagated) {
@@ -18408,8 +18451,12 @@ impl App {
             .as_ref()
             .and_then(|entry| entry.preferred_delivery.as_ref())
         {
-            Some(PreferredDelivery::Propagated) => DeliveryMode::Propagated,
-            Some(PreferredDelivery::Direct) | None => DeliveryMode::Direct,
+            Some(PreferredDelivery::Propagated | PreferredDelivery::PropagatedOnly) => {
+                DeliveryMode::Propagated
+            }
+            Some(PreferredDelivery::Direct | PreferredDelivery::DirectOnly) | None => {
+                DeliveryMode::Direct
+            }
         };
         self.workspace.conversations.push(conversation);
         self.workspace.active_conversation = self.workspace.conversations.len() - 1;
@@ -25822,6 +25869,20 @@ side
             app.directory_service
                 .find("peer.hash")
                 .and_then(|entry| entry.preferred_delivery),
+            Some(PreferredDelivery::DirectOnly)
+        );
+        assert!(app.cycle_selected_directory_preferred_delivery());
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .and_then(|entry| entry.preferred_delivery),
+            Some(PreferredDelivery::PropagatedOnly)
+        );
+        assert!(app.cycle_selected_directory_preferred_delivery());
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .and_then(|entry| entry.preferred_delivery),
             None
         );
     }
@@ -25848,6 +25909,47 @@ side
             app.active_conversation().delivery_mode,
             DeliveryMode::Direct,
             "reopening an existing tab must preserve its explicit mode"
+        );
+    }
+
+    #[test]
+    fn strict_directory_delivery_policy_blocks_manual_mode_switch() {
+        let mut app = App::new(test_config("directory-delivery-strict-toggle"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_preferred_delivery("peer.hash", Some(PreferredDelivery::DirectOnly))
+            .expect("persist strict policy");
+        app.open_directory_peer_conversation("peer.hash");
+
+        assert_eq!(
+            app.active_conversation().delivery_mode,
+            DeliveryMode::Direct
+        );
+        app.toggle_active_conversation_delivery_mode();
+        assert_eq!(
+            app.active_conversation().delivery_mode,
+            DeliveryMode::Direct
+        );
+        assert!(app.status.task.contains("direct only"));
+    }
+
+    #[cfg(feature = "native-reticulum")]
+    #[test]
+    fn strict_directory_delivery_policy_is_rechecked_at_send_boundary() {
+        let mut app = make_native_send_ready_app("directory-delivery-strict-send");
+        app.directory_service
+            .ingest_announce(FIXTURE_NODE_HASH, "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_preferred_delivery(FIXTURE_NODE_HASH, Some(PreferredDelivery::PropagatedOnly))
+            .expect("persist strict policy");
+        app.active_conversation_mut_for_test().delivery_mode = DeliveryMode::Direct;
+
+        assert_eq!(
+            app.active_conversation_send_blocker().as_deref(),
+            Some("LXMF send blocked by peer delivery policy: propagated only")
         );
     }
 
