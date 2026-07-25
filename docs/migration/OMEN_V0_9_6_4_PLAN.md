@@ -539,6 +539,22 @@ adapter passively observes the existing owned recovery worker and adds no
 snapshot, retry, action, worker, timer, subscription, queue, persistence,
 protocol, or dependency.
 
+Phase 3N adds app-owned propagation-sync correlation. Runtime sync events have
+no operation identity and are also emitted for outbound propagation acceptance,
+so the adapter creates an operation from the existing single pending app
+generation and ignores events without that correlation. Queue, typed stage
+progress, blockers, failures, final completion, and the existing task result
+coalesce into that record. Intermediate completion is not terminal and local
+sync completion never claims peer delivery. The ambiguous `Complete/Progress`
+shape used by outbound acceptance and cleanup is ignored. Runtime detail,
+arbitrary count-map keys, and backend errors remain in Network Doctor rather
+than shared presentation; only fixed typed labels and bounded final counts are
+retained. Identical stage progress coalesces, runtime terminal states resist
+later runtime updates, and only the correlated app task result may resolve the
+final outcome. Existing history bounds and terminal eviction apply. No sync,
+automatic retry, worker, timer, subscription, queue, persistence, protocol, or
+dependency is introduced.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:

@@ -223,6 +223,7 @@ pub fn domain_label(domain: OperationDomain) -> &'static str {
         OperationDomain::PathDiscovery => "path discovery",
         OperationDomain::LinkEstablishment => "link establishment",
         OperationDomain::LxmfMessage => "LXMF message",
+        OperationDomain::PropagationSync => "propagation sync",
         OperationDomain::ResourceTransfer => "resource transfer",
         OperationDomain::RuntimeEventStream => "runtime event stream",
         OperationDomain::OmenChatConnection => "OMENchat connection",
@@ -263,6 +264,8 @@ pub fn evidence_label(kind: OperationEvidenceKind) -> &'static str {
     match kind {
         OperationEvidenceKind::QueueAdmission => "queue admission",
         OperationEvidenceKind::Dispatch => "dispatch",
+        OperationEvidenceKind::OperationProgress => "operation progress",
+        OperationEvidenceKind::OperationCompletion => "operation completion",
         OperationEvidenceKind::TransportAcceptance => "transport acceptance",
         OperationEvidenceKind::Receipt => "receipt",
         OperationEvidenceKind::PeerDelivery => "peer delivery",

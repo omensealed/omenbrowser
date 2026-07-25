@@ -258,6 +258,36 @@ diagnostic surface. This adapter observes the current owned recovery worker; it
 adds no recovery attempt, snapshot request, retry, action, worker, timer,
 subscription, queue, persistence, protocol field, or dependency.
 
+## LXMF propagation-sync adapter
+
+`src/operations/propagation.rs` uses the application's existing single pending
+sync generation as the stable operation identity. This ownership is required
+because the runtime `PropagationSync` event has no operation identifier and is
+also emitted for outbound propagation acceptance outside a user-requested
+sync. Events received without the current app generation are ignored.
+
+The application records queue admission before spawning the existing sync
+task. Typed started, progress, intermediate-complete, blocked, failed, and
+final-complete stages update that exact operation. Intermediate stage
+completion remains active; only the typed final-complete stage or the existing
+task report locally completes the sync. Completion never claims peer message
+delivery. The task report is authoritative for the final success/blocker
+outcome and retains only bounded message and delivery-update counts.
+
+`Complete/Progress` is deliberately ignored because current producers use that
+ambiguous shape for outbound acceptance and link cleanup without operation
+identity. Runtime detail strings and arbitrary count-map keys are also omitted;
+they may contain link, identity, message, or backend details. Fixed typed stage
+labels provide the shared evidence, while Network Doctor retains the detailed
+diagnostic report. Repeated identical stage progress coalesces in place, typed
+runtime terminal states resist later runtime updates, and the app task result
+alone may resolve the final outcome.
+
+The adapter adds a bounded record per app generation and reuses the existing
+512-record/512-KiB history with terminal eviction. It introduces no sync,
+automatic retry, worker, timer, subscription, queue, persistence, protocol
+field, or dependency.
+
 ## Reticulum path-observation adapter
 
 `src/operations/path.rs` observes the existing typed `PathUpdated` runtime

@@ -3155,6 +3155,30 @@ do not force broadcast lag, connect to an SDK/RPC daemon, request a snapshot,
 or change the existing event worker. The worker's bounded lag and recovery
 tests remain the behavioral recovery gate.
 
+The propagation-sync Operations fixtures prove app-generation correlation,
+queue/start/progress/intermediate/final state boundaries, blocked and failed
+outcomes, task-result finalization, stable destination normalization,
+unrelated-event rejection, exclusion of ambiguous `Complete/Progress`, raw
+detail/count omission, stale and duplicate rejection, repeated-progress
+coalescing, terminal precedence, bounded evidence, late-target omission, and
+unresolved-history saturation:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::propagation::tests --lib
+
+cargo test --locked --no-default-features --features tui \
+  operations::propagation::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  propagation_sync_operations_require_app_correlation --lib
+```
+
+These are deterministic in-memory and isolated-root tests. They do not select a
+live propagation node, establish a Link, synchronize LXMF, contact a peer, or
+prove peer delivery. Existing propagation smoke and Python interoperability
+remain the live gates.
+
 The typed Resource adapter fixtures prove stable opaque correlation, transfer
 identifier and browser-operation redaction, offer/progress coalescing, retained
 authoritative totals, regression and malformed-total rejection, completion

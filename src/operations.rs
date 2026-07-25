@@ -11,6 +11,7 @@ pub mod lxmf;
 pub mod omenchat;
 pub mod path;
 pub mod presentation;
+pub mod propagation;
 pub mod resource;
 
 pub const OPERATION_HISTORY_MAX_ITEMS: usize = 512;
@@ -25,6 +26,7 @@ pub enum OperationDomain {
     PathDiscovery,
     LinkEstablishment,
     LxmfMessage,
+    PropagationSync,
     ResourceTransfer,
     RuntimeEventStream,
     OmenChatConnection,
@@ -123,6 +125,8 @@ impl OperationState {
 pub enum OperationEvidenceKind {
     QueueAdmission,
     Dispatch,
+    OperationProgress,
+    OperationCompletion,
     TransportAcceptance,
     Receipt,
     PeerDelivery,

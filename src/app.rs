@@ -13051,6 +13051,20 @@ impl App {
             .outbound_propagation_syncs
             .saturating_add(1);
         self.monitoring_state.note_outbound(128);
+        let selected_from_settings = self.settings.preferred_propagation_node_hash.clone();
+        let observed_at_unix_ms = i64::try_from(current_epoch_ms()).unwrap_or(i64::MAX);
+        if let Err(error) = crate::operations::propagation::begin_propagation_sync(
+            &mut self.operation_history,
+            generation,
+            selected_from_settings.as_deref(),
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Messaging,
+                format!("propagation Operations projection rejected sync start: {error}"),
+            );
+        }
         self.logs.push_with_source(
             LogSeverity::Info,
             LogSource::Messaging,
@@ -13060,7 +13074,6 @@ impl App {
         let runtime = self.runtime.clone();
         let service = self.messaging_service.clone();
         let tx = self.event_tx.clone();
-        let selected_from_settings = self.settings.preferred_propagation_node_hash.clone();
         let sync_limit = Some(self.settings.lxmf_sync_limit);
         tokio::spawn(async move {
             let report = collect_native_lxmf_propagation_diagnostics_report(
@@ -15997,6 +16010,18 @@ impl App {
                 format!("event-stream Operations projection rejected an update: {error}"),
             );
         }
+        if let Err(error) = crate::operations::propagation::record_propagation_sync_runtime_event(
+            &mut self.operation_history,
+            self.propagation_sync_pending,
+            &event,
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("propagation Operations projection rejected an update: {error}"),
+            );
+        }
         match event {
             crate::runtime::RuntimeBusEvent::StatusChanged(status) => {
                 self.runtime_status = status.clone();
@@ -17027,6 +17052,27 @@ impl App {
                 let stage_hint = propagation_sync_stage_hint(&report);
                 let _ = self.set_diagnostics_preview_value(&report);
                 let blocked = blocker != "no propagation blocker reported";
+                let selected_node = report
+                    .get("selected_node")
+                    .and_then(serde_json::Value::as_str);
+                let observed_at_unix_ms = i64::try_from(current_epoch_ms()).unwrap_or(i64::MAX);
+                if let Err(error) = crate::operations::propagation::finish_propagation_sync(
+                    &mut self.operation_history,
+                    generation,
+                    crate::operations::propagation::PropagationSyncOutcome {
+                        succeeded: sync_ok && !blocked,
+                        selected_node,
+                        messages_received: message_count,
+                        delivery_updates: sync_evidence_count,
+                    },
+                    observed_at_unix_ms,
+                ) {
+                    self.logs.push_with_source(
+                        LogSeverity::Warn,
+                        LogSource::Messaging,
+                        format!("propagation Operations projection rejected sync result: {error}"),
+                    );
+                }
                 self.status.task = if sync_ok && !blocked {
                     format!(
                         "propagation sync complete: state={after_state} messages={message_count} delivery_updates={sync_evidence_count} events={event_count}"
@@ -32371,6 +32417,76 @@ side
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn propagation_sync_operations_require_app_correlation_and_finalize_from_task_result() {
+        let mut app = App::new(test_config("propagation-sync-operations"));
+        let progress_event = || {
+            RuntimeBusEvent::PropagationSync(crate::runtime::PropagationSyncEvent {
+                stage: crate::runtime::PropagationSyncStage::LinkEstablish,
+                status: crate::runtime::PropagationSyncEventStatus::Started,
+                destination_hash: Some(FIXTURE_NODE_HASH.into()),
+                detail: "private link and identity detail".into(),
+                counts: BTreeMap::from([("private_message_id".into(), 99)]),
+            })
+        };
+
+        assert!(app.handle_runtime_bus_event(progress_event()));
+        assert!(!app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::PropagationSync
+        }));
+
+        app.propagation_sync_pending = Some(77);
+        crate::operations::propagation::begin_propagation_sync(
+            &mut app.operation_history,
+            77,
+            Some(FIXTURE_NODE_HASH),
+            1,
+        )
+        .expect("begin correlated sync");
+        assert!(app.handle_runtime_bus_event(progress_event()));
+        let active = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::PropagationSync)
+            .expect("active sync operation");
+        assert_eq!(active.state, crate::operations::OperationState::Dispatching);
+        assert!(!active.state.claims_peer_delivery());
+        assert!(!active.evidence.iter().any(|evidence| evidence
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private") || detail.contains("99"))));
+
+        assert!(
+            app.apply_message_task_result(MessageTaskResult::PropagationSynced {
+                generation: 77,
+                report: serde_json::json!({
+                    "report": "native_lxmf_propagation_diagnostics",
+                    "selected_node": FIXTURE_NODE_HASH,
+                    "sync": {"ok": true, "error": null},
+                    "after": {
+                        "has_path": true,
+                        "known_app_data": true,
+                        "transfer_state": "complete"
+                    },
+                    "sync_events": [],
+                    "blocker": "no propagation blocker reported"
+                }),
+                messages: Vec::new(),
+            })
+        );
+        let completed = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::PropagationSync)
+            .expect("completed sync operation");
+        assert_eq!(
+            completed.state,
+            crate::operations::OperationState::Completed
+        );
+        assert!(!completed.state.claims_peer_delivery());
+        assert!(completed.last_error.is_none());
     }
 
     #[test]
