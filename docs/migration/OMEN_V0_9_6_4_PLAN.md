@@ -351,6 +351,11 @@ pending UI confirmation but does not discard the durable record. Confirmation
 and the bounded persistence owner are otherwise unchanged, and no automatic
 retry, worker, queue, timer, schema, wire, or capability was added.
 
+The compact recovery notice and explicit Review flow were manually smoke-tested
+in a live joined OMENchat session on 2026-07-25. Join and ping health remained
+visible and normal, and the earlier uncertain send no longer presented as a
+connection-failure dialog.
+
 ### Required matrix for every newly activated family
 
 - response lost after server commit;
@@ -651,6 +656,12 @@ Extend existing directory/settings models conservatively.
 Existing behavior remains the migration default. Automatic uncertain mutation
 retry remains prohibited. Policy decisions must be visible in Operations and
 diagnostics.
+
+Phase 4A begins by making the already-persisted Directory `Direct` or
+`Propagated` preference effective as the initial mode for a newly opened peer
+conversation. Existing and restored conversation tabs preserve their explicit
+mode, and an unset preference remains Direct. This adds no automatic fallback,
+retry, setting, schema, protocol, worker, timer, or dependency.
 
 ### Propagation-node quality of life
 

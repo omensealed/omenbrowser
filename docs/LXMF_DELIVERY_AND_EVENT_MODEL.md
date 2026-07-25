@@ -220,6 +220,16 @@ this set and the acknowledgement inventory.
 
 ## Event and delivery follow-up
 
+### Per-peer delivery default
+
+The existing Directory `Direct` or `Propagated` preference initializes the
+delivery mode of a newly opened conversation for that peer. Reopening an
+existing conversation, restoring a saved conversation, and manually changing a
+conversation's delivery mode preserve that explicit per-tab choice. An unset
+or legacy preference remains Direct. This is a local composer default, not
+automatic fallback policy, delivery evidence, or permission to retry an
+uncertain send.
+
 The integrated runtime broadcast is consumed by one owned worker and forwarded
 through the existing 256-item application channel. Payload-bearing OMENchat
 events and SDK history pages additionally retain the shared 32 MiB queued-byte

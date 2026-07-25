@@ -18396,16 +18396,22 @@ impl App {
             self.switch_section(WorkspaceSection::Messages);
             return;
         }
-        let label = self
-            .directory_service
-            .find(peer_hash)
-            .map(|entry| entry.display_name)
+        let directory_entry = self.directory_service.find(peer_hash);
+        let label = directory_entry
+            .as_ref()
+            .map(|entry| entry.display_name.clone())
             .unwrap_or_else(|| peer_hash.chars().take(8).collect());
         let id = self.next_conversation_id;
         self.next_conversation_id += 1;
-        self.workspace
-            .conversations
-            .push(Conversation::new(id, peer_hash, label));
+        let mut conversation = Conversation::new(id, peer_hash, label);
+        conversation.delivery_mode = match directory_entry
+            .as_ref()
+            .and_then(|entry| entry.preferred_delivery.as_ref())
+        {
+            Some(PreferredDelivery::Propagated) => DeliveryMode::Propagated,
+            Some(PreferredDelivery::Direct) | None => DeliveryMode::Direct,
+        };
+        self.workspace.conversations.push(conversation);
         self.workspace.active_conversation = self.workspace.conversations.len() - 1;
         self.switch_section(WorkspaceSection::Messages);
     }
@@ -25817,6 +25823,31 @@ side
                 .find("peer.hash")
                 .and_then(|entry| entry.preferred_delivery),
             None
+        );
+    }
+
+    #[test]
+    fn directory_preferred_delivery_initializes_only_new_conversations() {
+        let mut app = App::new(test_config("directory-delivery-conversation-default"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_preferred_delivery("peer.hash", Some(PreferredDelivery::Propagated))
+            .expect("persist preference");
+
+        app.open_directory_peer_conversation("peer.hash");
+        assert_eq!(
+            app.active_conversation().delivery_mode,
+            DeliveryMode::Propagated
+        );
+
+        app.active_conversation_mut_for_test().delivery_mode = DeliveryMode::Direct;
+        app.open_directory_peer_conversation("peer.hash");
+        assert_eq!(
+            app.active_conversation().delivery_mode,
+            DeliveryMode::Direct,
+            "reopening an existing tab must preserve its explicit mode"
         );
     }
 
