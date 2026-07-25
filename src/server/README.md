@@ -187,7 +187,7 @@ server cleanly and run:
 
 ```bash
 omenchatd database restore-migration-backup \
-  --from ~/.omenchatd/omenchat.sqlite.pre-v3-from-v2.bak \
+  --from ~/.omenchatd/omenchat.sqlite.pre-v4-from-v3.bak \
   --confirm --home ~/.omenchatd
 ```
 
@@ -436,12 +436,14 @@ priority survival, graceful drain, RSS/FD stability, and the 32 MiB per-writer
 retention cap. The delay is a reproducible slow-disk simulation, not a benchmark
 of a particular storage device.
 
-The schema currently uses SQLite `user_version = 3`. Version 2 added the upload
+The schema currently uses SQLite `user_version = 4`. Version 2 added the upload
 ledger actor/time index used by quota planning. Version 3 adds the dormant,
 bounded-shape durable-mutation replay table, client-instance retirement table,
-and their indexes; no live request path reads or writes those tables until the
-capability is explicitly negotiated and activated. The isolated store boundary
-already enforces exact
+and their indexes. Version 4 adds nullable reply-event and bounded mention-ID
+metadata to room events plus a partial reply index. Existing event rows retain
+their original columns byte-for-byte and read as messages without metadata.
+The reply/mention capability is not advertised and no live request writes the
+new columns yet. The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental
 deletions per commit. Before deleting a replay result it permanently retires
@@ -456,7 +458,7 @@ transactionally. Files with
 a newer schema version are rejected without modification; run the matching or
 newer omenchatd rather than forcing the version backward.
 Migration of a non-empty older database first retains an online SQLite backup
-at `omenchat.sqlite.pre-v3-from-v<old>.bak`. The backup is owner-only on
+at `omenchat.sqlite.pre-v4-from-v<old>.bak`. The backup is owner-only on
 Unix and is never overwritten. If that path already exists or backup creation
 fails, startup aborts before changing the source database.
 Migration schema work and its version update are transactional. On failure the

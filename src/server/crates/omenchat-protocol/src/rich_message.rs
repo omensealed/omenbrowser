@@ -79,6 +79,12 @@ pub struct RichMessageEventMetadata {
     pub mentioned_user_ids: Vec<UserId>,
 }
 
+impl RichMessageEventMetadata {
+    pub fn validate(&self) -> Result<(), RichMessageError> {
+        validate_event_metadata(self)
+    }
+}
+
 pub fn append_rich_message_event_metadata(
     fields: &mut Vec<FrameValue>,
     metadata: &RichMessageEventMetadata,

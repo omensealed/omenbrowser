@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS room_events (
   target_user_id INTEGER,
   at INTEGER NOT NULL,
   payload BLOB,
+  reply_to_event_id INTEGER CHECK(
+    reply_to_event_id IS NULL OR reply_to_event_id > 0
+  ),
+  mention_user_ids BLOB CHECK(
+    mention_user_ids IS NULL OR (
+      length(mention_user_ids) BETWEEN 4 AND 64
+      AND length(mention_user_ids) % 4 = 0
+    )
+  ),
   deleted INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(room_id, event_id)
 );

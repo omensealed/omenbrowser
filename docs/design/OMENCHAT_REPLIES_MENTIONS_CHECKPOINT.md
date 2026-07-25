@@ -1,6 +1,6 @@
 # OMENchat replies and mentions checkpoint
 
-Status: design checkpoint; no production wire or schema activation  
+Status: implementation in progress; schema v4 dormant, no production wire activation
 Baseline: OMENbrowser/omenchatd v0.9.6-3, planned v0.9.6-4  
 Protocol baseline: version `1`, name `omenchat-v0.1`  
 Proposed additive capability: `reply-mentions-v1`
@@ -26,11 +26,11 @@ The current checkout already has the prerequisites that Unit 6A must reuse:
   This permits a fail-soft rich request shape whose first field remains the
   ordinary message body, but capability negotiation is still mandatory.
 
-The current event model has no reply reference, mention identifiers, local-user
-identifier, mention counter, or mute-except-mentions setting. The client SQLite
-store has no schema version and applies idempotent `ALTER TABLE` additions.
-omenchatd is at schema version 3 and creates a guarded, owner-only SQLite backup
-before migration.
+The client event model still has no reply reference, mention identifiers,
+local-user identifier, mention counter, or mute-except-mentions setting. The
+client SQLite store has no schema version and applies idempotent `ALTER TABLE`
+additions. omenchatd is now at schema version 4 and creates a guarded,
+owner-only SQLite backup before migration.
 
 ## Compatibility invariants
 
@@ -328,5 +328,23 @@ Unit 1 is implemented as an inert shared-contract foundation:
   changes the request hash.
 
 The live client does not request the capability and omenchatd does not accept
-or advertise it. No runtime branch, database column, configuration field, or
-UI control was added. Unit 2 remains the next rollback boundary.
+or advertise it. No runtime branch, configuration field, or UI control was
+added.
+
+Unit 2 is implemented as a dormant omenchatd storage boundary:
+
+- schema version 4 adds nullable `reply_to_event_id` and bounded
+  `mention_user_ids` columns plus the partial same-room reply index;
+- version-3 migration uses the existing immediate transaction, owner-only
+  no-clobber backup, future-version refusal, and staged restore machinery;
+- legacy rows preserve their existing values and decode with no metadata;
+- typed metadata uses exact big-endian `u32` mention IDs and rejects empty,
+  oversized, misaligned, zero, duplicate, or unsorted stored values;
+- only message events may carry the typed metadata;
+- ordinary live event insertion continues storing both new columns as `NULL`;
+- preservation, pre-v4 backup, injected rollback, malformed-storage, exact
+  round-trip, and non-message refusal tests cover the boundary.
+
+Unit 3—negotiated server validation, transactional durable execution, history,
+and fan-out—remains the next rollback boundary. Capability advertisement stays
+blocked.

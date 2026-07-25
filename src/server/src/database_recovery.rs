@@ -458,7 +458,9 @@ mod tests {
             .to_string();
         assert!(error.contains("SQLite"), "unexpected error: {error}");
 
-        let current_backup = root.join("omenchat.sqlite.pre-v3-from-v3.bak");
+        let current_backup = root.join(format!(
+            "omenchat.sqlite.pre-v{SCHEMA_VERSION}-from-v{SCHEMA_VERSION}.bak"
+        ));
         std::fs::copy(&database, &current_backup).expect("current schema copy");
         let error = restore_migration_backup(&database, &current_backup)
             .expect_err("current schema source must fail")

@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::OptionalExtension;
 
 use crate::error::ServerResult;
-use crate::protocol::{EventId, RoomId, UserId};
+use crate::protocol::{EventId, RichMessageEventMetadata, RoomId, UserId};
 
 pub mod durable_replay;
 
@@ -40,6 +40,7 @@ pub struct ServerRoomEvent {
     pub actor_user_id: Option<UserId>,
     pub actor_display_name: Option<String>,
     pub at_unix: i64,
+    pub metadata: Option<RichMessageEventMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,7 +117,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 4;
 
 impl OmenchatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -204,6 +205,18 @@ impl OmenchatStore {
         backup_source: Option<&std::path::Path>,
         migration_sql: &str,
     ) -> ServerResult<()> {
+        self.migrate_with_sql_and_step(backup_source, migration_sql, ensure_event_metadata_schema)
+    }
+
+    fn migrate_with_sql_and_step<F>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+    {
         let current_version: i64 =
             self.connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -225,6 +238,7 @@ impl OmenchatStore {
             rusqlite::TransactionBehavior::Immediate,
         )?;
         transaction.execute_batch(migration_sql)?;
+        schema_step(&transaction)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
         Ok(())
@@ -731,7 +745,8 @@ impl OmenchatStore {
         limit: usize,
     ) -> ServerResult<Vec<ServerRoomEvent>> {
         let mut events = self.query_events(
-            "SELECT e.room_id, e.event_id, e.event_kind, e.actor_user_id, e.at, e.payload, u.display_name
+            "SELECT e.room_id, e.event_id, e.event_kind, e.actor_user_id, e.at, e.payload, u.display_name,
+                    e.reply_to_event_id, e.mention_user_ids
              FROM room_events e
              LEFT JOIN users u ON u.user_id = e.actor_user_id
              WHERE e.room_id = ?1 AND e.deleted = 0
@@ -750,7 +765,8 @@ impl OmenchatStore {
         limit: usize,
     ) -> ServerResult<Vec<ServerRoomEvent>> {
         let mut events = self.query_events(
-            "SELECT e.room_id, e.event_id, e.event_kind, e.actor_user_id, e.at, e.payload, u.display_name
+            "SELECT e.room_id, e.event_id, e.event_kind, e.actor_user_id, e.at, e.payload, u.display_name,
+                    e.reply_to_event_id, e.mention_user_ids
              FROM room_events e
              LEFT JOIN users u ON u.user_id = e.actor_user_id
              WHERE e.room_id = ?1 AND e.event_id < ?2 AND e.deleted = 0
@@ -767,20 +783,58 @@ impl OmenchatStore {
         P: rusqlite::Params,
     {
         let mut statement = self.connection.prepare(sql)?;
-        let rows = statement.query_map(params, |row| {
+        let mut rows = statement.query(params)?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
             let kind: i64 = row.get(2)?;
             let payload: Option<Vec<u8>> = row.get(5)?;
-            Ok(ServerRoomEvent {
+            let metadata = decode_stored_event_metadata(row.get(7)?, row.get(8)?)?;
+            events.push(ServerRoomEvent {
                 room_id: row.get::<_, i64>(0)? as RoomId,
                 event_id: row.get::<_, i64>(1)? as EventId,
                 kind: decode_event_kind(kind, payload.unwrap_or_default()),
                 actor_user_id: row.get::<_, Option<i64>>(3)?.map(|value| value as UserId),
                 actor_display_name: row.get(6)?,
                 at_unix: row.get(4)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+                metadata,
+            });
+        }
+        Ok(events)
     }
+}
+
+fn ensure_event_metadata_schema(transaction: &rusqlite::Transaction<'_>) -> ServerResult<()> {
+    let mut statement = transaction.prepare("PRAGMA table_info(room_events)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    drop(statement);
+
+    if !columns.contains("reply_to_event_id") {
+        transaction.execute_batch(
+            "ALTER TABLE room_events
+             ADD COLUMN reply_to_event_id INTEGER
+             CHECK(reply_to_event_id IS NULL OR reply_to_event_id > 0);",
+        )?;
+    }
+    if !columns.contains("mention_user_ids") {
+        transaction.execute_batch(
+            "ALTER TABLE room_events
+             ADD COLUMN mention_user_ids BLOB
+             CHECK(
+               mention_user_ids IS NULL OR (
+                 length(mention_user_ids) BETWEEN 4 AND 64
+                 AND length(mention_user_ids) % 4 = 0
+               )
+             );",
+        )?;
+    }
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_events_reply
+         ON room_events(room_id, reply_to_event_id)
+         WHERE reply_to_event_id IS NOT NULL;",
+    )?;
+    Ok(())
 }
 
 pub(crate) fn migration_backup_path(
@@ -910,12 +964,30 @@ fn append_event_in_transaction(
     actor_user_id: Option<UserId>,
     kind: ServerRoomEventKind,
 ) -> ServerResult<ServerRoomEvent> {
+    append_event_with_metadata_in_transaction(transaction, room_id, actor_user_id, kind, None)
+}
+
+fn append_event_with_metadata_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    actor_user_id: Option<UserId>,
+    kind: ServerRoomEventKind,
+    metadata: Option<RichMessageEventMetadata>,
+) -> ServerResult<ServerRoomEvent> {
+    if metadata.is_some() && !matches!(kind, ServerRoomEventKind::Message { .. }) {
+        return Err(crate::error::ServerError::Message(
+            "reply and mention metadata is valid only for room messages".into(),
+        ));
+    }
+    let (reply_to_event_id, mention_user_ids) = encode_stored_event_metadata(metadata.as_ref())?;
     let event_id = next_event_id(transaction, room_id)?;
     let at_unix = current_unix_seconds();
     let (kind_code, payload) = encode_event_kind(&kind);
     transaction.execute(
-        "INSERT INTO room_events(room_id, event_id, event_kind, actor_user_id, at, payload)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO room_events(
+           room_id, event_id, event_kind, actor_user_id, at, payload,
+           reply_to_event_id, mention_user_ids
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         (
             room_id,
             event_id,
@@ -923,6 +995,8 @@ fn append_event_in_transaction(
             actor_user_id,
             at_unix,
             payload,
+            reply_to_event_id,
+            mention_user_ids,
         ),
     )?;
     let actor_display_name = actor_user_id
@@ -944,7 +1018,85 @@ fn append_event_in_transaction(
         actor_user_id,
         actor_display_name,
         at_unix,
+        metadata,
     })
+}
+
+fn encode_stored_event_metadata(
+    metadata: Option<&RichMessageEventMetadata>,
+) -> ServerResult<(Option<i64>, Option<Vec<u8>>)> {
+    let Some(metadata) = metadata else {
+        return Ok((None, None));
+    };
+    metadata.validate().map_err(|error| {
+        crate::error::ServerError::Message(format!(
+            "room event reply/mention metadata is invalid: {error}"
+        ))
+    })?;
+    let reply_to_event_id = metadata
+        .reply_to_event_id
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| {
+            crate::error::ServerError::Message(
+                "room event reply identifier exceeds SQLite integer range".into(),
+            )
+        })?;
+    let mention_user_ids = (!metadata.mentioned_user_ids.is_empty()).then(|| {
+        let mut encoded =
+            Vec::with_capacity(metadata.mentioned_user_ids.len() * std::mem::size_of::<UserId>());
+        for user_id in &metadata.mentioned_user_ids {
+            encoded.extend_from_slice(&user_id.to_be_bytes());
+        }
+        encoded
+    });
+    Ok((reply_to_event_id, mention_user_ids))
+}
+
+fn decode_stored_event_metadata(
+    reply_to_event_id: Option<i64>,
+    mention_user_ids: Option<Vec<u8>>,
+) -> ServerResult<Option<RichMessageEventMetadata>> {
+    if reply_to_event_id.is_none() && mention_user_ids.is_none() {
+        return Ok(None);
+    }
+    let reply_to_event_id = reply_to_event_id
+        .map(|event_id| {
+            EventId::try_from(event_id).map_err(|_| {
+                crate::error::ServerError::Message(
+                    "stored room event reply identifier is invalid".into(),
+                )
+            })
+        })
+        .transpose()?;
+    let mentioned_user_ids = match mention_user_ids {
+        None => Vec::new(),
+        Some(bytes)
+            if !bytes.is_empty()
+                && bytes.len() <= crate::protocol::RICH_MESSAGE_MAX_MENTIONS * 4
+                && bytes.len() % 4 == 0 =>
+        {
+            bytes
+                .chunks_exact(4)
+                .map(|chunk| UserId::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect()
+        }
+        Some(_) => {
+            return Err(crate::error::ServerError::Message(
+                "stored room event mention identifiers have an invalid bounded encoding".into(),
+            ))
+        }
+    };
+    let metadata = RichMessageEventMetadata {
+        reply_to_event_id,
+        mentioned_user_ids,
+    };
+    metadata.validate().map_err(|error| {
+        crate::error::ServerError::Message(format!(
+            "stored room event reply/mention metadata is invalid: {error}"
+        ))
+    })?;
+    Ok(Some(metadata))
 }
 
 fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRoom> {
@@ -1081,6 +1233,82 @@ mod tests {
                 Err(error) => panic!("remove isolated database: {error}"),
             }
         }
+    }
+
+    fn create_version_three_fixture(path: &std::path::Path) {
+        let connection = rusqlite::Connection::open(path).expect("version three database");
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .expect("base schema");
+        connection
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_room_events_reply;
+                 DROP TABLE room_events;
+                 CREATE TABLE room_events (
+                   room_id INTEGER NOT NULL,
+                   event_id INTEGER NOT NULL,
+                   event_kind INTEGER NOT NULL,
+                   actor_user_id INTEGER,
+                   target_user_id INTEGER,
+                   at INTEGER NOT NULL,
+                   payload BLOB,
+                   deleted INTEGER NOT NULL DEFAULT 0,
+                   PRIMARY KEY(room_id, event_id)
+                 );
+                 INSERT INTO rooms(room_id, name, topic, created_at)
+                 VALUES (1, 'preserved-v3-room', 'must survive migration', 1);
+                 INSERT INTO room_events(
+                   room_id, event_id, event_kind, at, payload
+                 ) VALUES (1, 1, 1, 1, X'7072657365727665642D7633');
+                 PRAGMA user_version = 3;",
+            )
+            .expect("version three fixture");
+    }
+
+    fn room_event_columns(connection: &rusqlite::Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(room_events)")
+            .expect("room event columns");
+        statement
+            .query_map([], |row| row.get(1))
+            .expect("query room event columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect room event columns")
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct LegacyRoomEventRow {
+        room_id: i64,
+        event_id: i64,
+        event_kind: i64,
+        actor_user_id: Option<i64>,
+        target_user_id: Option<i64>,
+        at: i64,
+        payload: Option<Vec<u8>>,
+        deleted: i64,
+    }
+
+    fn legacy_room_event_row(connection: &rusqlite::Connection) -> LegacyRoomEventRow {
+        connection
+            .query_row(
+                "SELECT room_id, event_id, event_kind, actor_user_id,
+                        target_user_id, at, payload, deleted
+                 FROM room_events WHERE room_id = 1 AND event_id = 1",
+                [],
+                |row| {
+                    Ok(LegacyRoomEventRow {
+                        room_id: row.get(0)?,
+                        event_id: row.get(1)?,
+                        event_kind: row.get(2)?,
+                        actor_user_id: row.get(3)?,
+                        target_user_id: row.get(4)?,
+                        at: row.get(5)?,
+                        payload: row.get(6)?,
+                        deleted: row.get(7)?,
+                    })
+                },
+            )
+            .expect("legacy room event row")
     }
 
     fn wait_for_crash_boundary_and_kill(
@@ -1424,7 +1652,7 @@ mod tests {
             .expect("version two fixture");
         drop(connection);
 
-        let store = OmenchatStore::open(&path).expect("version three migration");
+        let store = OmenchatStore::open(&path).expect("current schema migration");
         let room_count: i64 = store
             .connection
             .query_row(
@@ -1518,6 +1746,237 @@ mod tests {
         assert_eq!(backup_version, 2);
         assert_eq!(backup_replay_table_count, 0);
         assert_eq!(backup_client_table_count, 0);
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn version_three_database_adds_reply_metadata_without_rewriting_events() {
+        let path = isolated_database_path("v3-reply-metadata");
+        create_version_three_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version four migration");
+        let columns = room_event_columns(&store.connection);
+        assert!(columns.iter().any(|column| column == "reply_to_event_id"));
+        assert!(columns.iter().any(|column| column == "mention_user_ids"));
+        let index_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_room_events_reply'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("reply index");
+        let events = store.latest_events(1, 10).expect("preserved events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind,
+            ServerRoomEventKind::Message {
+                body: "preserved-v3".into()
+            }
+        );
+        assert_eq!(events[0].metadata, None);
+        assert_eq!(index_count, 1);
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        let backup_path = migration_backup_path(&path, 3);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version three migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            3
+        );
+        let backup_columns = room_event_columns(&backup);
+        assert!(!backup_columns
+            .iter()
+            .any(|column| column == "reply_to_event_id"));
+        assert!(!backup_columns
+            .iter()
+            .any(|column| column == "mention_user_ids"));
+        assert_eq!(
+            legacy_room_event_row(&store.connection),
+            legacy_room_event_row(&backup),
+            "every pre-v4 event column must retain its logical value"
+        );
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn version_four_metadata_round_trips_and_rejects_invalid_storage_shapes() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let metadata = RichMessageEventMetadata {
+            reply_to_event_id: Some(41),
+            mentioned_user_ids: vec![2, 9],
+        };
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .expect("metadata transaction");
+        let event = append_event_with_metadata_in_transaction(
+            &transaction,
+            1,
+            None,
+            ServerRoomEventKind::Message {
+                body: "rich body".into(),
+            },
+            Some(metadata.clone()),
+        )
+        .expect("append rich event");
+        transaction.commit().expect("commit rich event");
+        assert_eq!(event.metadata, Some(metadata.clone()));
+        assert_eq!(
+            store.latest_events(1, 10).expect("stored rich event")[0].metadata,
+            Some(metadata)
+        );
+        let stored: (i64, Vec<u8>) = store
+            .connection
+            .query_row(
+                "SELECT reply_to_event_id, mention_user_ids
+                 FROM room_events WHERE room_id = 1 AND event_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("stored metadata");
+        assert_eq!(stored.0, 41);
+        assert_eq!(
+            stored.1,
+            [2_u32.to_be_bytes(), 9_u32.to_be_bytes()].concat()
+        );
+
+        let legacy = store
+            .append_event(
+                1,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "legacy body".into(),
+                },
+            )
+            .expect("ordinary event");
+        assert_eq!(legacy.metadata, None);
+        let legacy_metadata: (Option<i64>, Option<Vec<u8>>) = store
+            .connection
+            .query_row(
+                "SELECT reply_to_event_id, mention_user_ids
+                 FROM room_events WHERE room_id = 1 AND event_id = 2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("ordinary stored metadata");
+        assert_eq!(legacy_metadata, (None, None));
+
+        for malformed in [
+            Vec::new(),
+            vec![0; 3],
+            vec![0; 68],
+            [1_u32.to_be_bytes(), 1_u32.to_be_bytes()].concat(),
+            0_u32.to_be_bytes().to_vec(),
+        ] {
+            assert!(decode_stored_event_metadata(None, Some(malformed)).is_err());
+        }
+        assert!(decode_stored_event_metadata(Some(0), None).is_err());
+    }
+
+    #[test]
+    fn metadata_is_rejected_for_non_message_events_before_insert() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .expect("metadata transaction");
+        let error = append_event_with_metadata_in_transaction(
+            &transaction,
+            1,
+            None,
+            ServerRoomEventKind::Notice {
+                body: "notice".into(),
+            },
+            Some(RichMessageEventMetadata {
+                reply_to_event_id: Some(1),
+                mentioned_user_ids: Vec::new(),
+            }),
+        )
+        .expect_err("notice metadata must fail")
+        .to_string();
+        assert!(error.contains("only for room messages"));
+        drop(transaction);
+        assert!(store.latest_events(1, 10).expect("events").is_empty());
+    }
+
+    #[test]
+    fn failed_version_four_schema_step_rolls_back_and_retains_v3_backup() {
+        let path = isolated_database_path("v4-migration-rollback");
+        create_version_three_fixture(&path);
+        let connection = rusqlite::Connection::open(&path).expect("migration connection");
+        configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT).expect("connection policy");
+        let store = OmenchatStore::from_connection(connection);
+        let error = store
+            .migrate_with_sql_and_step(
+                Some(&path),
+                include_str!("../migrations/001_init.sql"),
+                |transaction| {
+                    transaction.execute_batch(
+                        "ALTER TABLE room_events
+                         ADD COLUMN reply_to_event_id INTEGER;
+                         INSERT INTO missing_v4_table(value) VALUES ('fail');",
+                    )?;
+                    Ok(())
+                },
+            )
+            .expect_err("injected version four migration failure");
+        assert!(matches!(error, crate::error::ServerError::Sqlite(_)));
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("source version"),
+            3
+        );
+        assert!(!room_event_columns(&store.connection)
+            .iter()
+            .any(|column| column == "reply_to_event_id"));
+        let payload: Vec<u8> = store
+            .connection
+            .query_row(
+                "SELECT payload FROM room_events WHERE room_id = 1 AND event_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved source payload");
+        assert_eq!(payload, b"preserved-v3");
+
+        let backup_path = migration_backup_path(&path, 3);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("retained version three backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            3
+        );
 
         drop(backup);
         drop(store);
