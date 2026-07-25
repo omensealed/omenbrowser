@@ -1,6 +1,6 @@
 # OMENchat replies and mentions checkpoint
 
-Status: implementation in progress; schema v4 dormant, no production wire activation
+Status: implementation in progress; server/client storage dormant, no production wire activation
 Baseline: OMENbrowser/omenchatd v0.9.6-3, planned v0.9.6-4  
 Protocol baseline: version `1`, name `omenchat-v0.1`  
 Proposed additive capability: `reply-mentions-v1`
@@ -358,6 +358,31 @@ Unit 3 is implemented behind the still-false server activation gate:
   replay publication share one immediate transaction;
 - validation failures are retained as exact durable results, so a later policy
   or membership change cannot reinterpret the same mutation;
+
+Unit 4 is implemented as a dormant client model and persistence boundary:
+
+- `ChatMessageMetadata` is separate from the message body, and rich messages
+  remain distinguishable from legacy message events without changing their
+  displayed text;
+- the client accepts established five/six-field legacy events and only treats
+  the exact eight-field extension as rich; partial, noncanonical, and
+  oversized extension metadata is rejected before it mutates session state;
+- identity-scoped `chat.sqlite` adds nullable `reply_to_event_id` and
+  `mention_user_ids` columns idempotently, propagates migration errors, and
+  retains existing event rows unchanged;
+- metadata uses the same bounded big-endian `u32` representation and survives
+  client-store close/reopen; malformed stored metadata fails visibly instead
+  of being reinterpreted as plain text;
+- live fan-out, inline history, resource history, event-gap reconciliation,
+  bounded history accounting, GUI display, and TUI display share the enriched
+  project-owned event model;
+- dormant Link state records reply capability acceptance and the authenticated
+  local user ID only after an explicit request/accept sequence, and clears both
+  on downgrade or Link retirement.
+
+The production client still does not request `reply-mentions-v1`, the server
+activation constant remains false, and there is no Reply or mention composer
+control yet.
 - the single room-event encoder preserves metadata across live fan-out,
   bounded inline history, and resource history;
 - exact replay after restart returns the stored acknowledgement without a

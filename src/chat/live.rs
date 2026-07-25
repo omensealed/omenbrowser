@@ -16,11 +16,11 @@ use super::model::{
 };
 use super::mutation_intents::{OutboundMutationIntent, OutboundMutationState};
 use super::protocol::{
-    canonical_mutation_request_hash, parse_session_accept_negotiation,
-    with_session_open_negotiation, ChatErrorCode, ChatOp, ClientInstanceId,
-    DurableMutationEnvelope, Frame, FrameBody, FrameValue, MutationId, RoomId,
+    canonical_mutation_request_hash, parse_rich_message_event_metadata,
+    parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
+    ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MutationId, RoomId,
     SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
-    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME,
+    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME, REPLY_MENTIONS_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -63,6 +63,9 @@ pub struct LiveChatClientState {
     durable_requests: BTreeSet<ChatSessionId>,
     durable_sessions: BTreeSet<ChatSessionId>,
     durable_notice_ack_sessions: BTreeSet<ChatSessionId>,
+    reply_mentions_requests: BTreeSet<ChatSessionId>,
+    reply_mentions_sessions: BTreeSet<ChatSessionId>,
+    local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
     pending_uploads: BTreeMap<(ChatSessionId, u32), PendingLiveUpload>,
@@ -150,6 +153,14 @@ impl LiveChatClientState {
 
     pub fn durable_notice_ack_negotiated(&self, session_id: ChatSessionId) -> bool {
         self.durable_notice_ack_sessions.contains(&session_id)
+    }
+
+    pub fn reply_mentions_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.reply_mentions_sessions.contains(&session_id)
+    }
+
+    pub fn local_user_id(&self, session_id: ChatSessionId) -> Option<u32> {
+        self.local_user_ids.get(&session_id).copied()
     }
 
     pub fn durable_mutation_is_pending(
@@ -271,6 +282,9 @@ impl LiveChatClientState {
         self.durable_requests.remove(&session_id);
         self.durable_sessions.remove(&session_id);
         self.durable_notice_ack_sessions.remove(&session_id);
+        self.reply_mentions_requests.remove(&session_id);
+        self.reply_mentions_sessions.remove(&session_id);
+        self.local_user_ids.remove(&session_id);
         retired_echoes
     }
 }
@@ -609,6 +623,9 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.durable_sessions.remove(&session_id);
     state.durable_notice_ack_sessions.remove(&session_id);
     state.durable_requests.remove(&session_id);
+    state.reply_mentions_requests.remove(&session_id);
+    state.reply_mentions_sessions.remove(&session_id);
+    state.local_user_ids.remove(&session_id);
     let mut durable_requested = false;
     let mut session_open_body = local_display_name
         .map(|name| {
@@ -1957,8 +1974,12 @@ fn apply_frame_with_state(
             let durable_notice_ack_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == DURABLE_NOTICE_ACK_CAPABILITY);
+            let reply_mentions_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == REPLY_MENTIONS_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
                 let request_pending = state.durable_requests.remove(&session_id);
+                let reply_mentions_requested = state.reply_mentions_requests.remove(&session_id);
                 let already_accepted = state.durable_sessions.contains(&session_id);
                 if durable_accepted
                     && state.client_instance_id.is_some()
@@ -1970,9 +1991,17 @@ fn apply_frame_with_state(
                     } else {
                         state.durable_notice_ack_sessions.remove(&session_id);
                     }
+                    if reply_mentions_requested && reply_mentions_accepted {
+                        state.reply_mentions_sessions.insert(session_id);
+                    } else {
+                        state.reply_mentions_sessions.remove(&session_id);
+                        state.local_user_ids.remove(&session_id);
+                    }
                 } else {
                     state.durable_sessions.remove(&session_id);
                     state.durable_notice_ack_sessions.remove(&session_id);
+                    state.reply_mentions_sessions.remove(&session_id);
+                    state.local_user_ids.remove(&session_id);
                 }
             }
             let policy = body_values(&frame.body).map(|values| {
@@ -2074,6 +2103,26 @@ fn apply_frame_with_state(
                 });
                 return;
             };
+            if let Some(state) = state.as_deref_mut() {
+                if state.reply_mentions_sessions.contains(&session_id) {
+                    match body_values(&frame.body)
+                        .and_then(|values| values.get(1))
+                        .and_then(FrameValueExt::as_u64)
+                        .and_then(|user_id| u32::try_from(user_id).ok())
+                        .filter(|user_id| *user_id != 0)
+                    {
+                        Some(user_id) => {
+                            state.local_user_ids.insert(session_id, user_id);
+                        }
+                        None => {
+                            state.reply_mentions_sessions.remove(&session_id);
+                            state.local_user_ids.remove(&session_id);
+                        }
+                    }
+                } else {
+                    state.local_user_ids.remove(&session_id);
+                }
+            }
             if let Some(session) = client.session_mut(session_id) {
                 session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
                 for current in &mut session.rooms {
@@ -3393,6 +3442,14 @@ fn chat_event_fingerprint(events: &[ChatEvent]) -> RecentHistoryFingerprint {
                 checksum = fnv_mix_u64(checksum, 1);
                 checksum = fnv_mix_bytes(checksum, body);
             }
+            ChatEventKind::RichMessage { body, metadata } => {
+                checksum = fnv_mix_u64(checksum, 1);
+                checksum = fnv_mix_bytes(checksum, body);
+                checksum = fnv_mix_u64(checksum, metadata.reply_to_event_id.unwrap_or_default());
+                for user_id in &metadata.mentioned_user_ids {
+                    checksum = fnv_mix_u64(checksum, u64::from(*user_id));
+                }
+            }
             ChatEventKind::Action { body } => {
                 checksum = fnv_mix_u64(checksum, 2);
                 checksum = fnv_mix_bytes(checksum, body);
@@ -3526,7 +3583,17 @@ fn parse_event(value: &FrameValue, server_id: String, room_id: u32) -> Option<Ch
     let kind_id = fields.get(1)?.as_u64()?;
     let body = fields.get(4)?.as_str()?.to_string();
     let kind = match kind_id {
-        1 => ChatEventKind::Message { body },
+        1 if fields.len() <= 6 => ChatEventKind::Message { body },
+        1 => {
+            let metadata = parse_rich_message_event_metadata(fields).ok()??;
+            ChatEventKind::RichMessage {
+                body,
+                metadata: super::model::ChatMessageMetadata {
+                    reply_to_event_id: metadata.reply_to_event_id,
+                    mentioned_user_ids: metadata.mentioned_user_ids,
+                },
+            }
+        }
         2 => ChatEventKind::Action { body },
         3 => ChatEventKind::Notice { body },
         4 => ChatEventKind::System { body },
@@ -3901,7 +3968,9 @@ mod tests {
             }))
         );
         assert!(state.durable_requests.contains(&1));
+        assert!(state.reply_mentions_requests.is_empty());
         assert!(!state.durable_mutations_negotiated(1));
+        assert!(!state.reply_mentions_negotiated(1));
     }
 
     #[test]
@@ -7972,6 +8041,117 @@ mod tests {
 
         assert_eq!(event.actor_user_id, Some(7));
         assert_eq!(event.actor_display_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn parse_event_accepts_exact_rich_metadata_and_rejects_partial_extensions() {
+        let rich = parse_event(
+            &FrameValue::Array(vec![
+                FrameValue::U64(22),
+                FrameValue::U64(1),
+                FrameValue::U64(7),
+                FrameValue::I64(99),
+                FrameValue::String("reply".into()),
+                FrameValue::String("Alice".into()),
+                FrameValue::U64(21),
+                FrameValue::Array(vec![FrameValue::U64(2), FrameValue::U64(9)]),
+            ]),
+            "server".into(),
+            3,
+        )
+        .expect("rich event");
+        assert_eq!(
+            rich.kind,
+            ChatEventKind::RichMessage {
+                body: "reply".into(),
+                metadata: super::super::model::ChatMessageMetadata {
+                    reply_to_event_id: Some(21),
+                    mentioned_user_ids: vec![2, 9],
+                },
+            }
+        );
+
+        assert!(parse_event(
+            &FrameValue::Array(vec![
+                FrameValue::U64(23),
+                FrameValue::U64(1),
+                FrameValue::U64(7),
+                FrameValue::I64(100),
+                FrameValue::String("partial".into()),
+                FrameValue::String("Alice".into()),
+                FrameValue::U64(22),
+            ]),
+            "server".into(),
+            3,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn dormant_reply_negotiation_requires_request_and_join_user_identity() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: Vec::new(),
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "opening".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(ClientInstanceId::new([8; 16])));
+        state.durable_requests.insert(session_id);
+        state.reply_mentions_requests.insert(session_id);
+        let mut transport = NoopChatTransport;
+        let mut events = Vec::new();
+        let accepted_body = crate::chat::protocol::with_session_accept_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::Array(Vec::new()),
+            ]),
+            &crate::chat::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    REPLY_MENTIONS_CAPABILITY.into(),
+                ],
+            },
+        )
+        .expect("negotiated accept");
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 1, None, accepted_body),
+            &mut events,
+        );
+        assert!(state.reply_mentions_negotiated(session_id));
+        assert_eq!(state.local_user_id(session_id), None);
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::JoinAccept,
+                2,
+                Some(1),
+                FrameBody::Fields(vec![room_value(1, "lobby"), FrameValue::U64(7)]),
+            ),
+            &mut events,
+        );
+        assert_eq!(state.local_user_id(session_id), Some(7));
+
+        state.retire_session_link_state(session_id);
+        assert!(!state.reply_mentions_negotiated(session_id));
+        assert_eq!(state.local_user_id(session_id), None);
     }
 
     #[test]

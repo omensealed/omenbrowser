@@ -1,6 +1,6 @@
 use super::model::{
-    ChatEvent, ChatEventKind, ChatRoomSummary, ChatServerSummary, ChatUserSummary,
-    CHAT_CLIENT_MAX_SESSIONS, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES,
+    ChatEvent, ChatEventKind, ChatMessageMetadata, ChatRoomSummary, ChatServerSummary,
+    ChatUserSummary, CHAT_CLIENT_MAX_SESSIONS, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES,
     CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES, CHAT_SERVER_ID_MAX_BYTES,
     CHAT_SESSION_MAX_ROOMS, CHAT_SESSION_MAX_ROOM_BYTES, CHAT_SESSION_MAX_USERS,
     CHAT_SESSION_MAX_USER_BYTES, CHAT_USER_DISPLAY_MAX_BYTES,
@@ -77,6 +77,35 @@ impl SqliteChatStore {
             "ALTER TABLE saved_servers ADD COLUMN active_room_id INTEGER",
             [],
         );
+        self.add_column_if_missing(
+            "room_events",
+            "reply_to_event_id",
+            "ALTER TABLE room_events ADD COLUMN reply_to_event_id INTEGER",
+        )?;
+        self.add_column_if_missing(
+            "room_events",
+            "mention_user_ids",
+            "ALTER TABLE room_events ADD COLUMN mention_user_ids BLOB",
+        )?;
+        Ok(())
+    }
+
+    fn add_column_if_missing(
+        &self,
+        table: &str,
+        column: &str,
+        statement: &str,
+    ) -> anyhow::Result<()> {
+        let exists = self.connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+             )",
+            (table, column),
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            self.connection.execute(statement, [])?;
+        }
         Ok(())
     }
 }
@@ -334,14 +363,28 @@ impl ChatStore for SqliteChatStore {
             let event_id = i64::try_from(event.event_id).with_context(|| {
                 format!("event id {} cannot be stored in sqlite", event.event_id)
             })?;
-            let (kind, payload) = encode_event_kind(&event.kind);
+            let (kind, payload, metadata) = encode_event_kind(&event.kind);
+            if let Some(metadata) = metadata {
+                omenchat_protocol::RichMessageEventMetadata {
+                    reply_to_event_id: metadata.reply_to_event_id,
+                    mentioned_user_ids: metadata.mentioned_user_ids.clone(),
+                }
+                .validate()
+                .context("invalid OMENchat reply/mention metadata")?;
+            }
+            let mention_user_ids = metadata
+                .as_ref()
+                .map(|metadata| encode_mention_user_ids(&metadata.mentioned_user_ids));
             transaction.execute(
                 "INSERT INTO room_events(
-                   server_id, room_id, event_id, event_kind, actor_user_id, actor_display_name, at, payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                   server_id, room_id, event_id, event_kind, actor_user_id, actor_display_name, at,
+                   payload, reply_to_event_id, mention_user_ids
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(server_id, room_id, event_id) DO UPDATE SET
                    actor_user_id = COALESCE(excluded.actor_user_id, room_events.actor_user_id),
-                   actor_display_name = COALESCE(excluded.actor_display_name, room_events.actor_display_name)",
+                   actor_display_name = COALESCE(excluded.actor_display_name, room_events.actor_display_name),
+                   reply_to_event_id = COALESCE(excluded.reply_to_event_id, room_events.reply_to_event_id),
+                   mention_user_ids = COALESCE(excluded.mention_user_ids, room_events.mention_user_ids)",
                 (
                     &event.server_id,
                     event.room_id,
@@ -351,6 +394,11 @@ impl ChatStore for SqliteChatStore {
                     event.actor_display_name.as_deref(),
                     event.at_unix,
                     payload,
+                    metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.reply_to_event_id)
+                        .and_then(|event_id| i64::try_from(event_id).ok()),
+                    mention_user_ids,
                 ),
             )?;
         }
@@ -365,7 +413,8 @@ impl ChatStore for SqliteChatStore {
         limit: usize,
     ) -> anyhow::Result<Vec<ChatEvent>> {
         let mut events = self.query_events(
-            "SELECT server_id, room_id, event_id, event_kind, actor_user_id, actor_display_name, at, payload
+            "SELECT server_id, room_id, event_id, event_kind, actor_user_id, actor_display_name, at,
+                    payload, reply_to_event_id, mention_user_ids
              FROM room_events
              WHERE server_id = ?1 AND room_id = ?2 AND deleted = 0
              ORDER BY event_id DESC
@@ -384,7 +433,8 @@ impl ChatStore for SqliteChatStore {
         limit: usize,
     ) -> anyhow::Result<Vec<ChatEvent>> {
         let mut events = self.query_events(
-            "SELECT server_id, room_id, event_id, event_kind, actor_user_id, actor_display_name, at, payload
+            "SELECT server_id, room_id, event_id, event_kind, actor_user_id, actor_display_name, at,
+                    payload, reply_to_event_id, mention_user_ids
              FROM room_events
              WHERE server_id = ?1 AND room_id = ?2 AND event_id < ?3 AND deleted = 0
              ORDER BY event_id DESC
@@ -405,6 +455,32 @@ impl SqliteChatStore {
         let rows = statement.query_map(params, |row| {
             let kind: i64 = row.get(3)?;
             let payload: Option<String> = row.get(7)?;
+            let reply_to_event_id = match row.get::<_, Option<i64>>(8)? {
+                Some(value) => Some(
+                    u64::try_from(value)
+                        .ok()
+                        .filter(|value| *value != 0)
+                        .ok_or_else(|| {
+                            invalid_metadata_column(8, "reply event id must be positive")
+                        })?,
+                ),
+                None => None,
+            };
+            let mention_user_ids = match row.get::<_, Option<Vec<u8>>>(9)? {
+                Some(bytes) => Some(
+                    decode_mention_user_ids(&bytes)
+                        .map_err(|message| invalid_metadata_column(9, message))?,
+                ),
+                None => None,
+            };
+            if reply_to_event_id.is_some() || mention_user_ids.is_some() {
+                omenchat_protocol::RichMessageEventMetadata {
+                    reply_to_event_id,
+                    mentioned_user_ids: mention_user_ids.clone().unwrap_or_default(),
+                }
+                .validate()
+                .map_err(|error| invalid_metadata_column(9, error.to_string()))?;
+            }
             Ok(ChatEvent {
                 server_id: row.get(0)?,
                 room_id: row.get::<_, i64>(1)? as RoomId,
@@ -412,19 +488,25 @@ impl SqliteChatStore {
                 actor_user_id: row.get::<_, Option<i64>>(4)?.map(|value| value as u32),
                 actor_display_name: row.get(5)?,
                 at_unix: row.get(6)?,
-                kind: decode_event_kind(kind, payload.unwrap_or_default()),
+                kind: decode_event_kind(
+                    kind,
+                    payload.unwrap_or_default(),
+                    reply_to_event_id,
+                    mention_user_ids,
+                ),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 
-fn encode_event_kind(kind: &ChatEventKind) -> (i64, String) {
+fn encode_event_kind(kind: &ChatEventKind) -> (i64, String, Option<&ChatMessageMetadata>) {
     match kind {
-        ChatEventKind::Message { body } => (1, body.clone()),
-        ChatEventKind::Action { body } => (2, body.clone()),
-        ChatEventKind::Notice { body } => (3, body.clone()),
-        ChatEventKind::System { body } => (4, body.clone()),
+        ChatEventKind::Message { body } => (1, body.clone(), None),
+        ChatEventKind::RichMessage { body, metadata } => (1, body.clone(), Some(metadata)),
+        ChatEventKind::Action { body } => (2, body.clone(), None),
+        ChatEventKind::Notice { body } => (3, body.clone(), None),
+        ChatEventKind::System { body } => (4, body.clone(), None),
         ChatEventKind::Upload {
             resource_id,
             filename,
@@ -437,18 +519,69 @@ fn encode_event_kind(kind: &ChatEventKind) -> (i64, String) {
                 filename.replace('\u{1f}', "_"),
                 bytes
             ),
+            None,
         ),
     }
 }
 
-fn decode_event_kind(kind: i64, body: String) -> ChatEventKind {
+fn decode_event_kind(
+    kind: i64,
+    body: String,
+    reply_to_event_id: Option<EventId>,
+    mentioned_user_ids: Option<Vec<u32>>,
+) -> ChatEventKind {
     match kind {
+        1 if reply_to_event_id.is_some()
+            || mentioned_user_ids
+                .as_ref()
+                .is_some_and(|mentions| !mentions.is_empty()) =>
+        {
+            ChatEventKind::RichMessage {
+                body,
+                metadata: ChatMessageMetadata {
+                    reply_to_event_id,
+                    mentioned_user_ids: mentioned_user_ids.unwrap_or_default(),
+                },
+            }
+        }
         1 => ChatEventKind::Message { body },
         2 => ChatEventKind::Action { body },
         3 => ChatEventKind::Notice { body },
         5 => decode_upload_event_kind(&body).unwrap_or(ChatEventKind::System { body }),
         _ => ChatEventKind::System { body },
     }
+}
+
+fn encode_mention_user_ids(user_ids: &[u32]) -> Vec<u8> {
+    user_ids
+        .iter()
+        .flat_map(|user_id| user_id.to_be_bytes())
+        .collect()
+}
+
+fn decode_mention_user_ids(bytes: &[u8]) -> Result<Vec<u32>, &'static str> {
+    if bytes.len() > omenchat_protocol::RICH_MESSAGE_MAX_MENTIONS * 4 {
+        return Err("mention metadata exceeds its byte limit");
+    }
+    if bytes.len() % 4 != 0 {
+        return Err("mention metadata is not a sequence of u32 values");
+    }
+    let user_ids = bytes
+        .chunks_exact(4)
+        .map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .collect::<Vec<_>>();
+    Ok(user_ids)
+}
+
+fn invalid_metadata_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Blob,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message.into(),
+        )),
+    )
 }
 
 fn decode_upload_event_kind(body: &str) -> Option<ChatEventKind> {
@@ -473,6 +606,17 @@ fn is_transient_local_event_id(event_id: EventId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn isolated_store_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "omenbrowser-chat-store-{label}-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ))
+    }
 
     fn sample_server() -> ChatServerSummary {
         ChatServerSummary {
@@ -842,5 +986,98 @@ mod tests {
             .users_for_room(&server.server_id, 1)
             .expect("users")
             .is_empty());
+    }
+
+    #[test]
+    fn rich_message_metadata_survives_client_store_restart() {
+        let path = isolated_store_path("rich-restart");
+        let event = ChatEvent {
+            server_id: "server-a".into(),
+            room_id: 7,
+            event_id: 42,
+            actor_user_id: Some(3),
+            actor_display_name: Some("Alice".into()),
+            at_unix: 99,
+            kind: ChatEventKind::RichMessage {
+                body: "reply".into(),
+                metadata: ChatMessageMetadata {
+                    reply_to_event_id: Some(41),
+                    mentioned_user_ids: vec![2, 9],
+                },
+            },
+        };
+        {
+            let mut store = SqliteChatStore::open(&path).expect("create store");
+            store
+                .append_events(vec![event.clone()])
+                .expect("persist rich");
+        }
+        let store = SqliteChatStore::open(&path).expect("reopen store");
+        assert_eq!(
+            store
+                .latest_events(&"server-a".into(), 7, 10)
+                .expect("history"),
+            vec![event]
+        );
+        drop(store);
+        std::fs::remove_file(path).expect("remove store");
+    }
+
+    #[test]
+    fn client_metadata_columns_preserve_legacy_history_during_migration() {
+        let path = isolated_store_path("legacy-migration");
+        {
+            let connection = rusqlite::Connection::open(&path).expect("legacy database");
+            connection
+                .execute_batch(include_str!("migrations/001_init.sql"))
+                .expect("legacy schema");
+            connection
+                .execute(
+                    "INSERT INTO room_events(
+                       server_id, room_id, event_id, event_kind, actor_user_id, at, payload
+                     ) VALUES ('server-a', 1, 10, 1, 7, 99, 'legacy')",
+                    [],
+                )
+                .expect("legacy event");
+        }
+        let store = SqliteChatStore::open(&path).expect("migrate legacy store");
+        let events = store
+            .latest_events(&"server-a".into(), 1, 10)
+            .expect("legacy history");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind,
+            ChatEventKind::Message {
+                body: "legacy".into()
+            }
+        );
+        let columns = store
+            .connection
+            .prepare("SELECT name FROM pragma_table_info('room_events')")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("columns");
+        assert!(columns.iter().any(|column| column == "reply_to_event_id"));
+        assert!(columns.iter().any(|column| column == "mention_user_ids"));
+        drop(store);
+        std::fs::remove_file(path).expect("remove store");
+    }
+
+    #[test]
+    fn malformed_client_metadata_fails_closed_instead_of_becoming_plain_text() {
+        let store = SqliteChatStore::in_memory().expect("store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO room_events(
+                   server_id, room_id, event_id, event_kind, at, payload, mention_user_ids
+                 ) VALUES ('server-a', 1, 1, 1, 1, 'hello', X'00000002FF')",
+                [],
+            )
+            .expect("seed malformed metadata");
+        assert!(store.latest_events(&"server-a".into(), 1, 10).is_err());
     }
 }

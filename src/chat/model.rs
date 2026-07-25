@@ -128,6 +128,10 @@ pub enum ChatEventKind {
     Message {
         body: String,
     },
+    RichMessage {
+        body: String,
+        metadata: ChatMessageMetadata,
+    },
     Action {
         body: String,
     },
@@ -142,6 +146,12 @@ pub enum ChatEventKind {
         filename: String,
         bytes: u64,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatMessageMetadata {
+    pub reply_to_event_id: Option<EventId>,
+    pub mentioned_user_ids: Vec<UserId>,
 }
 
 #[cfg(test)]

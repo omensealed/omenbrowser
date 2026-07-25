@@ -2389,7 +2389,10 @@ fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_jso
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn format_chat_timeline_event(event: &omenbrowser_rs::chat::ChatEvent) -> serde_json::Value {
     let (kind, body) = match &event.kind {
-        omenbrowser_rs::chat::ChatEventKind::Message { body } => ("message", body.as_str()),
+        omenbrowser_rs::chat::ChatEventKind::Message { body }
+        | omenbrowser_rs::chat::ChatEventKind::RichMessage { body, .. } => {
+            ("message", body.as_str())
+        }
         omenbrowser_rs::chat::ChatEventKind::Action { body } => ("action", body.as_str()),
         omenbrowser_rs::chat::ChatEventKind::Notice { body } => ("notice", body.as_str()),
         omenbrowser_rs::chat::ChatEventKind::System { body } => ("system", body.as_str()),

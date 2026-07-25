@@ -759,6 +759,14 @@ fn chat_event_retained_bytes(event: &ChatEvent) -> usize {
         | super::model::ChatEventKind::Action { body }
         | super::model::ChatEventKind::Notice { body }
         | super::model::ChatEventKind::System { body } => body.capacity(),
+        super::model::ChatEventKind::RichMessage { body, metadata } => {
+            body.capacity().saturating_add(
+                metadata
+                    .mentioned_user_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            )
+        }
         super::model::ChatEventKind::Upload {
             resource_id,
             filename,

@@ -65,6 +65,7 @@ pub(in crate::desktop) fn chat_event_body(
             resend: local_echo_resend(session, event, body, true),
         },
         ChatEventKind::Message { body }
+        | ChatEventKind::RichMessage { body, .. }
         | ChatEventKind::Notice { body }
         | ChatEventKind::System { body } => ChatTimelineBody {
             text: body.clone(),
