@@ -14,6 +14,7 @@ use log_state::{
 pub use network_doctor::{
     NetworkDoctorActiveResourceRow, NetworkDoctorLinkRecentRow, NetworkDoctorLxmfRecentRow,
     NetworkDoctorPanelState, NetworkDoctorPathRecentRow, NetworkDoctorResourceRecentRow,
+    NETWORK_DOCTOR_OPERATION_ROWS,
 };
 use network_smoke::*;
 
@@ -10943,6 +10944,7 @@ impl App {
                 OperationPresentationFilter::All
             }
         };
+        self.reconcile_operation_selection();
         self.status.task = format!(
             "Operations filter: {}",
             crate::operations::presentation::filter_label(
@@ -10960,7 +10962,115 @@ impl App {
             self.input.cancel();
             self.workspace.focus = FocusArea::Workspace;
         }
+        self.reconcile_operation_selection();
         self.status.task = "Operations search cleared".into();
+    }
+
+    pub fn move_operation_selection(&mut self, direction: isize) -> bool {
+        let visible = self.visible_operation_ids();
+        if visible.is_empty() {
+            self.network_doctor_state.selected_operation = None;
+            self.status.task = "no Operations row matches the current filter".into();
+            return false;
+        }
+        let current = self
+            .network_doctor_state
+            .selected_operation
+            .and_then(|selected| visible.iter().position(|id| *id == selected));
+        let next = match (current, direction.is_negative()) {
+            (Some(index), true) => index.saturating_sub(1),
+            (Some(index), false) => index.saturating_add(1).min(visible.len() - 1),
+            (None, true) => visible.len() - 1,
+            (None, false) => 0,
+        };
+        self.network_doctor_state.selected_operation = Some(visible[next]);
+        self.status.task = format!(
+            "selected {} operation",
+            crate::operations::presentation::domain_label(visible[next].domain)
+        );
+        true
+    }
+
+    pub fn open_operation_select_mode(&mut self) -> bool {
+        self.reconcile_operation_selection();
+        if self.network_doctor_state.selected_operation.is_none() {
+            self.status.task = "no retained operation is available to inspect".into();
+            return false;
+        }
+        self.network_doctor_state.operation_select_mode = true;
+        self.network_doctor_state.operation_diagnostic_scroll = 0;
+        self.status.task =
+            "operation copy/select mode open; select terminal text, Esc returns".into();
+        true
+    }
+
+    pub fn close_operation_select_mode(&mut self) -> bool {
+        if !self.network_doctor_state.operation_select_mode {
+            return false;
+        }
+        self.network_doctor_state.operation_select_mode = false;
+        self.network_doctor_state.operation_diagnostic_scroll = 0;
+        self.status.task = "operation copy/select mode closed".into();
+        true
+    }
+
+    pub fn scroll_operation_diagnostic(&mut self, direction: isize) -> bool {
+        if !self.network_doctor_state.operation_select_mode {
+            return false;
+        }
+        self.network_doctor_state.operation_diagnostic_scroll = if direction.is_negative() {
+            self.network_doctor_state
+                .operation_diagnostic_scroll
+                .saturating_sub(1)
+        } else {
+            self.network_doctor_state
+                .operation_diagnostic_scroll
+                .saturating_add(1)
+        };
+        true
+    }
+
+    pub fn selected_operation_diagnostic(&self) -> Option<String> {
+        let selected = self.network_doctor_state.selected_operation?;
+        self.operation_history
+            .records()
+            .find(|record| record.id == selected)
+            .map(crate::operations::presentation::operation_diagnostics_text)
+    }
+
+    fn visible_operation_ids(&self) -> Vec<crate::operations::OperationId> {
+        use crate::operations::presentation::{present_operations, OperationPresentationQuery};
+
+        let query = OperationPresentationQuery::new(
+            self.network_doctor_state.operations_filter,
+            Some(&self.network_doctor_state.operations_search),
+            NETWORK_DOCTOR_OPERATION_ROWS,
+        )
+        .unwrap_or_else(|_| {
+            OperationPresentationQuery::new(
+                self.network_doctor_state.operations_filter,
+                None,
+                NETWORK_DOCTOR_OPERATION_ROWS,
+            )
+            .expect("the fixed Network Doctor row limit must remain valid")
+        });
+        present_operations(&self.operation_history, &query)
+            .rows
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    fn reconcile_operation_selection(&mut self) {
+        let visible = self.visible_operation_ids();
+        if self
+            .network_doctor_state
+            .selected_operation
+            .is_some_and(|selected| visible.contains(&selected))
+        {
+            return;
+        }
+        self.network_doctor_state.selected_operation = visible.first().copied();
     }
 
     pub fn cancel_active_input(&mut self) -> bool {
@@ -19926,6 +20036,7 @@ impl App {
             return false;
         }
         self.network_doctor_state.operations_search = text.trim().to_string();
+        self.reconcile_operation_selection();
         self.status.task = if self.network_doctor_state.operations_search.is_empty() {
             "Operations search cleared".into()
         } else {

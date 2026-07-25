@@ -165,6 +165,20 @@ impl<L: TerminalLifecycle> TerminalGuard<L> {
             self.alternate_screen_entered = false;
         }
     }
+
+    fn set_mouse_capture(&mut self, enabled: bool) -> io::Result<()> {
+        if enabled == self.mouse_capture_enabled {
+            return Ok(());
+        }
+        if enabled {
+            self.lifecycle.enable_mouse_capture()?;
+            self.mouse_capture_enabled = true;
+        } else {
+            self.lifecycle.disable_mouse_capture()?;
+            self.mouse_capture_enabled = false;
+        }
+        Ok(())
+    }
 }
 
 impl<L: TerminalLifecycle> Drop for TerminalGuard<L> {
@@ -174,7 +188,7 @@ impl<L: TerminalLifecycle> Drop for TerminalGuard<L> {
 }
 
 pub async fn run(mut app: App) -> AppResult<()> {
-    let _guard = TerminalGuard::enter()?;
+    let mut guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let external_shutdown = Arc::new(AtomicBool::new(false));
@@ -213,6 +227,7 @@ pub async fn run(mut app: App) -> AppResult<()> {
                 _ => {}
             }
         }
+        guard.set_mouse_capture(!app.network_doctor_state.operation_select_mode)?;
     }
     app.flush_pending_ui_preferences();
     let _ = app.flush_structured_logs(Duration::from_secs(3));
@@ -480,6 +495,21 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         {
             app.quit();
         }
+        (_, KeyCode::Esc | KeyCode::Char('q'))
+            if app.network_doctor_state.operation_select_mode =>
+        {
+            app.close_operation_select_mode();
+        }
+        (_, KeyCode::PageDown | KeyCode::Char('j'))
+            if app.network_doctor_state.operation_select_mode =>
+        {
+            app.scroll_operation_diagnostic(1);
+        }
+        (_, KeyCode::PageUp | KeyCode::Char('k'))
+            if app.network_doctor_state.operation_select_mode =>
+        {
+            app.scroll_operation_diagnostic(-1);
+        }
         (_, KeyCode::Enter)
             if matches!(
                 app.input.active.as_ref().map(|active| &active.target),
@@ -590,6 +620,11 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         {
             app.activate_focused_browser_control();
         }
+        (_, KeyCode::Enter)
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.open_operation_select_mode();
+        }
         (_, KeyCode::Enter) => app.activate_workspace_selection(),
         (_, KeyCode::Char(' '))
             if app.workspace.active_section == workspace::WorkspaceSection::Browser
@@ -638,6 +673,21 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
             if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
         {
             app.clear_operations_search();
+        }
+        (_, KeyCode::Down | KeyCode::Char('j'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.move_operation_selection(1);
+        }
+        (_, KeyCode::Up | KeyCode::Char('k'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.move_operation_selection(-1);
+        }
+        (_, KeyCode::Char('v'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.open_operation_select_mode();
         }
         (_, KeyCode::Char('P'))
             if app.workspace.active_section == workspace::WorkspaceSection::Diagnostics =>
@@ -1166,6 +1216,36 @@ mod tests {
     }
 
     #[test]
+    fn terminal_guard_releases_and_restores_mouse_capture_for_copy_select_mode() {
+        let (lifecycle, calls) = lifecycle(EnterFailure::None);
+        let mut guard = TerminalGuard::enter_with(lifecycle).expect("enter terminal lifecycle");
+        guard
+            .set_mouse_capture(false)
+            .expect("release mouse capture");
+        guard
+            .set_mouse_capture(false)
+            .expect("duplicate release is idempotent");
+        guard
+            .set_mouse_capture(true)
+            .expect("restore mouse capture");
+        drop(guard);
+
+        assert_eq!(
+            *calls.lock().expect("read lifecycle calls"),
+            [
+                "enable_raw",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "disable_mouse_capture",
+                "enable_mouse_capture",
+                "disable_raw",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+            ]
+        );
+    }
+
+    #[test]
     fn terminal_guard_rolls_back_every_partial_enter_failure() {
         let cases = [
             (EnterFailure::Raw, vec!["enable_raw", "disable_raw"]),
@@ -1331,6 +1411,74 @@ mod tests {
                 .len(),
             crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES
         );
+
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[tokio::test]
+    async fn network_doctor_operation_selection_opens_bounded_copy_select_mode() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-operation-selection-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        let id = crate::operations::OperationId::numeric(
+            crate::operations::OperationDomain::PathDiscovery,
+            9,
+        );
+        app.operation_history
+            .upsert(crate::operations::OperationRecord {
+                id,
+                target: crate::operations::OperationTarget {
+                    kind: crate::operations::OperationTargetKind::Destination,
+                    label: "selected-path".into(),
+                },
+                state: crate::operations::OperationState::Failed,
+                authority: crate::operations::EvidenceAuthority::Authoritative,
+                evidence: vec![crate::operations::OperationEvidence {
+                    kind: crate::operations::OperationEvidenceKind::Failure,
+                    authority: crate::operations::EvidenceAuthority::Authoritative,
+                    at_unix_ms: 10,
+                    detail: Some("path unavailable".into()),
+                }],
+                progress: None,
+                attempt_count: 1,
+                stamp_cost: None,
+                propagation_node: None,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 10,
+                last_error: Some("path unavailable".into()),
+                event_cursor: None,
+                valid_actions: vec![crate::operations::OperationAction::CopyDiagnostics],
+            })
+            .expect("operation");
+        app.switch_section(workspace::WorkspaceSection::NetworkDoctor);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        assert_eq!(app.network_doctor_state.selected_operation, Some(id));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.network_doctor_state.operation_select_mode);
+        let diagnostic = app.selected_operation_diagnostic().expect("diagnostic");
+        assert!(diagnostic.contains("selected-path"));
+        assert!(
+            diagnostic.len() <= crate::operations::presentation::OPERATION_DIAGNOSTICS_MAX_BYTES
+        );
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        )
+        .await;
+        assert_eq!(app.network_doctor_state.operation_diagnostic_scroll, 1);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(!app.network_doctor_state.operation_select_mode);
+        assert_eq!(app.network_doctor_state.operation_diagnostic_scroll, 0);
 
         drop(app);
         std::fs::remove_dir_all(root).expect("remove isolated TUI root");

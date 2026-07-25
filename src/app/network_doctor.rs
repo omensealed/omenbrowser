@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use super::{compact_hash, current_epoch_ms, hex_lower};
 use crate::operations::presentation::OperationPresentationFilter;
+use crate::operations::OperationId;
 use crate::runtime::{
     AnnouncePayload, LxmfDeliveryEvidence, OmenChatLinkClosed, OmenChatLinkData,
     OmenChatResourceData, OutboundStatus, PathEvent, RuntimeFacadeEvent,
@@ -11,12 +12,17 @@ use crate::runtime::{
 pub struct NetworkDoctorPanelState {
     pub operations_filter: OperationPresentationFilter,
     pub operations_search: String,
+    pub selected_operation: Option<OperationId>,
+    pub operation_select_mode: bool,
+    pub operation_diagnostic_scroll: u16,
     pub recent_paths: Vec<NetworkDoctorPathRecentRow>,
     pub recent_links: Vec<NetworkDoctorLinkRecentRow>,
     pub recent_resources: Vec<NetworkDoctorResourceRecentRow>,
     pub recent_lxmf: Vec<NetworkDoctorLxmfRecentRow>,
     pub active_resources: BTreeMap<String, NetworkDoctorActiveResourceRow>,
 }
+
+pub const NETWORK_DOCTOR_OPERATION_ROWS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkDoctorPathRecentRow {

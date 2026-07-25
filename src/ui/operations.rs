@@ -1,17 +1,15 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, NETWORK_DOCTOR_OPERATION_ROWS};
 use crate::input::InputTarget;
 use crate::operations::presentation::{
     filter_label, present_operations, OperationPresentationFilter, OperationPresentationQuery,
 };
-use crate::operations::{EvidenceAuthority, OperationHistory};
-
-const TUI_OPERATIONS_MAX_ROWS: usize = 8;
+use crate::operations::{EvidenceAuthority, OperationHistory, OperationId};
 
 #[derive(Debug, PartialEq, Eq)]
 struct TuiOperationsModel {
@@ -23,6 +21,7 @@ struct TuiOperationsModel {
 
 #[derive(Debug, PartialEq, Eq)]
 struct TuiOperationRow {
+    id: OperationId,
     headline: String,
     evidence: String,
     needs_attention: bool,
@@ -34,10 +33,10 @@ fn tui_operations_model(
     search: Option<&str>,
 ) -> TuiOperationsModel {
     let (query, query_rejected) =
-        match OperationPresentationQuery::new(filter, search, TUI_OPERATIONS_MAX_ROWS) {
+        match OperationPresentationQuery::new(filter, search, NETWORK_DOCTOR_OPERATION_ROWS) {
             Ok(query) => (query, false),
             Err(_) => (
-                OperationPresentationQuery::new(filter, None, TUI_OPERATIONS_MAX_ROWS)
+                OperationPresentationQuery::new(filter, None, NETWORK_DOCTOR_OPERATION_ROWS)
                     .expect("the fixed TUI Operations row limit must remain valid"),
                 true,
             ),
@@ -75,6 +74,7 @@ fn tui_operations_model(
                 }
             }
             TuiOperationRow {
+                id: row.id,
                 headline,
                 evidence: format!("  evidence: {}", row.evidence_summary),
                 needs_attention: row.needs_attention,
@@ -134,6 +134,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
         ));
     } else {
         for row in model.rows {
+            let selected = app.network_doctor_state.selected_operation == Some(row.id);
             let headline_style = if row.needs_attention {
                 Style::default()
                     .fg(Color::Yellow)
@@ -141,7 +142,14 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default().fg(Color::Cyan)
             };
-            lines.push(Line::styled(row.headline, headline_style));
+            lines.push(Line::styled(
+                format!("{}{}", if selected { "> " } else { "  " }, row.headline),
+                if selected {
+                    headline_style.add_modifier(Modifier::REVERSED)
+                } else {
+                    headline_style
+                },
+            ));
             lines.push(Line::styled(row.evidence, Style::default().fg(Color::Gray)));
         }
     }
@@ -154,6 +162,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::raw("Transport acceptance and receipt evidence do not claim peer delivery."),
         ]),
+        Line::from("Up/Down or j/k select | Enter/v copy-select diagnostic"),
     ]);
 
     frame.render_widget(
@@ -164,6 +173,31 @@ pub(super) fn render(frame: &mut Frame, area: Rect, app: &App) {
                     .border_style(Style::default().fg(Color::Cyan))
                     .title(" Network Doctor | Operations & Transfers "),
             )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+
+    if app.network_doctor_state.operation_select_mode {
+        render_operation_select_mode(frame, area, app);
+    }
+}
+
+fn render_operation_select_mode(frame: &mut Frame, area: Rect, app: &App) {
+    let diagnostic = app
+        .selected_operation_diagnostic()
+        .unwrap_or_else(|| "The selected operation is no longer retained.".into());
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(diagnostic)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(
+                        " Operation Copy/Select | terminal mouse selection enabled | Esc returns ",
+                    ),
+            )
+            .scroll((app.network_doctor_state.operation_diagnostic_scroll, 0))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -268,7 +302,7 @@ mod tests {
                 1,
             ))
             .expect("opaque fixture");
-        for local_id in 0..TUI_OPERATIONS_MAX_ROWS as u64 {
+        for local_id in 0..NETWORK_DOCTOR_OPERATION_ROWS as u64 {
             history
                 .upsert(record(
                     OperationId::numeric(OperationDomain::PathDiscovery, local_id),
@@ -281,7 +315,7 @@ mod tests {
         }
 
         let model = tui_operations_model(&history, OperationPresentationFilter::All, None);
-        assert_eq!(model.rows.len(), TUI_OPERATIONS_MAX_ROWS);
+        assert_eq!(model.rows.len(), NETWORK_DOCTOR_OPERATION_ROWS);
         assert!(model.summary.contains("8 shown / 9 retained operation(s)"));
         assert!(model.summary.contains("1 omitted"));
         assert!(model.rows[0].needs_attention);
@@ -376,6 +410,53 @@ mod tests {
         assert!(rendered.contains("route-visible-peer"));
         assert!(rendered.contains("transport accepted"));
         assert!(!rendered.contains("panel boundary is reserved"));
+
+        drop(terminal);
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[test]
+    fn copy_select_mode_renders_the_bounded_selected_diagnostic() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-operation-select-render-{}-{}",
+            std::process::id(),
+            crate::app::current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        app.workspace.active_section = WorkspaceSection::NetworkDoctor;
+        app.operation_history
+            .upsert(record(
+                OperationId::numeric(OperationDomain::PathDiscovery, 1),
+                "copyable-path",
+                OperationState::Failed,
+                EvidenceAuthority::Authoritative,
+                20,
+            ))
+            .expect("selection fixture");
+        assert!(app.move_operation_selection(1));
+        assert!(app.open_operation_select_mode());
+
+        let backend = TestBackend::new(120, 35);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::workspace::render(frame, &app))
+            .expect("render copy/select mode");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Operation Copy/Select"));
+        assert!(rendered.contains("copyable-path"));
+        assert!(rendered.contains("terminal mouse selection enabled"));
 
         drop(terminal);
         drop(app);

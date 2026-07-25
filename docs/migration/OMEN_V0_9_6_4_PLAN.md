@@ -806,6 +806,14 @@ active edit buffer without retaining a second history or index. Invalid state
 falls back visibly to the selected filter without panicking. No persistence,
 worker, timer, or networking behavior is added.
 
+Phase 5D adds TUI Operations row selection and a copy/select diagnostic view.
+Up/Down or j/k select among the same eight bounded presentation rows; Enter or
+v opens the existing redacted, 2 KiB operation diagnostic. While that view is
+open, the TUI explicitly releases terminal mouse capture so the user's terminal
+can perform its normal text selection/copy, then restores capture on Esc or q.
+PageUp/PageDown or j/k scroll the preview. No clipboard crate, OSC-52 sequence,
+diagnostic copy, persistence, worker, timer, or additional history is added.
+
 ### TUI
 
 - Search/filter mode.
