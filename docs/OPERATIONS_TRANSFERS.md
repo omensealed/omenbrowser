@@ -144,6 +144,38 @@ subscription, persistence, protocol field, or dependency.
 The eventual interactive desktop/TUI views must continue to consume the same
 projection rather than define frontend-specific delivery vocabulary.
 
+## OMENchat connection-state adapter
+
+`src/operations/connection.rs` projects the existing typed
+`ChatConnectionState` reducer into one shared record per OMENchat session. This
+is the complete project-owned connection lifecycle boundary used by the
+desktop: the runtime bus currently broadcasts link closure but does not
+broadcast a matching typed link-open or general Reticulum link-state event.
+The adapter therefore does not parse link logs or claim transport evidence
+that the shared event surface does not provide.
+
+The mapping is deliberately conservative:
+
+- disconnected and resolving sessions remain unresolved `Waiting`;
+- connecting, authenticating, joined, and draining sessions are `Active`;
+- reconnecting sessions are `Reconciling`;
+- typed failures are `Failed`, with retry availability retained in fixed
+  bounded evidence text;
+- joined means the OMENchat session is active, never that a message was
+  delivered;
+- repeated transitions coalesce by numeric session ID and stale observations
+  are ignored;
+- closing the session removes its connection record and releases its exact
+  retained-byte budget;
+- history saturation preserves existing unresolved work and rejects the new
+  projection.
+
+The normalized server destination is the public target. Link identifiers,
+authentication material, frame contents, error strings, and correlation data
+are not retained. The adapter adds no transport event, retry, worker, timer,
+subscription, queue, persistence, protocol field, or dependency. Existing
+OMENchat reconnect controls and retry policy remain authoritative.
+
 ## Reticulum path-observation adapter
 
 `src/operations/path.rs` observes the existing typed `PathUpdated` runtime

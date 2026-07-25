@@ -144,6 +144,13 @@ async fn close_omenchat_session_clears_live_transport_and_retry_state() {
         .omenchat
         .omenchat_connection_states
         .contains_key(&session_id));
+    assert!(!desktop.app.operation_history.records().any(|record| {
+        record.id
+            == crate::operations::OperationId::numeric(
+                crate::operations::OperationDomain::OmenChatConnection,
+                session_id,
+            )
+    }));
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -171,6 +178,19 @@ async fn omenchat_connection_state_is_bounded_by_sessions_and_join_is_event_driv
         desktop.omenchat_connection_state(session_id),
         crate::chat::ChatConnectionState::Resolving
     );
+    let operation = desktop
+        .app
+        .operation_history
+        .records()
+        .find(|record| {
+            record.id
+                == crate::operations::OperationId::numeric(
+                    crate::operations::OperationDomain::OmenChatConnection,
+                    session_id,
+                )
+        })
+        .expect("resolving connection operation");
+    assert_eq!(operation.state, crate::operations::OperationState::Waiting);
 
     let _ = desktop.register_omenchat_live_transport(
         session_id,
@@ -198,6 +218,20 @@ async fn omenchat_connection_state_is_bounded_by_sessions_and_join_is_event_driv
         desktop.omenchat_connection_state(session_id),
         crate::chat::ChatConnectionState::Joined
     );
+    let operation = desktop
+        .app
+        .operation_history
+        .records()
+        .find(|record| {
+            record.id
+                == crate::operations::OperationId::numeric(
+                    crate::operations::OperationDomain::OmenChatConnection,
+                    session_id,
+                )
+        })
+        .expect("joined connection operation");
+    assert_eq!(operation.state, crate::operations::OperationState::Active);
+    assert!(!operation.state.claims_peer_delivery());
 
     desktop.apply_omenchat_client_events_status(&[crate::chat::ChatClientEvent::Error {
         session_id: Some(session_id),

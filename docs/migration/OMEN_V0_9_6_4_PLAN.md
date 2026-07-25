@@ -467,6 +467,21 @@ warmups, browser retries, Network Doctor behavior, and runtime transport remain
 unchanged. No worker, timer, subscription, queue, persistence, protocol,
 action, or dependency is introduced.
 
+Phase 3I projects the existing typed OMENchat `ChatConnectionState` reducer
+into one shared Operations record per session. Disconnected/resolving remain
+`Waiting`; connecting/authenticating/joined/draining are `Active`;
+reconnecting is `Reconciling`; and typed failures are `Failed`. Joined is
+connection state, never message-delivery evidence. Repeated transitions
+coalesce, stale observations are ignored, invalid targets are rejected,
+saturation preserves existing unresolved work, and explicit session close
+removes the record and its byte budget. The runtime bus does not expose a
+matching typed link-open or general Reticulum link-state event, so this unit
+does not parse logs or fabricate transport acceptance. Link identifiers,
+frames, authentication material, and unbounded error strings are not retained.
+Existing reconnect policy and controls remain unchanged. No worker, timer,
+subscription, queue, persistence, protocol, transport behavior, action, or
+dependency is introduced.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:

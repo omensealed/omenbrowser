@@ -3,6 +3,8 @@ use std::collections::{BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(feature = "chat-client")]
+pub mod connection;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod omenchat;
 pub mod path;
@@ -120,6 +122,7 @@ pub enum OperationEvidenceKind {
     TransportAcceptance,
     Receipt,
     PeerDelivery,
+    ConnectionState,
     PathObservation,
     ResourceOffer,
     ResourceProgress,

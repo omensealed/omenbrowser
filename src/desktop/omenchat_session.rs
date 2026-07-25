@@ -59,6 +59,10 @@ impl DesktopApp {
                 .omenchat_link_sessions
                 .retain(|_, stored_session_id| *stored_session_id != session_id);
             self.omenchat.omenchat_connection_states.remove(&session_id);
+            crate::operations::connection::remove_omenchat_connection(
+                &mut self.app.operation_history,
+                session_id,
+            );
         }
         self.omenchat.chat_client.remove_session(session_id);
         if let (Some(store), Some(server_id)) =
@@ -99,10 +103,24 @@ impl DesktopApp {
         session_id: ChatSessionId,
         state: crate::chat::ChatConnectionState,
     ) {
-        if self.omenchat.chat_client.session(session_id).is_some() {
+        if let Some(destination) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.server.destination.clone())
+        {
             self.omenchat
                 .omenchat_connection_states
                 .insert(session_id, state);
+            if let Err(error) = crate::operations::connection::record_omenchat_connection_state(
+                &mut self.app.operation_history,
+                session_id,
+                &destination,
+                state,
+                i64::try_from(crate::app::current_epoch_ms()).unwrap_or(i64::MAX),
+            ) {
+                tracing::warn!("failed to project OMENchat connection state: {error}");
+            }
         }
     }
 

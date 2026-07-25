@@ -265,6 +265,7 @@ pub fn evidence_label(kind: OperationEvidenceKind) -> &'static str {
         OperationEvidenceKind::TransportAcceptance => "transport acceptance",
         OperationEvidenceKind::Receipt => "receipt",
         OperationEvidenceKind::PeerDelivery => "peer delivery",
+        OperationEvidenceKind::ConnectionState => "connection state",
         OperationEvidenceKind::PathObservation => "path observation",
         OperationEvidenceKind::ResourceOffer => "resource offer",
         OperationEvidenceKind::ResourceProgress => "resource progress",
@@ -609,6 +610,10 @@ mod tests {
         assert_ne!(
             action_label(OperationAction::ExplicitSend),
             action_label(OperationAction::ExplicitSafeRetry)
+        );
+        assert_eq!(
+            evidence_label(OperationEvidenceKind::ConnectionState),
+            "connection state"
         );
     }
 }

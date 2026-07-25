@@ -3077,6 +3077,28 @@ for typed request failure because `PathUpdated` does not expose request
 identity, timeout, failure, or reason; live path request behavior remains a
 separate smoke/interoperability gate.
 
+The OMENchat connection projection fixtures prove all typed connection-state
+mappings, stable session correlation, normalized and bounded public targets,
+transition coalescing, stale-state rejection, session-close removal, no
+transport/receipt/delivery claim, and saturation behavior:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::connection::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_connection_state_is_bounded_by_sessions_and_join_is_event_driven --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  close_omenchat_session_clears_live_transport_and_retry_state --lib
+```
+
+The tests use isolated application roots and the existing typed desktop state
+reducer. They do not start Reticulum, establish a Link, authenticate to an
+OMENchat server, reconnect over the network, or inspect private identity
+material. Live open/close/reconnect behavior remains covered by the documented
+OMENchat smoke and interoperability gates.
+
 The typed Resource adapter fixtures prove stable opaque correlation, transfer
 identifier and browser-operation redaction, offer/progress coalescing, retained
 authoritative totals, regression and malformed-total rejection, completion
