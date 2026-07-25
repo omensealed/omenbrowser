@@ -224,6 +224,7 @@ pub fn domain_label(domain: OperationDomain) -> &'static str {
         OperationDomain::LinkEstablishment => "link establishment",
         OperationDomain::LxmfMessage => "LXMF message",
         OperationDomain::ResourceTransfer => "resource transfer",
+        OperationDomain::RuntimeEventStream => "runtime event stream",
         OperationDomain::OmenChatConnection => "OMENchat connection",
         OperationDomain::OmenChatMutation => "OMENchat mutation",
     }

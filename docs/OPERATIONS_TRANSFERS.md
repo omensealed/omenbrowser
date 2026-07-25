@@ -235,6 +235,29 @@ failure with a later consistent delivery. Its raw evidence and RTT are not
 retained or parsed. No send, retry, cancellation, worker, timer, subscription,
 queue, persistence, protocol field, or dependency is added.
 
+## Runtime event-stream recovery adapter
+
+`src/operations/event_stream.rs` projects the existing typed `StreamGap` and
+`StreamRecovered` events into one bounded record for each integrated-broadcast
+or SDK/RPC source. A gap is authoritative `EventGap` evidence and carries only
+the typed source, reason category, dropped count, and numeric recovery cursor.
+It never implies that a message, path, or transfer failed.
+
+A recovery event updates an existing gap record only. Recovery without a
+corresponding retained gap is ignored. An error-free recovery is locally
+`Completed`; recovery that reports a snapshot error or a missing typed
+snapshot-success flag remains uncertain `Reconciling`. A later gap can reopen a
+completed source record.
+Stale cursors and duplicate gaps/recoveries are ignored, evidence remains
+limited to 16 entries, and the attempt count records bounded gap cycles.
+
+Upstream cursor strings and recovery error strings are deliberately omitted
+from the shared presentation record because they can contain backend or
+deployment detail. The existing Network Doctor log remains the detailed
+diagnostic surface. This adapter observes the current owned recovery worker; it
+adds no recovery attempt, snapshot request, retry, action, worker, timer,
+subscription, queue, persistence, protocol field, or dependency.
+
 ## Reticulum path-observation adapter
 
 `src/operations/path.rs` observes the existing typed `PathUpdated` runtime

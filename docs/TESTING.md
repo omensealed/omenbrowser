@@ -3133,6 +3133,28 @@ observe a live receipt, synchronize propagation, or establish Python
 interoperability. Live peer-delivery proof remains a separate smoke and
 interoperability gate.
 
+The runtime event-stream Operations fixtures prove independent source
+correlation, gap/recovery state, cursor ordering, duplicate rejection,
+successful completion, incomplete recovery, reopening after a later gap,
+bounded evidence, and omission of raw upstream cursors and recovery error
+text:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::event_stream::tests --lib
+
+cargo test --locked --no-default-features --features tui \
+  operations::event_stream::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_projects_event_gap --lib
+```
+
+These tests use typed in-memory events and an isolated application root. They
+do not force broadcast lag, connect to an SDK/RPC daemon, request a snapshot,
+or change the existing event worker. The worker's bounded lag and recovery
+tests remain the behavioral recovery gate.
+
 The typed Resource adapter fixtures prove stable opaque correlation, transfer
 identifier and browser-operation redaction, offer/progress coalescing, retained
 authoritative totals, regression and malformed-total rejection, completion

@@ -15986,6 +15986,17 @@ impl App {
                 format!("LXMF Operations projection rejected an update: {error}"),
             );
         }
+        if let Err(error) = crate::operations::event_stream::record_event_stream_runtime_event(
+            &mut self.operation_history,
+            &event,
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("event-stream Operations projection rejected an update: {error}"),
+            );
+        }
         match event {
             crate::runtime::RuntimeBusEvent::StatusChanged(status) => {
                 self.runtime_status = status.clone();
@@ -22679,6 +22690,69 @@ mod tests {
             crate::operations::OperationState::Delivered
         );
         assert!(delivered.state.claims_peer_delivery());
+    }
+
+    #[test]
+    fn runtime_handler_projects_event_gap_and_redacted_recovery_state() {
+        let mut app = App::new(test_config("operations-runtime-handler-event-gap"));
+        assert!(app.handle_runtime_bus_event(RuntimeBusEvent::StreamGap(
+            crate::runtime::RuntimeEventGap {
+                source: crate::runtime::RuntimeEventSource::SdkRpc,
+                reason: crate::runtime::RuntimeEventGapReason::UpstreamStreamGap,
+                dropped_count: 2,
+                last_cursor: 8,
+                next_cursor: 11,
+                upstream_cursor: Some("private-upstream-cursor".into()),
+            },
+        )));
+        let gap = app
+            .operation_history
+            .records()
+            .find(|record| {
+                record.id.domain == crate::operations::OperationDomain::RuntimeEventStream
+            })
+            .expect("event gap operation");
+        assert_eq!(gap.state, crate::operations::OperationState::EventGap);
+        assert!(!gap.state.claims_peer_delivery());
+        assert!(!gap.evidence.iter().any(|evidence| evidence
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private"))));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::StreamRecovered(
+                crate::runtime::RuntimeEventRecovery {
+                    source: crate::runtime::RuntimeEventSource::SdkRpc,
+                    cursor: 10,
+                    status_recovered: true,
+                    interfaces_recovered: true,
+                    network_snapshot_recovered: false,
+                    propagation_recovered: true,
+                    directory_entries_recovered: 3,
+                    messages_recovered: 2,
+                    errors: vec!["private identity and endpoint detail".into()],
+                },
+            ))
+        );
+        let recovery = app
+            .operation_history
+            .records()
+            .find(|record| {
+                record.id.domain == crate::operations::OperationDomain::RuntimeEventStream
+            })
+            .expect("event recovery operation");
+        assert_eq!(
+            recovery.state,
+            crate::operations::OperationState::Reconciling
+        );
+        assert_eq!(
+            recovery.authority,
+            crate::operations::EvidenceAuthority::Uncertain
+        );
+        assert!(!recovery.evidence.iter().any(|evidence| evidence
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private"))));
     }
 
     #[test]

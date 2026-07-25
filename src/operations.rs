@@ -5,6 +5,7 @@ use thiserror::Error;
 
 #[cfg(feature = "chat-client")]
 pub mod connection;
+pub mod event_stream;
 pub mod lxmf;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod omenchat;
@@ -25,6 +26,7 @@ pub enum OperationDomain {
     LinkEstablishment,
     LxmfMessage,
     ResourceTransfer,
+    RuntimeEventStream,
     OmenChatConnection,
     OmenChatMutation,
 }
@@ -63,6 +65,7 @@ pub enum OperationTargetKind {
     Peer,
     Server,
     Room,
+    Runtime,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

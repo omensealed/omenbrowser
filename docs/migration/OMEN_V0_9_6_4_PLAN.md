@@ -526,6 +526,19 @@ and RTT are omitted rather than parsed. No send, retry, cancellation, worker,
 timer, subscription, queue, persistence, protocol, or dependency is
 introduced.
 
+Phase 3M projects the existing typed `StreamGap` and `StreamRecovered` events
+into one bounded Operations record per integrated-broadcast or SDK/RPC event
+source. A gap is authoritative event-gap evidence, never a fabricated message,
+path, or transfer failure. Snapshot recovery is locally completed only when it
+reports no errors and every typed snapshot-success flag is true; otherwise it
+remains uncertain reconciliation, and a later gap can reopen the record.
+Numeric cursors order recovery while duplicate and stale observations are
+ignored. Evidence is capped and raw upstream cursor strings and recovery error
+text are omitted. Recovery without a retained gap does not create history. The
+adapter passively observes the existing owned recovery worker and adds no
+snapshot, retry, action, worker, timer, subscription, queue, persistence,
+protocol, or dependency.
+
 ### Model
 
 Each bounded record should contain only what its domain supports:
