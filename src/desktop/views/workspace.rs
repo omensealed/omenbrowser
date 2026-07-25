@@ -14,6 +14,7 @@ use super::super::*;
 impl DesktopApp {
     pub(in crate::desktop) fn browser_messages_workspace_view(&self) -> Element<'_, Message> {
         let controls = action_grid(self.workspace_primary_buttons(), 5);
+        let presets = action_grid(self.workspace_preset_buttons(), 3);
         let hidden_workspace_panes = self.hidden_workspace_pane_buttons();
         let hidden_conversation_panes = self.hidden_conversation_pane_buttons();
         #[cfg(feature = "chat-client")]
@@ -281,6 +282,7 @@ impl DesktopApp {
         #[cfg(feature = "chat-client")]
         let content = column![
             controls,
+            presets,
             hidden_workspace_panes,
             hidden_conversation_panes,
             omenchat_opener,
@@ -293,6 +295,7 @@ impl DesktopApp {
         #[cfg(not(feature = "chat-client"))]
         let content = column![
             controls,
+            presets,
             hidden_workspace_panes,
             hidden_conversation_panes,
             grid
@@ -302,6 +305,25 @@ impl DesktopApp {
         .width(Length::Fill)
         .into();
         content
+    }
+
+    pub(in crate::desktop) fn workspace_preset_buttons(&self) -> Vec<Button<'_, Message>> {
+        [
+            ("Preset: Browser", DesktopWorkspacePreset::BrowserFocus),
+            ("Preset: Messages", DesktopWorkspacePreset::MessagesFocus),
+            (
+                "Preset: Browser + Messages",
+                DesktopWorkspacePreset::BrowserAndMessages,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, preset)| {
+            subtle_button(
+                label,
+                Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(preset)),
+            )
+        })
+        .collect()
     }
 
     pub(in crate::desktop) fn workspace_primary_buttons(&self) -> Vec<Button<'_, Message>> {

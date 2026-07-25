@@ -501,6 +501,9 @@ mod tests {
         for message in [
             WorkspacePaneMessage::NewConversation,
             WorkspacePaneMessage::CloseConversationTab(1),
+            WorkspacePaneMessage::ApplyPreset(
+                crate::desktop::DesktopWorkspacePreset::BrowserAndMessages,
+            ),
             WorkspacePaneMessage::Clicked(pane),
             WorkspacePaneMessage::Dragged(iced::widget::pane_grid::DragEvent::Picked { pane }),
             WorkspacePaneMessage::Resized(iced::widget::pane_grid::ResizeEvent {

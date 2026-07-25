@@ -79,6 +79,101 @@ fn desktop_workspace_starts_with_browser_and_message_panes() {
 }
 
 #[test]
+fn workspace_focus_presets_hide_panes_without_deleting_backing_state() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-focus-presets");
+    let active_conversation = desktop.app.workspace.active_conversation;
+    desktop.app.workspace.conversations[active_conversation].draft_body = "retained draft".into();
+    let browser_id = desktop.app.active_browser_tab().id;
+    let conversation_id = desktop.app.active_conversation().id;
+    let browser_count = desktop.app.workspace.browser_tabs.len();
+    let conversation_count = desktop.app.workspace.conversations.len();
+
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(
+        DesktopWorkspacePreset::BrowserFocus,
+    )));
+
+    assert_eq!(desktop.workspace.workspace_panes.len(), 1);
+    assert_eq!(
+        desktop
+            .workspace
+            .workspace_panes
+            .get(desktop.workspace.active_workspace_pane),
+        Some(&DesktopPane::Browser(browser_id))
+    );
+    assert_eq!(desktop.app.workspace.browser_tabs.len(), browser_count);
+    assert_eq!(
+        desktop.app.workspace.conversations.len(),
+        conversation_count
+    );
+    assert!(desktop
+        .hidden_conversation_panes()
+        .iter()
+        .any(|(id, _, _)| *id == conversation_id));
+
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(
+        DesktopWorkspacePreset::MessagesFocus,
+    )));
+
+    assert_eq!(desktop.workspace.workspace_panes.len(), 1);
+    assert_eq!(
+        desktop
+            .workspace
+            .workspace_panes
+            .get(desktop.workspace.active_workspace_pane),
+        Some(&DesktopPane::Conversation(conversation_id))
+    );
+    assert_eq!(desktop.app.workspace.browser_tabs.len(), browser_count);
+    assert_eq!(
+        desktop.app.workspace.conversations.len(),
+        conversation_count
+    );
+    assert!(desktop
+        .hidden_browser_panes()
+        .iter()
+        .any(|(id, _)| *id == browser_id));
+}
+
+#[test]
+fn browser_and_messages_preset_persists_a_bounded_two_pane_layout() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-split-preset");
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(
+        DesktopWorkspacePreset::BrowserFocus,
+    )));
+
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(
+        DesktopWorkspacePreset::BrowserAndMessages,
+    )));
+
+    assert_eq!(desktop.workspace.workspace_panes.len(), 2);
+    assert_eq!(desktop.app.settings.ui.desktop_workspace_panes.len(), 2);
+    let Some(DesktopWorkspaceLayoutNode::Split { axis, ratio, a, b }) =
+        desktop.app.settings.ui.desktop_workspace_layout.as_ref()
+    else {
+        panic!("expected persisted split preset");
+    };
+    assert_eq!(*axis, DesktopWorkspaceSplitAxis::Vertical);
+    assert!((*ratio - 0.5).abs() < f32::EPSILON);
+    assert!(matches!(
+        a.as_ref(),
+        DesktopWorkspaceLayoutNode::Pane {
+            pane: DesktopWorkspacePaneSettings {
+                kind: DesktopWorkspacePaneKind::Browser,
+                ..
+            }
+        }
+    ));
+    assert!(matches!(
+        b.as_ref(),
+        DesktopWorkspaceLayoutNode::Pane {
+            pane: DesktopWorkspacePaneSettings {
+                kind: DesktopWorkspacePaneKind::Conversation,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
 fn close_pane_does_not_close_backing_browser_tab() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-close-pane");
     let pane = desktop

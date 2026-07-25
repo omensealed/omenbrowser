@@ -849,6 +849,15 @@ not a runtime switch that could pretend to unload GIF support. This reuses the
 existing atomic settings save/rollback path and adds no renderer timer, media
 cache, dependency, worker, or schema change.
 
+Phase 5I adds three fixed desktop workspace presets: Browser focus, Messages
+focus, and Browser + Messages. Applying a preset changes only the visible Iced
+pane grid and persists it through the existing bounded workspace-layout
+settings. It does not delete browser tabs, LXMF conversations, OMENchat
+sessions, histories, or drafts; hidden targets remain available through the
+existing restore controls or the preset buttons themselves. Presets add no new
+settings schema, layout engine, worker, timer, queue, dependency, or networking
+behavior.
+
 ### TUI
 
 - Search/filter mode.

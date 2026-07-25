@@ -7,7 +7,7 @@ use crate::chat::ChatSessionId;
 
 #[cfg(feature = "chat-client")]
 use super::is_pending_omenchat_destination;
-use super::{DesktopApp, DesktopPane, Message, WorkspacePaneMessage};
+use super::{DesktopApp, DesktopPane, DesktopWorkspacePreset, Message, WorkspacePaneMessage};
 
 impl DesktopApp {
     pub(super) fn dispatch_workspace_pane_message(
@@ -21,6 +21,9 @@ impl DesktopApp {
             Message::WorkspacePane(WorkspacePaneMessage::CloseConversationTab(conversation_id)) => {
                 self.update_close_conversation_pane_tab(conversation_id);
                 Ok(Task::none())
+            }
+            Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(preset)) => {
+                Ok(self.update_workspace_preset(preset))
             }
             Message::WorkspacePane(WorkspacePaneMessage::Clicked(pane)) => {
                 self.update_workspace_pane_clicked(pane);
@@ -54,6 +57,48 @@ impl DesktopApp {
 
     pub(super) fn update_workspace_pane_clicked(&mut self, pane: pane_grid::Pane) {
         self.focus_workspace_pane(pane);
+    }
+
+    pub(super) fn update_workspace_preset(
+        &mut self,
+        preset: DesktopWorkspacePreset,
+    ) -> Task<Message> {
+        let browser = DesktopPane::Browser(self.app.active_browser_tab().id);
+        let conversation = DesktopPane::Conversation(self.app.active_conversation().id);
+        let active_kind = self
+            .workspace
+            .workspace_panes
+            .get(self.workspace.active_workspace_pane)
+            .cloned();
+
+        let (workspace_panes, active_workspace_pane) = match preset {
+            DesktopWorkspacePreset::BrowserFocus => pane_grid::State::new(browser),
+            DesktopWorkspacePreset::MessagesFocus => pane_grid::State::new(conversation),
+            DesktopWorkspacePreset::BrowserAndMessages => {
+                let (mut panes, browser_pane) = pane_grid::State::new(browser);
+                let conversation_pane = panes
+                    .split(
+                        pane_grid::Axis::Vertical,
+                        browser_pane,
+                        conversation.clone(),
+                    )
+                    .map(|(pane, _)| pane)
+                    .unwrap_or(browser_pane);
+                let active = if active_kind.as_ref() == Some(&conversation) {
+                    conversation_pane
+                } else {
+                    browser_pane
+                };
+                (panes, active)
+            }
+        };
+
+        self.workspace.workspace_panes = workspace_panes;
+        self.workspace.active_workspace_pane = active_workspace_pane;
+        self.focus_workspace_pane(active_workspace_pane);
+        self.schedule_visible_workspace_scroll_restore(3);
+        self.persist_workspace_panes("workspace preset");
+        self.restore_visible_workspace_scrolls()
     }
 
     pub(super) fn update_workspace_pane_dragged(&mut self, event: pane_grid::DragEvent) {

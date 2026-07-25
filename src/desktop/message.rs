@@ -66,6 +66,13 @@ pub(in crate::desktop) enum DesktopPane {
     OmenChat(ChatSessionId),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) enum DesktopWorkspacePreset {
+    BrowserFocus,
+    MessagesFocus,
+    BrowserAndMessages,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::desktop) struct ExternalLinkPrompt {
     pub(in crate::desktop) url: String,
@@ -228,6 +235,7 @@ pub(in crate::desktop) enum DiagnosticsMessage {
 pub(in crate::desktop) enum WorkspacePaneMessage {
     NewConversation,
     CloseConversationTab(u64),
+    ApplyPreset(DesktopWorkspacePreset),
     Clicked(pane_grid::Pane),
     Dragged(pane_grid::DragEvent),
     Resized(pane_grid::ResizeEvent),
