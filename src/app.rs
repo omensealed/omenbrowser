@@ -5148,6 +5148,7 @@ pub struct PluginsPanelState {
 pub enum SettingsAction {
     EditTheme,
     EditHome,
+    ToggleReducedMotion,
     SelectRuntimeAuto,
     SelectRuntimeMock,
     SelectRuntimeReticulum,
@@ -5176,9 +5177,10 @@ pub enum SettingsAction {
 }
 
 impl SettingsAction {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::EditTheme,
         Self::EditHome,
+        Self::ToggleReducedMotion,
         Self::SelectRuntimeAuto,
         Self::SelectRuntimeMock,
         Self::SelectRuntimeReticulum,
@@ -11848,6 +11850,7 @@ impl App {
                 self.edit_settings_default_start_page();
                 true
             }
+            SettingsAction::ToggleReducedMotion => self.toggle_settings_reduced_motion(),
             SettingsAction::SelectRuntimeAuto => {
                 self.set_runtime_backend_setting(RuntimeBackendSetting::Auto)
             }

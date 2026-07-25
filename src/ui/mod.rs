@@ -1543,6 +1543,37 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove isolated TUI root");
     }
 
+    #[tokio::test]
+    async fn settings_reduced_motion_action_routes_existing_persisted_preference() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-reduced-motion-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        let action_index = crate::app::SettingsAction::ALL
+            .iter()
+            .position(|action| *action == crate::app::SettingsAction::ToggleReducedMotion)
+            .expect("reduced-motion Settings action");
+        app.switch_section(workspace::WorkspaceSection::Settings);
+        assert!(app.select_settings_action(action_index));
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.settings.ui.reduce_motion);
+        assert!(app.status.task.contains("animated previews are paused"));
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(!app.settings.ui.reduce_motion);
+        assert!(app.status.task.contains("animated previews may play"));
+
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
     #[test]
     fn repeated_external_signal_requests_coalesce_into_graceful_quit() {
         let root = std::env::temp_dir().join(format!(

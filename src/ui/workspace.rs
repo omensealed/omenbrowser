@@ -1016,6 +1016,23 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
                 )
             ),
         ),
+        settings_action_line(
+            app,
+            settings_action_index(SettingsAction::ToggleReducedMotion),
+            format!(
+                "[reduced motion] {} | desktop animated previews={} | TUI animation=none",
+                app.settings.ui.reduce_motion,
+                if cfg!(feature = "chat-client-gif") {
+                    if app.settings.ui.reduce_motion {
+                        "static frame"
+                    } else {
+                        "enabled"
+                    }
+                } else {
+                    "not compiled"
+                }
+            ),
+        ),
         Line::from(format!(
             "runtime backend: {:?}{}",
             app.settings.runtime_backend,
@@ -2008,6 +2025,7 @@ fn shortcut_help_lines(section: WorkspaceSection) -> Vec<Line<'static>> {
         ],
         WorkspaceSection::Settings => vec![
             Line::from("Up/Down selects a setting | Enter edits or activates"),
+            Line::from("Reduced motion controls desktop animated previews; TUI stays static"),
             Line::from("I creates a managed identity | i attaches an identity path"),
             Line::from("G runs native Reticulum quickstart"),
         ],
@@ -2094,6 +2112,9 @@ mod tests {
         assert!(directory.contains("d requests selected paths"));
         assert!(directory.contains("r refreshes propagation evidence"));
         assert!(directory.contains("x cancels"));
+
+        let settings = help_text(WorkspaceSection::Settings);
+        assert!(settings.contains("Reduced motion controls desktop animated previews"));
     }
 
     #[test]

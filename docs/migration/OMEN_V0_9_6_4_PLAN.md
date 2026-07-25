@@ -841,6 +841,14 @@ titles and contextual help now expose path request, refresh, cancellation,
 selection, and sync keys. No new request implementation, retry, timer, worker,
 queue, or networking state is introduced.
 
+Phase 5H exposes the existing persisted reduced-motion preference through the
+TUI Settings action list. The label states that the preference controls desktop
+animated previews and that the TUI has no animation loop. Static media remains
+the deliberate `desktop-product-static-media` compile-time product profile,
+not a runtime switch that could pretend to unload GIF support. This reuses the
+existing atomic settings save/rollback path and adds no renderer timer, media
+cache, dependency, worker, or schema change.
+
 ### TUI
 
 - Search/filter mode.
