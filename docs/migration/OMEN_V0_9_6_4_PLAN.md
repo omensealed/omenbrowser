@@ -343,9 +343,13 @@ command target. It shows the public server label, resolved room when available,
 prepared/uncertain state, and bounded relative expiry. The exact production
 retry guard controls whether Send/Retry is rendered; unavailable retry shows
 its redacted reason and leaves only explicit Stop Tracking. Expired rows retain
-only Finalize Expired. Confirmation and the bounded persistence owner are
-unchanged, and no automatic retry, worker, queue, timer, schema, wire, or
-capability was added.
+only Finalize Expired. The pane now starts with a compact non-error notice and
+shows the full warning/recovery controls only after explicit Review. It reports
+the current connection state separately because a successful join or ping does
+not establish whether an older mutation committed. Collapsing review clears a
+pending UI confirmation but does not discard the durable record. Confirmation
+and the bounded persistence owner are otherwise unchanged, and no automatic
+retry, worker, queue, timer, schema, wire, or capability was added.
 
 ### Required matrix for every newly activated family
 

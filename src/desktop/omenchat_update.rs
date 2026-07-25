@@ -67,6 +67,11 @@ impl DesktopApp {
                 self.cancel_omenchat_mutation_resolution();
                 Ok(Task::none())
             }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::ToggleRecoveredMutationReview(destination)) => {
+                self.toggle_omenchat_recovered_mutation_review(destination);
+                Ok(Task::none())
+            }
             Message::OmenChat(OmenChatMessage::ResendLocalEcho {
                 session_id,
                 room_id,

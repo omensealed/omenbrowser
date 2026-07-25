@@ -476,6 +476,27 @@ impl DesktopApp {
         self.app.status.task = "OMENchat mutation resolution cancelled".into();
     }
 
+    pub(in crate::desktop) fn toggle_omenchat_recovered_mutation_review(
+        &mut self,
+        server_destination: String,
+    ) {
+        if self
+            .omenchat
+            .omenchat_recovered_mutations_expanded_for
+            .as_deref()
+            == Some(server_destination.as_str())
+        {
+            self.omenchat.omenchat_recovered_mutations_expanded_for = None;
+            self.omenchat.omenchat_mutation_resolution_confirmation = None;
+            self.app.status.task =
+                "earlier OMENchat send remains unresolved; review was collapsed".into();
+        } else {
+            self.omenchat.omenchat_recovered_mutations_expanded_for = Some(server_destination);
+            self.app.status.task =
+                "reviewing an earlier OMENchat send; the current connection is unaffected".into();
+        }
+    }
+
     pub(in crate::desktop) fn confirm_omenchat_mutation_resolution(&mut self) -> Task<Message> {
         let Some(confirmation) = self.omenchat.omenchat_mutation_resolution_confirmation else {
             self.app.status.task =
@@ -2272,6 +2293,39 @@ mod tests {
         assert!(desktop.app.status.task.contains("12 uncertain"));
         assert!(desktop.app.status.task.contains("1 expired"));
         assert!(desktop.app.status.task.contains("nothing was resent"));
+        assert!(
+            desktop
+                .omenchat
+                .omenchat_recovered_mutations_expanded_for
+                .is_none(),
+            "recovery must remain collapsed until the user asks to review it"
+        );
+        desktop.toggle_omenchat_recovered_mutation_review(uncertain.server_destination.clone());
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_recovered_mutations_expanded_for
+                .as_deref(),
+            Some(uncertain.server_destination.as_str())
+        );
+        desktop.omenchat.omenchat_mutation_resolution_confirmation =
+            Some(OmenChatMutationResolutionConfirmation {
+                mutation_id: uncertain.mutation_id,
+                expected: uncertain.state,
+                next: OutboundMutationState::SentUncertain,
+            });
+        desktop.toggle_omenchat_recovered_mutation_review(uncertain.server_destination.clone());
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutations_expanded_for
+            .is_none());
+        assert!(
+            desktop
+                .omenchat
+                .omenchat_mutation_resolution_confirmation
+                .is_none(),
+            "collapsing review must not leave a hidden confirmation active"
+        );
         assert_eq!(desktop.app.operation_history.metrics().items, 14);
         assert_eq!(
             desktop

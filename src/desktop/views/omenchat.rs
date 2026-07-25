@@ -70,6 +70,16 @@ fn compact_recovery_destination(destination: &str) -> String {
     }
 }
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn recovered_mutation_notice(count: usize, connection: crate::chat::ChatConnectionState) -> String {
+    let noun = if count == 1 { "send" } else { "sends" };
+    let verb = if count == 1 { "needs" } else { "need" };
+    format!(
+        "{count} earlier {noun} {verb} review. Current connection: {}. Joining does not determine whether an earlier send committed.",
+        connection.label()
+    )
+}
+
 pub(in crate::desktop) fn omenchat_media_animation_allowed(
     pane_visible: bool,
     reduce_motion: bool,
@@ -303,7 +313,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     }
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     if let Some(recovered) =
-        omenchat_recovered_mutations_panel(desktop, &session.server.destination)
+        omenchat_recovered_mutations_panel(desktop, session.session_id, &session.server.destination)
     {
         timeline_panel = timeline_panel.push(recovered);
     }
@@ -359,6 +369,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_recovered_mutations_panel(
     desktop: &DesktopApp,
+    session_id: crate::chat::ChatSessionId,
     server_destination: &str,
 ) -> Option<Element<'static, Message>> {
     let now = std::time::SystemTime::now()
@@ -375,6 +386,35 @@ fn omenchat_recovered_mutations_panel(
     if matching_count == 0 {
         return None;
     }
+    let expanded = desktop
+        .omenchat
+        .omenchat_recovered_mutations_expanded_for
+        .as_deref()
+        == Some(server_destination);
+    if !expanded {
+        let notice = recovered_mutation_notice(
+            matching_count,
+            desktop.omenchat_connection_state(session_id),
+        );
+        return Some(
+            container(
+                row![
+                    text(notice).size(ui_size(12)).width(Length::Fill),
+                    subtle_button(
+                        "Review",
+                        Message::OmenChat(OmenChatMessage::ToggleRecoveredMutationReview(
+                            server_destination.to_owned(),
+                        )),
+                    ),
+                ]
+                .spacing(8),
+            )
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(status_container_style)
+            .into(),
+        );
+    }
     let server = desktop
         .omenchat
         .chat_client
@@ -390,13 +430,27 @@ fn omenchat_recovered_mutations_panel(
             )
         })
         .unwrap_or_else(|| compact_recovery_destination(server_destination));
-    let mut content =
-        column![
-            text("Recovered durable mutations — nothing was resent automatically")
-                .size(ui_size(13))
-        ]
-        .spacing(6)
-        .width(Length::Fill);
+    let mut content = column![row![
+        text(format!(
+            "Earlier sends needing review — current connection: {}",
+            desktop.omenchat_connection_state(session_id).label()
+        ))
+        .size(ui_size(13))
+        .width(Length::Fill),
+        subtle_button(
+            "Collapse",
+            Message::OmenChat(OmenChatMessage::ToggleRecoveredMutationReview(
+                server_destination.to_owned(),
+            )),
+        ),
+    ]
+    .spacing(8)]
+    .spacing(6)
+    .width(Length::Fill);
+    content = content.push(
+        text("Nothing was resent automatically. Joining or receiving pings does not resolve an earlier send whose acknowledgement was lost.")
+            .size(ui_size(11)),
+    );
     for intent in desktop
         .omenchat
         .omenchat_recovered_mutation_intents
@@ -466,7 +520,7 @@ fn omenchat_recovered_mutations_panel(
                     {
                         "Confirm Send"
                     } else {
-                        "Confirm Retry"
+                        "Confirm Safe Replay"
                     }
                 }
                 crate::chat::mutation_intents::OutboundMutationState::Expired => "Confirm Expired",
@@ -478,7 +532,7 @@ fn omenchat_recovered_mutations_panel(
                     Message::OmenChat(OmenChatMessage::ConfirmMutationResolution),
                 ),
                 subtle_button(
-                    "Cancel",
+                    "Keep Reviewing",
                     Message::OmenChat(OmenChatMessage::CancelMutationResolution),
                 ),
             ]
@@ -558,9 +612,10 @@ fn omenchat_recovered_mutations_panel(
 mod accessibility_tests {
     use super::{
         compact_recovery_destination, omenchat_media_animation_allowed,
-        recovered_mutation_expiry_label, recovered_mutation_operation,
+        recovered_mutation_expiry_label, recovered_mutation_notice, recovered_mutation_operation,
     };
     use crate::chat::protocol::{ChatOp, FrameBody};
+    use crate::chat::ChatConnectionState;
 
     #[test]
     fn reduced_motion_and_hidden_panes_withhold_animated_media() {
@@ -598,5 +653,17 @@ mod accessibility_tests {
             compact_recovery_destination("00112233445566778899aabbccddeeff"),
             "001122334455…"
         );
+    }
+
+    #[test]
+    fn recovered_mutation_notice_separates_join_health_from_earlier_send_outcome() {
+        let notice = recovered_mutation_notice(1, ChatConnectionState::Joined);
+        assert!(notice.contains("1 earlier send"));
+        assert!(notice.contains("Current connection: joined"));
+        assert!(notice.contains("does not determine"));
+
+        let plural = recovered_mutation_notice(2, ChatConnectionState::Reconnecting);
+        assert!(plural.contains("2 earlier sends"));
+        assert!(plural.contains("Current connection: reconnecting"));
     }
 }

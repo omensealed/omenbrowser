@@ -423,6 +423,8 @@ pub(in crate::desktop) enum OmenChatMessage {
     ConfirmMutationResolution,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     CancelMutationResolution,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ToggleRecoveredMutationReview(String),
     ResendLocalEcho {
         session_id: ChatSessionId,
         room_id: RoomId,

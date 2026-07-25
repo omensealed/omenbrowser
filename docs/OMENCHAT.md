@@ -361,7 +361,10 @@ trusted.
   message bodies, composer drafts, user lists, room names, filenames, local
   paths, credentials, private identity material, and all free-form status/error
   text. Disconnect detail is reduced to a fixed non-secret category.
-- Show recovered durable mutations in a four-row-per-server panel without
+- Show recovered durable mutations as a compact, non-error notice by default,
+  explicitly separate current connection health from an earlier uncertain send,
+  and reveal the bounded four-row-per-server review panel only on request. The
+  review panel contains no
   mutation IDs, request hashes, message bodies, or command targets. Each row
   identifies the operation kind, public server, room scope, state, and relative
   expiry. Send/Retry appears only when the production identity, client-instance,

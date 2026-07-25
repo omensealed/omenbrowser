@@ -469,6 +469,8 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) omenchat_mutation_resolution_confirmation:
         Option<OmenChatMutationResolutionConfirmation>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_recovered_mutations_expanded_for: Option<String>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_transports:
         HashMap<ChatSessionId, DesktopOmenChatTransport>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -590,6 +592,8 @@ impl OmenChatDesktopState {
             omenchat_other_identity_mutation_intents: 0,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_mutation_resolution_confirmation: None,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_recovered_mutations_expanded_for: None,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_transports: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
