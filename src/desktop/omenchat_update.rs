@@ -86,6 +86,13 @@ impl DesktopApp {
                 Ok(self.update_send_omenchat_draft(session_id))
             }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::ToggleReaction {
+                session_id,
+                room_id,
+                event_id,
+                token,
+            }) => Ok(self.prepare_omenchat_reaction_mutation(session_id, room_id, event_id, token)),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChat(OmenChatMessage::BeginMutationResolution {
                 mutation_id,
                 action,
@@ -236,6 +243,32 @@ impl DesktopApp {
             self.omenchat
                 .omenchat_live_state
                 .reply_mentions_negotiated(session_id)
+        }
+        #[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
+        {
+            let _ = session_id;
+            false
+        }
+    }
+
+    pub(in crate::desktop) fn omenchat_reactions_available(
+        &self,
+        session_id: ChatSessionId,
+    ) -> bool {
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        {
+            self.omenchat
+                .omenchat_live_state
+                .reactions_negotiated(session_id)
+                && self
+                    .omenchat
+                    .omenchat_live_state
+                    .durable_mutations_negotiated(session_id)
+                && self
+                    .omenchat
+                    .chat_client
+                    .local_user_id(session_id)
+                    .is_some()
         }
         #[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
         {

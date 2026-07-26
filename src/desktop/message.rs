@@ -469,6 +469,13 @@ pub(in crate::desktop) enum OmenChatMessage {
     ClearMentions(ChatSessionId),
     SendDraft(ChatSessionId),
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ToggleReaction {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+        token: crate::chat::protocol::ReactionToken,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     BeginMutationResolution {
         mutation_id: crate::chat::protocol::MutationId,
         action: OmenChatMutationResolutionAction,

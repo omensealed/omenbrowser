@@ -600,6 +600,7 @@ fn validate_prepare_request(
         ChatOp::RoomMessage
             | ChatOp::RoomAction
             | ChatOp::RoomNotice
+            | ChatOp::RoomReaction
             | ChatOp::PartRoom
             | ChatOp::Command
     ) {
@@ -845,6 +846,47 @@ mod tests {
                 0o600
             );
         }
+        drop(reopened);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn reaction_intent_survives_restart_without_changing_its_canonical_request() {
+        let root = isolated_root("reaction-restart");
+        let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
+        let body = crate::chat::protocol::ReactionRequest {
+            target_event_id: 42,
+            token: crate::chat::protocol::ReactionToken::Heart,
+            action: crate::chat::protocol::ReactionAction::Add,
+        }
+        .into_frame_body()
+        .expect("reaction body");
+        let request = PrepareOutboundMutation {
+            server_destination: "0123456789abcdef",
+            authenticated_identity_hash: b"authenticated-peer",
+            client_instance_id: ClientInstanceId::new([7; 16]),
+            op: ChatOp::RoomReaction,
+            room_id: Some(9),
+            body: body.clone(),
+            created_at: 100,
+            expires_at: 200,
+            correlation_id: None,
+        };
+        let mutation_id = MutationId::new([0x91; 16]);
+        let prepared = store
+            .persist_prepared_with_id(request, mutation_id, PRODUCTION_LIMITS)
+            .expect("persist reaction");
+        let request_hash = prepared.request_hash;
+        drop(store);
+
+        let reopened =
+            MutationIntentStore::open_for_identity_storage_root(&root).expect("reopen store");
+        let recovered = reopened.recover_nonterminal().expect("recover reaction");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].op, ChatOp::RoomReaction);
+        assert_eq!(recovered[0].body, body);
+        assert_eq!(recovered[0].request_hash, request_hash);
+        assert_eq!(recovered[0].state, OutboundMutationState::Prepared);
         drop(reopened);
         fs::remove_dir_all(root).expect("cleanup");
     }

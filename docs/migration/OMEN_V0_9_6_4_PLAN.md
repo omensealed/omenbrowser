@@ -1011,6 +1011,14 @@ administrative server view with no client-local identity. Therefore this slice
 does not fabricate a TUI reaction panel; that portion of checkpoint step 5
 remains unavailable until a separately justified OMENchat TUI exists.
 
+The sixth dormant slice connects capability-gated Iced controls to the existing
+bounded durable-mutation owner without activating the capability. Each action
+derives add/remove from authoritative local-user state, persists the canonical
+intent before sending, creates no optimistic count, and accepts only a strictly
+matching acknowledgement. Recovered reactions remain explicit-confirmation
+operations; capability loss blocks retry and restart never resends them.
+Production client request and server acceptance flags remain unchanged.
+
 ### Unit 6C — bounded local search
 
 - Search existing LXMF and OMENchat history by text, sender, room, date,

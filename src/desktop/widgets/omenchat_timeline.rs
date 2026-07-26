@@ -1,8 +1,9 @@
 use crate::app::current_epoch_ms;
 use crate::chat::protocol::RoomId;
 use crate::chat::{
-    chat_message_presentation, chat_reaction_summaries, ChatEvent, ChatEventKind, ChatReaction,
-    ChatReactionSummary, ChatReplyPresentation, ChatSessionId, ChatSessionView,
+    chat_event_supports_reactions, chat_message_presentation, chat_reaction_summaries, ChatEvent,
+    ChatEventKind, ChatReaction, ChatReactionSummary, ChatReplyPresentation, ChatSessionId,
+    ChatSessionView,
 };
 use std::collections::BTreeMap;
 
@@ -27,6 +28,7 @@ pub(in crate::desktop) struct ChatTimelineBody {
     pub(in crate::desktop) reactions: Vec<ChatReactionSummary>,
     pub(in crate::desktop) reply: Option<ChatTimelineReply>,
     pub(in crate::desktop) reply_target: Option<u64>,
+    pub(in crate::desktop) reaction_target: Option<u64>,
     pub(in crate::desktop) upload: Option<ChatTimelineUpload>,
     pub(in crate::desktop) resend: Option<ChatTimelineResend>,
 }
@@ -86,6 +88,9 @@ pub(in crate::desktop) fn chat_event_body<'a>(
     )
     .then_some(event.event_id)
     .filter(|_| !is_omenchat_local_echo_event(event));
+    let reaction_target = chat_event_supports_reactions(event)
+        .then_some(event.event_id)
+        .filter(|_| !is_omenchat_local_echo_event(event));
     let reply = presentation.reply.map(|reply| match reply {
         ChatReplyPresentation::Available {
             event_id,
@@ -112,6 +117,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             reactions,
             reply,
             reply_target: None,
+            reaction_target,
             upload: None,
             resend: local_echo_resend(session, event, body, true),
         },
@@ -126,6 +132,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             reactions,
             reply,
             reply_target,
+            reaction_target,
             upload: None,
             resend: match &event.kind {
                 ChatEventKind::Message { body } => local_echo_resend(session, event, body, false),
@@ -144,6 +151,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             reactions,
             reply,
             reply_target: None,
+            reaction_target,
             upload: Some(ChatTimelineUpload {
                 session_id: session.session_id,
                 resource_id: resource_id.clone(),

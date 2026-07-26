@@ -433,8 +433,14 @@ open the maintainer's real browser or omenchatd data.
    LXMF conversations but no OMENchat session or timeline; omenchatd's
    administrative TUI has no client-local user. This unit does not invent a
    second OMENchat frontend or misrepresent either TUI as supporting reactions.
-6. Add the durable composer action and recovered-intent presentation while the
-   production capability remains disabled.
+6. **Complete and dormant.** The Iced timeline exposes the fixed token catalog
+   only after both capabilities, a nonzero local user, a retained eligible
+   target, and an authoritative target snapshot exist. Add/remove selection is
+   persisted through the existing bounded mutation-intent worker before
+   transmission and is never applied optimistically. Only an exact matched
+   acknowledgement terminalizes the intent. Restart recovery never resends
+   automatically, and capability loss blocks explicit retry. Production still
+   does not request or accept `reactions-v1`.
 7. Run deterministic duplicate/restart/mixed-version/resource/retention gates
    and isolated measurements.
 8. Activate explicit client request/server acceptance in a separate commit.

@@ -4044,8 +4044,11 @@ actor deduplication, fixed token ordering, identity/room/target scoping, exact
 counts, and local-user highlighting in the non-interactive Iced timeline model.
 They also prove restart/reconnect clears non-persistent snapshot evidence while
 retaining bounded cache rows and that the next snapshot prunes targets no
-longer present in resident history. They do not expose reaction controls or
-request/accept `reactions-v1`.
+longer present in resident history. Dormant action tests require both
+capabilities, prohibit optimistic state, match acknowledgement identity and
+request fields, preserve canonical intents over restart, and block recovered
+retry after capability loss. Production does not request/accept
+`reactions-v1`.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-dev reaction --lib
@@ -4063,6 +4066,10 @@ cargo test --locked --no-default-features --features desktop-dev \
   omenchat_timeline_uses_shared_read_only_reaction_presentation --lib
 cargo test --locked --no-default-features --features desktop-dev \
   reaction_snapshot_evidence_and_rows_follow_retained_history --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  durable_reaction --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_intent_survives_restart --lib
 ```
 
 The Ratatui Messages workspace currently covers LXMF conversations and has no

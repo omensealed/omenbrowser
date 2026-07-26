@@ -17,6 +17,14 @@ fn recovered_mutation_operation(
         ChatOp::RoomMessage => "room message",
         ChatOp::RoomAction => "room action",
         ChatOp::RoomNotice => "room notice",
+        ChatOp::RoomReaction => match crate::chat::protocol::ReactionRequest::from_frame_body(body)
+        {
+            Ok(request) => match request.action {
+                crate::chat::protocol::ReactionAction::Add => "add reaction",
+                crate::chat::protocol::ReactionAction::Remove => "remove reaction",
+            },
+            Err(_) => "reaction",
+        },
         ChatOp::PartRoom => "leave room",
         ChatOp::Command => match body {
             FrameBody::Text(command) => match command.split_whitespace().next() {
@@ -115,6 +123,41 @@ fn omenchat_reaction_summary_row(
         );
     }
     summaries_row.wrap().into()
+}
+
+fn reaction_token_label(token: crate::chat::protocol::ReactionToken) -> &'static str {
+    use crate::chat::protocol::ReactionToken;
+    match token {
+        ReactionToken::ThumbsUp => "+1",
+        ReactionToken::Heart => "heart",
+        ReactionToken::Laugh => "laugh",
+        ReactionToken::Surprised => "wow",
+        ReactionToken::Sad => "sad",
+        ReactionToken::ThumbsDown => "-1",
+        ReactionToken::Celebrate => "celebrate",
+        ReactionToken::Question => "?",
+    }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_reaction_controls(
+    session_id: crate::chat::ChatSessionId,
+    room_id: crate::chat::protocol::RoomId,
+    event_id: u64,
+) -> Element<'static, Message> {
+    let mut controls = row![text("React:").size(ui_size(11))].spacing(4);
+    for token in crate::chat::protocol::ReactionToken::ALL {
+        controls = controls.push(subtle_button_owned(
+            reaction_token_label(token).to_string(),
+            Message::OmenChat(OmenChatMessage::ToggleReaction {
+                session_id,
+                room_id,
+                event_id,
+                token,
+            }),
+        ));
+    }
+    controls.wrap().into()
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -317,6 +360,21 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             }
             if !body.reactions.is_empty() {
                 group_content = group_content.push(omenchat_reaction_summary_row(&body.reactions));
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            if let Some(event_id) = body.reaction_target.filter(|event_id| {
+                desktop.omenchat_reactions_available(session.session_id)
+                    && desktop.omenchat.chat_client.reaction_snapshot_complete(
+                        session.session_id,
+                        session.active_room.room_id,
+                        *event_id,
+                    )
+            }) {
+                group_content = group_content.push(omenchat_reaction_controls(
+                    session.session_id,
+                    session.active_room.room_id,
+                    event_id,
+                ));
             }
             for hint in media_hints {
                 if let Some(row) = omenchat_media_hint_row(hint.clone()) {
@@ -841,6 +899,17 @@ mod accessibility_tests {
                 &FrameBody::Text("private message body".into())
             ),
             "room message"
+        );
+        let reaction = crate::chat::protocol::ReactionRequest {
+            target_event_id: 7,
+            token: crate::chat::protocol::ReactionToken::Heart,
+            action: crate::chat::protocol::ReactionAction::Add,
+        }
+        .into_frame_body()
+        .expect("reaction body");
+        assert_eq!(
+            recovered_mutation_operation(ChatOp::RoomReaction, &reaction),
+            "add reaction"
         );
         assert!(!recovered_mutation_operation(ChatOp::Command, &secret_body)
             .contains("private-target-name"));

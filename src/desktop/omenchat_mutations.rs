@@ -8,7 +8,10 @@ use crate::chat::mutation_intent_worker::await_intent_worker_reply;
 use crate::chat::mutation_intents::{
     IntentTransition, OutboundMutationIntent, OutboundMutationState, OwnedPrepareOutboundMutation,
 };
-use crate::chat::protocol::{ChatOp, FrameBody, MutationId, ReplyReference, RichMessageBody};
+use crate::chat::protocol::{
+    ChatOp, FrameBody, MutationId, ReactionAction, ReactionRequest, ReactionToken, ReplyReference,
+    RichMessageBody,
+};
 use crate::chat::{ChatClientEvent, ChatEventKind, ChatSessionId};
 
 use super::omenchat_desktop_state::{
@@ -22,6 +25,145 @@ use super::{
 const DURABLE_MUTATION_INTENT_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 impl DesktopApp {
+    pub(in crate::desktop) fn prepare_omenchat_reaction_mutation(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: u32,
+        event_id: u64,
+        token: ReactionToken,
+    ) -> Task<Message> {
+        if !self.omenchat_reactions_available(session_id) {
+            self.set_omenchat_session_status(
+                session_id,
+                "reactions are unavailable because reactions-v1 and durable-mutations-v1 were not negotiated"
+                    .into(),
+            );
+            return Task::none();
+        }
+        if !self
+            .omenchat
+            .chat_client
+            .reaction_snapshot_complete(session_id, room_id, event_id)
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "reaction controls are waiting for an authoritative server snapshot".into(),
+            );
+            return Task::none();
+        }
+        let Some(local_user_id) = self.omenchat.chat_client.local_user_id(session_id) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "reaction controls require the authenticated room user identity".into(),
+            );
+            return Task::none();
+        };
+        let Some((server_destination, target_retained)) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| {
+                (
+                    session.server.destination.clone(),
+                    session.events.iter().any(|event| {
+                        event.room_id == room_id
+                            && event.event_id == event_id
+                            && crate::chat::model::chat_event_supports_reactions(event)
+                    }),
+                )
+            })
+        else {
+            self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
+            return Task::none();
+        };
+        if !target_retained {
+            self.set_omenchat_session_status(
+                session_id,
+                "the reaction target is no longer retained".into(),
+            );
+            return Task::none();
+        }
+        let already_reacted = self
+            .omenchat
+            .chat_client
+            .reactions_for_targets(session_id, room_id, &[event_id])
+            .iter()
+            .any(|reaction| {
+                reaction.target_event_id == event_id
+                    && reaction.actor_user_id == local_user_id
+                    && reaction.token == token
+            });
+        let request = ReactionRequest {
+            target_event_id: event_id,
+            token,
+            action: if already_reacted {
+                ReactionAction::Remove
+            } else {
+                ReactionAction::Add
+            },
+        };
+        let body = match request.into_frame_body() {
+            Ok(body) => body,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("reaction request is invalid: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.set_omenchat_session_status(
+                session_id,
+                "reaction was not sent because durable mutation persistence is unavailable".into(),
+            );
+            return Task::none();
+        };
+        let (Some(client_instance_id), Some(authenticated_identity_hash)) = (
+            self.omenchat.omenchat_live_state.client_instance_id(),
+            self.omenchat.omenchat_authenticated_identity_hash.clone(),
+        ) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "reaction was not sent because durable mutation identity is unavailable".into(),
+            );
+            return Task::none();
+        };
+        let created_at = current_unix_seconds();
+        let reply = match worker.try_prepare(OwnedPrepareOutboundMutation {
+            server_destination,
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::RoomReaction,
+            room_id: Some(room_id),
+            body,
+            created_at,
+            expires_at: created_at.saturating_add(DURABLE_MUTATION_INTENT_LIFETIME_SECONDS),
+            correlation_id: None,
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("reaction was not admitted for durable persistence: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        self.set_omenchat_session_status(
+            session_id,
+            "persisting reaction intent before transmission".into(),
+        );
+        Task::perform(await_intent_worker_reply(reply), move |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::Prepared {
+                    session_id,
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
     pub(in crate::desktop) fn recover_omenchat_mutation_intents_if_pending(
         &mut self,
     ) -> Task<Message> {
@@ -819,6 +961,23 @@ impl DesktopApp {
                     .into(),
             );
         }
+        if intent.op == ChatOp::RoomReaction {
+            if !self
+                .omenchat
+                .omenchat_live_state
+                .reactions_negotiated(session_id)
+            {
+                return Err(
+                    "the live OMENchat peer did not negotiate reactions-v1; this reaction was not retried"
+                        .into(),
+                );
+            }
+            if ReactionRequest::from_frame_body(&intent.body).is_err() {
+                return Err(
+                    "the recovered OMENchat reaction request is malformed; it was not sent".into(),
+                );
+            }
+        }
         if self
             .omenchat
             .omenchat_live_state
@@ -1024,6 +1183,11 @@ impl DesktopApp {
             .omenchat
             .omenchat_live_state
             .durable_mutations_negotiated(session_id)
+            || (intent.op == ChatOp::RoomReaction
+                && !self
+                    .omenchat
+                    .omenchat_live_state
+                    .reactions_negotiated(session_id))
             || !self
                 .omenchat
                 .omenchat_live_transports
@@ -1145,6 +1309,13 @@ impl DesktopApp {
         let (link_id, events, outgoing, resources) = {
             let link_id = transport.link_id;
             let events = match intent.op {
+                ChatOp::RoomReaction => crate::chat::live::send_uncertain_durable_reaction(
+                    &mut self.omenchat.chat_client,
+                    &mut self.omenchat.omenchat_live_state,
+                    transport,
+                    session_id,
+                    &intent,
+                ),
                 ChatOp::PartRoom => crate::chat::live::send_uncertain_durable_part_room(
                     &mut self.omenchat.chat_client,
                     &mut self.omenchat.omenchat_live_state,
@@ -1464,7 +1635,7 @@ mod tests {
     use crate::desktop::DesktopOmenChatTransport;
 
     #[test]
-    fn room_message_composer_preserves_legacy_body_and_gates_rich_metadata() {
+    fn room_message_and_reaction_composers_gate_negotiated_capabilities() {
         let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
             paths: crate::config::AppPaths::from_root(std::env::temp_dir().join(format!(
                 "omenbrowser-rich-composer-unit-{}-{}",
@@ -1605,6 +1776,45 @@ mod tests {
             .recovered_omenchat_retry_session_id(&recovered)
             .expect_err("capability loss must block recovered rich retry")
             .contains("did not negotiate reply-mentions-v1"));
+
+        let reaction_body = ReactionRequest {
+            target_event_id: 9,
+            token: ReactionToken::Heart,
+            action: ReactionAction::Add,
+        }
+        .into_frame_body()
+        .expect("reaction body");
+        let recovered_reaction = OutboundMutationIntent {
+            mutation_id: MutationId::new([0x75; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomReaction,
+                Some(1),
+                &reaction_body,
+            )
+            .expect("reaction request hash"),
+            op: ChatOp::RoomReaction,
+            body: reaction_body,
+            ..recovered.clone()
+        };
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_reaction)
+            .expect_err("dormant capability must block recovered reaction retry")
+            .contains("did not negotiate reactions-v1"));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_reactions_negotiated_for_test(session_id, true);
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&recovered_reaction),
+            Ok(session_id)
+        );
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_reactions_negotiated_for_test(session_id, false);
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_reaction)
+            .is_err());
     }
 
     #[tokio::test]

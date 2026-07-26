@@ -19,9 +19,9 @@ use super::protocol::{
     canonical_mutation_request_hash, parse_rich_message_event_metadata,
     parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MutationId,
-    ReactionEvent, ReactionSnapshot, RichMessageBody, RoomId, SessionOpenNegotiation,
-    DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY,
-    PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
+    ReactionAck, ReactionEvent, ReactionRequest, ReactionSnapshot, RichMessageBody, RoomId,
+    SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
+    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -101,6 +101,7 @@ enum PendingCommandResult {
         command: PendingUserCommand,
         target: String,
     },
+    Reaction(ReactionRequest),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1013,6 +1014,108 @@ pub fn send_uncertain_durable_room_text<T: ChatLinkTransport>(
         Some(session_id),
     ));
     events
+}
+
+pub fn send_uncertain_durable_reaction<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    intent: &OutboundMutationIntent,
+) -> Vec<ChatClientEvent> {
+    let error = |message: &str| {
+        vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: message.into(),
+        }]
+    };
+    if !state.durable_mutations_negotiated(session_id) || !state.reactions_negotiated(session_id) {
+        return error("durable OMENchat reactions were not negotiated for this live session");
+    }
+    if intent.op != ChatOp::RoomReaction
+        || intent.state != OutboundMutationState::SentUncertain
+        || intent.expires_at <= current_unix_secs()
+    {
+        return error("durable OMENchat reaction is not eligible for transmission");
+    }
+    if state.client_instance_id != Some(intent.client_instance_id) {
+        return error("durable OMENchat reaction belongs to a different client instance");
+    }
+    let Some(session) = client.session(session_id) else {
+        return error("OMENchat live session is not available");
+    };
+    let Some(room_id) = intent.room_id else {
+        return error("durable OMENchat reaction has no room identity");
+    };
+    if session.server.destination != intent.server_destination
+        || !session.rooms.iter().any(|room| room.room_id == room_id)
+    {
+        return error("durable OMENchat reaction belongs to a different server or room");
+    }
+    let request = match ReactionRequest::from_frame_body(&intent.body) {
+        Ok(request) => request,
+        Err(_) => return error("durable OMENchat reaction request is invalid"),
+    };
+    if !session.events.iter().any(|event| {
+        event.room_id == room_id
+            && event.event_id == request.target_event_id
+            && event.event_id <= u64::MAX.saturating_sub(1_000_000)
+            && super::model::chat_event_supports_reactions(event)
+    }) {
+        return error("durable OMENchat reaction target is no longer retained");
+    }
+    if !matches!(
+        canonical_mutation_request_hash(intent.op, intent.room_id, &intent.body),
+        Ok(request_hash) if request_hash == intent.request_hash
+    ) {
+        return error("durable OMENchat reaction hash does not match its stored request");
+    }
+    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_local_echo_session_items(session_id)
+            >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
+    {
+        state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
+        return error("OMENchat pending mutation queue is full; wait for server acceptance");
+    }
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
+    let envelope = match (DurableMutationEnvelope {
+        mutation_id: intent.mutation_id,
+        request_hash: intent.request_hash,
+        body: intent.body.clone(),
+    })
+    .into_frame_body()
+    {
+        Ok(body) => body,
+        Err(envelope_error) => {
+            return error(&format!(
+                "durable OMENchat reaction envelope is invalid: {envelope_error}"
+            ))
+        }
+    };
+    if let Some(event) = send_frame_or_error(
+        transport,
+        Frame::new(ChatOp::RoomReaction, seq, Some(room_id), envelope),
+        Some(session_id),
+    ) {
+        return vec![event];
+    }
+    state.pending_local_echoes.insert(
+        (session_id, seq),
+        PendingLocalEcho {
+            session_id,
+            room_id,
+            temp_event_id: None,
+            mutation_id: Some(intent.mutation_id),
+            command_result: Some(PendingCommandResult::Reaction(request)),
+        },
+    );
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = "reaction request sent; awaiting server result".into();
+    }
+    drain_live_events_with_state(client, state, transport, Some(session_id))
 }
 
 pub fn send_uncertain_durable_part_room<T: ChatLinkTransport>(
@@ -2340,6 +2443,9 @@ fn apply_frame_with_state(
                 }),
             }
         }
+        ChatOp::ReactionAck => {
+            apply_reaction_ack(client, state, preferred_session_id, &frame, events);
+        }
         ChatOp::MessageAck => {
             if let Some(state) = state {
                 apply_message_ack(client, state, preferred_session_id, &frame, events);
@@ -2442,6 +2548,68 @@ fn apply_frame_with_state(
             apply_upload_inline_chunk(client, state, preferred_session_id, &frame, events);
         }
         _ => {}
+    }
+}
+
+fn apply_reaction_ack(
+    client: &mut ChatClient,
+    state: Option<&mut LiveChatClientState>,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let (Some(state), Some(session_id)) = (state, preferred_session_id) else {
+        return;
+    };
+    let Some(pending) = state
+        .pending_local_echoes
+        .get(&(session_id, frame.seq))
+        .cloned()
+    else {
+        return;
+    };
+    let Some(PendingCommandResult::Reaction(expected)) = pending.command_result else {
+        return;
+    };
+    if !state.reactions_negotiated(session_id) || frame.room_id != Some(pending.room_id) {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat ignored a reaction acknowledgement outside its negotiated room"
+                .into(),
+        });
+        return;
+    }
+    let Ok(ack) = ReactionAck::from_frame_body(&frame.body) else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat ignored an invalid reaction acknowledgement".into(),
+        });
+        return;
+    };
+    if ack.target_event_id != expected.target_event_id
+        || ack.token != expected.token
+        || ack.action != expected.action
+        || state.local_user_id(session_id) != Some(ack.actor_user_id)
+    {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat ignored a mismatched reaction acknowledgement".into(),
+        });
+        return;
+    }
+    state.pending_local_echoes.remove(&(session_id, frame.seq));
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = if ack.changed {
+            "reaction accepted by server".into()
+        } else {
+            "reaction already matched the requested state".into()
+        };
+    }
+    if let Some(mutation_id) = pending.mutation_id {
+        events.push(ChatClientEvent::DurableMutationAcknowledged {
+            session_id,
+            mutation_id,
+        });
     }
 }
 
@@ -2841,6 +3009,7 @@ fn durable_command_result_match(
             },
             Some(pending.room_id),
         ),
+        PendingCommandResult::Reaction(_) => return None,
     };
     let Some(mutation_id) = pending.mutation_id else {
         return Some(Err(()));
@@ -2913,6 +3082,7 @@ fn durable_command_result_match(
                 _ => {}
             }
         }
+        PendingCommandResult::Reaction(_) => return None,
     }
     Some(Ok(mutation_id))
 }
@@ -4443,6 +4613,191 @@ mod tests {
             expires_at: i64::MAX,
             correlation_id: None,
         }
+    }
+
+    fn durable_reaction_intent(
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+    ) -> OutboundMutationIntent {
+        let body = ReactionRequest {
+            target_event_id: 9,
+            token: super::super::protocol::ReactionToken::Heart,
+            action: super::super::protocol::ReactionAction::Add,
+        }
+        .into_frame_body()
+        .expect("reaction body");
+        OutboundMutationIntent {
+            server_destination: "abcd".into(),
+            authenticated_identity_hash: vec![3; 16],
+            client_instance_id,
+            mutation_id: MutationId::new([8; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomReaction,
+                Some(1),
+                &body,
+            )
+            .expect("request hash"),
+            op: ChatOp::RoomReaction,
+            room_id: Some(1),
+            body,
+            state,
+            created_at: 10,
+            expires_at: i64::MAX,
+            correlation_id: None,
+        }
+    }
+
+    #[test]
+    fn durable_reaction_requires_both_capabilities_and_never_applies_optimistically() {
+        let client_instance_id = ClientInstanceId::new([2; 16]);
+        let (mut client, session_id) = live_test_client();
+        client
+            .session_mut(session_id)
+            .expect("session")
+            .events
+            .push(parse_event(&event_value(9, 2, "target"), "abcd".into(), 1).expect("event"));
+        assert!(client.bind_local_user_id(session_id, 7));
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        state.local_user_ids.insert(session_id, 7);
+        let intent =
+            durable_reaction_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        let mut transport = CapturedChatTransport::default();
+
+        let blocked = send_uncertain_durable_reaction(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert!(matches!(
+            blocked.as_slice(),
+            [ChatClientEvent::Error { .. }]
+        ));
+        assert!(transport.sent_frames.is_empty());
+
+        state.set_reactions_negotiated_for_test(session_id, true);
+        let sent = send_uncertain_durable_reaction(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert!(sent.is_empty());
+        assert_eq!(transport.sent_frames.len(), 1);
+        assert!(client.reactions_for_targets(session_id, 1, &[9]).is_empty());
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+    }
+
+    #[test]
+    fn durable_reaction_ack_must_match_exact_request_and_local_identity() {
+        let client_instance_id = ClientInstanceId::new([2; 16]);
+        let (mut client, session_id) = live_test_client();
+        client
+            .session_mut(session_id)
+            .expect("session")
+            .events
+            .push(parse_event(&event_value(9, 2, "target"), "abcd".into(), 1).expect("event"));
+        assert!(client.bind_local_user_id(session_id, 7));
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        state.set_reactions_negotiated_for_test(session_id, true);
+        state.local_user_ids.insert(session_id, 7);
+        let intent =
+            durable_reaction_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        let mut transport = CapturedChatTransport::default();
+        assert!(send_uncertain_durable_reaction(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        )
+        .is_empty());
+        let sent = decode_frame(&transport.sent_frames[0]).expect("sent frame");
+
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ReactionAck,
+                sent.seq,
+                Some(1),
+                ReactionAck {
+                    target_event_id: 9,
+                    actor_user_id: 8,
+                    token: super::super::protocol::ReactionToken::Heart,
+                    action: super::super::protocol::ReactionAction::Add,
+                    changed: true,
+                    reaction_event_id: Some(10),
+                }
+                .into_frame_body()
+                .expect("ack"),
+            ))
+            .expect("mismatched ack");
+        let mismatched =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(matches!(
+            mismatched.as_slice(),
+            [ChatClientEvent::Error { message, .. }] if message.contains("mismatched")
+        ));
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+
+        state.set_reactions_negotiated_for_test(session_id, false);
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ReactionAck,
+                sent.seq,
+                Some(1),
+                ReactionAck {
+                    target_event_id: 9,
+                    actor_user_id: 7,
+                    token: super::super::protocol::ReactionToken::Heart,
+                    action: super::super::protocol::ReactionAction::Add,
+                    changed: true,
+                    reaction_event_id: Some(10),
+                }
+                .into_frame_body()
+                .expect("ack"),
+            ))
+            .expect("matching ack");
+        let capability_lost =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(matches!(
+            capability_lost.as_slice(),
+            [ChatClientEvent::Error { message, .. }] if message.contains("outside its negotiated room")
+        ));
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+
+        state.set_reactions_negotiated_for_test(session_id, true);
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ReactionAck,
+                sent.seq,
+                Some(1),
+                ReactionAck {
+                    target_event_id: 9,
+                    actor_user_id: 7,
+                    token: super::super::protocol::ReactionToken::Heart,
+                    action: super::super::protocol::ReactionAction::Add,
+                    changed: true,
+                    reaction_event_id: Some(10),
+                }
+                .into_frame_body()
+                .expect("ack"),
+            ))
+            .expect("matching ack after capability restore");
+        let acknowledged =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(acknowledged.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::DurableMutationAcknowledged { mutation_id, .. }
+                if *mutation_id == intent.mutation_id
+        )));
+        assert!(!state.durable_mutation_is_pending(session_id, intent.mutation_id));
+        assert!(client.reactions_for_targets(session_id, 1, &[9]).is_empty());
     }
 
     fn durable_rich_room_text_intent(

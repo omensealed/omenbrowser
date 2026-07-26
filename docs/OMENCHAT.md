@@ -77,15 +77,19 @@ bounded per actor/target, target, room, server, and database by both items and
 retained bytes. The shared client state applies only strictly decoded,
 negotiated deltas and authoritative explicit-target snapshots, including the
 existing bounded inline/Resource history paths, and restores only reactions
-whose eligible target events remain in the bounded resident history. There are
-no reaction controls and production session-open frames still do not request
-`reactions-v1`, so mixed-version and current user-visible behavior are
-unchanged.
+whose eligible target events remain in the bounded resident history. The Iced
+timeline contains dormant fixed-token controls which additionally require both
+negotiated capabilities, a bound local user, a retained target, and current
+authoritative snapshot evidence. They persist through the bounded durable
+mutation owner before sending and never update counts optimistically.
+Production session-open frames still do not request `reactions-v1`, so the
+controls remain hidden and mixed-version/current behavior is unchanged.
 The shared presentation reducer can summarize retained rows by fixed token and
 distinct actor count. When retained reaction state is available, the
-Iced timeline displays those summaries as read-only chips and marks `you` only
-when the negotiated numeric local-user ID is among the actors. The chips are
-not buttons and cannot transmit a mutation. Counts are visible only after a
+Iced timeline displays those summaries as chips and marks `you` only
+when the negotiated numeric local-user ID is among the actors. The summary
+chips remain read-only; a separate bounded token-control row appears only when
+every dormant action gate above is satisfied. Counts are visible only after a
 validated live snapshot marks that explicit target complete. Cache restore and
 reconnect clear this non-persistent evidence without deleting bounded rows, so
 stale counts are not presented as current while reconciliation is pending. The
