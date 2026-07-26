@@ -1,0 +1,114 @@
+# Local history search checkpoint
+
+Status: bounded read-only domain slice implemented; UI integration pending  
+Release target: `v0.9.6-4`  
+Storage baseline: LXMF bounded JSON threads; OMENchat identity-scoped SQLite
+
+## Current-state findings
+
+LXMF and OMENchat do not share one durable store:
+
+- LXMF conversations are retained as bounded JSON thread files. Each thread is
+  limited to 4,096 messages/8 MiB; discovery and aggregate storage also have
+  explicit count and byte ceilings.
+- OMENchat room events are retained in the browser identity's `chat.sqlite`
+  and projected into `ChatClient` sessions. A resident session retains at most
+  1,024 events/8 MiB.
+- omenchatd has a separate SQLite database and identity. Client-local search
+  must not open, index, or depend on that server database.
+
+The canonical desktop product enables `portable-sqlite`, and both product
+manifests use the bundled SQLite source. `libsqlite3-sys 0.35.0` enables
+`SQLITE_ENABLE_FTS5`; a product-profile runtime test now creates and queries a
+temporary FTS5 table. This proves FTS5 is available in the packaged desktop
+build, but it does not by itself justify an index.
+
+## First-slice decision
+
+The first slice uses no schema or persistent index. `history_search` provides a
+project-owned, read-only reducer over already-retained `Conversation` and
+`ChatSessionView` values:
+
+- query strings: at most 256 bytes and eight text terms;
+- work: at most 8,192 examined messages/events per request;
+- output: at most 128 results;
+- every copied display field: at most 256 bytes with UTF-8-safe truncation;
+- matching: allocation-free ASCII-insensitive byte comparison;
+- ordering: newest first with deterministic public-text tie breakers;
+- visible result keys: typed ephemeral routing keys, not searchable opaque
+  network identifiers.
+
+The reducer supports public text, sender, room, inclusive date bounds,
+attachment-only filtering, source filtering, and LXMF delivery state. OMENchat
+does not fabricate a delivery state because its room-event model does not
+contain LXMF delivery evidence.
+
+The following are intentionally excluded from searchable text:
+
+- peer and server destination hashes;
+- message IDs and OMENchat resource IDs;
+- arbitrary LXMF extension fields;
+- private attachment paths;
+- idempotency, correlation, ticket, stamp, or authentication material.
+
+## UI and ownership checkpoint
+
+The reducer is not called from the Iced update or view path in this slice. UI
+activation requires one owned search task with:
+
+- one current generation; a newer query cancels or supersedes the old result;
+- at most one in-flight scan;
+- immutable bounded input snapshots created without filesystem or SQLite work
+  in `view`;
+- explicit result/error delivery through the existing task-result boundary;
+- no recurring timer, polling subscription, or background indexer;
+- an honest `scan limit reached`/`result limit reached` indicator;
+- jump actions that validate the typed result key against current retained
+  state before changing selection or scroll position.
+
+Search input should be submitted explicitly or after a bounded debounce. Every
+keystroke must not synchronously scan the maximum resident history.
+
+## FTS5 disposition
+
+FTS5 remains available but deferred. It becomes justified only if measurement
+shows the bounded resident reducer cannot meet interactive latency targets.
+Any later index must be a rebuildable, non-authoritative derivative:
+
+- never replace LXMF JSON or OMENchat `room_events` as authoritative history;
+- remain identity scoped;
+- version and validate its tokenizer/schema;
+- bound rows and bytes to the authoritative stores;
+- update transactionally with OMENchat event persistence;
+- use bounded incremental rebuild/pruning work;
+- be removable without deleting messages;
+- provide copy/rollback tests before activation.
+
+A unified persistent FTS table spanning JSON and SQLite would require a new
+index owner and reconciliation lifecycle. It is not admitted for this release
+without measurement.
+
+## Compatibility and rollback
+
+This slice changes no wire operation, capability, application protocol,
+database schema, configuration, identity path, message format, or server
+behavior. Removing `history_search` and its tests is a complete rollback.
+
+## Test matrix
+
+- LXMF public body/title/sender/attachment matching.
+- OMENchat public body/sender/room/date/attachment matching.
+- source and LXMF delivery filters.
+- opaque IDs, arbitrary fields, and private paths are not searchable.
+- query, term, scan, result, and copied-text boundaries.
+- UTF-8-safe excerpts.
+- deterministic newest-first ordering.
+- packaged SQLite compile-option and functional FTS5 probe.
+
+## Next gate
+
+Measure the maximum bounded reducer on representative resident histories.
+Then add the owned one-in-flight desktop task and a compact search surface
+without persistence or schema changes. UI activation is not complete until
+stale-result, cancellation/supersession, focus, jump, and isolated-root tests
+pass.

@@ -1094,6 +1094,40 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "portable-sqlite")]
+    #[test]
+    fn packaged_sqlite_build_exposes_working_fts5() {
+        let store = SqliteChatStore::in_memory().expect("store");
+        let enabled = store
+            .connection
+            .query_row(
+                "SELECT sqlite_compileoption_used('ENABLE_FTS5')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("compile option");
+        assert!(enabled);
+        store
+            .connection
+            .execute_batch(
+                "CREATE VIRTUAL TABLE temp.local_search_fts5_probe USING fts5(body);
+                 INSERT INTO local_search_fts5_probe(body) VALUES ('bounded search probe');",
+            )
+            .expect("create FTS5 probe");
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM local_search_fts5_probe
+                     WHERE local_search_fts5_probe MATCH 'bounded'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("FTS5 query"),
+            1
+        );
+    }
+
     #[test]
     fn room_mute_except_mentions_defaults_off_and_survives_restart() {
         let path = isolated_store_path("mute-except-mentions");

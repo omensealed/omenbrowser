@@ -542,6 +542,21 @@ typed upload completion and Resource-available events with the exact byte count
 for both clients. Reticulum Resource integrity remains enforced; raw payloads,
 resource IDs, identities, destinations, paths, and reports are deleted.
 
+Bounded local-history reducer and packaged SQLite capability:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  history_search::tests
+cargo test --locked --no-default-features --features desktop-product \
+  packaged_sqlite_build_exposes_working_fts5
+```
+
+The reducer tests use in-memory fixtures only. They enforce query, term, scan,
+result, and copied-text ceilings and prove that opaque IDs, arbitrary LXMF
+fields, and private attachment paths are not searchable. The FTS5 test creates
+only a temporary table on an in-memory bundled-SQLite connection; no user
+database or schema is touched.
+
 Current-product NomadNet page request qualification:
 
 ```bash

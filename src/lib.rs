@@ -23,6 +23,7 @@ pub mod desktop;
 pub mod diagnostics;
 pub mod directory;
 pub mod error;
+pub mod history_search;
 pub mod identity;
 pub mod input;
 pub mod interfaces;

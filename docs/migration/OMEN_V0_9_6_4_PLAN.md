@@ -1067,6 +1067,17 @@ prefixed so pre-restart evidence cannot satisfy the replacement-Link gate.
 - Incremental, cancellable, low-priority indexing with explicit queue and batch
   bounds if an index worker is required.
 
+Unit 6C begins with `docs/design/LOCAL_HISTORY_SEARCH_CHECKPOINT.md`. Current
+code confirms that LXMF JSON threads and OMENchat SQLite/session history have
+different authoritative owners. The first slice therefore adds a zero-schema,
+read-only reducer over resident bounded models rather than a second persistent
+source of truth. Query, terms, examined items, results, and copied display text
+all have hard ceilings; opaque identifiers, extension fields, and private paths
+are excluded. The packaged `portable-sqlite` profile also has a functional
+FTS5 probe, but a persistent index remains deferred until measurement justifies
+its owner/rebuild lifecycle. UI activation requires one cancellable or
+superseding owned task and may not scan history on Iced's update/view path.
+
 ### Unit 6D — safe invitations
 
 - Include server destination, room, verified server fingerprint/evidence, and
