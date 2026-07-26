@@ -534,6 +534,17 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 .style(subtle_button_style),
             "Attach file"
         ),
+        tooltip_button(
+            button(centered_toolbar_icon(ICON_SHARE))
+                .on_press(Message::OmenChat(OmenChatMessage::CopyInvitation(
+                    session.session_id,
+                )))
+                .padding(0)
+                .width(Length::Fixed(toolbar_icon_button_side()))
+                .height(Length::Fixed(toolbar_icon_button_side()))
+                .style(subtle_button_style),
+            "Copy invitation for this room"
+        ),
         text_input(&format!("Message #{}", session.active_room.name), draft)
             .size(ui_size(14))
             .padding(8)

@@ -257,3 +257,19 @@ retried.
 Focused desktop-dev tests cover the exact match, cross-session isolation,
 catalog mismatch, cancellation, and replacement paths. Micron enhanced links
 and QR generation/import remain inactive.
+
+Step 4 is now active as a synchronous desktop clipboard action in each
+OMENchat composer. It serializes the exact open-session destination, includes
+the active numeric room only when that room is joined, and includes the
+bounded server display label. It includes a Directory identity fingerprint
+only when every valid exact-destination OMENchat entry agrees; malformed or
+conflicting evidence is omitted rather than guessed. The canonical serializer
+remains the final 2 KiB/no-secret gate.
+
+Generation does not create or alter Directory evidence, trust, sessions,
+rooms, storage, protocol state, or network activity. It owns no worker, timer,
+queue, cache, or retry. The existing plain `omenchat://<destination>` form
+remains available for older clients and documentation. Focused tests cover
+canonical field selection, percent encoding, unjoined-room omission,
+conflicting-identity omission, missing-session failure, and zero state
+mutation. Enhanced Micron links and QR rendering/import remain inactive.

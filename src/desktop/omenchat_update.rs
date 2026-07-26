@@ -139,6 +139,9 @@ impl DesktopApp {
                 self.update_load_older_omenchat_history(session_id);
                 Ok(Task::none())
             }
+            Message::OmenChat(OmenChatMessage::CopyInvitation(session_id)) => {
+                Ok(self.update_copy_omenchat_invitation(session_id))
+            }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChat(OmenChatMessage::CopySessionDiagnostics(session_id)) => {
                 Ok(self.update_copy_omenchat_session_diagnostics(session_id))

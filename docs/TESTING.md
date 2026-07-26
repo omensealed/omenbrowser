@@ -4236,6 +4236,19 @@ replacement. Native live smoke must still confirm a real authenticated catalog
 and join; enhanced Micron links and QR presentation require separate tests
 before activation.
 
+Canonical clipboard generation is covered in the production profile:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  --lib omenchat_invitations
+```
+
+The tests verify joined-room and bounded-label serialization, omission of an
+unjoined room, fail-closed omission of conflicting identity evidence, missing
+session handling, and no session-state mutation. A packaged display smoke must
+still confirm the share icon writes the canonical URI to the native clipboard.
+QR rendering/import and enhanced Micron links remain outside this test claim.
+
 The desktop quick-open activation adds focused tests proving parse-only input
 does not create a session or mutate Directory state, a conflicting fingerprint
 cannot be confirmed, cancellation is explicit, and confirmation consumes the

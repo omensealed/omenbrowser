@@ -36,6 +36,8 @@ mod omenchat_commands;
 mod omenchat_desktop_state;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 mod omenchat_diagnostics;
+#[cfg(feature = "chat-client")]
+mod omenchat_invitations;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 mod omenchat_live_drain;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]

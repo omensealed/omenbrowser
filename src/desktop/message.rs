@@ -509,6 +509,7 @@ pub(in crate::desktop) enum OmenChatMessage {
         action: bool,
     },
     LoadOlderHistory(ChatSessionId),
+    CopyInvitation(ChatSessionId),
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     CopySessionDiagnostics(ChatSessionId),
     CloseSession(ChatSessionId),

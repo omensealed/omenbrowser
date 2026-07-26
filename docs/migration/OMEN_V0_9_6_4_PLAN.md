@@ -1148,6 +1148,16 @@ and enhanced Micron links and QR remain inactive. No new connection owner,
 retry, worker, timer, queue, persistence, wire, schema, capability, or
 dependency was added.
 
+The fifth slice adds canonical copy generation to the existing OMENchat
+composer. It emits only the exact session destination, a joined active room,
+the bounded server label, and an identity fingerprint when exact OMENchat
+Directory evidence is valid and unambiguous. Conflicting or malformed identity
+evidence is omitted; it is never promoted to trust. The existing serializer
+enforces the 2 KiB and no-secret contract before the current Iced clipboard
+owner receives the text. Missing sessions fail closed. No QR feature, enhanced
+Micron link, persistence, wire behavior, network action, worker, timer, queue,
+cache, retry, schema, capability, or dependency was added.
+
 ### Unit 6E — corrections and delete tombstones
 
 - Append correction and tombstone events rather than rewriting history.

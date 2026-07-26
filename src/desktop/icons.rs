@@ -19,6 +19,7 @@ pub(super) const ICON_RESTORE_BROWSER: &str = "\u{f233}";
 pub(super) const ICON_RESTORE_MESSAGES: &str = "\u{f199}";
 pub(super) const ICON_RESTORE_CHAT: &str = "\u{f075}";
 pub(super) const ICON_REPLY: &str = "\u{f086}";
+pub(super) const ICON_SHARE: &str = "\u{f1e0}";
 pub(super) const ICON_OMENCHAT_PATH: &str = "\u{f1e5}";
 pub(super) const ICON_OMENCHAT_RECONNECT: &str = "\u{f01e}";
 pub(super) const ICON_OMENCHAT_ATTACH: &str = "\u{f0c6}";
