@@ -448,16 +448,20 @@ omenchatd state.
    objects, schema-4 exports remove both schema-5 and schema-6 layers, and the
    separate schema-5 downgrade-copy command removes only revisions while
    preserving reactions. The capability remains unrequested and unaccepted.
-4. **Executor foundation complete and dormant.** The transactional store and
+4. **Server foundation complete and dormant.** The transactional store and
    durable session executor enforce author/moderator/mute policy, immutable
    originals, eight corrections plus a tombstone, soft correction and hard
    total-state ceilings, bounded audit age/count/bytes/pruning, transactional
    reaction cleanup, exact replay/conflict behavior, codec-failure rollback,
    and authoritative inline/Resource snapshots. Revision IDs are allocated
    across retained audit and current state so pruning cannot cause reuse.
-   Normal negotiation still rejects the capability. Link-scoped binding,
-   capability-filtered live fan-out, and automatic history-following snapshots
-   remain the next dormant sub-slice.
+   Link-scoped binding records revision support only when the session response
+   actually accepts it, capability-filtered live fan-out excludes legacy and
+   stale-identity Links, and capable history responses are followed by an
+   explicit-target snapshot. Exact replay returns its original acknowledgement
+   without repeating fan-out, and identity replacement or Link close clears
+   the binding. Normal negotiation still rejects the capability, so these live
+   paths remain unreachable by production clients.
 5. Add the bounded client state/cache, persistent intent kind, reducer,
    snapshots/deltas, restart reconciliation, and dormant GUI controls.
 6. Complete room-history retention/compaction so an original and all dependent
@@ -526,6 +530,32 @@ The focused result is 14 passed. The full standalone result is 425 passed and
 transactional executor and snapshot boundary; it is not Link-scoped fan-out,
 client reducer, native package, mixed-version process, or live Reticulum
 interoperability evidence.
+
+The second executor sub-slice subsequently passed:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-full \
+    message_revision -- --nocapture
+  cargo test --locked --no-default-features --features server-full
+  cargo clippy --locked --no-default-features --features server-full \
+    --all-targets -- -D warnings
+  cargo fmt --all --check
+)
+cargo check --locked --no-default-features --features desktop-product
+cargo fmt --all --check
+git diff --check
+```
+
+The focused result is 17 passed. The full standalone result is 428 passed and
+9 ignored explicit soak/hardware/upstream cases. The tests prove dormant
+Link-scoped acceptance state, same-room and identity-matched fan-out, exclusion
+of base and stale-identity Links, history-following snapshots, replay without
+repeat fan-out, and binding retirement. They inject the capable binding only
+inside isolated tests; production negotiation remains disabled. These results
+are not client reducer, native package, mixed-version process, or live
+Reticulum interoperability evidence.
 
 ## Completion gate
 

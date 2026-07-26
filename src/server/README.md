@@ -494,7 +494,9 @@ storage ceilings, incremental audit pruning, reaction cleanup, exact durable
 replay, and inline/Resource snapshots. Migration and rollback/export support
 is active, but `message-revisions-v1` remains unrequested and unaccepted:
 normal clients cannot reach the executor, and no client reducer or UI action
-exists yet.
+exists yet. Dormant Link-scoped plumbing is present for capability-filtered
+live events and history-following snapshots, but the production acceptance
+gate remains false; it does not activate the wire feature.
 The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental

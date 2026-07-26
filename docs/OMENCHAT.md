@@ -70,6 +70,9 @@ support and a bounded transactional server executor are present. The executor
 enforces authorization, revision/storage ceilings, exact replay, reaction
 cleanup, and explicit-target snapshots. The capability is not requested or
 accepted, so normal clients cannot reach it and no client action is enabled.
+Dormant Link-scoped event and history-snapshot plumbing exists behind that
+disabled acceptance gate; its presence does not advertise or activate the
+wire feature.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated

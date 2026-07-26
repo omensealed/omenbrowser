@@ -17,8 +17,9 @@ use crate::protocol::{
     MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, ReactionAck,
     ReactionRequest, ReactionSnapshot, RichMessageBody, RichMessageEventMetadata, RoomId,
     SessionAcceptNegotiation, UserId, DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY,
-    MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, PROTOCOL_NAME, REACTIONS_CAPABILITY,
-    REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG, REPLY_MENTIONS_CAPABILITY,
+    MESSAGE_REVISIONS_CAPABILITY, MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, PROTOCOL_NAME,
+    REACTIONS_CAPABILITY, REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG,
+    REPLY_MENTIONS_CAPABILITY,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -208,6 +209,7 @@ pub(crate) struct DurableMutationPeerContext<'a> {
     pub durable_notice_ack: bool,
     pub reply_mentions: bool,
     pub reactions: bool,
+    pub message_revisions: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -685,6 +687,15 @@ impl SessionEngine {
             });
             if reactions_requested && REACTIONS_SERVER_ENABLED {
                 accepted_capabilities.push(REACTIONS_CAPABILITY.into());
+            }
+            let message_revisions_requested = negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == MESSAGE_REVISIONS_CAPABILITY)
+            });
+            if message_revisions_requested && MESSAGE_REVISIONS_SERVER_ENABLED {
+                accepted_capabilities.push(MESSAGE_REVISIONS_CAPABILITY.into());
             }
             response_body = with_session_accept_negotiation(
                 response_body,
@@ -1269,6 +1280,7 @@ impl SessionEngine {
                 durable_notice_ack: true,
                 reply_mentions: false,
                 reactions: false,
+                message_revisions: false,
             },
             seq,
             room_id,
@@ -1322,13 +1334,13 @@ impl SessionEngine {
                 ChatErrorCode::DurableMutationNotNegotiated,
                 "reactions were not negotiated for this link",
             )),
-            ChatOp::RoomMessageRevision if MESSAGE_REVISIONS_SERVER_ENABLED => self
+            ChatOp::RoomMessageRevision if peers.message_revisions => self
                 .handle_durable_message_revision(peer, seq, room_id, client_instance_id, envelope),
             ChatOp::RoomMessageRevision => Ok(self.durable_error_dispatch(
                 seq,
                 room_id,
                 ChatErrorCode::DurableMutationNotNegotiated,
-                "message revisions are not enabled for this server",
+                "message revisions were not negotiated for this link",
             )),
             _ => Ok(self.durable_error_dispatch(
                 seq,
@@ -5705,6 +5717,7 @@ mod tests {
                     durable_notice_ack: true,
                     reply_mentions: true,
                     reactions: false,
+                    message_revisions: false,
                 },
                 3,
                 Some(room.room_id),
@@ -5766,6 +5779,7 @@ mod tests {
                     durable_notice_ack: true,
                     reply_mentions: true,
                     reactions: true,
+                    message_revisions: false,
                 },
                 10,
                 Some(room_id),
@@ -5812,6 +5826,7 @@ mod tests {
                     durable_notice_ack: true,
                     reply_mentions: true,
                     reactions: true,
+                    message_revisions: false,
                 },
                 11,
                 Some(room_id),
@@ -5831,6 +5846,7 @@ mod tests {
                     durable_notice_ack: true,
                     reply_mentions: true,
                     reactions: true,
+                    message_revisions: false,
                 },
                 12,
                 Some(room_id),
@@ -5859,6 +5875,7 @@ mod tests {
                     durable_notice_ack: true,
                     reply_mentions: true,
                     reactions: true,
+                    message_revisions: false,
                 },
                 13,
                 Some(room_id),
@@ -5945,6 +5962,7 @@ mod tests {
                         durable_notice_ack: true,
                         reply_mentions: true,
                         reactions: true,
+                        message_revisions: false,
                     },
                     u32::from(mutation_marker),
                     Some(room.room_id),
@@ -6017,6 +6035,7 @@ mod tests {
                     durable_notice_ack: false,
                     reply_mentions: false,
                     reactions: false,
+                    message_revisions: false,
                 },
                 3,
                 Some(room.room_id),
@@ -7131,6 +7150,7 @@ mod tests {
                     durable_notice_ack: true,
                     reply_mentions: true,
                     reactions: false,
+                    message_revisions: false,
                 },
                 31,
                 Some(room_id),
@@ -7220,6 +7240,7 @@ mod tests {
                     durable_notice_ack: true,
                     reply_mentions: true,
                     reactions: false,
+                    message_revisions: false,
                 },
                 33,
                 Some(room_id),
@@ -7282,6 +7303,7 @@ mod tests {
                     durable_notice_ack: true,
                     reply_mentions: true,
                     reactions: false,
+                    message_revisions: false,
                 },
                 35,
                 Some(room_id),
@@ -7329,6 +7351,7 @@ mod tests {
             durable_notice_ack: true,
             reply_mentions,
             reactions: false,
+            message_revisions: false,
         };
 
         let not_negotiated = engine
@@ -8743,6 +8766,7 @@ mod tests {
                         durable_notice_ack: true,
                         reply_mentions: false,
                         reactions: false,
+                        message_revisions: false,
                     },
                     110 + index as u32,
                     Some(room.room_id),
@@ -8812,6 +8836,7 @@ mod tests {
                         durable_notice_ack: true,
                         reply_mentions: false,
                         reactions: false,
+                        message_revisions: false,
                     },
                     120 + index as u32,
                     Some(room.room_id),

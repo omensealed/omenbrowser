@@ -1335,6 +1335,13 @@ pruning, revision-ID non-reuse, transaction and result-codec rollback, exact
 restart replay without repeat fan-out, hash conflict, and identical
 inline/Resource snapshot decoding. `message-revisions-v1` remains rejected by
 normal capability negotiation.
+Dormant live-plumbing tests request the capability through the real session
+path and prove the resulting production binding stays disabled. Separate
+isolated tests inject a capable binding to cover same-room, identity-matched
+fan-out; exclusion of base and stale-identity Links; join/history-following
+snapshots; exact replay without repeated fan-out; and binding retirement after
+identity replacement or Link close. Injection is test-only and does not claim
+capability activation.
 An injected migration executes one schema statement and then fails on the next.
 That test proves the partial schema is transactionally removed, the source
 marker and version 0 survive, and the backup stays readable.
@@ -4209,6 +4216,8 @@ cargo test --locked --no-default-features --features desktop-product \
   cd src/server
   cargo test --locked --no-default-features --features server-headless \
     message_revision --lib
+  cargo test --locked --no-default-features --features server-full \
+    message_revision -- --nocapture
 )
 ```
 
@@ -4216,9 +4225,11 @@ The shared tests cover exact request/action/replacement shapes, bounds,
 acknowledgement/event agreement, canonical explicit-target snapshots,
 capability dependency, and a stable durable hash. Both independent frame
 codecs preserve the same correction bytes. Client and server tests prove the
-capability remains absent from production request/accept negotiation. These
-tests do not claim schema, persistence, execution, presentation,
-mixed-version-process, or live Reticulum support.
+capability remains absent from production request/accept negotiation. The
+server-full focus also covers dormant persistence/execution plus test-injected
+Link-scoped fan-out, history snapshots, replay suppression, and retirement.
+These tests do not claim client presentation, mixed-version-process, native
+package, or live Reticulum support.
 
 ## Bounded local-history desktop search
 

@@ -1226,9 +1226,18 @@ bounded audit pruning, transactional reaction cleanup, exact restart replay
 without repeat fan-out, conflict detection, result-codec rollback, and
 authoritative inline/Resource snapshots. Audit pruning cannot reuse a revision
 ID because allocation considers both audit and current-state maxima. Production
-negotiation still refuses `message-revisions-v1`; there is no Link-scoped live
-binding/fan-out, client state, UI action, worker, timer, retry, or capability
-activation yet.
+negotiation still refuses `message-revisions-v1`.
+
+The fourth dormant slice adds Link-scoped server plumbing without activating
+the feature. A revision binding can be recorded only from an actually accepted
+session response and is cleared on authenticated-identity replacement or Link
+close. Isolated tests inject that otherwise-unreachable binding to prove that
+live events reach only same-room, identity-matched capable Links; base, legacy,
+and stale-identity Links receive no revision state. Capable join/history
+responses are followed by authoritative explicit-target snapshots, and exact
+durable replay returns the original acknowledgement without a second fan-out.
+The production acceptance constant remains false. There is still no client
+state, UI action, worker, timer, retry, or capability activation.
 
 ### Unit 6F — pins and moderation audit history
 
