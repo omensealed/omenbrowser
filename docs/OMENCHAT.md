@@ -94,6 +94,14 @@ projections and the usage ledger, preserves upload and durable-replay records,
 and leaves the event-ID high-water mark intact. No runtime configuration,
 admission path, timer, protocol capability, command, or UI invokes it yet, so
 upgrading still does not delete room history.
+The server configuration now records a typed `[history_retention]` policy. Its
+compatibility default is disabled with ceilings of 365 days, 100,000 events,
+and 256 MiB per room. Enabled zero limits are rejected, and documented hard
+maxima prevent an unbounded policy. `status` and `status --json` perform a
+read-only inspection of at most 256 room ledgers and report omitted rooms plus
+complete/incomplete/missing accounting. They do not advance accounting or
+delete data. Until admission integration is implemented, status always reports
+automatic compaction inactive even if operator intent is configured enabled.
 The desktop has a matching dormant, rebuildable revision projection outside
 immutable room history. It is bounded per room, server, and identity-scoped
 cache by rows and stable retained bytes; strict deltas and authoritative

@@ -54,6 +54,14 @@ client caches may already hold an event.
   persistent event-ID high-water mark, clears only surviving reply references,
   and updates dependency tables and usage accounting atomically. It is not
   called by event admission, startup, a timer, configuration, RPC, or the UI.
+- Typed configuration persists the policy under `[history_retention]`.
+  Defaults remain disabled with 365 days, 100,000 events, and 256 MiB per room.
+  Enabled zero limits fail closed; excessive values clamp to 3,650 days,
+  1,000,000 events, and 10 GiB.
+- Human and machine-readable status inspect at most 256 rooms through a
+  read-only connection. They distinguish complete, incomplete, and missing
+  ledgers, report omitted rooms, and never advance backfill or compact history.
+  Status explicitly reports automatic compaction as inactive.
 - The client already bounds resident history to 1,024 events / 8 MiB and
   incrementally removes orphaned reaction and revision projections. Server
   compaction does not remotely erase older client copies.
@@ -264,8 +272,11 @@ Required before enabling retention:
    and durable-replay records, never reuses event IDs, and rolls back cleanup
    and ledger changes together at every injected boundary. No production path
    calls it.
-4. Add disabled-by-default validated configuration and explicit maintenance
-   status.
+4. **Complete but inactive.** Add disabled-by-default validated configuration
+   and explicit maintenance status. The policy round-trips through typed TOML,
+   retains conservative hard maxima, and rejects enabled zero limits. Status is
+   read-only and bounded to 256 rooms. Setting `enabled = true` records operator
+   intent but does not call compaction until admission integration is complete.
 5. Integrate bounded compaction with event admission.
 6. Run server/client restart, Resource, mixed-version, and live isolated smoke
    gates.

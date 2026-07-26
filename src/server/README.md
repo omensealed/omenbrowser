@@ -546,6 +546,23 @@ updates all projections and usage accounting atomically. Upload storage,
 durable replay, and event-ID sequences are preserved. It has no configuration,
 startup/admission hook, timer, CLI, protocol capability, or UI control, so
 normal server operation continues to retain history indefinitely.
+Generated configuration includes:
+
+```toml
+[history_retention]
+enabled = false
+max_age_days = 365
+max_events_per_room = 100000
+max_bytes_per_room = 268435456
+```
+
+Enabled zero limits are rejected. Values above 3,650 days, 1,000,000 events,
+or 10 GiB are clamped to those documented maxima. `status` and `status --json`
+inspect at most 256 room usage ledgers through a read-only connection and
+report truncation plus complete/incomplete/missing accounting. They never
+advance backfill or compact history. In this checkpoint, even
+`enabled = true` only records operator intent; status reports automatic
+compaction inactive and normal event admission remains unchanged.
 The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental

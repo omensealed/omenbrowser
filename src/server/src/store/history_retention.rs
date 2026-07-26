@@ -9,6 +9,7 @@ use crate::protocol::{EventId, RoomId};
 
 pub const MAX_COMPACTED_EVENTS_PER_TRANSACTION: usize = 64;
 pub const MAX_COMPACTION_DEPENDENT_ROWS: usize = 20_000;
+pub const MAX_HISTORY_MAINTENANCE_STATUS_ROOMS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RoomHistoryCompaction {
@@ -19,6 +20,17 @@ pub struct RoomHistoryCompaction {
     pub removed_reaction_audit: usize,
     pub removed_revision_state: usize,
     pub removed_revision_audit: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RoomHistoryMaintenanceStatus {
+    pub inspected_rooms: usize,
+    pub more_rooms: bool,
+    pub complete_ledgers: usize,
+    pub incomplete_ledgers: usize,
+    pub missing_ledgers: usize,
+    pub accounted_events: u64,
+    pub accounted_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +69,81 @@ enum CompactionBoundary {
 }
 
 impl OmenchatStore {
+    pub fn room_history_maintenance_status(
+        &self,
+        max_rooms: usize,
+    ) -> ServerResult<RoomHistoryMaintenanceStatus> {
+        if max_rooms == 0 {
+            return Err(ServerError::Message(
+                "room history maintenance status requires a positive room limit".into(),
+            ));
+        }
+        let limit = max_rooms.min(MAX_HISTORY_MAINTENANCE_STATUS_ROOMS);
+        let sql_limit = i64::try_from(limit + 1)
+            .map_err(|_| ServerError::Message("room status limit does not fit SQLite".into()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT u.event_count, u.retained_bytes, u.backfill_complete
+             FROM rooms AS r
+             LEFT JOIN room_history_usage AS u ON u.room_id = r.room_id
+             ORDER BY r.room_id
+             LIMIT ?1",
+        )?;
+        let mut rows = statement.query([sql_limit])?;
+        let mut status = RoomHistoryMaintenanceStatus::default();
+        while let Some(row) = rows.next()? {
+            if status.inspected_rooms == limit {
+                status.more_rooms = true;
+                break;
+            }
+            status.inspected_rooms += 1;
+            let event_count = row.get::<_, Option<i64>>(0)?;
+            let retained_bytes = row.get::<_, Option<i64>>(1)?;
+            let complete = row.get::<_, Option<bool>>(2)?;
+            match (event_count, retained_bytes, complete) {
+                (None, None, None) => status.missing_ledgers += 1,
+                (Some(event_count), Some(retained_bytes), Some(complete)) => {
+                    let event_count = u64::try_from(event_count).map_err(|_| {
+                        ServerError::Message(
+                            "room history maintenance found a negative event count".into(),
+                        )
+                    })?;
+                    let retained_bytes = u64::try_from(retained_bytes).map_err(|_| {
+                        ServerError::Message(
+                            "room history maintenance found negative retained bytes".into(),
+                        )
+                    })?;
+                    status.accounted_events = status
+                        .accounted_events
+                        .checked_add(event_count)
+                        .ok_or_else(|| {
+                            ServerError::Message(
+                                "room history maintenance event count overflowed".into(),
+                            )
+                        })?;
+                    status.accounted_bytes = status
+                        .accounted_bytes
+                        .checked_add(retained_bytes)
+                        .ok_or_else(|| {
+                            ServerError::Message(
+                                "room history maintenance byte count overflowed".into(),
+                            )
+                        })?;
+                    if complete {
+                        status.complete_ledgers += 1;
+                    } else {
+                        status.incomplete_ledgers += 1;
+                    }
+                }
+                _ => {
+                    return Err(ServerError::Message(
+                        "room history maintenance found a partial usage row".into(),
+                    ));
+                }
+            }
+        }
+        Ok(status)
+    }
+
     pub fn compact_room_history_through(
         &self,
         room_id: RoomId,
@@ -468,6 +555,58 @@ mod tests {
         .expect("reply");
         transaction.commit().expect("commit");
         (store, room.room_id)
+    }
+
+    #[test]
+    fn maintenance_status_is_read_only_bounded_and_reports_missing_ledgers() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let tracked = store.ensure_room("tracked", None).expect("tracked room");
+        store
+            .append_event(tracked.room_id, None, message("accounted"))
+            .expect("tracked event");
+        let before = store
+            .room_history_usage(tracked.room_id)
+            .expect("usage")
+            .expect("usage row");
+
+        let status = store
+            .room_history_maintenance_status(10)
+            .expect("maintenance status");
+        assert_eq!(status.inspected_rooms, 2);
+        assert!(!status.more_rooms);
+        assert_eq!(status.complete_ledgers, 1);
+        assert_eq!(status.incomplete_ledgers, 0);
+        assert_eq!(status.missing_ledgers, 1);
+        assert_eq!(status.accounted_events, 1);
+        assert_eq!(status.accounted_bytes, before.retained_bytes);
+        assert_eq!(
+            store
+                .room_history_usage(tracked.room_id)
+                .expect("usage after status")
+                .expect("usage row after status"),
+            before
+        );
+
+        let bounded = store
+            .room_history_maintenance_status(1)
+            .expect("bounded status");
+        assert_eq!(bounded.inspected_rooms, 1);
+        assert!(bounded.more_rooms);
+        assert!(store.room_history_maintenance_status(0).is_err());
+
+        for index in 0..MAX_HISTORY_MAINTENANCE_STATUS_ROOMS {
+            store
+                .ensure_room(&format!("status-{index}"), None)
+                .expect("additional room");
+        }
+        let hard_bounded = store
+            .room_history_maintenance_status(usize::MAX)
+            .expect("hard-bounded status");
+        assert_eq!(
+            hard_bounded.inspected_rooms,
+            MAX_HISTORY_MAINTENANCE_STATUS_ROOMS
+        );
+        assert!(hard_bounded.more_rooms);
     }
 
     fn insert_dependencies(store: &OmenchatStore, room_id: RoomId) {

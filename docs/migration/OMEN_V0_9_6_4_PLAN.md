@@ -1312,6 +1312,17 @@ durable mutation replay, and persistent event-ID high-water marks remain
 independent. Injected faults prove atomic rollback. No configuration,
 admission hook, timer, capability, CLI, or UI activates this primitive.
 
+The fourth implementation slice adds typed `[history_retention]`
+configuration and bounded read-only maintenance evidence. Existing and newly
+generated configurations default to `enabled = false`, 365 days, 100,000
+events, and 256 MiB per room. Enabled zero limits fail closed; excessive values
+clamp to documented maxima of 3,650 days, 1,000,000 events, and 10 GiB.
+Human and JSON status inspect no more than 256 rooms and distinguish complete,
+incomplete, and missing usage ledgers without advancing backfill. JSON
+explicitly reports `automatic_compaction_active = false`. Recording enabled
+operator intent still does not delete history; admission integration remains a
+separate unit.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

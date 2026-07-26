@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use crate::error::{ServerError, ServerResult};
 use crate::session::SessionLimits;
+use crate::store::{OmenchatStore, RoomHistoryMaintenanceStatus};
 use crate::tui_format::human_bytes;
 use crate::{TcpClientOverride, TcpServerOverride};
 
@@ -16,6 +17,12 @@ pub const NOMADNET_PORTAL_PATH: &str = "/page/index.mu";
 pub const DEFAULT_UPLOAD_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_MAX_FILE_BYTES: u64 = 512 * 1024;
 pub const DEFAULT_PING_INTERVAL_SECONDS: u64 = 30;
+pub const DEFAULT_HISTORY_RETENTION_MAX_AGE_DAYS: u64 = 365;
+pub const DEFAULT_HISTORY_RETENTION_MAX_EVENTS_PER_ROOM: u64 = 100_000;
+pub const DEFAULT_HISTORY_RETENTION_MAX_BYTES_PER_ROOM: u64 = 256 * 1024 * 1024;
+pub const MAX_HISTORY_RETENTION_AGE_DAYS: u64 = 3_650;
+pub const MAX_HISTORY_RETENTION_EVENTS_PER_ROOM: u64 = 1_000_000;
+pub const MAX_HISTORY_RETENTION_BYTES_PER_ROOM: u64 = 10 * 1024 * 1024 * 1024;
 pub const RETICULUM_CONFIG_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const RETICULUM_CONFIG_MAX_INTERFACES: usize = 64;
 static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -29,6 +36,7 @@ struct ConfigDocument {
     limits: Option<LimitsDocument>,
     compression: Option<CompressionDocument>,
     policy: Option<PolicyDocument>,
+    history_retention: Option<HistoryRetentionDocument>,
     // Version-0 files could place supported values at the document root.
     name: Option<String>,
     operator_label: Option<String>,
@@ -102,6 +110,15 @@ struct PolicyDocument {
     allow_read_receipts: Option<bool>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HistoryRetentionDocument {
+    enabled: Option<bool>,
+    max_age_days: Option<u64>,
+    max_events_per_room: Option<u64>,
+    max_bytes_per_room: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerConfig {
     pub name: String,
@@ -118,6 +135,7 @@ pub struct ServerConfig {
     pub upload_quota_bytes: u64,
     pub upload_max_file_bytes: u64,
     pub ping_interval_seconds: u64,
+    pub history_retention: RoomHistoryRetentionConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,6 +146,25 @@ pub struct ServerLimitsConfig {
     pub large_batch_threshold_bytes: usize,
     pub rate_messages_per_minute: usize,
     pub rate_commands_per_minute: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomHistoryRetentionConfig {
+    pub enabled: bool,
+    pub max_age_days: u64,
+    pub max_events_per_room: u64,
+    pub max_bytes_per_room: u64,
+}
+
+impl Default for RoomHistoryRetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_age_days: DEFAULT_HISTORY_RETENTION_MAX_AGE_DAYS,
+            max_events_per_room: DEFAULT_HISTORY_RETENTION_MAX_EVENTS_PER_ROOM,
+            max_bytes_per_room: DEFAULT_HISTORY_RETENTION_MAX_BYTES_PER_ROOM,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,6 +245,7 @@ impl ServerConfig {
             upload_quota_bytes: DEFAULT_UPLOAD_QUOTA_BYTES,
             upload_max_file_bytes: DEFAULT_UPLOAD_MAX_FILE_BYTES,
             ping_interval_seconds: DEFAULT_PING_INTERVAL_SECONDS,
+            history_retention: RoomHistoryRetentionConfig::default(),
         }
     }
 
@@ -267,6 +305,13 @@ contact_visibility_default = "on_request"
 require_invite_for_private_rooms = true
 allow_typing_indicators = false
 allow_read_receipts = false
+
+[history_retention]
+# Disabled preserves the historical indefinite-retention behavior.
+enabled = {history_retention_enabled}
+max_age_days = {history_retention_max_age_days}
+max_events_per_room = {history_retention_max_events_per_room}
+max_bytes_per_room = {history_retention_max_bytes_per_room}
 "#,
             name = toml_string(&self.name),
             operator = toml_string(&self.operator_label),
@@ -284,6 +329,19 @@ allow_read_receipts = false
             large_batch_threshold_bytes = self.limits.large_batch_threshold_bytes,
             rate_messages_per_minute = self.limits.rate_messages_per_minute,
             rate_commands_per_minute = self.limits.rate_commands_per_minute,
+            history_retention_enabled = self.history_retention.enabled,
+            history_retention_max_age_days = self
+                .history_retention
+                .max_age_days
+                .clamp(1, MAX_HISTORY_RETENTION_AGE_DAYS),
+            history_retention_max_events_per_room = self
+                .history_retention
+                .max_events_per_room
+                .clamp(1, MAX_HISTORY_RETENTION_EVENTS_PER_ROOM),
+            history_retention_max_bytes_per_room = self
+                .history_retention
+                .max_bytes_per_room
+                .clamp(1, MAX_HISTORY_RETENTION_BYTES_PER_ROOM),
         )
     }
 
@@ -391,6 +449,23 @@ allow_read_receipts = false
             .or(document.rate_commands_per_minute)
         {
             config.limits.rate_commands_per_minute = value.min(600);
+        }
+        if let Some(retention) = document.history_retention {
+            config.history_retention.enabled = retention
+                .enabled
+                .unwrap_or(config.history_retention.enabled);
+            if let Some(value) = retention.max_age_days {
+                config.history_retention.max_age_days =
+                    value.clamp(1, MAX_HISTORY_RETENTION_AGE_DAYS);
+            }
+            if let Some(value) = retention.max_events_per_room {
+                config.history_retention.max_events_per_room =
+                    value.clamp(1, MAX_HISTORY_RETENTION_EVENTS_PER_ROOM);
+            }
+            if let Some(value) = retention.max_bytes_per_room {
+                config.history_retention.max_bytes_per_room =
+                    value.clamp(1, MAX_HISTORY_RETENTION_BYTES_PER_ROOM);
+            }
         }
         if upload_max_file_bytes.is_none()
             && config.upload_quota_bytes == DEFAULT_UPLOAD_MAX_FILE_BYTES
@@ -567,6 +642,21 @@ fn validate_fixed_document(document: &ConfigDocument) -> ServerResult<()> {
             6,
             "compression.compression_level",
         )?;
+    }
+    if let Some(retention) = &document.history_retention {
+        if retention.enabled == Some(true) {
+            for (name, value) in [
+                ("max_age_days", retention.max_age_days),
+                ("max_events_per_room", retention.max_events_per_room),
+                ("max_bytes_per_room", retention.max_bytes_per_room),
+            ] {
+                if value == Some(0) {
+                    return Err(ServerError::Message(format!(
+                        "history_retention.{name} must be positive when retention is enabled"
+                    )));
+                }
+            }
+        }
     }
     if let Some(policy) = &document.policy {
         require_fixed(policy.allow_public_rooms, true, "policy.allow_public_rooms")?;
@@ -1254,16 +1344,23 @@ fn write_reticulum_config_edit(config: &ServerConfig, bytes: &[u8]) -> ServerRes
 
 pub fn render_status(config: &ServerConfig) -> String {
     let rooms = list_rooms(config).unwrap_or_default();
-    render_status_with_room_count(config, rooms.len())
+    let mut rendered = render_status_with_room_count(config, rooms.len());
+    let maintenance = OmenchatStore::open_read_only(&config.database_path)
+        .and_then(|store| store.room_history_maintenance_status(256));
+    rendered.push_str(&render_history_maintenance_status(
+        maintenance.as_ref().ok(),
+    ));
+    rendered
 }
 
 pub fn render_status_with_room_count(config: &ServerConfig, room_count: usize) -> String {
     let reticulum_config_file = config.reticulum_config_file();
     let destination_status = render_destination_status(config);
     let portal_file_status = render_portal_file_status(config);
+    let history_retention = render_history_retention_status(&config.history_retention);
     let limits = render_limits_status(&config.limits);
     format!(
-        "name: {name}\noperator: {operator}\nmotd: {motd}\nidentity: {identity}\n{destination_status}database: {database}\nreticulum dir: {reticulum_dir}\nreticulum config: {reticulum_config}\nchat service: omenchat.{aspect} (fixed)\nportal service: nomadnetwork.node path={nomadnet_page} (fixed)\n{portal_file_status}announce interval: {announce_interval} minute(s)\nping interval: {ping_interval} second(s)\nupload quota: {upload_quota}\nupload max file: {upload_max_file}\nupload cache: {upload_cache}\nrooms: {rooms}\n{limits}",
+        "name: {name}\noperator: {operator}\nmotd: {motd}\nidentity: {identity}\n{destination_status}database: {database}\nreticulum dir: {reticulum_dir}\nreticulum config: {reticulum_config}\nchat service: omenchat.{aspect} (fixed)\nportal service: nomadnetwork.node path={nomadnet_page} (fixed)\n{portal_file_status}announce interval: {announce_interval} minute(s)\nping interval: {ping_interval} second(s)\nupload quota: {upload_quota}\nupload max file: {upload_max_file}\nupload cache: {upload_cache}\nrooms: {rooms}\n{history_retention}{limits}",
         name = config.name,
         operator = config.operator_label,
         motd = if config.motd.trim().is_empty() {
@@ -1289,6 +1386,7 @@ pub fn render_status_with_room_count(config: &ServerConfig, room_count: usize) -
         upload_max_file = human_bytes(config.upload_max_file_bytes),
         upload_cache = config.upload_cache_path().display(),
         rooms = room_count,
+        history_retention = history_retention,
         limits = limits,
     )
 }
@@ -1324,6 +1422,42 @@ fn render_limits_status(limits: &ServerLimitsConfig) -> String {
         large_batch_human = human_bytes(limits.large_batch_threshold_bytes as u64),
         rate_messages_per_minute = limits.rate_messages_per_minute,
         rate_commands_per_minute = limits.rate_commands_per_minute,
+    )
+}
+
+fn render_history_retention_status(retention: &RoomHistoryRetentionConfig) -> String {
+    format!(
+        "history retention: {state} (policy only; automatic compaction inactive)\n  max age: {max_age_days} day(s)\n  max events per room: {max_events_per_room}\n  max bytes per room: {max_bytes_per_room} ({max_bytes_human})\n",
+        state = if retention.enabled {
+            "configured, not active"
+        } else {
+            "disabled"
+        },
+        max_age_days = retention.max_age_days,
+        max_events_per_room = retention.max_events_per_room,
+        max_bytes_per_room = retention.max_bytes_per_room,
+        max_bytes_human = human_bytes(retention.max_bytes_per_room),
+    )
+}
+
+fn render_history_maintenance_status(status: Option<&RoomHistoryMaintenanceStatus>) -> String {
+    let Some(status) = status else {
+        return "history accounting: unavailable (read-only inspection failed)\n".into();
+    };
+    format!(
+        "history accounting: inspected {inspected_rooms} room(s){more}\n  complete: {complete_ledgers}; incomplete: {incomplete_ledgers}; missing: {missing_ledgers}\n  accounted: {accounted_events} event(s), {accounted_bytes} ({accounted_bytes_human})\n",
+        inspected_rooms = status.inspected_rooms,
+        more = if status.more_rooms {
+            " (more rooms not inspected)"
+        } else {
+            ""
+        },
+        complete_ledgers = status.complete_ledgers,
+        incomplete_ledgers = status.incomplete_ledgers,
+        missing_ledgers = status.missing_ledgers,
+        accounted_events = status.accounted_events,
+        accounted_bytes = status.accounted_bytes,
+        accounted_bytes_human = human_bytes(status.accounted_bytes),
     )
 }
 
@@ -1860,6 +1994,74 @@ mod tests {
             .expect_err("malformed quota must fail")
             .to_string();
         assert!(malformed.contains("upload_quota_bytes"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn history_retention_defaults_disabled_and_round_trips_bounded_policy() {
+        let root = temp_root("history-retention-config");
+        let mut config = ServerConfig::for_root(root.clone());
+        assert_eq!(
+            config.history_retention,
+            RoomHistoryRetentionConfig::default()
+        );
+        config.history_retention = RoomHistoryRetentionConfig {
+            enabled: true,
+            max_age_days: 90,
+            max_events_per_room: 25_000,
+            max_bytes_per_room: 64 * 1024 * 1024,
+        };
+        config.save().expect("save retention policy");
+
+        let loaded = ServerConfig::load_or_default(root.clone()).expect("load retention policy");
+        assert_eq!(loaded.history_retention, config.history_retention);
+        let status = render_status(&loaded);
+        assert!(status.contains("history retention: configured, not active"));
+        assert!(status.contains("automatic compaction inactive"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enabled_history_retention_rejects_zero_and_clamps_excessive_limits() {
+        let root = temp_root("history-retention-validation");
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("config.toml");
+        std::fs::write(
+            &path,
+            "[history_retention]\nenabled = true\nmax_age_days = 0\n",
+        )
+        .expect("zero policy");
+        let error = ServerConfig::load_or_default(root.clone())
+            .expect_err("enabled zero limit must fail")
+            .to_string();
+        assert!(error.contains("max_age_days must be positive"));
+
+        std::fs::write(
+            &path,
+            format!(
+                "[history_retention]\nenabled = false\nmax_age_days = {}\nmax_events_per_room = {}\nmax_bytes_per_room = {}\n",
+                MAX_HISTORY_RETENTION_AGE_DAYS + 1,
+                MAX_HISTORY_RETENTION_EVENTS_PER_ROOM + 1,
+                MAX_HISTORY_RETENTION_BYTES_PER_ROOM + 1,
+            ),
+        )
+        .expect("excessive disabled policy");
+        let loaded = ServerConfig::load_or_default(root.clone()).expect("clamped policy");
+        assert!(!loaded.history_retention.enabled);
+        assert_eq!(
+            loaded.history_retention.max_age_days,
+            MAX_HISTORY_RETENTION_AGE_DAYS
+        );
+        assert_eq!(
+            loaded.history_retention.max_events_per_room,
+            MAX_HISTORY_RETENTION_EVENTS_PER_ROOM
+        );
+        assert_eq!(
+            loaded.history_retention.max_bytes_per_room,
+            MAX_HISTORY_RETENTION_BYTES_PER_ROOM
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

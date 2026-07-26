@@ -1147,6 +1147,21 @@ fn runtime_mode_label() -> &'static str {
 fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
     let room_result = config::list_rooms(config);
     let room_count = room_result.as_ref().map(Vec::len).ok();
+    let history_accounting = store::OmenchatStore::open_read_only(&config.database_path)
+        .and_then(|store| store.room_history_maintenance_status(256))
+        .map(|status| {
+            serde_json::json!({
+                "state": "available",
+                "inspected_rooms": status.inspected_rooms,
+                "more_rooms": status.more_rooms,
+                "complete_ledgers": status.complete_ledgers,
+                "incomplete_ledgers": status.incomplete_ledgers,
+                "missing_ledgers": status.missing_ledgers,
+                "accounted_events": status.accounted_events,
+                "accounted_bytes": status.accounted_bytes,
+            })
+        })
+        .unwrap_or_else(|_| serde_json::json!({ "state": "unavailable" }));
     let public_addresses = config::render_public_addresses(config)
         .lines()
         .filter(|line| {
@@ -1198,6 +1213,14 @@ fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
         "rooms": {
             "catalog": if room_result.is_ok() { "ok" } else { "error" },
             "count": room_count,
+        },
+        "history_retention": {
+            "enabled": config.history_retention.enabled,
+            "automatic_compaction_active": false,
+            "max_age_days": config.history_retention.max_age_days,
+            "max_events_per_room": config.history_retention.max_events_per_room,
+            "max_bytes_per_room": config.history_retention.max_bytes_per_room,
+            "accounting": history_accounting,
         },
         "limits": {
             "max_message_bytes": config.limits.max_message_bytes,
@@ -1658,6 +1681,19 @@ mod tests {
         );
         assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.6");
         assert_eq!(status_value["runtime"]["mode"], runtime_mode_label());
+        assert_eq!(status_value["history_retention"]["enabled"], false);
+        assert_eq!(
+            status_value["history_retention"]["automatic_compaction_active"],
+            false
+        );
+        assert_eq!(
+            status_value["history_retention"]["accounting"]["state"],
+            "available"
+        );
+        assert_eq!(
+            status_value["history_retention"]["accounting"]["missing_ledgers"],
+            1
+        );
 
         let doctor = render_doctor_json(&config).expect("doctor json");
         let doctor_value: serde_json::Value = serde_json::from_str(&doctor).expect("valid doctor");

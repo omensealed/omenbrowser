@@ -10,7 +10,7 @@ pub mod history_retention;
 pub mod message_revisions;
 pub mod reactions;
 
-pub use history_retention::RoomHistoryCompaction;
+pub use history_retention::{RoomHistoryCompaction, RoomHistoryMaintenanceStatus};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerRoom {

@@ -4383,3 +4383,18 @@ surviving versus selected replies, upload/durable-replay preservation,
 monotonic event IDs, and rollback at every cleanup/ledger/commit boundary.
 This test does not imply that retention is enabled: no production path invokes
 the primitive.
+
+Typed policy and redacted maintenance-status coverage uses:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-full history_retention_ -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-full \
+  machine_readable_status_and_doctor_are_valid_and_redacted -- --nocapture)
+```
+
+The tests prove disabled defaults, exact round-trip, enabled zero-limit
+rejection, hard-maximum clamping, a 256-room read ceiling, truncation evidence,
+complete/incomplete/missing ledger classification, read-only behavior, and
+machine-output redaction. Automatic compaction remains inactive.
