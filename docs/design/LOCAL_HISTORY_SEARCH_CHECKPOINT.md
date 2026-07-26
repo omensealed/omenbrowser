@@ -107,8 +107,34 @@ behavior. Removing `history_search` and its tests is a complete rollback.
 
 ## Next gate
 
-Measure the maximum bounded reducer on representative resident histories.
-Then add the owned one-in-flight desktop task and a compact search surface
-without persistence or schema changes. UI activation is not complete until
-stale-result, cancellation/supersession, focus, jump, and isolated-root tests
-pass.
+An ignored deterministic measurement exercises the full 8,192-item reducer
+scan over 64 MiB of retained LXMF message text. It reports full-miss and
+128-result hit timings without imposing a hardware-specific pass/fail
+threshold:
+
+```bash
+cargo test --release --locked --no-default-features \
+  --features desktop-product \
+  history_search::tests::measure_maximum_bounded_lxmf_search \
+  -- --ignored --exact --nocapture
+```
+
+To record process resident memory as well as elapsed reducer time, first warm
+the release build and then prefix the same command with `/usr/bin/time -v`.
+Cargo/build time must not be reported as reducer latency; the test prints the
+timed reducer operations separately.
+
+On 2026-07-26, the optimized reducer scanned 8,192 messages containing exactly
+67,108,864 bytes of retained message text in approximately 133 ms for a full
+miss and 112 ms for a result-producing scan that exceeded and truncated to the
+128-result ceiling on the available Linux host. These are single observations,
+not portable thresholds. Peak RSS was not collected
+because GNU `time` was not installed (`/usr/bin/time` was absent; the usual host
+package is `time`). This evidence rejects synchronous Iced update/view
+execution and cloning the maximum resident history for each query. The search
+must run as owned, bounded blocking work against isolated store data.
+
+Next, add the owned one-in-flight store-backed blocking task and a compact
+search surface without persistence or schema changes. UI activation is not
+complete until stale-result, cancellation/supersession, focus, jump, and
+isolated-root tests pass.

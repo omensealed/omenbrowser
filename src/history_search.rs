@@ -648,6 +648,86 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "opt-in 64 MiB local-history search measurement"]
+    fn measure_maximum_bounded_lxmf_search() {
+        use std::time::Instant;
+
+        const CONVERSATION_COUNT: usize = 2;
+        const MESSAGE_TEXT_BYTES: usize = 8 * 1024;
+        let conversations = (0..CONVERSATION_COUNT)
+            .map(|conversation_id| {
+                conversation(
+                    conversation_id as u64,
+                    (0..crate::messaging::store::MESSAGE_STORE_THREAD_MAX_MESSAGES)
+                        .map(|index| {
+                            let marker = if index % 32 == 0 {
+                                " bounded-search-hit "
+                            } else {
+                                " "
+                            };
+                            let mut body = "x".repeat(MESSAGE_TEXT_BYTES - marker.len());
+                            body.push_str(marker);
+                            message(index as f64, "measurement", &body)
+                        })
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let retained_text_bytes = conversations
+            .iter()
+            .flat_map(|conversation| conversation.thread.messages.iter())
+            .map(|message| message.content.len())
+            .sum::<usize>();
+        assert_eq!(
+            conversations
+                .iter()
+                .map(|conversation| conversation.thread.messages.len())
+                .sum::<usize>(),
+            LOCAL_HISTORY_SEARCH_SCAN_MAX_ITEMS
+        );
+        assert_eq!(
+            retained_text_bytes,
+            LOCAL_HISTORY_SEARCH_SCAN_MAX_ITEMS * MESSAGE_TEXT_BYTES
+        );
+
+        let miss_started = Instant::now();
+        let miss = search_local_history(
+            conversations.iter().map(LocalHistorySearchInput::Lxmf),
+            &LocalHistorySearchQuery {
+                text: "definitely-absent-search-term".into(),
+                ..LocalHistorySearchQuery::default()
+            },
+        )
+        .expect("bounded miss");
+        let miss_elapsed = miss_started.elapsed();
+
+        let hit_started = Instant::now();
+        let hit = search_local_history(
+            conversations.iter().map(LocalHistorySearchInput::Lxmf),
+            &LocalHistorySearchQuery {
+                text: "bounded-search-hit".into(),
+                ..LocalHistorySearchQuery::default()
+            },
+        )
+        .expect("bounded hit");
+        let hit_elapsed = hit_started.elapsed();
+
+        assert_eq!(miss.scanned_items, LOCAL_HISTORY_SEARCH_SCAN_MAX_ITEMS);
+        assert!(miss.results.is_empty());
+        assert_eq!(hit.scanned_items, LOCAL_HISTORY_SEARCH_SCAN_MAX_ITEMS);
+        assert_eq!(hit.results.len(), LOCAL_HISTORY_SEARCH_RESULT_MAX_ITEMS);
+        assert!(hit.result_limit_reached);
+        println!(
+            "local_history_search_measurement retained_text_bytes={retained_text_bytes} \
+             scanned_items={} miss_micros={} capped_hit_micros={} results={}",
+            miss.scanned_items,
+            miss_elapsed.as_micros(),
+            hit_elapsed.as_micros(),
+            hit.results.len()
+        );
+    }
+
+    #[test]
     fn excerpts_preserve_utf8_and_hard_byte_bounds() {
         let conversation = conversation(
             1,

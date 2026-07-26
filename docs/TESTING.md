@@ -557,6 +557,20 @@ fields, and private attachment paths are not searchable. The FTS5 test creates
 only a temporary table on an in-memory bundled-SQLite connection; no user
 database or schema is touched.
 
+The opt-in maximum-work measurement is excluded from normal test runs because
+its deterministic fixture retains 64 MiB of message text:
+
+```bash
+cargo test --release --locked --no-default-features \
+  --features desktop-product \
+  history_search::tests::measure_maximum_bounded_lxmf_search \
+  -- --ignored --exact --nocapture
+```
+
+It prints reducer-only full-miss and capped-hit durations. It is a measurement,
+not a hardware-specific pass/fail benchmark, and it never opens an application
+root or persistent store.
+
 Current-product NomadNet page request qualification:
 
 ```bash
