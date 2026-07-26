@@ -484,6 +484,22 @@ Two-client recent-history smoke:
 bash scripts/release-omenchat-smoke.sh --multi-client
 ```
 
+Negotiated reaction qualification uses the same isolated harness and forces
+the bounded reaction snapshot through the existing Resource transport:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --reaction-smoke \
+  --multi-client \
+  --restart-server
+```
+
+The reaction option persists each mutation intent before transmission,
+deliberately discards one acknowledgement, replays the exact mutation, verifies
+the original result, tests logical no-op and removal, and requires an
+authoritative Resource snapshot. It creates isolated browser identities and
+omenchatd state; it never uses the maintainer's normal roots.
+
 Server-process restart with the same isolated server and browser roots:
 
 ```bash

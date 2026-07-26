@@ -378,7 +378,7 @@ allow_read_receipts = false
             .and_then(|value| value.large_batch_threshold_bytes)
             .or(document.large_batch_threshold_bytes)
         {
-            config.limits.large_batch_threshold_bytes = value.clamp(256, 1_048_576);
+            config.limits.large_batch_threshold_bytes = value.clamp(1, 1_048_576);
         }
         if let Some(value) = limits
             .and_then(|value| value.rate_messages_per_minute)
@@ -1801,6 +1801,22 @@ mod tests {
         assert_eq!(loaded.limits.rate_commands_per_minute, 17);
         assert_eq!(loaded.identity_path, config.identity_path);
         assert_eq!(loaded.reticulum_config_path, config.reticulum_config_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn large_batch_threshold_can_force_resource_without_changing_payload_limits() {
+        let root = temp_root("forced-resource-threshold");
+        let mut config = ServerConfig::for_root(root.clone());
+        init_files(&config).expect("init");
+        let max_message_bytes = config.limits.max_message_bytes;
+        config.limits.large_batch_threshold_bytes = 1;
+        config.save().expect("save");
+
+        let loaded = ServerConfig::load_or_default(root.clone()).expect("load");
+
+        assert_eq!(loaded.limits.large_batch_threshold_bytes, 1);
+        assert_eq!(loaded.limits.max_message_bytes, max_message_bytes);
         let _ = std::fs::remove_dir_all(root);
     }
 

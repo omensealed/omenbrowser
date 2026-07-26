@@ -16,8 +16,8 @@ use crate::protocol::{
     ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
     ReactionAck, ReactionRequest, ReactionSnapshot, RichMessageBody, RichMessageEventMetadata,
     RoomId, SessionAcceptNegotiation, UserId, DURABLE_MUTATION_CAPABILITY,
-    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_BODY_TAG,
-    REPLY_MENTIONS_CAPABILITY,
+    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY,
+    REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG, REPLY_MENTIONS_CAPABILITY,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -518,6 +518,32 @@ impl SessionEngine {
             Some(room_id),
             self.batch_body(room_id, &purpose, &values)?,
         ))
+    }
+
+    pub fn latest_reaction_snapshot_frame(
+        &self,
+        seq: u32,
+        room_id: RoomId,
+        request_op: ChatOp,
+    ) -> ServerResult<Frame> {
+        let limit = match request_op {
+            ChatOp::JoinRoom => self.limits.join_backlog_events,
+            ChatOp::HistoryRecent => self.limits.history_batch_size,
+            _ => {
+                return Err(ServerError::Message(
+                    "reaction snapshot request does not identify a recent-history boundary".into(),
+                ))
+            }
+        };
+        let mut target_event_ids = self
+            .store
+            .latest_events(room_id, limit.min(REACTION_SNAPSHOT_MAX_TARGETS))?
+            .into_iter()
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>();
+        target_event_ids.sort_unstable();
+        target_event_ids.dedup();
+        self.reaction_snapshot_frame(seq, room_id, &target_event_ids)
     }
 
     fn handle_session_open(
@@ -5257,7 +5283,13 @@ mod tests {
             .reaction_snapshot_frame(14, room_id, &[target_event_id])
             .expect("reaction snapshot");
         assert_eq!(snapshot_frame.op, ChatOp::ReactionSnapshotResource);
+        let mut transport = crate::transport::CapturedTransport::default();
+        crate::transport::send_response_frame(&engine, [0x45; 16], &snapshot_frame, &mut transport)
+            .expect("dispatch reaction snapshot resource");
+        assert_eq!(transport.frames.len(), 1);
+        assert_eq!(transport.resources.len(), 1);
         let offer = decode_resource_offer_body(&snapshot_frame.body).expect("resource offer");
+        assert_eq!(transport.resources[0].resource_id, offer.resource_id);
         let payload = engine
             .resource_payload(&offer.resource_id)
             .expect("resource lookup")

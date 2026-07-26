@@ -196,6 +196,7 @@ async fn async_main() -> anyhow::Result<()> {
             destination,
             room,
             message,
+            reaction_smoke,
             upload_file,
             fetch_upload_filename,
             fetch_upload_bytes,
@@ -212,6 +213,7 @@ async fn async_main() -> anyhow::Result<()> {
                 destination,
                 room,
                 message,
+                reaction_smoke,
                 upload_file,
                 fetch_upload_filename,
                 fetch_upload_bytes,
@@ -356,6 +358,7 @@ enum CliCommand {
         destination: String,
         room: String,
         message: String,
+        reaction_smoke: bool,
         upload_file: Option<PathBuf>,
         fetch_upload_filename: Option<String>,
         fetch_upload_bytes: Option<u64>,
@@ -421,6 +424,7 @@ struct OmenChatSmokeCommandInput {
     destination: String,
     room: String,
     message: String,
+    reaction_smoke: bool,
     upload_file: Option<PathBuf>,
     fetch_upload_filename: Option<String>,
     fetch_upload_bytes: Option<u64>,
@@ -507,6 +511,7 @@ impl CliCommand {
         let mut omenchat_smoke_destination = None;
         let mut omenchat_room = "lobby".to_string();
         let mut omenchat_message = "OMENchat smoke test from OMENbrowser_rs".to_string();
+        let mut omenchat_reaction_smoke = false;
         let mut omenchat_upload_file = None;
         let mut omenchat_fetch_upload_filename = None;
         let mut omenchat_fetch_upload_bytes = None;
@@ -591,6 +596,9 @@ impl CliCommand {
                     omenchat_message = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a message body"))?;
+                }
+                "--omenchat-reaction-smoke" => {
+                    omenchat_reaction_smoke = true;
                 }
                 "--omenchat-upload-file" | "--upload-file" => {
                     let value = args
@@ -844,6 +852,7 @@ impl CliCommand {
                 destination,
                 room: omenchat_room,
                 message: omenchat_message,
+                reaction_smoke: omenchat_reaction_smoke,
                 upload_file: omenchat_upload_file,
                 fetch_upload_filename: omenchat_fetch_upload_filename,
                 fetch_upload_bytes: omenchat_fetch_upload_bytes,
@@ -1200,6 +1209,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         destination,
         room,
         message,
+        reaction_smoke,
         upload_file,
         fetch_upload_filename,
         fetch_upload_bytes,
@@ -1453,6 +1463,43 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         "events": message_events,
     }));
 
+    let mut reaction_ok = true;
+    if joined && message_seen && reaction_smoke {
+        let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
+            .context("OMENchat reaction smoke target message was not retained")?;
+        let authenticated_identity_hash = app
+            .runtime_status
+            .active_identity
+            .as_ref()
+            .map(|identity| parse_16_byte_hex_hash(&identity.hash_hex))
+            .transpose()?
+            .context("OMENchat reaction smoke has no active identity")?;
+        let room_id = client
+            .session(session_id)
+            .map(|session| session.active_room.room_id)
+            .unwrap_or(1);
+        let (passed, reaction_stages) = run_omenchat_reaction_smoke(
+            &*app.runtime,
+            &mut runtime_events,
+            &mut client,
+            &mut live_state,
+            &mut transport,
+            OmenChatReactionSmokeOptions {
+                link_id: opened.link_id,
+                session_id,
+                room_id,
+                target_event_id,
+                server_destination: &destination,
+                identity_storage_root: &app.paths.identity_storage_root(),
+                authenticated_identity_hash,
+                wait: Duration::from_secs(response_wait_secs),
+            },
+        )
+        .await?;
+        reaction_ok = passed;
+        stages.extend(reaction_stages);
+    }
+
     let mut upload_ok = true;
     if joined && message_seen {
         if let Some(upload_file) = upload_file {
@@ -1645,11 +1692,13 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
             "status": session.status.clone(),
         })
     });
-    let outcome = joined && message_seen && upload_ok && reconnect_ok;
+    let outcome = joined && message_seen && reaction_ok && upload_ok && reconnect_ok;
     let failed_stage = if !joined {
         "join_wait"
     } else if !message_seen {
         "message_echo_wait"
+    } else if !reaction_ok {
+        "reaction_smoke"
     } else if !upload_ok {
         "upload_fetch_wait"
     } else if !reconnect_ok {
@@ -1993,6 +2042,390 @@ async fn run_omenchat_continuous_reconnect_smoke(
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+struct OmenChatReactionSmokeOptions<'a> {
+    link_id: [u8; 16],
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    room_id: u32,
+    target_event_id: u64,
+    server_destination: &'a str,
+    identity_storage_root: &'a std::path::Path,
+    authenticated_identity_hash: [u8; 16],
+    wait: Duration,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn prepare_omenchat_smoke_reaction(
+    store: &omenbrowser_rs::chat::mutation_intents::MutationIntentStore,
+    options: &OmenChatReactionSmokeOptions<'_>,
+    client_instance_id: omenbrowser_rs::chat::protocol::ClientInstanceId,
+    action: omenbrowser_rs::chat::protocol::ReactionAction,
+) -> anyhow::Result<omenbrowser_rs::chat::mutation_intents::OutboundMutationIntent> {
+    use omenbrowser_rs::chat::mutation_intents::{
+        IntentTransition, OutboundMutationState, PrepareOutboundMutation,
+    };
+    use omenbrowser_rs::chat::protocol::{ChatOp, ReactionRequest, ReactionToken};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default();
+    let body = ReactionRequest {
+        target_event_id: options.target_event_id,
+        token: ReactionToken::Heart,
+        action,
+    }
+    .into_frame_body()
+    .context("encode OMENchat smoke reaction")?;
+    let prepared = store.persist_prepared(PrepareOutboundMutation {
+        server_destination: options.server_destination,
+        authenticated_identity_hash: &options.authenticated_identity_hash,
+        client_instance_id,
+        op: ChatOp::RoomReaction,
+        room_id: Some(options.room_id),
+        body,
+        created_at: now,
+        expires_at: now.saturating_add(60 * 60),
+        correlation_id: Some("release-reaction-smoke"),
+    })?;
+    match store.transition(
+        prepared.mutation_id,
+        OutboundMutationState::Prepared,
+        OutboundMutationState::SentUncertain,
+    )? {
+        IntentTransition::Updated(intent) => Ok(intent),
+        other => anyhow::bail!("OMENchat smoke reaction transition failed: {other:?}"),
+    }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn send_omenchat_smoke_reaction(
+    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
+    client: &mut omenbrowser_rs::chat::ChatClient,
+    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &mut OmenChatSmokeTransport,
+    options: &OmenChatReactionSmokeOptions<'_>,
+    intent: &omenbrowser_rs::chat::mutation_intents::OutboundMutationIntent,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let events = omenbrowser_rs::chat::live::send_uncertain_durable_reaction(
+        client,
+        live_state,
+        transport,
+        options.session_id,
+        intent,
+    );
+    if events
+        .iter()
+        .any(|event| matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. }))
+    {
+        anyhow::bail!("OMENchat smoke reaction was rejected before transmission");
+    }
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    Ok(events.iter().map(format_chat_event).collect())
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn discard_omenchat_reaction_ack(
+    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    link_id: [u8; 16],
+    wait: Duration,
+) -> anyhow::Result<serde_json::Value> {
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, runtime_events.recv()).await {
+            Ok(Ok(RuntimeBusEvent::OmenChatLinkData(data))) if data.link_id == link_id => {
+                let frame = omenbrowser_rs::chat::codec::decode_frame(&data.frame_bytes)
+                    .context("decode deliberately discarded OMENchat reaction response")?;
+                if frame.op == omenbrowser_rs::chat::protocol::ChatOp::ReactionAck {
+                    return Ok(serde_json::json!({
+                        "stage": "reaction_lost_ack",
+                        "ok": true,
+                        "bytes": data.frame_bytes.len(),
+                        "sequence": frame.seq,
+                    }));
+                }
+            }
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
+        }
+    }
+    anyhow::bail!("OMENchat smoke did not observe the acknowledgement selected for loss")
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn run_omenchat_reaction_smoke(
+    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
+    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    client: &mut omenbrowser_rs::chat::ChatClient,
+    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &mut OmenChatSmokeTransport,
+    options: OmenChatReactionSmokeOptions<'_>,
+) -> anyhow::Result<(bool, Vec<serde_json::Value>)> {
+    use omenbrowser_rs::chat::mutation_intents::{MutationIntentStore, OutboundMutationState};
+    use omenbrowser_rs::chat::protocol::{ReactionAction, ReactionToken};
+    use omenbrowser_rs::chat::ChatClientRequest;
+
+    let mut stages = Vec::new();
+    let negotiated = live_state.durable_mutations_negotiated(options.session_id)
+        && live_state.reactions_negotiated(options.session_id);
+    stages.push(serde_json::json!({
+        "stage": "reaction_capability",
+        "ok": negotiated,
+    }));
+    let Some(client_instance_id) = live_state.client_instance_id() else {
+        return Ok((false, stages));
+    };
+    if !negotiated {
+        return Ok((false, stages));
+    }
+    let store = MutationIntentStore::open_for_identity_storage_root(options.identity_storage_root)
+        .context("open isolated OMENchat smoke mutation store")?;
+
+    let add =
+        prepare_omenchat_smoke_reaction(&store, &options, client_instance_id, ReactionAction::Add)?;
+    let sent = send_omenchat_smoke_reaction(runtime, client, live_state, transport, &options, &add)
+        .await?;
+    stages.push(serde_json::json!({
+        "stage": "reaction_add_send",
+        "ok": true,
+        "events": sent,
+    }));
+    stages
+        .push(discard_omenchat_reaction_ack(runtime_events, options.link_id, options.wait).await?);
+
+    let replayed =
+        send_omenchat_smoke_reaction(runtime, client, live_state, transport, &options, &add)
+            .await?;
+    let replay_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client
+                .session(options.session_id)
+                .is_some_and(|session| session.status == "reaction accepted by server")
+        },
+    )
+    .await;
+    let replay_acknowledged = client
+        .session(options.session_id)
+        .is_some_and(|session| session.status == "reaction accepted by server");
+    stages.push(serde_json::json!({
+        "stage": "reaction_exact_replay",
+        "ok": replay_acknowledged,
+        "send_events": replayed,
+        "events": replay_events,
+    }));
+    if replay_acknowledged {
+        let _ = store.transition(
+            add.mutation_id,
+            OutboundMutationState::SentUncertain,
+            OutboundMutationState::Acknowledged,
+        )?;
+    }
+
+    let sync_events = omenbrowser_rs::chat::live::handle_live_request(
+        client,
+        live_state,
+        transport,
+        ChatClientRequest::SyncRecent {
+            session_id: options.session_id,
+        },
+    );
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    let snapshot_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client
+                .reactions_for_targets(
+                    options.session_id,
+                    options.room_id,
+                    &[options.target_event_id],
+                )
+                .iter()
+                .any(|reaction| reaction.token == ReactionToken::Heart)
+        },
+    )
+    .await;
+    let resource_snapshot = snapshot_events.iter().any(|event| {
+        event.get("event").and_then(serde_json::Value::as_str) == Some("resource_data")
+            && omenchat_smoke_events_contain_decoded_event(
+                std::slice::from_ref(event),
+                "reaction_snapshot_applied",
+            )
+    });
+    stages.push(serde_json::json!({
+        "stage": "reaction_resource_snapshot",
+        "ok": resource_snapshot,
+        "request_events": sync_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+        "events": snapshot_events,
+    }));
+
+    let no_op =
+        prepare_omenchat_smoke_reaction(&store, &options, client_instance_id, ReactionAction::Add)?;
+    let _ = send_omenchat_smoke_reaction(runtime, client, live_state, transport, &options, &no_op)
+        .await?;
+    let no_op_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client.session(options.session_id).is_some_and(|session| {
+                session.status == "reaction already matched the requested state"
+            })
+        },
+    )
+    .await;
+    let no_op_ok = client
+        .session(options.session_id)
+        .is_some_and(|session| session.status == "reaction already matched the requested state");
+    if no_op_ok {
+        let _ = store.transition(
+            no_op.mutation_id,
+            OutboundMutationState::SentUncertain,
+            OutboundMutationState::Acknowledged,
+        )?;
+    }
+    stages.push(serde_json::json!({
+        "stage": "reaction_noop_add",
+        "ok": no_op_ok,
+        "events": no_op_events,
+    }));
+
+    let remove = prepare_omenchat_smoke_reaction(
+        &store,
+        &options,
+        client_instance_id,
+        ReactionAction::Remove,
+    )?;
+    let _ = send_omenchat_smoke_reaction(runtime, client, live_state, transport, &options, &remove)
+        .await?;
+    let remove_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client
+                .session(options.session_id)
+                .is_some_and(|session| session.status == "reaction accepted by server")
+        },
+    )
+    .await;
+    let remove_ok = client
+        .session(options.session_id)
+        .is_some_and(|session| session.status == "reaction accepted by server");
+    if remove_ok {
+        let _ = store.transition(
+            remove.mutation_id,
+            OutboundMutationState::SentUncertain,
+            OutboundMutationState::Acknowledged,
+        )?;
+    }
+    stages.push(serde_json::json!({
+        "stage": "reaction_remove",
+        "ok": remove_ok,
+        "events": remove_events,
+    }));
+
+    let remove_sync_events = omenbrowser_rs::chat::live::handle_live_request(
+        client,
+        live_state,
+        transport,
+        ChatClientRequest::SyncRecent {
+            session_id: options.session_id,
+        },
+    );
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    let remove_snapshot_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client.session(options.session_id).is_some_and(|session| {
+                session.status != "requested recent room history"
+                    && client
+                        .reactions_for_targets(
+                            options.session_id,
+                            options.room_id,
+                            &[options.target_event_id],
+                        )
+                        .iter()
+                        .all(|reaction| reaction.token != ReactionToken::Heart)
+            })
+        },
+    )
+    .await;
+    let remove_snapshot_ok = client
+        .reactions_for_targets(
+            options.session_id,
+            options.room_id,
+            &[options.target_event_id],
+        )
+        .iter()
+        .all(|reaction| reaction.token != ReactionToken::Heart);
+    stages.push(serde_json::json!({
+        "stage": "reaction_remove_snapshot",
+        "ok": remove_snapshot_ok,
+        "request_events": remove_sync_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+        "events": remove_snapshot_events,
+    }));
+
+    let recovered = store.recover_nonterminal()?;
+    let persistence_ok = recovered.is_empty();
+    stages.push(serde_json::json!({
+        "stage": "reaction_intent_persistence",
+        "ok": persistence_ok,
+        "nonterminal_count": recovered.len(),
+    }));
+    Ok((
+        replay_acknowledged
+            && resource_snapshot
+            && no_op_ok
+            && remove_ok
+            && remove_snapshot_ok
+            && persistence_ok,
+        stages,
+    ))
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn create_omenchat_reconnect_ready_file(path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
 
@@ -2156,6 +2589,30 @@ fn omenchat_session_contains_message(
                     | omenbrowser_rs::chat::ChatEventKind::System { body }
                     if body == message
             )
+        })
+    })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_session_message_event_id(
+    client: &omenbrowser_rs::chat::ChatClient,
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    message: &str,
+) -> Option<u64> {
+    client.session(session_id).and_then(|session| {
+        session.events.iter().rev().find_map(|event| {
+            if event.event_id > u64::MAX.saturating_sub(1_000_000) {
+                return None;
+            }
+            matches!(
+                &event.kind,
+                omenbrowser_rs::chat::ChatEventKind::Message { body }
+                    | omenbrowser_rs::chat::ChatEventKind::Action { body }
+                    | omenbrowser_rs::chat::ChatEventKind::Notice { body }
+                    | omenbrowser_rs::chat::ChatEventKind::System { body }
+                    if body == message
+            )
+            .then_some(event.event_id)
         })
     })
 }
@@ -5060,6 +5517,7 @@ mod tests {
             "lobby".to_string(),
             "--omenchat-message".to_string(),
             "hello smoke".to_string(),
+            "--omenchat-reaction-smoke".to_string(),
             "--path-wait".to_string(),
             "3".to_string(),
             "--tcp-client".to_string(),
@@ -5078,6 +5536,7 @@ mod tests {
                 destination: FIXTURE_DESTINATION_HASH.into(),
                 room: "lobby".into(),
                 message: "hello smoke".into(),
+                reaction_smoke: true,
                 upload_file: None,
                 fetch_upload_filename: None,
                 fetch_upload_bytes: None,

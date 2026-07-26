@@ -180,7 +180,7 @@ fn validate_resource_offer(offer: &ResourceOffer, op: ChatOp) -> anyhow::Result<
         anyhow::bail!("OMENchat resource offer id is empty or exceeds client limits");
     }
     let purpose_matches = match op {
-        ChatOp::HistoryResourceOffer => offer.purpose == "history",
+        ChatOp::HistoryResourceOffer => matches!(offer.purpose.as_str(), "history" | "recent"),
         ChatOp::UserListSnapshotResource => offer.purpose == "userlist",
         ChatOp::ReactionSnapshotResource => offer.purpose.starts_with("reactions:"),
         _ => anyhow::bail!("OMENchat operation is not a batch resource offer"),
@@ -583,6 +583,41 @@ mod tests {
 
         assert!(error.to_string().contains("purpose mismatch"));
         assert!(transport.pending_resource_offers.is_empty());
+    }
+
+    #[test]
+    fn recent_history_resource_purpose_matches_server_sync_contract() {
+        let values = vec![FrameValue::String("recent history".into())];
+        let batch = compressed_values_batch(&values).expect("resource batch");
+        let resource_id = "recent:1:fixture".to_owned();
+        let mut transport = CapturedChatTransport::default();
+        transport.insert_resource(
+            resource_id.clone(),
+            compressed_values_payload(&values).expect("resource payload"),
+        );
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::HistoryResourceOffer,
+                1,
+                Some(1),
+                resource_offer_body(&ResourceOffer {
+                    resource_id,
+                    compression: super::super::protocol::Compression::Bzip2,
+                    uncompressed_len: batch.uncompressed_len,
+                    compressed_len: batch.bytes.len() as u64,
+                    purpose: "recent".into(),
+                }),
+            ))
+            .expect("push recent offer");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("recent history resource"),
+            Some(ChatLinkEvent::ResourceBatch {
+                op: ChatOp::HistoryResourceOffer,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
     }
 
     #[test]

@@ -830,6 +830,29 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         if request_op == ChatOp::JoinRoom && reply_mentions_active {
             append_join_accept_user_id(&mut responses, self.engine.local_user_id(peer)?)?;
         }
+        let reactions_active = self.durable_sessions.get(&link_id).is_some_and(|binding| {
+            binding.identity_hash == peer.identity_hash && binding.reactions
+        });
+        if reactions_active && matches!(request_op, ChatOp::JoinRoom | ChatOp::HistoryRecent) {
+            let room_id = responses.iter().find_map(|response| {
+                matches!(
+                    response.op,
+                    ChatOp::JoinAccept
+                        | ChatOp::HistoryCurrent
+                        | ChatOp::HistoryInline
+                        | ChatOp::HistoryResourceOffer
+                )
+                .then_some(response.room_id)
+                .flatten()
+            });
+            if let Some(room_id) = room_id {
+                responses.push(self.engine.latest_reaction_snapshot_frame(
+                    request_seq,
+                    room_id,
+                    request_op,
+                )?);
+            }
+        }
         let dispatch = FrameDispatchOutcome {
             session_accepted: request_op == ChatOp::SessionOpen
                 && responses
@@ -2835,7 +2858,13 @@ mod tests {
 
     #[test]
     fn negotiated_reaction_binding_is_explicit_and_link_scoped() {
-        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                large_batch_threshold_bytes: 1,
+                ..SessionLimits::default()
+            },
+        );
         let capable_link = [0x48; 16];
         let base_link = [0x49; 16];
         let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
@@ -2905,6 +2934,45 @@ mod tests {
                 ],
             }))
         );
+
+        for link_id in [capable_link, base_link] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    2,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join frame"),
+            })
+            .expect("join response");
+        }
+        let reaction_snapshots = live
+            .transport()
+            .frames
+            .iter()
+            .filter_map(|captured| {
+                decode_frame(&captured.bytes)
+                    .ok()
+                    .filter(|frame| frame.op == ChatOp::ReactionSnapshotResource)
+                    .map(|_| captured.link_id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reaction_snapshots, vec![capable_link]);
+        assert!(live
+            .transport()
+            .resources
+            .iter()
+            .any(|resource| resource.link_id == capable_link
+                && resource.resource_id.starts_with("reactions:")));
+        assert!(!live
+            .transport()
+            .resources
+            .iter()
+            .any(|resource| resource.link_id == base_link
+                && resource.resource_id.starts_with("reactions:")));
     }
 
     #[test]

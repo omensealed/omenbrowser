@@ -1038,7 +1038,10 @@ with a valid durable request. Tests preserve fail-closed behavior for
 unsolicited acceptance, base-only/older peers, downgrade, reconnect, identity
 change, and Link retirement. No wire number, schema, limit, queue, worker,
 timer, or ordinary protocol-v1 frame changed. The isolated current/current
-two-client smoke remains the next release-qualification gate.
+two-client smoke subsequently passed with a graceful server restart and forced
+Resource snapshots. It exposed and fixed missing live snapshot attachment,
+missing `ReactionSnapshotResource` transport dispatch/release coverage, and
+the client's missing `recent` history Resource-purpose acceptance.
 
 ### Unit 6C — bounded local search
 

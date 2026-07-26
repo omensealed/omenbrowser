@@ -21,6 +21,7 @@ keep_roots=0
 multi_client=0
 restart_server=0
 continuous_client_reconnect=0
+reaction_smoke=0
 
 usage() {
   cat <<'USAGE'
@@ -53,6 +54,7 @@ Options:
   --restart-server     Gracefully restart omenchatd, reuse the first browser root, and rerun smoke
   --continuous-client-reconnect
                        Keep one browser smoke process alive while omenchatd restarts
+  --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
   --keep-roots         Leave generated browser/server roots in place
   -h, --help           Show this help
 
@@ -136,6 +138,10 @@ while [[ $# -gt 0 ]]; do
       continuous_client_reconnect=1
       shift
       ;;
+    --reaction-smoke)
+      reaction_smoke=1
+      shift
+      ;;
     --keep-roots)
       keep_roots=1
       shift
@@ -201,6 +207,9 @@ fi
 if [[ "$restart_server" -eq 1 && "$continuous_client_reconnect" -eq 1 ]]; then
   echo "--restart-server and --continuous-client-reconnect are separate cases" >&2
   exit 2
+fi
+if [[ "$reaction_smoke" -eq 1 && -z "$server_large_batch_threshold_bytes" ]]; then
+  server_large_batch_threshold_bytes=1
 fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -329,12 +338,17 @@ if [[ "$continuous_client_reconnect" -eq 1 ]]; then
     --omenchat-reconnect-wait 75
   )
 fi
+reaction_args=()
+if [[ "$reaction_smoke" -eq 1 ]]; then
+  reaction_args=(--omenchat-reaction-smoke --omenchat-response-wait 30)
+fi
 "$browser_bin" \
   --omenchat-smoke "$destination" \
   "${client_interface_args[@]}" \
   --path-wait "$path_wait" \
   --app-root "$browser_root" \
   --omenchat-message "$message" \
+  "${reaction_args[@]}" \
   "${upload_args[@]}" \
   "${continuous_args[@]}" \
   --output "$run_dir/omenchat-smoke.json" \
@@ -538,6 +552,7 @@ if [[ "$restart_server" -eq 1 ]]; then
     --path-wait "$path_wait" \
     --app-root "$browser_root" \
     --omenchat-message "${message} (after server restart)" \
+    "${reaction_args[@]}" \
     --output "$run_dir/omenchat-smoke-restart.json" \
     > "$run_dir/omenchat-smoke-restart.stdout" \
     2> "$run_dir/omenchat-smoke-restart.stderr"
@@ -580,6 +595,7 @@ if [[ "$multi_client" -eq 1 ]]; then
     --path-wait "$path_wait" \
     --app-root "$browser_root_2" \
     --omenchat-message "$second_message" \
+    "${reaction_args[@]}" \
     "${second_upload_args[@]}" \
     --output "$run_dir/omenchat-smoke-2.json" \
     > "$run_dir/omenchat-smoke-2.stdout" \
@@ -619,6 +635,7 @@ server_home: $server_home
 multi_client: $multi_client
 restart_server: $restart_server
 continuous_client_reconnect: $continuous_client_reconnect
+reaction_smoke: $reaction_smoke
 continuous_link_closed: $continuous_link_closed
 continuous_link_reopened: $continuous_link_reopened
 continuous_session_reconnected: $continuous_session_reconnected

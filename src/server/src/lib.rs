@@ -632,7 +632,7 @@ fn apply_config_limit_patch(config: &mut config::ServerConfig, patch: &ConfigSet
         config.limits.join_backlog_events = size.clamp(0, 500);
     }
     if let Some(bytes) = patch.large_batch_threshold_bytes {
-        config.limits.large_batch_threshold_bytes = bytes.clamp(256, 1_048_576);
+        config.limits.large_batch_threshold_bytes = bytes.clamp(1, 1_048_576);
     }
     if let Some(rate) = patch.rate_messages_per_minute {
         config.limits.rate_messages_per_minute = rate.min(600);

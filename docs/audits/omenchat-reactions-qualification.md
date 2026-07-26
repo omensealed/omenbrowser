@@ -108,10 +108,15 @@ Clippy, and full root/server commands are recorded in `docs/TESTING.md`.
   one separately reversible activation unit. Explicit-request, unsolicited
   acceptance, base-only peer, downgrade, and live Link-binding regressions
   pass.
-- Re-run deterministic root and standalone-server matrices after activation.
-- Run an isolated current/current two-client smoke covering add, remove,
-  semantic no-op, lost acknowledgement/exact retry, client reconnect, server
-  restart, and forced Resource snapshot.
-- Confirm ordinary traffic with a capability-absent client during that smoke.
-- Keep activation out of release artifacts if the live smoke fails; disabling
-  negotiation is the rollback and preserves additive reaction state.
+- Deterministic root and standalone-server matrices were re-run after
+  activation.
+- The isolated current/current smoke passed add, remove, semantic no-op, a
+  deliberately lost acknowledgement, exact replay, two independent clients,
+  graceful server restart, and forced Resource snapshots on 2026-07-26. Local
+  evidence was retained under
+  `/tmp/omenchat-reactions-v0964-full-fixed/omenchat-smoke-20260726T132850Z`.
+- Capability-absent behavior remains covered by the explicit link-scoped
+  negotiation regression; ordinary traffic is unchanged.
+- Continuous same-process Link replacement remains covered by the existing
+  reconnect smoke and deterministic replacement-Link replay tests; it was not
+  combined with the mutually exclusive graceful-restart mode in this run.

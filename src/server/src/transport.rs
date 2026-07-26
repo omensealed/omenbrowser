@@ -201,6 +201,7 @@ fn maybe_offer_resource<T: OmenchatTransport>(
         response.op,
         ChatOp::HistoryResourceOffer
             | ChatOp::UserListSnapshotResource
+            | ChatOp::ReactionSnapshotResource
             | ChatOp::UploadResourceOffer
     ) {
         return Ok(());
@@ -242,7 +243,9 @@ pub(crate) fn release_response_resource(
 ) -> ServerResult<()> {
     let resource_id = match response.op {
         ChatOp::UploadResourceOffer => upload_resource_id_from_offer(response),
-        ChatOp::HistoryResourceOffer | ChatOp::UserListSnapshotResource => Some(
+        ChatOp::HistoryResourceOffer
+        | ChatOp::UserListSnapshotResource
+        | ChatOp::ReactionSnapshotResource => Some(
             decode_resource_offer_body(&response.body)
                 .map_err(|error| {
                     crate::error::ServerError::Message(format!(

@@ -1,6 +1,6 @@
 # OMENchat reactions checkpoint
 
-Status: deterministic activation complete; isolated live smoke pending
+Status: activation and isolated live qualification complete
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`  
 Protocol baseline: `omenchat-v0.1`, numeric protocol version 1  
 Required base capability: `durable-mutations-v1`
@@ -456,8 +456,15 @@ open the maintainer's real browser or omenchatd data.
    identity change, reconnect, and Link retirement remain fail-closed. The
    activation changes no operation numbers, schema, retention limits, or
    ordinary protocol-v1 frames.
-9. Run a real isolated two-client add/remove/restart/Resource smoke before
-   release qualification.
+9. **Complete.** The current-product isolated smoke now exercises explicit
+   reaction negotiation, persistent intent admission, a deliberately discarded
+   acknowledgement, exact replay, logical no-op, removal, and authoritative
+   Resource snapshots. A two-client run with a graceful omenchatd restart
+   passed on 2026-07-26. The smoke exposed and fixed two integration omissions:
+   live join/recent-history responses did not append reaction snapshots, and
+   the server Resource dispatcher did not include
+   `ReactionSnapshotResource`. It also qualified the server-emitted `recent`
+   history Resource purpose used while rebuilding snapshot targets.
 
 Each unit is independently reversible and must leave both Cargo roots
 buildable. No unit adds a worker, timer, polling subscription, dependency, or

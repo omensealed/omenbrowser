@@ -2696,7 +2696,7 @@ impl AdminTui {
             }
             InputMode::EditLargeBatchThresholdBytes => {
                 let bytes = parse_limit_input(&value, "large batch threshold bytes")?;
-                self.config.limits.large_batch_threshold_bytes = bytes.clamp(256, 1_048_576);
+                self.config.limits.large_batch_threshold_bytes = bytes.clamp(1, 1_048_576);
                 self.config.save()?;
                 append_admin_log(
                     &self.config,
@@ -4484,7 +4484,7 @@ fn apply_admin_command_with_database(
         "set-large-batch-threshold-bytes" => {
             let value =
                 parse_usize_arg(&mut parts, "usage: set-large-batch-threshold-bytes <bytes>")?;
-            config.limits.large_batch_threshold_bytes = value.clamp(256, 1_048_576);
+            config.limits.large_batch_threshold_bytes = value.clamp(1, 1_048_576);
             config.save()?;
             append_admin_log(
                 config,

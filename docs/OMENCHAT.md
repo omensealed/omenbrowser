@@ -85,6 +85,12 @@ mutation owner before sending and never update counts optimistically.
 Production session-open frames request `reactions-v1` only when the persistent
 durable-mutation owner is ready. Older or capability-absent servers leave the
 controls hidden and ordinary room behavior unchanged.
+Negotiated Links now receive an explicit reaction snapshot after join and
+recent-history synchronization. The snapshot covers only the bounded history
+range represented to that client. Inline and Resource forms use the same strict
+decoder; base or legacy Links receive neither. The release smoke's one-byte
+batch threshold is an isolated way to select Resource transport earlier and
+does not change message, Resource, allocation, or retention limits.
 The shared presentation reducer can summarize retained rows by fixed token and
 distinct actor count. When retained reaction state is available, the
 Iced timeline displays those summaries as chips and marks `you` only
