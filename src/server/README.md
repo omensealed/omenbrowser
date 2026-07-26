@@ -539,13 +539,13 @@ transaction, while legacy rows advance by at most 256 per append or explicit
 maintenance call. The backfill cursor survives restart and retention remains
 disabled until accounting is complete. Accounting failure rolls back event
 insertion and sequence advancement.
-The store also contains a dormant explicit compaction primitive. It requires
-complete accounting, removes no more than 64 original events per immediate
-transaction, bounds dependent reply/reaction/revision work to 20,000 rows, and
-updates all projections and usage accounting atomically. Upload storage,
-durable replay, and event-ID sequences are preserved. It has no configuration,
-startup/admission hook, timer, CLI, protocol capability, or UI control, so
-normal server operation continues to retain history indefinitely.
+The store also contains an explicit compaction primitive. It requires complete
+accounting, removes no more than 64 original events per immediate transaction,
+bounds dependent reply/reaction/revision work to 20,000 rows, and updates all
+projections and usage accounting atomically. Upload storage, durable replay,
+and event-ID sequences are preserved. Only live event admission calls it when
+the typed policy below is enabled; there is no startup sweep, timer, RPC
+compactor, or UI deletion control.
 Generated configuration includes:
 
 ```toml
@@ -569,6 +569,23 @@ dependent projections. A sole newest event may exceed the byte ceiling.
 Incomplete accounting or saturation requiring another batch rejects the event
 and rolls back insertion and cleanup together. There is no startup sweep,
 timer, polling worker, RPC compactor, or TUI deletion action.
+
+For an upgraded room whose usage ledger needs more than one backfill batch,
+stop omenchatd and advance one 256-event metadata batch explicitly:
+
+```bash
+omenchatd database advance-history-usage \
+  --room-id 1 \
+  --confirm \
+  --home ~/.omenchatd
+```
+
+The command requires an existing current-schema database, updates only the
+selected room's usage metadata, and reports the cursor, captured target, item
+and byte totals, and completion state. Repeat it while the server remains
+stopped until `complete=true`, then inspect `status` before enabling retention.
+It never deletes or compacts room history.
+
 The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental

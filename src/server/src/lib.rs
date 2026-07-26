@@ -41,6 +41,7 @@ pub enum CliCommand {
     DatabaseExportSchemaFive(ServerOptions, DatabaseExportOptions),
     DatabaseExportSchemaSix(ServerOptions, DatabaseExportOptions),
     DatabaseExportSchemaSeven(ServerOptions, DatabaseExportOptions),
+    DatabaseAdvanceHistoryUsage(ServerOptions, DatabaseHistoryUsageOptions),
     ConfigShow(ServerOptions),
     ConfigSet(ServerOptions, ConfigSetOptions),
     RoomsList(ServerOptions),
@@ -88,6 +89,11 @@ pub struct DatabaseRestoreOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DatabaseExportOptions {
     pub destination: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseHistoryUsageOptions {
+    pub room_id: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -358,6 +364,36 @@ impl Omenchatd {
                 );
                 Ok(())
             }
+            CliCommand::DatabaseAdvanceHistoryUsage(options, history) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(crate::error::ServerError::Message(
+                        "room history usage maintenance refused: database file is missing; run `omenchatd init` only when creating a new server home"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let usage = database.advance_room_history_usage(history.room_id)?;
+                println!(
+                    "room {} history usage: events={} bytes={} cursor={} target={} complete={}",
+                    history.room_id,
+                    usage.event_count,
+                    usage.retained_bytes,
+                    usage.backfill_through_event_id,
+                    usage.backfill_target_event_id,
+                    usage.backfill_complete
+                );
+                if usage.backfill_complete {
+                    println!("History usage accounting is complete. No history was deleted.");
+                } else {
+                    println!(
+                        "One bounded accounting batch completed. Stop omenchatd and repeat this command for room {} before enabling retention.",
+                        history.room_id
+                    );
+                }
+                Ok(())
+            }
             CliCommand::ConfigShow(options) => {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
@@ -552,6 +588,7 @@ fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand 
     };
     let mut confirmed = false;
     let mut path = None;
+    let mut room_id = None;
     let mut options = ServerOptions::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -569,6 +606,21 @@ fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand 
                 ) =>
             {
                 path = args.next().map(PathBuf::from)
+            }
+            "--room-id" if command == "advance-history-usage" => {
+                let Some(value) = args.next() else {
+                    return CliCommand::Invalid(
+                        "history usage maintenance requires --room-id <positive-id>".into(),
+                    );
+                };
+                room_id = match value.parse::<u32>() {
+                    Ok(value) if value > 0 => Some(value),
+                    _ => {
+                        return CliCommand::Invalid(
+                            "history usage maintenance requires --room-id <positive-id>".into(),
+                        );
+                    }
+                };
             }
             "--home" => options.home = args.next().map(PathBuf::from),
             other => {
@@ -615,6 +667,15 @@ fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand 
         ("export-schema7-copy", None) => {
             CliCommand::Invalid("schema-7 export requires --to <new-database-path>".into())
         }
+        ("advance-history-usage", _) => match room_id {
+            Some(room_id) => CliCommand::DatabaseAdvanceHistoryUsage(
+                options,
+                DatabaseHistoryUsageOptions { room_id },
+            ),
+            None => CliCommand::Invalid(
+                "history usage maintenance requires --room-id <positive-id>".into(),
+            ),
+        },
         _ => CliCommand::Help,
     }
 }
@@ -1056,6 +1117,7 @@ fn print_help() {
     println!("  database export-schema6-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema5-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema4-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database advance-history-usage --room-id <id> --confirm [--home <path>]  # one metadata-only batch; server must be stopped");
     println!("  config show [--home <path>]");
     println!(
         "  config set [--home <path>] [--name <name>] [--operator-label <label>] [--motd <text>] [--announce-interval <minutes>]"
@@ -2352,6 +2414,158 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn cli_requires_room_and_confirmation_for_history_usage_maintenance() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "advance-history-usage".to_string(),
+                "--room-id".to_string(),
+                "7".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "advance-history-usage".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--room-id")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "advance-history-usage".to_string(),
+                "--room-id".to_string(),
+                "0".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("positive-id")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "advance-history-usage".to_string(),
+                "--room-id".to_string(),
+                "7".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-history-usage".to_string(),
+            ]),
+            CliCommand::DatabaseAdvanceHistoryUsage(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-history-usage")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseHistoryUsageOptions { room_id: 7 },
+            )
+        );
+    }
+
+    #[test]
+    fn cli_history_usage_maintenance_advances_one_bounded_batch_per_invocation() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-history-usage-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let store = crate::store::OmenchatStore::open(&config.database_path)
+            .expect("migrate current database");
+        drop(store);
+        let missing = Omenchatd
+            .run(CliCommand::DatabaseAdvanceHistoryUsage(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseHistoryUsageOptions { room_id: 99 },
+            ))
+            .expect_err("unknown room must fail")
+            .to_string();
+        assert!(missing.contains("room 99 was not found"), "{missing}");
+        let store = crate::store::OmenchatStore::open(&config.database_path)
+            .expect("reopen current database");
+        for event_id in 1..=300 {
+            store
+                .append_event(
+                    1,
+                    None,
+                    crate::store::ServerRoomEventKind::Message {
+                        body: format!("legacy-{event_id}"),
+                    },
+                )
+                .expect("seed history");
+        }
+        drop(store);
+        let fixture = rusqlite::Connection::open(&config.database_path).expect("fixture database");
+        fixture
+            .execute(
+                "UPDATE room_history_usage
+                 SET event_count = 0, retained_bytes = 0,
+                     backfill_through_event_id = 0,
+                     backfill_target_event_id = 300,
+                     backfill_complete = 0
+                 WHERE room_id = 1",
+                [],
+            )
+            .expect("reset usage fixture");
+        drop(fixture);
+
+        let command = || {
+            CliCommand::DatabaseAdvanceHistoryUsage(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseHistoryUsageOptions { room_id: 1 },
+            )
+        };
+        Omenchatd
+            .run(command())
+            .expect("first bounded maintenance batch");
+        let store =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("inspect first batch");
+        let first = store
+            .room_history_usage(1)
+            .expect("usage")
+            .expect("usage row");
+        assert_eq!(first.event_count, 256);
+        assert_eq!(first.backfill_through_event_id, 256);
+        assert!(!first.backfill_complete);
+        drop(store);
+
+        Omenchatd
+            .run(command())
+            .expect("final bounded maintenance batch");
+        let store =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("inspect final batch");
+        let complete = store
+            .room_history_usage(1)
+            .expect("usage")
+            .expect("usage row");
+        assert_eq!(complete.event_count, 300);
+        assert_eq!(complete.backfill_through_event_id, 300);
+        assert!(complete.backfill_complete);
+        assert_eq!(
+            store
+                .latest_events(1, 400)
+                .expect("preserved history")
+                .len(),
+            300
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).expect("remove isolated history usage home");
     }
 
     #[test]

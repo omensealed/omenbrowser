@@ -285,9 +285,16 @@ Required before enabling retention:
    the insertion transaction. An oversized sole newest event is retained; the
    next admission can replace it. Incomplete accounting or a ceiling requiring
    another batch rejects and rolls back the new event and all attempted cleanup.
-6. Run server/client restart, Resource, mixed-version, and live isolated smoke
-   gates.
-7. Reassess `message-revisions-v1` activation. Do not activate it merely
+6. **Complete.** Add an explicit stopped-server maintenance action for legacy
+   usage accounting. One invocation advances at most 256 rows for one positive
+   room ID, reports the durable cursor/target and totals, and never compacts or
+   deletes history. Confirmation, existing-current-schema mode, and an
+   isolated two-invocation 300-row regression keep the action bounded.
+7. **Deterministic portion complete.** File-backed restart, pagination across
+   compacted gaps, forced Resource history, and unchanged v0.6 byte fixtures
+   pass. Run the current/current and mixed-version live isolated smoke gates
+   once the release candidate is otherwise stable.
+8. Reassess `message-revisions-v1` activation. Do not activate it merely
    because schemas 7 and 8 exist.
 
 Each step must leave omenchatd independently buildable and reversible. No step

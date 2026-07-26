@@ -116,6 +116,12 @@ only the surviving ordered IDs and Resource payloads serialize only those
 events. The existing v0.6.0-1 byte fixtures remain exact; live mixed-version
 retention behavior is still a separate release qualification rather than an
 inference from these deterministic tests.
+An operator can stop omenchatd and run
+`database advance-history-usage --room-id <id> --confirm --home <path>` to
+advance one 256-event accounting batch for one room. The command requires the
+existing current schema, reports its durable cursor and target, and never
+deletes history. Repeating it until `complete=true` closes the fail-closed
+legacy-ledger admission condition without adding a startup sweep or worker.
 The desktop has a matching dormant, rebuildable revision projection outside
 immutable room history. It is bounded per room, server, and identity-scoped
 cache by rows and stable retained bytes; strict deltas and authoritative

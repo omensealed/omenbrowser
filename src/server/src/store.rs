@@ -645,6 +645,16 @@ impl OmenchatStore {
     }
 
     pub fn advance_room_history_usage(&self, room_id: RoomId) -> ServerResult<RoomHistoryUsage> {
+        let room_exists = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM rooms WHERE room_id = ?1)",
+            [room_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !room_exists {
+            return Err(crate::error::ServerError::Message(format!(
+                "room {room_id} was not found"
+            )));
+        }
         let transaction = rusqlite::Transaction::new_unchecked(
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,

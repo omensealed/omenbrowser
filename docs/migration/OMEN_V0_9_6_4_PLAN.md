@@ -1344,6 +1344,14 @@ bidirectional byte fixtures still pass unchanged. These are deterministic
 store/session/codec results; they do not replace the later live
 current/current or mixed-version process gates.
 
+The seventh implementation slice exposes the bounded ledger backfill as an
+explicit stopped-server maintenance command. One confirmed invocation targets
+one positive room ID and advances at most 256 usage rows through the existing
+single-owner administrative database worker. It requires an existing
+current-schema database, prints cursor/target/item/byte/completion evidence,
+and never invokes compaction or deletes history. A 300-event file-backed
+regression requires two invocations and preserves all 300 events.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

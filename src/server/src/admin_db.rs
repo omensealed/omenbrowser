@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::{RoomId, UserId};
-use crate::store::{OmenchatStore, ServerAdminUser, ServerRoom, ServerUser};
+use crate::store::{OmenchatStore, RoomHistoryUsage, ServerAdminUser, ServerRoom, ServerUser};
 
 const ADMIN_DATABASE_QUEUE_ITEMS: usize = 16;
 const ADMIN_DATABASE_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -182,6 +182,10 @@ impl AdminDatabase {
 
     pub fn archive_room(&self, room_id: RoomId) -> ServerResult<()> {
         self.call(move |store| store.archive_room(room_id))
+    }
+
+    pub fn advance_room_history_usage(&self, room_id: RoomId) -> ServerResult<RoomHistoryUsage> {
+        self.call(move |store| store.advance_room_history_usage(room_id))
     }
 
     pub fn request_archive_room(&self, room_id: RoomId) -> ServerResult<AdminDatabaseResponse<()>> {
