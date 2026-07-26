@@ -13,6 +13,8 @@ mod diagnostics;
 mod directory;
 mod external_browser;
 mod fonts;
+mod history_search;
+mod history_search_state;
 mod icons;
 mod identity;
 mod input;

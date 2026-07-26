@@ -13,6 +13,7 @@ enum MessageRoute {
     Clearweb,
     ExternalBrowser,
     Runtime,
+    HistorySearch,
     Shell,
     Interface,
     Plugin,
@@ -49,6 +50,8 @@ impl Message {
             Message::ExternalBrowser(_) => MessageRoute::ExternalBrowser,
 
             Message::Runtime(_) => MessageRoute::Runtime,
+
+            Message::HistorySearch(_) => MessageRoute::HistorySearch,
 
             Message::Shell(_) => MessageRoute::Shell,
 
@@ -98,6 +101,7 @@ impl DesktopApp {
             MessageRoute::Clearweb => self.dispatch_clearweb_message(message),
             MessageRoute::ExternalBrowser => self.dispatch_external_browser_message(message),
             MessageRoute::Runtime => self.dispatch_runtime_message(message),
+            MessageRoute::HistorySearch => self.dispatch_history_search_message(message),
             MessageRoute::Shell => self.dispatch_shell_message(message),
             MessageRoute::Interface => self.dispatch_interface_message(message),
             MessageRoute::Plugin => self.dispatch_plugin_message(message),
@@ -133,8 +137,9 @@ mod tests {
     use crate::app::{App, LogSeverity, LogSource};
     use crate::desktop::{
         BrowserMessage, ClearwebMessage, ConversationCompletionMessage, ConversationMessage,
-        DiagnosticsMessage, DirectoryMessage, ExternalBrowserMessage, IdentityMessage,
-        InterfaceMessage, PluginMessage, RuntimeMessage, ThemeMessage, WorkspacePaneMessage,
+        DiagnosticsMessage, DirectoryMessage, ExternalBrowserMessage, HistorySearchMessage,
+        IdentityMessage, InterfaceMessage, PluginMessage, RuntimeMessage, ThemeMessage,
+        WorkspacePaneMessage,
     };
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     use crate::desktop::{
@@ -751,6 +756,19 @@ mod tests {
         ] {
             assert_eq!(Message::Runtime(message).route(), MessageRoute::Runtime);
         }
+    }
+
+    #[test]
+    fn history_search_messages_have_one_compile_time_route() {
+        let submit = Message::HistorySearch(Box::new(HistorySearchMessage::Submit(
+            crate::history_search::LocalHistorySearchQuery::default(),
+        )));
+        assert_eq!(submit.route(), MessageRoute::HistorySearch);
+        let completed = Message::HistorySearch(Box::new(HistorySearchMessage::Completed {
+            generation: 1,
+            result: Ok(crate::history_search::LocalHistorySearchPage::default()),
+        }));
+        assert_eq!(completed.route(), MessageRoute::HistorySearch);
     }
 
     #[test]

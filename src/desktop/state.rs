@@ -2,6 +2,7 @@ use crate::app::App;
 
 use super::clearweb_state::ClearwebDesktopState;
 use super::conversation_state::ConversationDesktopState;
+use super::history_search_state::LocalHistorySearchDesktopState;
 use super::monitoring_state::DesktopMonitoringState;
 #[cfg(feature = "chat-client")]
 use super::omenchat_desktop_state::OmenChatDesktopState;
@@ -24,6 +25,7 @@ pub(in crate::desktop) struct DesktopApp {
     pub(in crate::desktop) ui: DesktopUiState,
     pub(in crate::desktop) monitoring: DesktopMonitoringState,
     pub(in crate::desktop) clearweb: ClearwebDesktopState,
+    pub(in crate::desktop) history_search: LocalHistorySearchDesktopState,
     #[cfg(feature = "chat-client")]
     pub(in crate::desktop) omenchat: OmenChatDesktopState,
 }
@@ -71,6 +73,7 @@ impl DesktopApp {
             ui: Default::default(),
             monitoring: Default::default(),
             clearweb,
+            history_search: Default::default(),
             #[cfg(feature = "chat-client")]
             omenchat,
         }

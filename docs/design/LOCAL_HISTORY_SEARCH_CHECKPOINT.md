@@ -170,7 +170,16 @@ newest-first ordering, and opaque peer/server keys remain typed routing data
 rather than searchable or presented text. A temporary-root test covers both
 stores and proves public labels/text remain separate from routing identifiers.
 
-Next, add the owned one-in-flight store-backed blocking task and a compact
-search surface without persistence or schema changes. UI activation is not
-complete until stale-result, cancellation/supersession, focus, jump, and
-isolated-root tests pass.
+The desktop now owns searches with a monotonically increasing generation, one
+active blocking scan, and one replaceable pending query. Submitting while a
+scan runs never starts another `spawn_blocking` job; only the newest queued
+query starts after the active scan completes. Superseded and stale completions
+cannot replace visible results. Shutdown invalidates the active generation and
+drops the pending query, while the already bounded filesystem/SQLite scan is
+allowed to finish without applying its result. Explicit completion and storage
+errors return through the exhaustive desktop message router. No timer,
+subscription, indexer, or recurring work was added.
+
+Next, add a compact search surface without persistence or schema changes. UI
+activation is not complete until focus, validated jump, and presentation tests
+pass.

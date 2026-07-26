@@ -110,6 +110,7 @@ impl DesktopApp {
             return Task::none();
         }
         self.app.cancel_propagation_node_refresh_for_shutdown();
+        self.history_search.cancel_for_shutdown();
         self.app.flush_pending_ui_preferences();
         self.app.flush_pending_directory_persistence();
         let runtime = self.app.runtime.clone();

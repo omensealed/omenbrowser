@@ -591,6 +591,19 @@ proves malformed JSON fails without creating recovery backups.
 The combined fixture searches both isolated stores, verifies global ordering,
 and ensures opaque routing keys never become presentation or searchable text.
 
+Desktop search ownership and exhaustive routing:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  history_search_state::tests
+cargo test --locked --no-default-features --features desktop-product \
+  history_search_messages_have_one_compile_time_route
+```
+
+The owner tests prove one active job, newest-only pending replacement,
+stale-completion rejection, and shutdown invalidation. They do not open a
+store or start a Tokio task.
+
 Current-product NomadNet page request qualification:
 
 ```bash

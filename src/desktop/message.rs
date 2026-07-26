@@ -130,6 +130,15 @@ pub(in crate::desktop) enum RuntimeMessage {
 }
 
 #[derive(Clone, Debug)]
+pub(in crate::desktop) enum HistorySearchMessage {
+    Submit(crate::history_search::LocalHistorySearchQuery),
+    Completed {
+        generation: u64,
+        result: Result<crate::history_search::LocalHistorySearchPage, String>,
+    },
+}
+
+#[derive(Clone, Debug)]
 pub(in crate::desktop) enum IdentityMessage {
     Create,
     ActivateManaged(String),
@@ -599,6 +608,7 @@ pub(in crate::desktop) enum Message {
     Clearweb(ClearwebMessage),
     ExternalBrowser(ExternalBrowserMessage),
     Runtime(RuntimeMessage),
+    HistorySearch(Box<HistorySearchMessage>),
     #[cfg(test)]
     TestUnhandledRouting,
 }
