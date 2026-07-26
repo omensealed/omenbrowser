@@ -1286,9 +1286,19 @@ per-room event-ID high-water mark. Legacy rooms seed lazily from the indexed
 maximum, avoiding a migration history scan; committed IDs remain monotonic
 after deleting newest or all retained rows, while transaction rollback may
 reuse only an uncommitted allocation. Integer exhaustion fails closed. A
-confirmation-gated schema-6 copy export removes only this metadata from a
-staged copy and preserves history, reactions, and dormant revision state.
+confirmation-gated schema-6 copy export removes the later usage ledger plus
+this sequence metadata from a staged copy and preserves history, reactions,
+and dormant revision state.
 Retention remains disabled and no production path deletes history.
+
+The second implementation slice advances omenchatd to schema 8 with a
+per-room item/byte usage ledger. Migration creates no room rows and scans no
+history. A room captures one fixed backfill target, accounts new events in the
+same immediate writer transaction, and advances legacy accounting by at most
+256 rows per append or explicit maintenance call. Cursor progress is durable;
+append-during-backfill is counted once; overflow rolls back the event and
+sequence. A confirmation-gated schema-7 copy removes only usage metadata.
+Retention and message revisions remain inactive.
 
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise

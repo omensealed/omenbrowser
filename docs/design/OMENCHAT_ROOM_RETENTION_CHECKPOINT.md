@@ -76,7 +76,10 @@ or search for a reusable hole.
 
 ## Usage ledger and bounded backfill
 
-Schema 7 should also add one ledger row per room:
+Schema 8 adds one ledger row per room. A separate version is deliberate:
+schema 7 was already a complete, runnable event-sequence boundary, and silently
+adding a table under the same version would strand an intermediate schema-7
+checkout.
 
 ```sql
 CREATE TABLE room_history_usage(
@@ -186,28 +189,29 @@ has erased prior peer copies.
 
 ## Migration and rollback
 
-Schema 7 is additive:
+Schemas 7 and 8 are additive:
 
-- create the sequence and usage tables in the existing guarded immediate
-  migration transaction;
+- create the sequence table in schema 7 and the usage table in schema 8, each
+  in the existing guarded immediate migration transaction;
 - do not scan or rewrite `room_events` during migration;
 - update recovery validation and fault boundaries;
-- extend schema-6 and schema-5 downgrade-copy commands to remove only the new
-  tables from the copy;
-- preserve the active schema-7 database and all original history;
+- provide a schema-7 copy that removes only usage metadata and a schema-6 copy
+  that removes both usage and sequence metadata;
+- preserve the active schema-8 database and all original history;
 - leave retention disabled after migration.
 
-Rolling the binary back requires exporting a confirmed schema-6 copy. The copy
-loses only sequence/usage metadata because no compaction may occur before the
-ledger and policy gates pass. Once any history has been compacted, rollback
-cannot recreate deleted history; operators must restore a pre-compaction
-backup if they require it.
+Rolling back to the immediately prior binary requires a confirmed schema-7
+copy, which loses only usage metadata. Rolling back past persistent sequences
+requires a schema-6 copy, which loses both sequence and usage metadata. No
+compaction may occur before the ledger and policy gates pass. Once any history
+has been compacted, rollback cannot recreate deleted history; operators must
+restore a pre-compaction backup if they require it.
 
 ## Test matrix
 
 Required before enabling retention:
 
-- schema 0–6 migration and schema-6 downgrade copy;
+- schema 0–7 migration and schema-7/schema-6 downgrade copies;
 - injected rollback at each new table/version/commit boundary;
 - lazy sequence seeding from legacy history;
 - concurrent writers allocate distinct increasing IDs;
@@ -238,7 +242,13 @@ Required before enabling retention:
    transaction as insertion. Concurrent writers remain monotonic; deletion of
    the newest or every retained event cannot reuse an ID; exhaustion fails
    closed. No history is deleted and retention remains disabled.
-2. Add the usage ledger and bounded resumable backfill.
+2. **Complete.** Schema 8 adds an empty per-room usage ledger without scanning
+   history. New events update stable item/byte totals in their existing
+   immediate transaction, while legacy rows advance by at most 256 per append
+   or explicit maintenance call. The cursor and target survive restart; an
+   append during incomplete backfill is counted exactly once; accounting
+   overflow rolls back the event and sequence. A guarded schema-7 copy removes
+   only usage metadata. No event is deleted and retention remains disabled.
 3. Add the atomic bounded compaction primitive and fault tests.
 4. Add disabled-by-default validated configuration and explicit maintenance
    status.
@@ -246,7 +256,7 @@ Required before enabling retention:
 6. Run server/client restart, Resource, mixed-version, and live isolated smoke
    gates.
 7. Reassess `message-revisions-v1` activation. Do not activate it merely
-   because schema 7 exists.
+   because schemas 7 and 8 exist.
 
 Each step must leave omenchatd independently buildable and reversible. No step
 adds a polling worker, recurring timer, automatic network retry, or client

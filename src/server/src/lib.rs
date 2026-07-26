@@ -40,6 +40,7 @@ pub enum CliCommand {
     DatabaseExportSchemaFour(ServerOptions, DatabaseExportOptions),
     DatabaseExportSchemaFive(ServerOptions, DatabaseExportOptions),
     DatabaseExportSchemaSix(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaSeven(ServerOptions, DatabaseExportOptions),
     ConfigShow(ServerOptions),
     ConfigSet(ServerOptions, ConfigSetOptions),
     RoomsList(ServerOptions),
@@ -340,6 +341,23 @@ impl Omenchatd {
                 );
                 Ok(())
             }
+            CliCommand::DatabaseExportSchemaSeven(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_seven_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-7 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-7 copy: {}", report.destination.display());
+                println!(
+                    "Room history usage metadata is intentionally absent; event sequences, message revisions, reactions, and ordinary history are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
             CliCommand::ConfigShow(options) => {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
@@ -544,7 +562,10 @@ fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand 
             "--to"
                 if matches!(
                     command.as_str(),
-                    "export-schema4-copy" | "export-schema5-copy" | "export-schema6-copy"
+                    "export-schema4-copy"
+                        | "export-schema5-copy"
+                        | "export-schema6-copy"
+                        | "export-schema7-copy"
                 ) =>
             {
                 path = args.next().map(PathBuf::from)
@@ -587,6 +608,12 @@ fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand 
         }
         ("export-schema6-copy", None) => {
             CliCommand::Invalid("schema-6 export requires --to <new-database-path>".into())
+        }
+        ("export-schema7-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaSeven(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema7-copy", None) => {
+            CliCommand::Invalid("schema-7 export requires --to <new-database-path>".into())
         }
         _ => CliCommand::Help,
     }
@@ -1025,6 +1052,7 @@ fn print_help() {
     println!("  doctor [--home <path>] [--json]");
     println!("  uploads repair-ledger --confirm [--home <path>]  # server must be stopped");
     println!("  database restore-migration-backup --from <path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema7-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema6-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema5-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema4-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
@@ -2238,6 +2266,48 @@ mod tests {
                 },
                 DatabaseExportOptions {
                     destination: PathBuf::from("/tmp/omenchat-schema6.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_seven_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema7-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema7.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema7-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema7-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema7.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaSeven(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema7.sqlite"),
                 }
             )
         );

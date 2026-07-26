@@ -29,6 +29,12 @@ pub struct DatabaseSchemaSixExportReport {
     pub destination: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseSchemaSevenExportReport {
+    pub source_version: i64,
+    pub destination: PathBuf,
+}
+
 pub fn restore_migration_backup(
     database: &Path,
     backup: &Path,
@@ -171,6 +177,28 @@ where
     })
 }
 
+pub fn export_schema_seven_copy(
+    database: &Path,
+    destination: &Path,
+) -> ServerResult<DatabaseSchemaSevenExportReport> {
+    export_schema_seven_copy_with_publish(database, destination, atomic_replace)
+}
+
+fn export_schema_seven_copy_with_publish<F>(
+    database: &Path,
+    destination: &Path,
+    mut publish: F,
+) -> ServerResult<DatabaseSchemaSevenExportReport>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    export_downgrade_copy_with_publish(database, destination, 7, &mut publish)?;
+    Ok(DatabaseSchemaSevenExportReport {
+        source_version: SCHEMA_VERSION,
+        destination: destination.to_path_buf(),
+    })
+}
+
 fn export_downgrade_copy_with_publish<F>(
     database: &Path,
     destination: &Path,
@@ -180,7 +208,7 @@ fn export_downgrade_copy_with_publish<F>(
 where
     F: FnMut(&Path, &Path) -> std::io::Result<()>,
 {
-    debug_assert!(matches!(target_version, 4..=6));
+    debug_assert!(matches!(target_version, 4..=7));
     let schema_label = format!("schema-{target_version}");
     validate_regular_file(database, "active database")?;
     if database == destination {
@@ -250,7 +278,10 @@ where
             &connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        transaction.execute_batch("DROP TABLE IF EXISTS room_event_sequences;")?;
+        transaction.execute_batch("DROP TABLE IF EXISTS room_history_usage;")?;
+        if target_version <= 6 {
+            transaction.execute_batch("DROP TABLE IF EXISTS room_event_sequences;")?;
+        }
         if target_version <= 5 {
             transaction.execute_batch(
                 "DROP INDEX IF EXISTS idx_room_message_revision_events_retention;
@@ -387,11 +418,22 @@ fn validate_current_database(path: &Path) -> ServerResult<()> {
             "restored database is missing schema-7 room event sequence storage".into(),
         ));
     }
+    let usage_table: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'room_history_usage'",
+        [],
+        |row| row.get(0),
+    )?;
+    if usage_table != 1 {
+        return Err(ServerError::Message(
+            "restored database is missing schema-8 room history usage storage".into(),
+        ));
+    }
     Ok(())
 }
 
 fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()> {
-    debug_assert!(matches!(target_version, 4..=6));
+    debug_assert!(matches!(target_version, 4..=7));
     let schema_label = format!("schema-{target_version}");
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -432,9 +474,9 @@ fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()>
             "{schema_label} export retained schema-6 message revision objects"
         )));
     }
-    if target_version == 6 && revision_objects != 5 {
+    if target_version >= 6 && revision_objects != 5 {
         return Err(ServerError::Message(format!(
-            "schema-6 export did not retain the complete schema-6 message revision layer; found {revision_objects} of 5 objects"
+            "{schema_label} export did not retain the complete schema-6 message revision layer; found {revision_objects} of 5 objects"
         )));
     }
     let reaction_objects: i64 = connection.query_row(
@@ -464,9 +506,25 @@ fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()>
         [],
         |row| row.get(0),
     )?;
-    if sequence_objects != 0 {
+    if target_version <= 6 && sequence_objects != 0 {
         return Err(ServerError::Message(format!(
             "{schema_label} export retained schema-7 room event sequence objects"
+        )));
+    }
+    if target_version == 7 && sequence_objects != 1 {
+        return Err(ServerError::Message(
+            "schema-7 export did not retain room event sequence storage".into(),
+        ));
+    }
+    let usage_objects: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE name = 'room_history_usage'",
+        [],
+        |row| row.get(0),
+    )?;
+    if usage_objects != 0 {
+        return Err(ServerError::Message(format!(
+            "{schema_label} export retained schema-8 room history usage objects"
         )));
     }
     Ok(())
@@ -1149,6 +1207,77 @@ mod tests {
         drop(exported);
         drop(active);
         std::fs::remove_dir_all(root).expect("remove schema-six export root");
+    }
+
+    #[test]
+    fn schema_seven_export_preserves_sequence_and_omits_usage_ledger() {
+        let (root, database, _) = setup_current_for_schema_four_export("schema7-success");
+        let destination = root.join("omenchat-schema7.sqlite");
+        let report =
+            export_schema_seven_copy(&database, &destination).expect("schema seven export");
+        assert_eq!(report.source_version, SCHEMA_VERSION);
+        assert_eq!(report.destination, destination);
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("schema seven database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("export version"),
+            7
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'room_event_sequences'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("sequence table retained"),
+            1
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE name = 'room_history_usage'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("usage table absent"),
+            0
+        );
+        for table in [
+            "room_events",
+            "room_reactions",
+            "room_reaction_events",
+            "room_message_revision_state",
+            "room_message_revision_events",
+        ] {
+            assert_eq!(
+                exported
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master
+                         WHERE type = 'table' AND name = ?1",
+                        [table],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("preserved table lookup"),
+                1,
+                "schema-7 export must preserve {table}"
+            );
+        }
+        let integrity: String = exported
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("integrity check");
+        assert_eq!(integrity, "ok");
+
+        drop(exported);
+        std::fs::remove_dir_all(root).expect("remove schema-seven export root");
     }
 
     #[test]

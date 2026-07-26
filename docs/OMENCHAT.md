@@ -45,7 +45,7 @@ five-second caches; moderation mutations and transactional stale-user pruning
 complete asynchronously through the same worker. The command-driven line
 console waits synchronously on that same bounded owner. Upload-ledger repair
 still uses its existing synchronous maintenance path.
-The current schema is recorded as SQLite `user_version = 7`. Version 2 adds an
+The current schema is recorded as SQLite `user_version = 8`. Version 2 adds an
 actor/time index for upload quota planning. Version 3 adds the
 durable-mutation replay table and creation-order index. Version 4 adds nullable
 reply-event and bounded mention-ID metadata plus a partial reply index. The
@@ -80,6 +80,13 @@ transaction. Deleting newest or all retained rows therefore cannot reuse a
 committed event ID, while a rolled-back allocation remains safely reusable.
 Integer exhaustion fails closed. Retention remains disabled and schema 7 does
 not delete history.
+Version 8 adds an initially empty per-room history usage ledger. Existing
+history is not scanned during migration. New events update stable item/byte
+totals in their existing immediate transaction, and legacy rows advance by at
+most 256 per append or explicit maintenance call. Backfill target and cursor
+survive restart, and retention remains unavailable until accounting is
+complete. Accounting failure rolls back event insertion and sequence
+advancement.
 The desktop has a matching dormant, rebuildable revision projection outside
 immutable room history. It is bounded per room, server, and identity-scoped
 cache by rows and stable retained bytes; strict deltas and authoritative
@@ -134,7 +141,7 @@ workspace currently represents LXMF conversations, not OMENchat sessions, so
 it does not display OMENchat reaction state.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
-`omenchat.sqlite.pre-v7-from-v<old>.bak`. It never overwrites an existing backup;
+`omenchat.sqlite.pre-v8-from-v<old>.bak`. It never overwrites an existing backup;
 backup failure aborts migration, and a successful backup is retained for
 operator recovery.
 Schema statements and the version update share one immediate transaction, so a
@@ -148,11 +155,16 @@ publication. The selected source remains unchanged and the prior active
 database is retained as an owner-only `pre-restore` backup. Operators must run
 `doctor` before restarting.
 
-An offline non-destructive schema-6 downgrade artifact can be created with
+An offline non-destructive schema-7 downgrade artifact can be created with
+`omenchatd database export-schema7-copy --to <new-path> --confirm --home
+<path>`. It removes only schema-8 usage metadata and preserves event sequences,
+history, reactions, and dormant revisions.
+
+A schema-6 downgrade artifact can be created with
 `omenchatd database export-schema6-copy --to <new-path> --confirm --home
-<path>`. It removes only schema-7 event sequence metadata from a private
-staged copy; history, reactions, and dormant revisions remain. An older
-schema-6 binary can then allocate from the retained maximum because no
+<path>`. It removes schema-8 usage and schema-7 event sequence metadata from a
+private staged copy; history, reactions, and dormant revisions remain. An
+older schema-6 binary can then allocate from the retained maximum because no
 compaction is active.
 
 A schema-5 downgrade artifact can be created with
@@ -163,7 +175,7 @@ artifact, use
 `omenchatd database export-schema4-copy --to <new-path> --confirm --home
 <path>`. That copy drops both schema-6 revisions and schema-5 reactions before
 moving to `user_version = 4`. Both commands require a new destination, pass
-integrity/foreign-key checks, atomically publish, and leave the active schema-7
+integrity/foreign-key checks, atomically publish, and leave the active schema-8
 database unchanged.
 
 ## Server Commands

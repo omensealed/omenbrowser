@@ -1335,6 +1335,13 @@ concurrent writers and deletion of newest/all retained rows, and fail closed
 at SQLite integer exhaustion. The confirmation-gated schema-6 export removes
 only sequence metadata while retaining ordinary history, reactions, and
 message revisions.
+Schema-8 tests migrate schema 7 without scanning history, inject failure at
+each usage-table/version/commit boundary, advance legacy accounting in
+256-event batches across restart-safe cursors, account an append during
+backfill exactly once, compare stable retained bytes to the bounded source
+rows, and roll back event/sequence changes on accounting exhaustion. The
+schema-7 copy preserves sequences and history while removing only the usage
+ledger.
 Focused dormant revision-executor tests cover author/moderator/mute policy,
 immutable originals, cross-room/non-message/deleted targets, eight corrections
 plus tombstone, reaction cleanup, soft/hard state saturation, bounded audit

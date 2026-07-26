@@ -201,8 +201,21 @@ The previous active database is retained as a unique owner-only
 files are modified. Run `doctor` before restarting. Restore is deliberately an
 offline, explicit `--confirm` operation.
 
+To prepare a separate schema-7-compatible rollback copy while retaining the
+active schema-8 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema7-copy \
+  --to ~/.omenchatd/omenchat-schema7.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes only schema-8 room-history
+usage metadata from a staged copy and preserves event sequences, message
+revisions, reactions, and ordinary history.
+
 To prepare a separate schema-6-compatible rollback copy while retaining the
-active schema-7 database, stop the server cleanly and run:
+active schema-8 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema6-copy \
@@ -210,15 +223,15 @@ omenchatd database export-schema6-copy \
   --confirm --home ~/.omenchatd
 ```
 
-The destination must not exist. The command removes only schema-7 room-event
-sequence metadata from a staged copy, sets `user_version = 6`, and validates
-integrity and foreign keys before atomic publication. Message revisions,
-reactions, ordinary history, and the active database are preserved. Retention
-is not active, so exporting the sequence metadata cannot conceal prior
-compaction.
+The destination must not exist. The command removes schema-8 usage and
+schema-7 room-event sequence metadata from a staged copy, sets
+`user_version = 6`, and validates integrity and foreign keys before atomic
+publication. Message revisions, reactions, ordinary history, and the active
+database are preserved. Retention is not active, so exporting the accounting
+metadata cannot conceal prior compaction.
 
 To prepare a separate schema-5-compatible rollback copy while retaining the
-active schema-7 database, stop the server cleanly and run:
+active schema-8 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema5-copy \
@@ -486,7 +499,7 @@ priority survival, graceful drain, RSS/FD stability, and the 32 MiB per-writer
 retention cap. The delay is a reproducible slow-disk simulation, not a benchmark
 of a particular storage device.
 
-The schema currently uses SQLite `user_version = 7`. Version 2 added the upload
+The schema currently uses SQLite `user_version = 8`. Version 2 added the upload
 ledger actor/time index used by quota planning. Version 3 adds the
 bounded-shape durable-mutation replay table, client-instance retirement table,
 and their indexes. Version 4 adds nullable reply-event and bounded mention-ID
@@ -520,6 +533,12 @@ inserts the event in one immediate transaction; rollback can reuse only an ID
 that was never committed. Deleting retained history can no longer make a
 committed event ID reusable. Room-history retention remains disabled and no
 events are deleted by this schema change.
+Version 8 adds an empty per-room history item/byte usage ledger. Migration does
+not scan history. New events are accounted in their existing immediate
+transaction, while legacy rows advance by at most 256 per append or explicit
+maintenance call. The backfill cursor survives restart and retention remains
+disabled until accounting is complete. Accounting failure rolls back event
+insertion and sequence advancement.
 The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental
@@ -534,7 +553,7 @@ transactionally. Files with
 a newer schema version are rejected without modification; run the matching or
 newer omenchatd rather than forcing the version backward.
 Migration of a non-empty older database first retains an online SQLite backup
-at `omenchat.sqlite.pre-v7-from-v<old>.bak`. The backup is owner-only on
+at `omenchat.sqlite.pre-v8-from-v<old>.bak`. The backup is owner-only on
 Unix and is never overwritten. If that path already exists or backup creation
 fails, startup aborts before changing the source database.
 Migration schema work and its version update are transactional. On failure the
@@ -543,11 +562,13 @@ and the completed pre-migration backup remains available.
 The confirmation-gated restore command described above validates and migrates
 that retained artifact through a staging database before replacement, and
 preserves the prior active database for rollback.
-The separate `export-schema6-copy` command provides a non-destructive downgrade
-artifact without sequence metadata while preserving revisions, reactions, and
-history. `export-schema5-copy` omits revision state while preserving reactions.
+The separate `export-schema7-copy` command removes only usage metadata while
+preserving event sequences and all history layers. `export-schema6-copy`
+provides a non-destructive downgrade artifact without usage or sequence
+metadata while preserving revisions, reactions, and history.
+`export-schema5-copy` omits revision state while preserving reactions.
 The deeper `export-schema4-copy` artifact omits both reactions and revisions.
-No export command edits the active schema-7 database.
+No export command edits the active schema-8 database.
 
 The SQLite store can compare its upload ledger with an identity directory and
 report missing, byte-mismatched, orphaned, and out-of-root paths without

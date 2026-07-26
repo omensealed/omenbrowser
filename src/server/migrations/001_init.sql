@@ -60,6 +60,17 @@ CREATE TABLE IF NOT EXISTS room_event_sequences (
   last_event_id INTEGER NOT NULL CHECK(last_event_id >= 0)
 );
 
+CREATE TABLE IF NOT EXISTS room_history_usage (
+  room_id INTEGER PRIMARY KEY,
+  event_count INTEGER NOT NULL CHECK(event_count >= 0),
+  retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+  backfill_through_event_id INTEGER NOT NULL CHECK(backfill_through_event_id >= 0),
+  backfill_target_event_id INTEGER NOT NULL CHECK(backfill_target_event_id >= 0),
+  backfill_complete INTEGER NOT NULL CHECK(backfill_complete IN (0, 1)),
+  last_compacted_at INTEGER,
+  CHECK(backfill_through_event_id <= backfill_target_event_id)
+);
+
 CREATE TABLE IF NOT EXISTS upload_files (
   resource_id TEXT PRIMARY KEY,
   room_id INTEGER NOT NULL,

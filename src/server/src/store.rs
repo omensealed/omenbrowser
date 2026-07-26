@@ -82,6 +82,15 @@ pub struct UploadLedgerQuotaPlan {
     pub evict_paths: Vec<std::path::PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomHistoryUsage {
+    pub event_count: u64,
+    pub retained_bytes: u64,
+    pub backfill_through_event_id: EventId,
+    pub backfill_target_event_id: EventId,
+    pub backfill_complete: bool,
+}
+
 pub struct RecordUploadFile<'a> {
     pub resource_id: &'a str,
     pub room_id: RoomId,
@@ -119,7 +128,10 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 7;
+pub(crate) const SCHEMA_VERSION: i64 = 8;
+const HISTORY_USAGE_BACKFILL_BATCH: usize = 256;
+const HISTORY_EVENT_FIXED_RETAINED_BYTES: u64 = 64;
+const HISTORY_REPLY_RETAINED_BYTES: u64 = 8;
 
 impl OmenchatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -275,15 +287,42 @@ impl OmenchatStore {
         backup_source: Option<&std::path::Path>,
         migration_sql: &str,
         schema_step: F,
-        mut reaction_hook: H,
-        mut revision_hook: R,
-        mut sequence_hook: S,
+        reaction_hook: H,
+        revision_hook: R,
+        sequence_hook: S,
     ) -> ServerResult<()>
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
         H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
         R: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
         S: FnMut(EventSequenceMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_history_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            MigrationHooks {
+                reaction: reaction_hook,
+                revision: revision_hook,
+                sequence: sequence_hook,
+                usage: |_| Ok(()),
+            },
+        )
+    }
+
+    fn migrate_with_sql_step_and_history_hooks<F, H, R, S, U>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        mut hooks: MigrationHooks<H, R, S, U>,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+        R: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
+        S: FnMut(EventSequenceMigrationBoundary) -> ServerResult<()>,
+        U: FnMut(HistoryUsageMigrationBoundary) -> ServerResult<()>,
     {
         let current_version: i64 =
             self.connection
@@ -307,16 +346,19 @@ impl OmenchatStore {
         )?;
         transaction.execute_batch(migration_sql)?;
         schema_step(&transaction)?;
-        ensure_reaction_schema_with_hook(&transaction, &mut reaction_hook)?;
-        ensure_message_revision_schema_with_hook(&transaction, &mut revision_hook)?;
-        ensure_event_sequence_schema_with_hook(&transaction, &mut sequence_hook)?;
-        reaction_hook(ReactionMigrationBoundary::BeforeVersionUpdate)?;
-        revision_hook(MessageRevisionMigrationBoundary::BeforeVersionUpdate)?;
-        sequence_hook(EventSequenceMigrationBoundary::VersionUpdate)?;
+        ensure_reaction_schema_with_hook(&transaction, &mut hooks.reaction)?;
+        ensure_message_revision_schema_with_hook(&transaction, &mut hooks.revision)?;
+        ensure_event_sequence_schema_with_hook(&transaction, &mut hooks.sequence)?;
+        ensure_history_usage_schema_with_hook(&transaction, &mut hooks.usage)?;
+        (hooks.reaction)(ReactionMigrationBoundary::BeforeVersionUpdate)?;
+        (hooks.revision)(MessageRevisionMigrationBoundary::BeforeVersionUpdate)?;
+        (hooks.sequence)(EventSequenceMigrationBoundary::VersionUpdate)?;
+        (hooks.usage)(HistoryUsageMigrationBoundary::VersionUpdate)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        reaction_hook(ReactionMigrationBoundary::BeforeCommit)?;
-        revision_hook(MessageRevisionMigrationBoundary::BeforeCommit)?;
-        sequence_hook(EventSequenceMigrationBoundary::Commit)?;
+        (hooks.reaction)(ReactionMigrationBoundary::BeforeCommit)?;
+        (hooks.revision)(MessageRevisionMigrationBoundary::BeforeCommit)?;
+        (hooks.sequence)(EventSequenceMigrationBoundary::Commit)?;
+        (hooks.usage)(HistoryUsageMigrationBoundary::Commit)?;
         transaction.commit()?;
         Ok(())
     }
@@ -579,6 +621,23 @@ impl OmenchatStore {
         let event = append_event_in_transaction(&transaction, room_id, actor_user_id, kind)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    pub fn advance_room_history_usage(&self, room_id: RoomId) -> ServerResult<RoomHistoryUsage> {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let high_water = ensure_room_event_sequence(&transaction, room_id)?;
+        ensure_room_history_usage(&transaction, room_id, high_water)?;
+        advance_room_history_usage_backfill(&transaction, room_id, HISTORY_USAGE_BACKFILL_BATCH)?;
+        let usage = room_history_usage_on(&transaction, room_id)?;
+        transaction.commit()?;
+        Ok(usage)
+    }
+
+    pub fn room_history_usage(&self, room_id: RoomId) -> ServerResult<Option<RoomHistoryUsage>> {
+        room_history_usage_optional_on(&self.connection, room_id)
     }
 
     #[cfg(test)]
@@ -998,6 +1057,45 @@ enum EventSequenceMigrationBoundary {
     Commit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryUsageMigrationBoundary {
+    Table,
+    VersionUpdate,
+    Commit,
+}
+
+struct MigrationHooks<H, R, S, U> {
+    reaction: H,
+    revision: R,
+    sequence: S,
+    usage: U,
+}
+
+fn ensure_history_usage_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(HistoryUsageMigrationBoundary) -> ServerResult<()>,
+{
+    hook(HistoryUsageMigrationBoundary::Table)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_history_usage(
+           room_id INTEGER PRIMARY KEY,
+           event_count INTEGER NOT NULL CHECK(event_count >= 0),
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           backfill_through_event_id INTEGER NOT NULL
+             CHECK(backfill_through_event_id >= 0),
+           backfill_target_event_id INTEGER NOT NULL
+             CHECK(backfill_target_event_id >= 0),
+           backfill_complete INTEGER NOT NULL CHECK(backfill_complete IN (0, 1)),
+           last_compacted_at INTEGER,
+           CHECK(backfill_through_event_id <= backfill_target_event_id)
+         );",
+    )?;
+    Ok(())
+}
+
 fn ensure_event_sequence_schema_with_hook<H>(
     transaction: &rusqlite::Transaction<'_>,
     hook: &mut H,
@@ -1147,13 +1245,7 @@ fn next_event_id(
     transaction: &rusqlite::Transaction<'_>,
     room_id: RoomId,
 ) -> ServerResult<EventId> {
-    transaction.execute(
-        "INSERT INTO room_event_sequences(room_id, last_event_id)
-         SELECT ?1, COALESCE(MAX(event_id), 0)
-         FROM room_events WHERE room_id = ?1
-         ON CONFLICT(room_id) DO NOTHING",
-        [room_id],
-    )?;
+    ensure_room_event_sequence(transaction, room_id)?;
     let event_id = transaction
         .query_row(
             "UPDATE room_event_sequences
@@ -1171,6 +1263,29 @@ fn next_event_id(
         })?;
     EventId::try_from(event_id).map_err(|_| {
         crate::error::ServerError::Message(format!("room {room_id} event identifier is invalid"))
+    })
+}
+
+fn ensure_room_event_sequence(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+) -> ServerResult<EventId> {
+    transaction.execute(
+        "INSERT INTO room_event_sequences(room_id, last_event_id)
+         SELECT ?1, COALESCE(MAX(event_id), 0)
+         FROM room_events WHERE room_id = ?1
+         ON CONFLICT(room_id) DO NOTHING",
+        [room_id],
+    )?;
+    let high_water = transaction.query_row(
+        "SELECT last_event_id FROM room_event_sequences WHERE room_id = ?1",
+        [room_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    EventId::try_from(high_water).map_err(|_| {
+        crate::error::ServerError::Message(format!(
+            "room {room_id} event sequence high-water mark is invalid"
+        ))
     })
 }
 
@@ -1242,6 +1357,11 @@ pub(super) fn append_event_with_metadata_in_transaction(
     let event_id = next_event_id(transaction, room_id)?;
     let at_unix = current_unix_seconds();
     let (kind_code, payload) = encode_event_kind(&kind);
+    let retained_bytes = room_event_retained_bytes(
+        payload.len(),
+        reply_to_event_id.is_some(),
+        mention_user_ids.as_ref().map_or(0, Vec::len),
+    )?;
     transaction.execute(
         "INSERT INTO room_events(
            room_id, event_id, event_kind, actor_user_id, at, payload,
@@ -1258,6 +1378,9 @@ pub(super) fn append_event_with_metadata_in_transaction(
             mention_user_ids,
         ),
     )?;
+    ensure_room_history_usage(transaction, room_id, event_id.saturating_sub(1))?;
+    record_new_room_history_event(transaction, room_id, retained_bytes)?;
+    advance_room_history_usage_backfill(transaction, room_id, HISTORY_USAGE_BACKFILL_BATCH)?;
     let actor_display_name = actor_user_id
         .map(|user_id| {
             transaction
@@ -1278,6 +1401,226 @@ pub(super) fn append_event_with_metadata_in_transaction(
         actor_display_name,
         at_unix,
         metadata,
+    })
+}
+
+fn room_event_retained_bytes(
+    payload_bytes: usize,
+    has_reply: bool,
+    mention_bytes: usize,
+) -> ServerResult<u64> {
+    let payload_bytes = u64::try_from(payload_bytes).map_err(|_| {
+        crate::error::ServerError::Message("room event payload size does not fit storage".into())
+    })?;
+    let mention_bytes = u64::try_from(mention_bytes).map_err(|_| {
+        crate::error::ServerError::Message("room event mention size does not fit storage".into())
+    })?;
+    HISTORY_EVENT_FIXED_RETAINED_BYTES
+        .checked_add(payload_bytes)
+        .and_then(|bytes| bytes.checked_add(mention_bytes))
+        .and_then(|bytes| {
+            bytes.checked_add(if has_reply {
+                HISTORY_REPLY_RETAINED_BYTES
+            } else {
+                0
+            })
+        })
+        .ok_or_else(|| {
+            crate::error::ServerError::Message(
+                "room event retained-byte accounting overflowed".into(),
+            )
+        })
+}
+
+fn ensure_room_history_usage(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    backfill_target_event_id: EventId,
+) -> ServerResult<()> {
+    let target = i64::try_from(backfill_target_event_id).map_err(|_| {
+        crate::error::ServerError::Message(
+            "room history backfill target does not fit SQLite".into(),
+        )
+    })?;
+    transaction.execute(
+        "INSERT INTO room_history_usage(
+           room_id, event_count, retained_bytes,
+           backfill_through_event_id, backfill_target_event_id, backfill_complete
+         ) VALUES (?1, 0, 0, 0, ?2, CASE WHEN ?2 = 0 THEN 1 ELSE 0 END)
+         ON CONFLICT(room_id) DO NOTHING",
+        (room_id, target),
+    )?;
+    Ok(())
+}
+
+fn record_new_room_history_event(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    retained_bytes: u64,
+) -> ServerResult<()> {
+    let retained_bytes = i64::try_from(retained_bytes).map_err(|_| {
+        crate::error::ServerError::Message("room event retained bytes do not fit SQLite".into())
+    })?;
+    let changed = transaction.execute(
+        "UPDATE room_history_usage
+         SET event_count = event_count + 1,
+             retained_bytes = retained_bytes + ?2
+         WHERE room_id = ?1
+           AND event_count < 9223372036854775807
+           AND retained_bytes <= 9223372036854775807 - ?2",
+        (room_id, retained_bytes),
+    )?;
+    if changed != 1 {
+        return Err(crate::error::ServerError::Message(format!(
+            "room {room_id} history usage accounting is unavailable or exhausted"
+        )));
+    }
+    Ok(())
+}
+
+fn advance_room_history_usage_backfill(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    limit: usize,
+) -> ServerResult<usize> {
+    let (through, target, complete) = transaction.query_row(
+        "SELECT backfill_through_event_id, backfill_target_event_id, backfill_complete
+         FROM room_history_usage WHERE room_id = ?1",
+        [room_id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        },
+    )?;
+    if complete || limit == 0 {
+        return Ok(0);
+    }
+    let bounded_limit = limit.min(HISTORY_USAGE_BACKFILL_BATCH);
+    let mut statement = transaction.prepare(
+        "SELECT event_id, COALESCE(length(payload), 0),
+                reply_to_event_id IS NOT NULL,
+                COALESCE(length(mention_user_ids), 0)
+         FROM room_events
+         WHERE room_id = ?1 AND event_id > ?2 AND event_id <= ?3
+         ORDER BY event_id
+         LIMIT ?4",
+    )?;
+    let rows = statement
+        .query_map((room_id, through, target, bounded_limit as i64), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let mut added_bytes = 0u64;
+    for (_, payload_bytes, has_reply, mention_bytes) in &rows {
+        let payload_bytes = usize::try_from(*payload_bytes).map_err(|_| {
+            crate::error::ServerError::Message("stored room event payload length is invalid".into())
+        })?;
+        let mention_bytes = usize::try_from(*mention_bytes).map_err(|_| {
+            crate::error::ServerError::Message("stored room event mention length is invalid".into())
+        })?;
+        added_bytes = added_bytes
+            .checked_add(room_event_retained_bytes(
+                payload_bytes,
+                *has_reply,
+                mention_bytes,
+            )?)
+            .ok_or_else(|| {
+                crate::error::ServerError::Message(
+                    "room history backfill byte accounting overflowed".into(),
+                )
+            })?;
+    }
+    let added_items = i64::try_from(rows.len()).map_err(|_| {
+        crate::error::ServerError::Message("room history backfill count does not fit SQLite".into())
+    })?;
+    let added_bytes = i64::try_from(added_bytes).map_err(|_| {
+        crate::error::ServerError::Message("room history backfill bytes do not fit SQLite".into())
+    })?;
+    let last_seen = rows.last().map(|row| row.0).unwrap_or(target);
+    let finished = rows.len() < bounded_limit || last_seen >= target;
+    let next_through = if finished { target } else { last_seen };
+    let changed = transaction.execute(
+        "UPDATE room_history_usage
+         SET event_count = event_count + ?2,
+             retained_bytes = retained_bytes + ?3,
+             backfill_through_event_id = ?4,
+             backfill_complete = ?5
+         WHERE room_id = ?1
+           AND backfill_through_event_id = ?6
+           AND backfill_target_event_id = ?7
+           AND backfill_complete = 0
+           AND event_count <= 9223372036854775807 - ?2
+           AND retained_bytes <= 9223372036854775807 - ?3",
+        (
+            room_id,
+            added_items,
+            added_bytes,
+            next_through,
+            finished,
+            through,
+            target,
+        ),
+    )?;
+    if changed != 1 {
+        return Err(crate::error::ServerError::Message(format!(
+            "room {room_id} history backfill state changed or accounting is exhausted"
+        )));
+    }
+    Ok(rows.len())
+}
+
+fn room_history_usage_optional_on(
+    connection: &rusqlite::Connection,
+    room_id: RoomId,
+) -> ServerResult<Option<RoomHistoryUsage>> {
+    connection
+        .query_row(
+            "SELECT event_count, retained_bytes,
+                    backfill_through_event_id, backfill_target_event_id,
+                    backfill_complete
+             FROM room_history_usage WHERE room_id = ?1",
+            [room_id],
+            room_history_usage_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn room_history_usage_on(
+    connection: &rusqlite::Connection,
+    room_id: RoomId,
+) -> ServerResult<RoomHistoryUsage> {
+    room_history_usage_optional_on(connection, room_id)?.ok_or_else(|| {
+        crate::error::ServerError::Message(format!(
+            "room {room_id} history usage ledger is unavailable"
+        ))
+    })
+}
+
+fn room_history_usage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoomHistoryUsage> {
+    let event_count = row.get::<_, i64>(0)?;
+    let retained_bytes = row.get::<_, i64>(1)?;
+    let through = row.get::<_, i64>(2)?;
+    let target = row.get::<_, i64>(3)?;
+    if event_count < 0 || retained_bytes < 0 || through < 0 || target < 0 {
+        return Err(rusqlite::Error::IntegralValueOutOfRange(0, event_count));
+    }
+    Ok(RoomHistoryUsage {
+        event_count: event_count as u64,
+        retained_bytes: retained_bytes as u64,
+        backfill_through_event_id: through as EventId,
+        backfill_target_event_id: target as EventId,
+        backfill_complete: row.get(4)?,
     })
 }
 
@@ -1503,6 +1846,7 @@ mod tests {
             .execute_batch(
                 "DROP INDEX IF EXISTS idx_room_events_reply;
                  DROP TABLE IF EXISTS room_event_sequences;
+                 DROP TABLE IF EXISTS room_history_usage;
                  DROP TABLE room_events;
                  CREATE TABLE room_events (
                    room_id INTEGER NOT NULL,
@@ -1533,6 +1877,7 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS room_event_sequences;
+                 DROP TABLE IF EXISTS room_history_usage;
                  INSERT INTO rooms(room_id, name, topic, created_at)
                  VALUES (1, 'preserved-v4-room', 'must survive migration', 1);
                  INSERT INTO room_events(
@@ -1593,6 +1938,20 @@ mod tests {
             .pragma_update(None, "user_version", 6)
             .expect("version six marker");
         transaction.commit().expect("version six commit");
+    }
+
+    fn create_version_seven_fixture(path: &std::path::Path) {
+        create_version_six_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version seven database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version seven transaction");
+        ensure_event_sequence_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version seven event sequence schema");
+        transaction
+            .pragma_update(None, "user_version", 7)
+            .expect("version seven marker");
+        transaction.commit().expect("version seven commit");
     }
 
     fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
@@ -2670,6 +3029,141 @@ mod tests {
     }
 
     #[test]
+    fn version_seven_database_adds_empty_history_usage_without_scanning_history() {
+        let path = isolated_database_path("v7-history-usage-schema");
+        create_version_seven_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version eight migration");
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_event_sequences"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_history_usage"
+        ));
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM room_history_usage", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("usage row count"),
+            0,
+            "migration must not scan or eagerly account legacy room history"
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        let backup_path = migration_backup_path(&path, 7);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version seven migration backup");
+        assert!(schema_object_exists(
+            &backup,
+            "table",
+            "room_event_sequences"
+        ));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_history_usage"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_history_usage_schema_fault_boundary_rolls_back_to_version_seven() {
+        for boundary in [
+            HistoryUsageMigrationBoundary::Table,
+            HistoryUsageMigrationBoundary::VersionUpdate,
+            HistoryUsageMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v8-fault-{boundary:?}"));
+            create_version_seven_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_history_hooks(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    MigrationHooks {
+                        reaction: |_| Ok(()),
+                        revision: |_| Ok(()),
+                        sequence: |_| Ok(()),
+                        usage: |observed| {
+                            if observed == boundary {
+                                Err(crate::error::ServerError::Message(format!(
+                                    "injected history usage migration fault at {observed:?}"
+                                )))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected history usage migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                7
+            );
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_event_sequences"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_history_usage"
+            ));
+
+            let backup_path = migration_backup_path(&path, 7);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version seven rollback backup");
+            assert!(schema_object_exists(
+                &backup,
+                "table",
+                "room_event_sequences"
+            ));
+            assert!(!schema_object_exists(
+                &backup,
+                "table",
+                "room_history_usage"
+            ));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
     fn version_four_metadata_round_trips_and_rejects_invalid_storage_shapes() {
         let store = OmenchatStore::in_memory().expect("store");
         let metadata = RichMessageEventMetadata {
@@ -3081,6 +3575,218 @@ mod tests {
             .latest_events(room.room_id, 10)
             .expect("history")
             .is_empty());
+    }
+
+    #[test]
+    fn room_history_usage_backfill_is_bounded_resumable_and_byte_exact() {
+        let path = isolated_database_path("history-usage-backfill");
+        create_version_seven_fixture(&path);
+        let fixture = rusqlite::Connection::open(&path).expect("fixture connection");
+        for event_id in 2..=600i64 {
+            fixture
+                .execute(
+                    "INSERT INTO room_events(
+                       room_id, event_id, event_kind, at, payload
+                     ) VALUES (1, ?1, 1, ?1, ?2)",
+                    (event_id, format!("legacy-{event_id}").into_bytes()),
+                )
+                .expect("legacy history");
+        }
+        drop(fixture);
+
+        let store = OmenchatStore::open(&path).expect("migrated store");
+        let first = store.advance_room_history_usage(1).expect("first batch");
+        assert_eq!(first.event_count, HISTORY_USAGE_BACKFILL_BATCH as u64);
+        assert_eq!(
+            first.backfill_through_event_id,
+            HISTORY_USAGE_BACKFILL_BATCH as EventId
+        );
+        assert_eq!(first.backfill_target_event_id, 600);
+        assert!(!first.backfill_complete);
+
+        drop(store);
+        let store = OmenchatStore::open(&path).expect("restart during backfill");
+        let second = store.advance_room_history_usage(1).expect("second batch");
+        assert_eq!(second.event_count, 512);
+        assert_eq!(second.backfill_through_event_id, 512);
+        assert!(!second.backfill_complete);
+
+        let third = store.advance_room_history_usage(1).expect("final batch");
+        assert_eq!(third.event_count, 600);
+        assert_eq!(third.backfill_through_event_id, 600);
+        assert!(third.backfill_complete);
+        let expected_bytes: i64 = store
+            .connection
+            .query_row(
+                "SELECT SUM(
+                   64 + COALESCE(length(payload), 0)
+                   + CASE WHEN reply_to_event_id IS NULL THEN 0 ELSE 8 END
+                   + COALESCE(length(mention_user_ids), 0)
+                 ) FROM room_events WHERE room_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expected retained bytes");
+        assert_eq!(third.retained_bytes, expected_bytes as u64);
+
+        drop(store);
+        std::fs::remove_file(migration_backup_path(&path, 7)).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn append_during_incomplete_history_backfill_is_counted_exactly_once() {
+        let path = isolated_database_path("history-usage-concurrent-append");
+        create_version_seven_fixture(&path);
+        let fixture = rusqlite::Connection::open(&path).expect("fixture connection");
+        for event_id in 2..=600i64 {
+            fixture
+                .execute(
+                    "INSERT INTO room_events(
+                       room_id, event_id, event_kind, at, payload
+                     ) VALUES (1, ?1, 1, ?1, X'78')",
+                    [event_id],
+                )
+                .expect("legacy history");
+        }
+        drop(fixture);
+
+        let store = OmenchatStore::open(&path).expect("migrated store");
+        let first = store.advance_room_history_usage(1).expect("first batch");
+        assert_eq!(first.event_count, 256);
+        let appended = store
+            .append_event(1, None, ServerRoomEventKind::Message { body: "new".into() })
+            .expect("append while backfill incomplete");
+        assert_eq!(appended.event_id, 601);
+        let after_append = store
+            .room_history_usage(1)
+            .expect("usage query")
+            .expect("usage row");
+        assert_eq!(after_append.event_count, 513);
+        assert_eq!(after_append.backfill_through_event_id, 512);
+        assert_eq!(after_append.backfill_target_event_id, 600);
+        assert!(!after_append.backfill_complete);
+
+        let complete = store.advance_room_history_usage(1).expect("complete");
+        assert_eq!(complete.event_count, 601);
+        assert!(complete.backfill_complete);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM room_events WHERE room_id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("actual history count"),
+            complete.event_count as i64
+        );
+
+        drop(store);
+        std::fs::remove_file(migration_backup_path(&path, 7)).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn history_usage_accounting_failure_rolls_back_event_and_sequence() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("usage-overflow", None).expect("room");
+        let first = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "first".into(),
+                },
+            )
+            .expect("first event");
+        assert_eq!(first.event_id, 1);
+        store
+            .connection
+            .execute(
+                "UPDATE room_history_usage
+                 SET retained_bytes = 9223372036854775807
+                 WHERE room_id = ?1",
+                [room.room_id],
+            )
+            .expect("saturate usage");
+        let error = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "must roll back".into(),
+                },
+            )
+            .expect_err("accounting overflow must fail")
+            .to_string();
+        assert!(error.contains("history usage accounting is unavailable or exhausted"));
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT last_event_id FROM room_event_sequences WHERE room_id = ?1",
+                    [room.room_id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("rolled-back sequence"),
+            1
+        );
+        assert_eq!(
+            store
+                .latest_events(room.room_id, 10)
+                .expect("history")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn history_usage_counts_reply_and_mention_metadata_with_stable_bytes() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("usage-metadata", None).expect("room");
+        store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "original".into(),
+                },
+            )
+            .expect("original");
+        let transaction = store
+            .connection
+            .unchecked_transaction()
+            .expect("transaction");
+        append_event_with_metadata_in_transaction(
+            &transaction,
+            room.room_id,
+            None,
+            ServerRoomEventKind::Message {
+                body: "reply".into(),
+            },
+            Some(RichMessageEventMetadata {
+                reply_to_event_id: Some(1),
+                mentioned_user_ids: vec![7, 9],
+            }),
+        )
+        .expect("rich reply");
+        transaction.commit().expect("commit");
+
+        let usage = store
+            .room_history_usage(room.room_id)
+            .expect("usage")
+            .expect("usage row");
+        assert!(usage.backfill_complete);
+        assert_eq!(usage.event_count, 2);
+        assert_eq!(
+            usage.retained_bytes,
+            (HISTORY_EVENT_FIXED_RETAINED_BYTES + "original".len() as u64)
+                + (HISTORY_EVENT_FIXED_RETAINED_BYTES
+                    + "reply".len() as u64
+                    + HISTORY_REPLY_RETAINED_BYTES
+                    + 2 * std::mem::size_of::<UserId>() as u64)
+        );
     }
 
     #[test]
