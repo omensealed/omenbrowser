@@ -1334,6 +1334,16 @@ rejects admission and rolls back the new event, sequence advance, cleanup, and
 ledger changes. No timer, polling worker, startup sweep, RPC, or UI compaction
 path is added.
 
+The sixth implementation slice adds recovery and transport-boundary evidence
+without changing policy. A file-backed restart regression proves retained
+event IDs remain monotonic, the usage ledger remains complete, and
+`HistoryBefore` treats compacted ID gaps as an ordinary end of retained
+history. A forced-Resource session regression proves that only surviving
+events are serialized after admission compaction. The existing v0.6.0-1
+bidirectional byte fixtures still pass unchanged. These are deterministic
+store/session/codec results; they do not replace the later live
+current/current or mixed-version process gates.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

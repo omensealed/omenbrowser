@@ -3616,6 +3616,100 @@ mod tests {
     }
 
     #[test]
+    fn retained_history_reopens_with_monotonic_ids_and_pages_across_gaps() {
+        let path = isolated_database_path("history-retention-reopen");
+        let policy = RoomHistoryRetentionPolicy {
+            enabled: true,
+            max_age_days: 3_650,
+            max_events_per_room: 3,
+            max_bytes_per_room: u64::MAX,
+        };
+        let room_id = {
+            let store = OmenchatStore::open(&path)
+                .expect("store")
+                .with_room_history_retention(policy);
+            let room = store.ensure_room("retained", None).expect("room");
+            for body in ["one", "two", "three", "four"] {
+                store
+                    .append_event(
+                        room.room_id,
+                        None,
+                        ServerRoomEventKind::Message { body: body.into() },
+                    )
+                    .expect("retained append");
+            }
+            assert_eq!(
+                store
+                    .latest_events(room.room_id, 10)
+                    .expect("retained history")
+                    .iter()
+                    .map(|event| event.event_id)
+                    .collect::<Vec<_>>(),
+                vec![2, 3, 4]
+            );
+            room.room_id
+        };
+
+        {
+            let store = OmenchatStore::open(&path)
+                .expect("reopened store")
+                .with_room_history_retention(policy);
+            assert_eq!(
+                store
+                    .events_before(room_id, 4, 10)
+                    .expect("page before retained event")
+                    .iter()
+                    .map(|event| event.event_id)
+                    .collect::<Vec<_>>(),
+                vec![2, 3]
+            );
+            assert!(store
+                .events_before(room_id, 2, 10)
+                .expect("page before oldest retained event")
+                .is_empty());
+
+            let fifth = store
+                .append_event(
+                    room_id,
+                    None,
+                    ServerRoomEventKind::Message {
+                        body: "five".into(),
+                    },
+                )
+                .expect("append after reopen");
+            assert_eq!(fifth.event_id, 5);
+            assert_eq!(
+                store
+                    .latest_events(room_id, 10)
+                    .expect("history after reopen append")
+                    .iter()
+                    .map(|event| event.event_id)
+                    .collect::<Vec<_>>(),
+                vec![3, 4, 5]
+            );
+            let usage = store
+                .room_history_usage(room_id)
+                .expect("usage")
+                .expect("usage row");
+            assert_eq!(usage.event_count, 3);
+            assert!(usage.backfill_complete);
+        }
+
+        let store = OmenchatStore::open(&path).expect("final reopen");
+        assert_eq!(
+            store
+                .latest_events(room_id, 10)
+                .expect("final retained history")
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5]
+        );
+        drop(store);
+        remove_database_files(&path);
+    }
+
+    #[test]
     fn room_history_usage_backfill_is_bounded_resumable_and_byte_exact() {
         let path = isolated_database_path("history-usage-backfill");
         create_version_seven_fixture(&path);

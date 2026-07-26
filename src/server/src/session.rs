@@ -9022,6 +9022,87 @@ mod tests {
     }
 
     #[test]
+    fn retained_history_resource_and_paging_expose_only_surviving_events() {
+        let store = OmenchatStore::in_memory()
+            .expect("store")
+            .with_room_history_retention(crate::store::RoomHistoryRetentionPolicy {
+                enabled: true,
+                max_age_days: 3_650,
+                max_events_per_room: 3,
+                max_bytes_per_room: u64::MAX,
+            });
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let user = store
+            .ensure_user(&peer().identity_hash, "Alice", Some("lxmf-a"))
+            .expect("user");
+        store.join_room(room.room_id, user.user_id).expect("join");
+        for body in ["one", "two", "three", "four"] {
+            store
+                .append_event(
+                    room.room_id,
+                    Some(user.user_id),
+                    ServerRoomEventKind::Message { body: body.into() },
+                )
+                .expect("append retained event");
+        }
+        let engine = SessionEngine::with_limits(
+            store,
+            SessionLimits {
+                history_batch_size: 10,
+                large_batch_threshold_bytes: 1,
+                ..SessionLimits::default()
+            },
+        );
+
+        let history = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::HistoryBefore,
+                    1,
+                    Some(room.room_id),
+                    FrameBody::Fields(vec![FrameValue::U64(u64::MAX)]),
+                ),
+            )
+            .expect("retained resource history");
+        assert_eq!(history[0].op, ChatOp::HistoryResourceOffer);
+        let offer = decode_resource_offer_body(&history[0].body).expect("resource offer");
+        let payload = engine
+            .resource_payload(&offer.resource_id)
+            .expect("resource lookup")
+            .expect("resource payload");
+        let values = decode_compressed_values_payload(&payload).expect("retained resource payload");
+        let event_ids = values
+            .iter()
+            .filter_map(|value| match value {
+                FrameValue::Array(fields) => fields.first(),
+                _ => None,
+            })
+            .filter_map(|value| match value {
+                FrameValue::U64(event_id) => Some(*event_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(event_ids, vec![2, 3, 4]);
+
+        let before_oldest = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::HistoryBefore,
+                    2,
+                    Some(room.room_id),
+                    FrameBody::Fields(vec![FrameValue::U64(2)]),
+                ),
+            )
+            .expect("page before oldest retained event");
+        assert_eq!(before_oldest[0].op, ChatOp::HistoryEnd);
+    }
+
+    #[test]
     fn banned_users_are_denied_session_and_room_actions() {
         let path = temp_store_path("banned");
         let store = OmenchatStore::open(&path).expect("store");

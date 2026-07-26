@@ -109,6 +109,13 @@ originals with their dependent projections. A single newest event may exceed
 the byte ceiling until the next admission. Incomplete accounting or a ceiling
 that cannot be restored in one batch fails closed and rolls back both insertion
 and attempted compaction.
+Isolated regressions reopen a compacted file-backed store, append through the
+persistent event-ID sequence, page across removed IDs, and force the retained
+history through the existing Resource-offer path. The reopened store preserves
+only the surviving ordered IDs and Resource payloads serialize only those
+events. The existing v0.6.0-1 byte fixtures remain exact; live mixed-version
+retention behavior is still a separate release qualification rather than an
+inference from these deterministic tests.
 The desktop has a matching dormant, rebuildable revision projection outside
 immutable room history. It is bounded per room, server, and identity-scoped
 cache by rows and stable retained bytes; strict deltas and authoritative
