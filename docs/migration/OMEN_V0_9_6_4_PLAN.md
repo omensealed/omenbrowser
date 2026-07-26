@@ -1187,6 +1187,20 @@ and static-media products. Native/package builds remain the platform gate.
 - Define bounded correction depth/count and tombstone retention.
 - Durable replay must not repeat edits, deletions, notifications, or fan-out.
 
+The design checkpoint is recorded in
+`docs/design/OMENCHAT_CORRECTIONS_TOMBSTONES_CHECKPOINT.md`. It proposes the
+additive `message-revisions-v1` capability over the existing durable base,
+reserves the currently unused operation range 35–39, defines exact
+request/ack/event/explicit-target-snapshot shapes, and keeps original room
+events immutable. Current state and bounded append-only audit use separate
+schema-6 tables; the legacy `room_events.deleted` test projection is not the
+new contract. The checkpoint also records an activation dependency: current
+server room history is retained indefinitely, so a live tombstone cannot be
+pruned safely until Unit 6G can remove an original and every dependent
+revision, reaction, and reply projection atomically. No capability, operation,
+schema, persistence, worker, timer, retry, or UI action is activated by this
+checkpoint.
+
 ### Unit 6F — pins and moderation audit history
 
 - Append bounded pin/unpin and moderation-audit events.
