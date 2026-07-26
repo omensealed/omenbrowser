@@ -27,6 +27,15 @@ impl DesktopApp {
             Message::OmenChat(OmenChatMessage::OpenServerEntry) => {
                 Ok(self.update_open_omenchat_server_entry())
             }
+            Message::OmenChat(OmenChatMessage::ConfirmInvitation) => {
+                Ok(self.update_confirm_omenchat_invitation())
+            }
+            Message::OmenChat(OmenChatMessage::CancelInvitation) => {
+                self.omenchat.omenchat_invitation_preview.cancel();
+                self.app.status.task =
+                    "OMENchat invitation cancelled; no connection was opened".into();
+                Ok(Task::none())
+            }
             Message::OmenChat(OmenChatMessage::ToggleRooms) => {
                 self.update_toggle_omenchat_rooms();
                 Ok(Task::none())
@@ -193,6 +202,23 @@ impl DesktopApp {
     }
 
     pub(super) fn update_open_omenchat_server_entry(&mut self) -> Task<Message> {
+        let entered = self.omenchat.omenchat_server_entry.trim();
+        if entered.starts_with("omenchat://") && entered.contains('?') {
+            match self
+                .omenchat
+                .omenchat_invitation_preview
+                .replace_from_uri(entered, &self.app.directory_state.entries)
+            {
+                Ok(()) => {
+                    self.app.status.task =
+                        "review the OMENchat invitation; no connection has been opened".into();
+                }
+                Err(error) => {
+                    self.app.status.task = format!("invalid OMENchat invitation: {error}");
+                }
+            }
+            return Task::none();
+        }
         let Some(target) = normalize_omenchat_manual_target(&self.omenchat.omenchat_server_entry)
         else {
             self.app.status.task = "enter an OMENchat destination hash or omenchat://<hash>".into();
@@ -202,6 +228,29 @@ impl DesktopApp {
         self.open_omenchat_link(LinkAction {
             target,
             fields: Vec::new(),
+        })
+        .unwrap_or_else(Task::none)
+    }
+
+    pub(super) fn update_confirm_omenchat_invitation(&mut self) -> Task<Message> {
+        let Some(invitation) = self.omenchat.omenchat_invitation_preview.take_confirmable() else {
+            self.app.status.task =
+                "OMENchat invitation cannot be confirmed; review its identity evidence".into();
+            return Task::none();
+        };
+        self.omenchat.omenchat_server_entry.clear();
+        let mut fields = Vec::new();
+        if let Some(label) = invitation.display_label {
+            fields.push(format!("name={label}"));
+        }
+        if invitation.room_id.is_some() {
+            self.app.status.task =
+                "opening OMENchat invitation; select the suggested room after its catalog loads"
+                    .into();
+        }
+        self.open_omenchat_link(LinkAction {
+            target: format!("omenchat://{}", invitation.server_destination),
+            fields,
         })
         .unwrap_or_else(Task::none)
     }

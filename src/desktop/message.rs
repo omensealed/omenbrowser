@@ -442,6 +442,8 @@ pub(in crate::desktop) enum OmenChatMessage {
     NewPane,
     ServerEntryChanged(String),
     OpenServerEntry,
+    ConfirmInvitation,
+    CancelInvitation,
     ToggleRooms,
     JoinRoom {
         session_id: ChatSessionId,

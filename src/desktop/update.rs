@@ -228,6 +228,8 @@ mod tests {
             OmenChatMessage::NewPane,
             OmenChatMessage::ServerEntryChanged("omenchat://server".into()),
             OmenChatMessage::OpenServerEntry,
+            OmenChatMessage::ConfirmInvitation,
+            OmenChatMessage::CancelInvitation,
             OmenChatMessage::ToggleRooms,
             OmenChatMessage::JoinRoom {
                 session_id,

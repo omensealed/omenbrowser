@@ -37,6 +37,56 @@ impl DesktopApp {
             omen_button("Open", Message::OmenChat(OmenChatMessage::OpenServerEntry),),
         ]
         .spacing(8);
+        #[cfg(feature = "chat-client")]
+        let omenchat_invitation = if let Some(preview) =
+            self.omenchat.omenchat_invitation_preview.pending()
+        {
+            let invitation = &preview.invitation;
+            let mut details = column![
+                text("Review OMENchat invitation").size(ui_size(14)),
+                text(format!("Server: {}", invitation.server_destination)).size(ui_size(12)),
+                text(preview.identity_evidence.label()).size(ui_size(12)),
+            ]
+            .spacing(4);
+            if let Some(label) = &invitation.display_label {
+                details = details.push(text(format!("Claimed label: {label}")).size(ui_size(12)));
+            }
+            if let Some(room_id) = invitation.room_id {
+                details = details.push(
+                    text(format!(
+                        "Suggested room ID: {room_id} (select only after the server catalog loads)"
+                    ))
+                    .size(ui_size(12)),
+                );
+            }
+            let actions = if preview.allows_confirmation() {
+                row![
+                    omen_button(
+                        "Open Server",
+                        Message::OmenChat(OmenChatMessage::ConfirmInvitation)
+                    ),
+                    subtle_button(
+                        "Cancel",
+                        Message::OmenChat(OmenChatMessage::CancelInvitation)
+                    ),
+                ]
+            } else {
+                row![subtle_button(
+                    "Cancel Conflicting Invitation",
+                    Message::OmenChat(OmenChatMessage::CancelInvitation)
+                )]
+            }
+            .spacing(8);
+            section_card(
+                "Invitation Confirmation",
+                details.push(actions).push(
+                    text("Importing this invitation does not save or trust the server.")
+                        .size(ui_size(12)),
+                ),
+            )
+        } else {
+            column![].into()
+        };
 
         let grid = pane_grid(
             &self.workspace.workspace_panes,
@@ -292,6 +342,7 @@ impl DesktopApp {
             hidden_workspace_panes,
             hidden_conversation_panes,
             omenchat_opener,
+            omenchat_invitation,
             history_search,
             grid
         ]

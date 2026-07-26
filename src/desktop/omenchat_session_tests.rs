@@ -328,6 +328,102 @@ fn opening_existing_omenchat_destination_restores_without_duplicate_session() {
         .contains("restored existing OMENchat session"));
 }
 
+#[test]
+fn enhanced_invitation_requires_confirmation_without_connecting_or_persisting_trust() {
+    let (mut desktop, _) = desktop_with_paths("omenbrowser-rs-desktop-invitation-preview");
+    let sessions_before = desktop.omenchat.chat_client.sessions().len();
+    let directory_before = desktop.app.directory_state.entries.clone();
+    desktop.omenchat.omenchat_server_entry =
+        format!("omenchat://{FIXTURE_CHAT_SERVER_HASH}?invite=1&room=7&label=Field%20Ops");
+
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::OpenServerEntry));
+
+    let preview = desktop
+        .omenchat
+        .omenchat_invitation_preview
+        .pending()
+        .expect("invitation preview");
+    assert_eq!(preview.invitation.room_id, Some(7));
+    assert_eq!(
+        preview.invitation.display_label.as_deref(),
+        Some("Field Ops")
+    );
+    assert_eq!(
+        desktop.omenchat.chat_client.sessions().len(),
+        sessions_before,
+        "parsing an invitation must not open a session"
+    );
+    assert_eq!(desktop.app.directory_state.entries, directory_before);
+    assert!(desktop
+        .app
+        .status
+        .task
+        .contains("no connection has been opened"));
+
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::CancelInvitation));
+    assert!(desktop
+        .omenchat
+        .omenchat_invitation_preview
+        .pending()
+        .is_none());
+    assert_eq!(
+        desktop.omenchat.chat_client.sessions().len(),
+        sessions_before
+    );
+}
+
+#[test]
+fn conflicting_invitation_identity_blocks_desktop_confirmation() {
+    let (mut desktop, _) = desktop_with_paths("omenbrowser-rs-desktop-invitation-conflict");
+    let mut entry = crate::directory::DirectoryEntry::new(
+        FIXTURE_CHAT_SERVER_HASH,
+        "Known Server",
+        crate::directory::DirectoryKind::OmenChat,
+    );
+    entry.identity_hash = Some("11111111111111111111111111111111".into());
+    desktop.app.directory_state.entries.push(entry);
+    desktop.omenchat.omenchat_server_entry = format!(
+        "omenchat://{FIXTURE_CHAT_SERVER_HASH}?invite=1&identity=22222222222222222222222222222222"
+    );
+
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::OpenServerEntry));
+    let sessions_before = desktop.omenchat.chat_client.sessions().len();
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::ConfirmInvitation));
+
+    assert_eq!(
+        desktop.omenchat.chat_client.sessions().len(),
+        sessions_before
+    );
+    assert!(desktop
+        .omenchat
+        .omenchat_invitation_preview
+        .pending()
+        .is_some());
+    assert!(desktop.app.status.task.contains("cannot be confirmed"));
+}
+
+#[test]
+fn explicit_invitation_confirmation_consumes_preview_before_returning_open_task() {
+    let (mut desktop, _) = desktop_with_paths("omenbrowser-rs-desktop-invitation-confirm");
+    desktop.omenchat.omenchat_server_entry =
+        format!("omenchat://{FIXTURE_CHAT_SERVER_HASH}?invite=1&label=Field%20Ops");
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::OpenServerEntry));
+    assert!(desktop
+        .omenchat
+        .omenchat_invitation_preview
+        .pending()
+        .is_some());
+
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::ConfirmInvitation));
+
+    assert!(desktop
+        .omenchat
+        .omenchat_invitation_preview
+        .pending()
+        .is_none());
+    assert!(desktop.omenchat.omenchat_server_entry.is_empty());
+}
+
 #[cfg(feature = "mock-runtime")]
 #[test]
 fn opening_destination_from_blank_chat_replaces_blank_pane() {

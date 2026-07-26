@@ -4220,5 +4220,18 @@ percent/UTF-8 data, unsupported or duplicate fields, authority tricks, and
 secret-field omission. They also cover all Directory identity-evidence classes,
 conflicting duplicate precedence, one-item preview replacement, invalid-input
 preservation, explicit cancellation, and conflict-blocked confirmation.
-Desktop presentation, connection confirmation, room selection, and QR
+Live Link completion, deferred room selection, enhanced Micron links, and QR
 presentation require separate tests before activation.
+
+The desktop quick-open activation adds focused tests proving parse-only input
+does not create a session or mutate Directory state, a conflicting fingerprint
+cannot be confirmed, cancellation is explicit, and confirmation consumes the
+preview before returning the existing asynchronous open task. These tests do
+not execute the returned Iced task or claim live Link establishment:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  invitation --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_domain_messages_have_one_compile_time_route --lib
+```

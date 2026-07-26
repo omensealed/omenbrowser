@@ -1130,6 +1130,17 @@ The reducer has no connection, join, trust, persistence, QR, worker, timer,
 queue, protocol, or schema behavior. Desktop presentation and explicit
 confirmation remain the next slice.
 
+The third slice activates preview and confirmation only in the desktop
+quick-open surface. Parsing an enhanced invitation opens no connection and
+does not mutate Directory/trust state. The card renders bounded public fields
+and exact identity evidence; conflicts allow cancellation only. Explicit Open
+consumes the preview and routes a plain destination through the existing
+OMENchat Link owner. Legacy plain links remain unchanged. Suggested rooms are
+shown but remain manual until a follow-up can validate them against the
+authenticated returned catalog; enhanced Micron links and QR remain inactive.
+No new connection owner, retry, worker, timer, queue, persistence, wire,
+schema, capability, or dependency was added.
+
 ### Unit 6E — corrections and delete tombstones
 
 - Append correction and tombstone events rather than rewriting history.

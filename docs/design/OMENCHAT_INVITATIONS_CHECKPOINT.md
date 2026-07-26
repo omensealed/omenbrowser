@@ -1,6 +1,6 @@
 # OMENchat safe invitations checkpoint
 
-Status: canonical URI and dormant preview reducer implemented; desktop activation pending
+Status: desktop confirmation active; deferred room selection and QR pending
 Release target: `v0.9.6-4`
 Protocol baseline: OMENchat protocol 1; no new frame operation or capability
 
@@ -233,3 +233,19 @@ single-item replacement, invalid-import preservation, confirmable consumption,
 and conflict cancellation. Step 3, desktop preview presentation and explicit
 confirmation through the existing OMENchat session boundary, remains the next
 gate.
+
+The first half of step 3 is now active in the desktop quick-open surface.
+Enhanced invitation input creates the single preview and opens no session.
+The card shows the exact destination, claimed label, suggested numeric room,
+and identity-evidence classification; a conflict exposes only Cancel. Import
+does not modify Directory or trust state. Explicit Open consumes a confirmable
+preview and routes the plain destination plus bounded display hint through the
+existing OMENchat Link boundary. Legacy plain links retain their existing
+behavior.
+
+The suggested room is deliberately not joined yet. The card states that it
+must be selected after the authenticated server catalog loads, and confirmation
+does not claim otherwise. A later subunit must correlate the suggestion to the
+opened session, require an exact returned numeric room ID, and clear it on
+failure/cancellation/replacement before automatic selection can be enabled.
+Micron enhanced links and QR generation/import are also not active.

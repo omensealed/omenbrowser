@@ -456,6 +456,7 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) active_media_cache_jobs:
         HashMap<String, (ChatSessionId, u64, CancellationToken)>,
     pub(in crate::desktop) omenchat_server_entry: String,
+    pub(in crate::desktop) omenchat_invitation_preview: crate::chat::OmenChatInvitationPreviewOwner,
     pub(in crate::desktop) omenchat_rooms_visible: bool,
     pub(in crate::desktop) omenchat_pending_upload_sources:
         HashMap<(ChatSessionId, String, u64), PathBuf>,
@@ -586,6 +587,7 @@ impl OmenChatDesktopState {
             media_cache_generation: 0,
             active_media_cache_jobs: HashMap::new(),
             omenchat_server_entry: String::new(),
+            omenchat_invitation_preview: crate::chat::OmenChatInvitationPreviewOwner::default(),
             omenchat_rooms_visible: true,
             omenchat_pending_upload_sources: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
