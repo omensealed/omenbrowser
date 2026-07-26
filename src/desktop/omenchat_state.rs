@@ -470,6 +470,8 @@ impl DesktopApp {
                     self.consume_omenchat_invitation_room_catalog(*session_id, rooms);
                 }
                 ChatClientEvent::RoomJoined { session_id, .. } => {
+                    #[cfg(feature = "desktop-qr")]
+                    self.clear_omenchat_invitation_qr_for_session(*session_id);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     self.set_omenchat_connection_state(
                         *session_id,

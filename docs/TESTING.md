@@ -4263,6 +4263,24 @@ still reaches the deterministic mock open path. A packaged interaction smoke
 must still cover both keyboard-focused and pointer link activation. QR
 rendering/import remains outside this claim.
 
+Canonical product QR generation and ownership:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  --lib qr_owner
+bash scripts/verify-product-features.sh
+cargo check --locked --no-default-features \
+  --features desktop-product-static-media
+```
+
+The tests prove one-item replacement, toggle/close and session cleanup,
+canonical 2 KiB input, missing-session failure, and byte-identical clipboard
+text after the visible QR is created. The graph gate requires Iced QR and
+locked `qrcode 0.13.0` in both canonical products. Packaged native smoke must
+still verify QR contrast/scanning, layout at supported UI scales, clipboard
+behavior, and absence of camera/image-import permissions. Camera and image-file
+QR decoding are not implemented.
+
 The desktop quick-open activation adds focused tests proving parse-only input
 does not create a session or mutate Directory state, a conflicting fingerprint
 cannot be confirmed, cancellation is explicit, and confirmation consumes the

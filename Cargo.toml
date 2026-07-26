@@ -49,8 +49,8 @@ chat-client-popout = ["chat-client"]
 # Canonical build identities. Release and packaging commands must use
 # `--no-default-features --features desktop-product`; development profiles keep
 # mock support explicit so it cannot leak into distributed binaries.
-desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite"]
-desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite"]
+desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr"]
+desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr"]
 desktop-dev = ["desktop-product", "mock-runtime"]
 desktop-test = ["desktop-dev", "desktop-ui-test"]
 

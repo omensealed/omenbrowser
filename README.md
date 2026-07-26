@@ -144,9 +144,10 @@ cargo build --release --locked --no-default-features --features desktop-product
 ```
 
 `desktop-product` is the canonical release identity and includes bundled SQLite
-for installer/portable builds plus the `chat-client-reticulum` Reticulum 0.9
-path. `chat-client-rns-clean` remains as a compatibility alias for older local
-commands. It builds
+for installer/portable builds, bounded OMENchat invitation QR presentation,
+and the `chat-client-reticulum` Reticulum 0.9 path. QR support is generation
+only: it does not add camera access or image decoding. `chat-client-rns-clean`
+remains as a compatibility alias for older local commands. It builds
 the browser against `reticulum-rs`, `reticulum-rs-transport`, and `lxmf`
 without pulling the old `rns-net` compatibility stack into normal native
 networking builds.
@@ -166,8 +167,8 @@ archives built outside a Git checkout can provide the commit explicitly with
 For low-resource systems that do not need animated previews,
 `desktop-product-static-media` keeps the same live Reticulum/OMENchat product
 stack but excludes `iced_gif`. GIF files are still cached and shown through the
-static image path. The canonical `desktop-product` continues to enable
-animation.
+static image path. It retains invitation QR presentation. The canonical
+`desktop-product` continues to enable animation.
 
 Linux desktop builds enable Iced's X11 and Wayland backends and the XDG portal
 file picker. Those Linux-only features are excluded from native Windows and

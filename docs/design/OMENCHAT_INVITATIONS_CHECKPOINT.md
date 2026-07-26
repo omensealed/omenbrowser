@@ -26,10 +26,12 @@ appropriate public URI/QR contract and must not be activated or silently
 treated as the new invitation format.
 
 Iced 0.14 QR support and its locked `qrcode 0.13.0` dependency are already
-available through the optional `desktop-qr` feature. The canonical desktop
-product does not currently enable that feature. No new crate is required to
-render QR data, but enabling the feature remains a deliberate product-graph
-change that must pass native/package qualification.
+available through the optional `desktop-qr` feature. Both canonical desktop
+products now enable that reviewed feature. The transitive encoder is pure Rust,
+MIT OR Apache-2.0, and already locked; it adds no camera, decoder, native
+library, platform permission, network path, or second payload format. The
+machine graph gate requires the feature and exact locked encoder in both
+products. Native/package qualification remains a release gate.
 
 ## Scope and trust model
 
@@ -256,7 +258,7 @@ retried.
 
 Focused desktop-dev tests cover the exact match, cross-session isolation,
 catalog mismatch, cancellation, and replacement paths. Micron enhanced links
-and QR generation/import remain inactive.
+and QR generation were still inactive in that subunit.
 
 Step 4 is now active as a synchronous desktop clipboard action in each
 OMENchat composer. It serializes the exact open-session destination, includes
@@ -281,5 +283,15 @@ as invitation errors rather than falling through to browser navigation or a
 plain Link open. Link form-forwarding fields are not invitation fields and are
 ignored. Plain `omenchat://<destination>` Micron links preserve their existing
 open behavior. Keyboard-focused and pointer-hit activation share this reducer.
-Focused tests cover valid, malformed, and legacy paths. QR rendering/import
-remains inactive.
+Focused tests cover valid, malformed, and legacy paths.
+
+Step 5 adds an explicit QR toggle beside the existing copy action. One
+ephemeral owner retains at most one canonical URI and Iced QR matrix/cache.
+Input is already capped at 2 KiB and contains only the approved public fields.
+The card displays the exact URI alongside the QR; Copy uses the retained URI
+while the card is open, so Directory changes cannot make the clipboard differ
+from the visible matrix. Opening another QR replaces the owner. Toggle/Close,
+session close, and room transition release it. There is no recurring render
+subscription, camera, image decode/import, permission, storage, network action,
+or wire change. Textual QR payload import already uses the normal quick-open
+parser; camera and image-file QR decoding remain outside scope.

@@ -1144,7 +1144,8 @@ ID. Cross-session catalogs cannot consume it. Catalog mismatch, open or
 handshake failure, session close, cancellation, and replacement clear it.
 Existing authenticated sessions can use their already-returned catalog. The
 normal join owner remains authoritative, uncertain mutations are not retried,
-and enhanced Micron links and QR remain inactive. No new connection owner,
+and enhanced Micron links and QR were not activated by that slice. No new
+connection owner,
 retry, worker, timer, queue, persistence, wire, schema, capability, or
 dependency was added.
 
@@ -1164,9 +1165,20 @@ persist, or change trust before confirmation; malformed enhanced links fail as
 invitation input and cannot fall through to browser navigation or a plain
 session open. Form-forwarding fields are ignored at this boundary. Plain legacy
 Micron links retain their established direct-open behavior. Keyboard-focused
-and pointer activation use the same reducer. QR remains inactive, and this
+and pointer activation use the same reducer. QR was not activated by that
+slice, and this
 slice adds no runtime owner, persistence, wire behavior, worker, timer, queue,
 cache, retry, schema, capability, dependency, or product-feature change.
+
+The seventh slice admits Iced's existing QR feature into both canonical desktop
+products and adds an explicit OMENchat invitation QR card. The locked transitive
+`qrcode 0.13.0` encoder is pure Rust and MIT OR Apache-2.0; no crate version,
+camera, decoder, native library, platform permission, or network surface was
+added. One ephemeral owner holds one canonical URI plus one encoded matrix/cache
+and clears on toggle, Close, replacement, session close, or room transition.
+The visible text and clipboard use the exact retained QR URI. The product graph
+gate requires `desktop-qr`, Iced QR support, and the exact encoder in animated
+and static-media products. Native/package builds remain the platform gate.
 
 ### Unit 6E — corrections and delete tombstones
 

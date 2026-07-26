@@ -1,4 +1,6 @@
 use iced::widget::{button, column, container, row, text, text_input};
+#[cfg(feature = "desktop-qr")]
+use iced::widget::{qr_code, text::Wrapping};
 use iced::{Element, Font, Length};
 
 use super::super::*;
@@ -545,6 +547,18 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 .style(subtle_button_style),
             "Copy invitation for this room"
         ),
+        #[cfg(feature = "desktop-qr")]
+        tooltip_button(
+            button(centered_toolbar_icon(ICON_QR))
+                .on_press(Message::OmenChat(OmenChatMessage::ToggleInvitationQr(
+                    session.session_id,
+                )))
+                .padding(0)
+                .width(Length::Fixed(toolbar_icon_button_side()))
+                .height(Length::Fixed(toolbar_icon_button_side()))
+                .style(subtle_button_style),
+            "Show invitation QR"
+        ),
         text_input(&format!("Message #{}", session.active_room.name), draft)
             .size(ui_size(14))
             .padding(8)
@@ -609,6 +623,51 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
+        );
+    }
+    #[cfg(feature = "desktop-qr")]
+    if let Some(qr) = desktop
+        .omenchat
+        .omenchat_invitation_qr
+        .as_ref()
+        .filter(|qr| qr.session_id == session.session_id)
+    {
+        composer_panel = composer_panel.push(
+            container(
+                column![
+                    row![
+                        text("OMENchat room invitation")
+                            .size(ui_size(13))
+                            .width(Length::Fill),
+                        subtle_button(
+                            "Copy URI",
+                            Message::OmenChat(OmenChatMessage::CopyInvitation(session.session_id))
+                        ),
+                        subtle_button(
+                            "Close",
+                            Message::OmenChat(OmenChatMessage::CloseInvitationQr)
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                    container(qr_code(&qr.data).total_size(180.0))
+                        .center_x(Length::Fill)
+                        .width(Length::Fill),
+                    text(qr.uri.as_str())
+                        .size(ui_size(11))
+                        .width(Length::Fill)
+                        .wrapping(Wrapping::WordOrGlyph),
+                    text(
+                        "Public connection metadata only; recipients still confirm before opening."
+                    )
+                    .size(ui_size(11)),
+                ]
+                .spacing(6)
+                .width(Length::Fill),
+            )
+            .padding(8)
+            .width(Length::Fill)
+            .style(status_container_style),
         );
     }
     composer_panel = composer_panel.push(composer);

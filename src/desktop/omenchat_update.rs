@@ -142,6 +142,17 @@ impl DesktopApp {
             Message::OmenChat(OmenChatMessage::CopyInvitation(session_id)) => {
                 Ok(self.update_copy_omenchat_invitation(session_id))
             }
+            #[cfg(feature = "desktop-qr")]
+            Message::OmenChat(OmenChatMessage::ToggleInvitationQr(session_id)) => {
+                self.update_toggle_omenchat_invitation_qr(session_id);
+                Ok(Task::none())
+            }
+            #[cfg(feature = "desktop-qr")]
+            Message::OmenChat(OmenChatMessage::CloseInvitationQr) => {
+                self.omenchat.omenchat_invitation_qr = None;
+                self.app.status.task = "closed OMENchat invitation QR".into();
+                Ok(Task::none())
+            }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChat(OmenChatMessage::CopySessionDiagnostics(session_id)) => {
                 Ok(self.update_copy_omenchat_session_diagnostics(session_id))
@@ -290,6 +301,8 @@ impl DesktopApp {
         if previous_room_id != current_room_id {
             self.omenchat.omenchat_reply_drafts.remove(&session_id);
             self.omenchat.omenchat_selected_mentions.remove(&session_id);
+            #[cfg(feature = "desktop-qr")]
+            self.clear_omenchat_invitation_qr_for_session(session_id);
         }
         self.schedule_visible_workspace_scroll_restore(2);
         self.restore_omenchat_scroll(session_id)

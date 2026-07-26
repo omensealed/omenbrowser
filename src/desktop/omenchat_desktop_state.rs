@@ -29,6 +29,13 @@ pub(in crate::desktop) struct PendingOmenChatInvitationRoom {
     pub(in crate::desktop) session_id: Option<ChatSessionId>,
 }
 
+#[cfg(feature = "desktop-qr")]
+pub(in crate::desktop) struct OmenChatInvitationQr {
+    pub(in crate::desktop) session_id: ChatSessionId,
+    pub(in crate::desktop) uri: String,
+    pub(in crate::desktop) data: iced::widget::qr_code::Data,
+}
+
 #[cfg(feature = "chat-client-gif")]
 pub(in crate::desktop) type OmenChatGifFrames = iced_gif::Frames;
 
@@ -465,6 +472,8 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) omenchat_server_entry: String,
     pub(in crate::desktop) omenchat_invitation_preview: crate::chat::OmenChatInvitationPreviewOwner,
     pub(in crate::desktop) omenchat_invitation_room: Option<PendingOmenChatInvitationRoom>,
+    #[cfg(feature = "desktop-qr")]
+    pub(in crate::desktop) omenchat_invitation_qr: Option<OmenChatInvitationQr>,
     pub(in crate::desktop) omenchat_rooms_visible: bool,
     pub(in crate::desktop) omenchat_pending_upload_sources:
         HashMap<(ChatSessionId, String, u64), PathBuf>,
@@ -597,6 +606,8 @@ impl OmenChatDesktopState {
             omenchat_server_entry: String::new(),
             omenchat_invitation_preview: crate::chat::OmenChatInvitationPreviewOwner::default(),
             omenchat_invitation_room: None,
+            #[cfg(feature = "desktop-qr")]
+            omenchat_invitation_qr: None,
             omenchat_rooms_visible: true,
             omenchat_pending_upload_sources: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]

@@ -510,6 +510,10 @@ pub(in crate::desktop) enum OmenChatMessage {
     },
     LoadOlderHistory(ChatSessionId),
     CopyInvitation(ChatSessionId),
+    #[cfg(feature = "desktop-qr")]
+    ToggleInvitationQr(ChatSessionId),
+    #[cfg(feature = "desktop-qr")]
+    CloseInvitationQr,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     CopySessionDiagnostics(ChatSessionId),
     CloseSession(ChatSessionId),

@@ -6,6 +6,8 @@ use super::DesktopApp;
 impl DesktopApp {
     pub(in crate::desktop) fn close_omenchat_session(&mut self, session_id: ChatSessionId) {
         self.clear_omenchat_invitation_room_for_session(session_id);
+        #[cfg(feature = "desktop-qr")]
+        self.clear_omenchat_invitation_qr_for_session(session_id);
         let server_id = self
             .omenchat
             .chat_client

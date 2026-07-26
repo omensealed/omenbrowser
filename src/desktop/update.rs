@@ -278,6 +278,10 @@ mod tests {
             },
             OmenChatMessage::LoadOlderHistory(session_id),
             OmenChatMessage::CopyInvitation(session_id),
+            #[cfg(feature = "desktop-qr")]
+            OmenChatMessage::ToggleInvitationQr(session_id),
+            #[cfg(feature = "desktop-qr")]
+            OmenChatMessage::CloseInvitationQr,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             OmenChatMessage::CopySessionDiagnostics(session_id),
             OmenChatMessage::CloseSession(session_id),

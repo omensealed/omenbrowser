@@ -7,7 +7,7 @@ cd "$repo_root"
 features="${OMENBROWSER_BROWSER_FEATURES:-desktop-product}"
 tree="$(cargo tree --locked -e features --no-default-features --features "$features" -i omenbrowser_rs)"
 
-required=(desktop-product portable-sqlite chat-client-gif chat-client-reticulum native-network)
+required=(desktop-product desktop-qr portable-sqlite chat-client-gif chat-client-reticulum native-network)
 for feature in "${required[@]}"; do
   if ! grep -q "omenbrowser_rs feature \"$feature\"" <<<"$tree"; then
     echo "product feature verification failed: required feature '$feature' is absent" >&2
@@ -57,9 +57,31 @@ if grep -Eq '(^|[[:space:]])iced_gif v' <<<"$static_media_dependencies"; then
   echo "product feature verification failed: static-media product includes iced_gif" >&2
   exit 1
 fi
-for feature in desktop-product-static-media chat-client-reticulum native-network; do
+for feature in desktop-product-static-media desktop-qr chat-client-reticulum native-network; do
   if ! grep -q "omenbrowser_rs feature \"$feature\"" <<<"$static_media_features"; then
     echo "product feature verification failed: static-media product lacks '$feature'" >&2
+    exit 1
+  fi
+done
+
+for profile_spec in \
+  "animated product|$features" \
+  "static-media product|desktop-product-static-media"; do
+  profile="${profile_spec%%|*}"
+  profile_features="${profile_spec#*|}"
+  qr_tree="$(
+    cargo tree --locked -e features --no-default-features \
+      --features "$profile_features" -i qrcode
+  )"
+  qr_dependencies="$(
+    cargo tree --locked --no-default-features --features "$profile_features" --prefix none
+  )"
+  if ! grep -qF 'iced_widget feature "qr_code"' <<<"$qr_tree"; then
+    echo "product feature verification failed: $profile lacks reviewed Iced QR support" >&2
+    exit 1
+  fi
+  if ! grep -q '^qrcode v0\.13\.0$' <<<"$qr_dependencies"; then
+    echo "product feature verification failed: $profile lacks locked qrcode 0.13.0" >&2
     exit 1
   fi
 done
