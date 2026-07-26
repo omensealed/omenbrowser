@@ -1270,6 +1270,17 @@ activation.
 - Per-room upload and media policy.
 - Clear client evidence when policy rejects an operation.
 
+The first Unit 6G checkpoint is recorded in
+`docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is
+indefinite and its event allocator derives the next identifier from retained
+rows, so deletion could reuse an immutable event ID. The approved order is:
+persistent per-room high-water mark, bounded resumable byte/item ledger,
+atomic dependency-aware compaction, disabled-by-default policy, then
+admission integration and live gates. Surviving replies lose only an expired
+reply projection; reaction and revision state/audit for a deleted target are
+removed in the same transaction. No retention behavior or
+`message-revisions-v1` activation is introduced by the checkpoint.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

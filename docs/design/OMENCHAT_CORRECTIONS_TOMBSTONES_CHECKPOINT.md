@@ -472,9 +472,12 @@ omenchatd state.
    session-open frames still do not request the capability, unsolicited
    acceptance cannot activate it, and no correction/tombstone control is
    exposed. Dormant GUI controls remain a later sub-slice.
-6. Complete room-history retention/compaction so an original and all dependent
-   revision/reaction/reply projections are removed atomically. This is required
-   before capability activation.
+6. **Design checkpoint complete; implementation pending.**
+   `OMENCHAT_ROOM_RETENTION_CHECKPOINT.md` records the disabled compatibility
+   default, persistent event-ID high-water mark, bounded usage-ledger backfill,
+   atomic revision/reaction/reply cleanup, rollback boundary, and test matrix.
+   The current `MAX(event_id) + 1` allocator must be replaced before any event
+   deletion can be safe. This remains required before capability activation.
 7. Run deterministic, mixed-version, retention, Resource, restart, fault, and
    live isolated smoke gates.
 8. Request and accept `message-revisions-v1` only after every gate passes.
