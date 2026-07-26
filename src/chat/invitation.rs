@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::directory::{DirectoryEntry, DirectoryKind};
+
 use super::model::CHAT_SERVER_DISPLAY_MAX_BYTES;
 
 pub const OMENCHAT_INVITATION_MAX_BYTES: usize = 2 * 1024;
@@ -20,6 +22,82 @@ pub struct OmenChatInvitation {
     pub room_id: Option<u32>,
     pub display_label: Option<String>,
     pub claimed_identity_hash: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OmenChatInvitationIdentityEvidence {
+    NotProvided,
+    Unverified,
+    VerifiedMatch { trusted: bool },
+    Conflict,
+}
+
+impl OmenChatInvitationIdentityEvidence {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotProvided => "no identity fingerprint supplied",
+            Self::Unverified => "identity fingerprint unverified",
+            Self::VerifiedMatch { trusted: true } => "verified match · trusted directory entry",
+            Self::VerifiedMatch { trusted: false } => "verified match · not trusted",
+            Self::Conflict => "identity fingerprint conflicts with directory evidence",
+        }
+    }
+
+    pub fn allows_confirmation(self) -> bool {
+        !matches!(self, Self::Conflict)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OmenChatInvitationPreview {
+    pub invitation: OmenChatInvitation,
+    pub identity_evidence: OmenChatInvitationIdentityEvidence,
+}
+
+impl OmenChatInvitationPreview {
+    pub fn new(invitation: OmenChatInvitation, directory: &[DirectoryEntry]) -> Self {
+        let identity_evidence = assess_identity_evidence(&invitation, directory);
+        Self {
+            invitation,
+            identity_evidence,
+        }
+    }
+
+    pub fn allows_confirmation(&self) -> bool {
+        self.identity_evidence.allows_confirmation()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OmenChatInvitationPreviewOwner {
+    pending: Option<OmenChatInvitationPreview>,
+}
+
+impl OmenChatInvitationPreviewOwner {
+    pub fn pending(&self) -> Option<&OmenChatInvitationPreview> {
+        self.pending.as_ref()
+    }
+
+    pub fn replace_from_uri(
+        &mut self,
+        value: &str,
+        directory: &[DirectoryEntry],
+    ) -> Result<(), OmenChatInvitationError> {
+        let invitation = OmenChatInvitation::parse(value)?;
+        self.pending = Some(OmenChatInvitationPreview::new(invitation, directory));
+        Ok(())
+    }
+
+    pub fn cancel(&mut self) -> bool {
+        self.pending.take().is_some()
+    }
+
+    pub fn take_confirmable(&mut self) -> Option<OmenChatInvitation> {
+        if !self.pending.as_ref()?.allows_confirmation() {
+            return None;
+        }
+        self.pending.take().map(|preview| preview.invitation)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -249,6 +327,39 @@ fn decode_hex(byte: u8) -> Option<u8> {
     }
 }
 
+fn assess_identity_evidence(
+    invitation: &OmenChatInvitation,
+    directory: &[DirectoryEntry],
+) -> OmenChatInvitationIdentityEvidence {
+    let Some(claimed) = invitation.claimed_identity_hash.as_deref() else {
+        return OmenChatInvitationIdentityEvidence::NotProvided;
+    };
+    let mut matching_identity_seen = false;
+    let mut matching_identity_trusted = false;
+    for entry in directory.iter().filter(|entry| {
+        entry.kind == DirectoryKind::OmenChat
+            && entry
+                .destination_hash
+                .eq_ignore_ascii_case(&invitation.server_destination)
+    }) {
+        let Some(known) = entry.identity_hash.as_deref() else {
+            continue;
+        };
+        if !known.eq_ignore_ascii_case(claimed) {
+            return OmenChatInvitationIdentityEvidence::Conflict;
+        }
+        matching_identity_seen = true;
+        matching_identity_trusted |= entry.trusted;
+    }
+    if matching_identity_seen {
+        OmenChatInvitationIdentityEvidence::VerifiedMatch {
+            trusted: matching_identity_trusted,
+        }
+    } else {
+        OmenChatInvitationIdentityEvidence::Unverified
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +515,118 @@ mod tests {
         ] {
             assert!(!uri.contains(forbidden));
         }
+    }
+
+    fn directory_entry(identity: Option<&str>, trusted: bool) -> DirectoryEntry {
+        let mut entry = DirectoryEntry::new(DESTINATION, "Server", DirectoryKind::OmenChat);
+        entry.identity_hash = identity.map(str::to_owned);
+        entry.trusted = trusted;
+        entry
+    }
+
+    fn invitation_with_identity(identity: Option<&str>) -> OmenChatInvitation {
+        let mut invitation = OmenChatInvitation::new(DESTINATION).expect("invitation");
+        invitation.claimed_identity_hash = identity.map(str::to_owned);
+        invitation
+    }
+
+    #[test]
+    fn preview_distinguishes_absent_unverified_verified_and_conflicting_identity() {
+        assert_eq!(
+            OmenChatInvitationPreview::new(invitation_with_identity(None), &[]).identity_evidence,
+            OmenChatInvitationIdentityEvidence::NotProvided
+        );
+        assert_eq!(
+            OmenChatInvitationPreview::new(invitation_with_identity(Some(IDENTITY)), &[])
+                .identity_evidence,
+            OmenChatInvitationIdentityEvidence::Unverified
+        );
+        assert_eq!(
+            OmenChatInvitationPreview::new(
+                invitation_with_identity(Some(IDENTITY)),
+                &[directory_entry(Some(IDENTITY), true)]
+            )
+            .identity_evidence,
+            OmenChatInvitationIdentityEvidence::VerifiedMatch { trusted: true }
+        );
+        let conflict = OmenChatInvitationPreview::new(
+            invitation_with_identity(Some(IDENTITY)),
+            &[directory_entry(
+                Some("11111111111111111111111111111111"),
+                true,
+            )],
+        );
+        assert_eq!(
+            conflict.identity_evidence,
+            OmenChatInvitationIdentityEvidence::Conflict
+        );
+        assert!(!conflict.allows_confirmation());
+    }
+
+    #[test]
+    fn conflicting_duplicate_directory_evidence_wins_over_a_match() {
+        let preview = OmenChatInvitationPreview::new(
+            invitation_with_identity(Some(IDENTITY)),
+            &[
+                directory_entry(Some(IDENTITY), true),
+                directory_entry(Some("11111111111111111111111111111111"), false),
+            ],
+        );
+        assert_eq!(
+            preview.identity_evidence,
+            OmenChatInvitationIdentityEvidence::Conflict
+        );
+    }
+
+    #[test]
+    fn preview_owner_retains_one_item_replaces_only_after_valid_parse_and_cancels() {
+        let mut owner = OmenChatInvitationPreviewOwner::default();
+        let first = format!("omenchat://{DESTINATION}?invite=1&room=1");
+        owner.replace_from_uri(&first, &[]).expect("first preview");
+        assert_eq!(
+            owner
+                .pending()
+                .and_then(|preview| preview.invitation.room_id),
+            Some(1)
+        );
+
+        assert!(owner.replace_from_uri("hostile input", &[]).is_err());
+        assert_eq!(
+            owner
+                .pending()
+                .and_then(|preview| preview.invitation.room_id),
+            Some(1),
+            "invalid input must not discard the current explicit preview"
+        );
+
+        let second = format!("omenchat://{DESTINATION}?invite=1&room=2");
+        owner.replace_from_uri(&second, &[]).expect("replacement");
+        assert_eq!(
+            owner
+                .take_confirmable()
+                .and_then(|invitation| invitation.room_id),
+            Some(2)
+        );
+        assert!(owner.pending().is_none());
+        assert!(!owner.cancel());
+    }
+
+    #[test]
+    fn conflict_cannot_be_taken_for_confirmation_or_discarded_implicitly() {
+        let mut owner = OmenChatInvitationPreviewOwner::default();
+        let uri = format!("omenchat://{DESTINATION}?invite=1&identity={IDENTITY}");
+        owner
+            .replace_from_uri(
+                &uri,
+                &[directory_entry(
+                    Some("11111111111111111111111111111111"),
+                    false,
+                )],
+            )
+            .expect("conflicting preview");
+        assert!(owner.take_confirmable().is_none());
+        assert!(owner.pending().is_some());
+        assert!(owner.cancel());
+        assert!(owner.pending().is_none());
     }
 }

@@ -1,6 +1,6 @@
 # OMENchat safe invitations checkpoint
 
-Status: canonical URI domain implemented; confirmation/UI pending
+Status: canonical URI and dormant preview reducer implemented; desktop activation pending
 Release target: `v0.9.6-4`
 Protocol baseline: OMENchat protocol 1; no new frame operation or capability
 
@@ -216,5 +216,20 @@ normalization, destination/fingerprint length and hex rules, room boundaries,
 unknown/duplicate/trailing fields, malformed percent and UTF-8 input, control
 bytes, authority tricks, noncanonical schemes, and the label limit. The type
 has no production caller yet and therefore cannot connect, join, trust,
-persist, or render QR data. Step 2, the ephemeral preview and trust-evidence
-reducer, remains the next gate.
+persist, or render QR data.
+
+Step 2 is also complete as a dormant frontend-neutral reducer. It owns at most
+one preview, replaces it only after a new URI parses successfully, and requires
+explicit cancellation. Identity evidence is one of no claim, unverified,
+verified match (with Directory trust reported separately), or conflict. Only
+exact OMENchat Directory destinations participate. Any conflicting identity
+for that destination wins over a matching duplicate and blocks confirmation;
+the blocked preview remains visible until explicitly cancelled. Taking a
+confirmable invitation consumes the preview but still performs no connection
+or state mutation because no production caller exists yet.
+
+Focused tests cover every evidence class, duplicate conflict precedence,
+single-item replacement, invalid-import preservation, confirmable consumption,
+and conflict cancellation. Step 3, desktop preview presentation and explicit
+confirmation through the existing OMENchat session boundary, remains the next
+gate.

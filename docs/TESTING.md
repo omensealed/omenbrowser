@@ -4217,5 +4217,8 @@ cargo test --locked --no-default-features --features desktop-product \
 The tests cover the exact legacy plain URI, enhanced canonical ordering,
 outer/field boundaries, hexadecimal normalization, room overflow, malformed
 percent/UTF-8 data, unsupported or duplicate fields, authority tricks, and
-secret-field omission. Confirmation, Directory evidence, room selection, and
-QR presentation require separate tests before activation.
+secret-field omission. They also cover all Directory identity-evidence classes,
+conflicting duplicate precedence, one-item preview replacement, invalid-input
+preservation, explicit cancellation, and conflict-blocked confirmation.
+Desktop presentation, connection confirmation, room selection, and QR
+presentation require separate tests before activation.

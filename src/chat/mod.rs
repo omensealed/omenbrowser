@@ -37,7 +37,8 @@ pub use client::{
 };
 pub use descriptor::OmenChatDescriptor;
 pub use invitation::{
-    OmenChatInvitation, OmenChatInvitationError, OmenChatInvitationKind,
+    OmenChatInvitation, OmenChatInvitationError, OmenChatInvitationIdentityEvidence,
+    OmenChatInvitationKind, OmenChatInvitationPreview, OmenChatInvitationPreviewOwner,
     OMENCHAT_INVITATION_MAX_BYTES,
 };
 pub use model::*;

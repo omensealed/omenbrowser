@@ -1121,6 +1121,15 @@ caller, connection action, preview, storage, QR, wire, schema, worker, timer,
 or dependency. Ephemeral confirmation and trust-evidence reduction remain the
 next slice.
 
+The second dormant slice adds that frontend-neutral preview reducer without
+wiring it to a desktop action. It owns one replaceable invitation, classifies
+no-claim, unverified, verified, and conflicting identity evidence from exact
+OMENchat Directory entries, and makes any conflict block confirmation until
+explicit cancellation. Invalid replacement input preserves the prior preview.
+The reducer has no connection, join, trust, persistence, QR, worker, timer,
+queue, protocol, or schema behavior. Desktop presentation and explicit
+confirmation remain the next slice.
+
 ### Unit 6E — corrections and delete tombstones
 
 - Append correction and tombstone events rather than rewriting history.
