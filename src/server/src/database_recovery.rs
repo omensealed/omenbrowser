@@ -17,6 +17,12 @@ pub struct DatabaseSchemaFourExportReport {
     pub destination: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseSchemaFiveExportReport {
+    pub source_version: i64,
+    pub destination: PathBuf,
+}
+
 pub fn restore_migration_backup(
     database: &Path,
     backup: &Path,
@@ -108,20 +114,63 @@ fn export_schema_four_copy_with_publish<F>(
 where
     F: FnMut(&Path, &Path) -> std::io::Result<()>,
 {
+    export_downgrade_copy_with_publish(database, destination, 4, &mut publish)?;
+    Ok(DatabaseSchemaFourExportReport {
+        source_version: SCHEMA_VERSION,
+        destination: destination.to_path_buf(),
+    })
+}
+
+pub fn export_schema_five_copy(
+    database: &Path,
+    destination: &Path,
+) -> ServerResult<DatabaseSchemaFiveExportReport> {
+    export_schema_five_copy_with_publish(database, destination, atomic_replace)
+}
+
+fn export_schema_five_copy_with_publish<F>(
+    database: &Path,
+    destination: &Path,
+    mut publish: F,
+) -> ServerResult<DatabaseSchemaFiveExportReport>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    export_downgrade_copy_with_publish(database, destination, 5, &mut publish)?;
+    Ok(DatabaseSchemaFiveExportReport {
+        source_version: SCHEMA_VERSION,
+        destination: destination.to_path_buf(),
+    })
+}
+
+fn export_downgrade_copy_with_publish<F>(
+    database: &Path,
+    destination: &Path,
+    target_version: i64,
+    publish: &mut F,
+) -> ServerResult<()>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    debug_assert!(matches!(target_version, 4 | 5));
+    let schema_label = format!("schema-{target_version}");
     validate_regular_file(database, "active database")?;
     if database == destination {
-        return Err(ServerError::Message(
-            "schema-4 export destination must differ from the active database".into(),
-        ));
+        return Err(ServerError::Message(format!(
+            "{schema_label} export destination must differ from the active database"
+        )));
     }
     if sidecar_path(database, "-wal").exists() || sidecar_path(database, "-shm").exists() {
         return Err(ServerError::Message(
-            "schema-4 export refused while SQLite WAL/SHM files exist; stop omenchatd cleanly and retry"
-                .into(),
+            format!(
+                "{schema_label} export refused while SQLite WAL/SHM files exist; stop omenchatd cleanly and retry"
+            ),
         ));
     }
     let destination_parent = destination.parent().ok_or_else(|| {
-        ServerError::Message("schema-4 export requires a destination parent directory".into())
+        ServerError::Message(format!(
+            "{schema_label} export requires a destination parent directory"
+        ))
     })?;
     let destination_reservation = OpenOptions::new()
         .write(true)
@@ -129,7 +178,7 @@ where
         .open(destination)
         .map_err(|error| {
             ServerError::Message(format!(
-                "schema-4 export destination must not already exist: {}: {error}",
+                "{schema_label} export destination must not already exist: {}: {error}",
                 destination.display()
             ))
         })?;
@@ -148,7 +197,8 @@ where
         return Err(error);
     }
 
-    let (stage, stage_reservation) = match reserve_sibling(destination, "schema4-stage", "sqlite") {
+    let stage_label = format!("schema{target_version}-stage");
+    let (stage, stage_reservation) = match reserve_sibling(destination, &stage_label, "sqlite") {
         Ok(stage) => stage,
         Err(error) => {
             let _ = std::fs::remove_file(destination);
@@ -173,16 +223,25 @@ where
             rusqlite::TransactionBehavior::Immediate,
         )?;
         transaction.execute_batch(
-            "DROP INDEX IF EXISTS idx_room_reaction_events_retention;
-             DROP INDEX IF EXISTS idx_room_reactions_target;
-             DROP TABLE IF EXISTS room_reaction_events;
-             DROP TABLE IF EXISTS room_reactions;",
+            "DROP INDEX IF EXISTS idx_room_message_revision_events_retention;
+             DROP INDEX IF EXISTS idx_room_message_revision_events_target;
+             DROP INDEX IF EXISTS idx_room_message_revision_state_event;
+             DROP TABLE IF EXISTS room_message_revision_events;
+             DROP TABLE IF EXISTS room_message_revision_state;",
         )?;
-        transaction.pragma_update(None, "user_version", 4)?;
+        if target_version == 4 {
+            transaction.execute_batch(
+                "DROP INDEX IF EXISTS idx_room_reaction_events_retention;
+                 DROP INDEX IF EXISTS idx_room_reactions_target;
+                 DROP TABLE IF EXISTS room_reaction_events;
+                 DROP TABLE IF EXISTS room_reactions;",
+            )?;
+        }
+        transaction.pragma_update(None, "user_version", target_version)?;
         transaction.commit()?;
         drop(connection);
         checkpoint_staged_database(&stage)?;
-        validate_schema_four_copy(&stage)?;
+        validate_downgrade_copy(&stage, target_version)?;
         Ok(())
     })();
     if let Err(error) = prepare_result {
@@ -199,17 +258,14 @@ where
     let publication_result = (|| -> ServerResult<()> {
         set_private_permissions(destination)?;
         sync_directory(destination_parent)?;
-        validate_schema_four_copy(destination)
+        validate_downgrade_copy(destination, target_version)
     })();
     if let Err(error) = publication_result {
         remove_sqlite_files(destination);
         return Err(error);
     }
 
-    Ok(DatabaseSchemaFourExportReport {
-        source_version: SCHEMA_VERSION,
-        destination: destination.to_path_buf(),
-    })
+    Ok(())
 }
 
 fn validate_regular_file(path: &Path, label: &str) -> ServerResult<()> {
@@ -292,19 +348,21 @@ fn validate_current_database(path: &Path) -> ServerResult<()> {
     Ok(())
 }
 
-fn validate_schema_four_copy(path: &Path) -> ServerResult<()> {
+fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()> {
+    debug_assert!(matches!(target_version, 4 | 5));
+    let schema_label = format!("schema-{target_version}");
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version != 4 {
+    if version != target_version {
         return Err(ServerError::Message(format!(
-            "schema-4 export has unexpected schema version {version}"
+            "{schema_label} export has unexpected schema version {version}"
         )));
     }
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if integrity != "ok" {
         return Err(ServerError::Message(format!(
-            "schema-4 export failed SQLite integrity_check: {integrity}"
+            "{schema_label} export failed SQLite integrity_check: {integrity}"
         )));
     }
     let foreign_key_failure: Option<String> = connection
@@ -312,7 +370,24 @@ fn validate_schema_four_copy(path: &Path) -> ServerResult<()> {
         .optional()?;
     if let Some(table) = foreign_key_failure {
         return Err(ServerError::Message(format!(
-            "schema-4 export failed foreign_key_check in table {table}"
+            "{schema_label} export failed foreign_key_check in table {table}"
+        )));
+    }
+    let revision_objects: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE name IN (
+           'room_message_revision_state',
+           'room_message_revision_events',
+           'idx_room_message_revision_state_event',
+           'idx_room_message_revision_events_target',
+           'idx_room_message_revision_events_retention'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if revision_objects != 0 {
+        return Err(ServerError::Message(format!(
+            "{schema_label} export retained schema-6 message revision objects"
         )));
     }
     let reaction_objects: i64 = connection.query_row(
@@ -326,10 +401,15 @@ fn validate_schema_four_copy(path: &Path) -> ServerResult<()> {
         [],
         |row| row.get(0),
     )?;
-    if reaction_objects != 0 {
+    if target_version == 4 && reaction_objects != 0 {
         return Err(ServerError::Message(
             "schema-4 export retained schema-5 reaction objects".into(),
         ));
+    }
+    if target_version == 5 && reaction_objects != 4 {
+        return Err(ServerError::Message(format!(
+            "schema-5 export did not retain the complete schema-5 reaction layer; found {reaction_objects} of 4 objects"
+        )));
     }
     Ok(())
 }
@@ -558,6 +638,24 @@ mod tests {
                 [room.room_id],
             )
             .expect("reaction audit");
+        connection
+            .execute(
+                "INSERT INTO room_message_revision_state(
+                   room_id, target_event_id, latest_revision_event_id, revision_action,
+                   actor_user_id, replacement_body, revision_number, at, retained_bytes
+                 ) VALUES (?1, 1, 2, 1, 7, X'636F72726563746564', 1, 2, 41)",
+                [room.room_id],
+            )
+            .expect("message revision state");
+        connection
+            .execute(
+                "INSERT INTO room_message_revision_events(
+                   room_id, revision_event_id, target_event_id, actor_user_id,
+                   revision_action, replacement_body, revision_number, at, retained_bytes
+                 ) VALUES (?1, 2, 1, 7, 1, X'636F72726563746564', 1, 2, 41)",
+                [room.room_id],
+            )
+            .expect("message revision audit");
         drop(connection);
         (root, database, destination)
     }
@@ -730,6 +828,16 @@ mod tests {
                 .expect("active reactions"),
             1
         );
+        assert_eq!(
+            active
+                .query_row(
+                    "SELECT COUNT(*) FROM room_message_revision_state",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("active revision state"),
+            1
+        );
 
         let exported = rusqlite::Connection::open_with_flags(
             &destination,
@@ -764,11 +872,16 @@ mod tests {
             exported
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master
-                     WHERE name IN ('room_reactions', 'room_reaction_events')",
+                     WHERE name IN (
+                       'room_reactions',
+                       'room_reaction_events',
+                       'room_message_revision_state',
+                       'room_message_revision_events'
+                     )",
                     [],
                     |row| row.get::<_, i64>(0)
                 )
-                .expect("reaction tables absent"),
+                .expect("post-schema-four tables absent"),
             0
         );
         let integrity: String = exported
@@ -791,6 +904,102 @@ mod tests {
         drop(exported);
         drop(active);
         std::fs::remove_dir_all(root).expect("remove export root");
+    }
+
+    #[test]
+    fn schema_five_export_preserves_reactions_and_omits_message_revisions() {
+        let (root, database, _) = setup_current_for_schema_four_export("schema5-success");
+        let destination = root.join("omenchat-schema5.sqlite");
+        let report = export_schema_five_copy(&database, &destination).expect("schema five export");
+        assert_eq!(report.source_version, SCHEMA_VERSION);
+        assert_eq!(report.destination, destination);
+
+        let active = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("active database");
+        assert_eq!(
+            active
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("active version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            active
+                .query_row(
+                    "SELECT COUNT(*) FROM room_message_revision_events",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("active revision audit"),
+            1
+        );
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("schema five database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("export version"),
+            5
+        );
+        assert_eq!(
+            exported
+                .query_row("SELECT COUNT(*) FROM room_reactions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved reaction state"),
+            1
+        );
+        assert_eq!(
+            exported
+                .query_row("SELECT COUNT(*) FROM room_reaction_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved reaction audit"),
+            1
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE name IN (
+                       'room_message_revision_state',
+                       'room_message_revision_events',
+                       'idx_room_message_revision_state_event',
+                       'idx_room_message_revision_events_target',
+                       'idx_room_message_revision_events_retention'
+                     )",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("revision objects absent"),
+            0
+        );
+        let integrity: String = exported
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("integrity check");
+        assert_eq!(integrity, "ok");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .expect("export metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        drop(exported);
+        drop(active);
+        std::fs::remove_dir_all(root).expect("remove schema-five export root");
     }
 
     #[test]
@@ -855,5 +1064,71 @@ mod tests {
         );
         drop(active);
         std::fs::remove_dir_all(root).expect("remove refusal root");
+    }
+
+    #[test]
+    fn schema_five_export_refuses_overwrite_sidecars_and_publish_failure() {
+        let (root, database, _) = setup_current_for_schema_four_export("schema5-refusals");
+        let destination = root.join("omenchat-schema5.sqlite");
+
+        std::fs::write(&destination, b"operator-owned").expect("existing destination");
+        let error = export_schema_five_copy(&database, &destination)
+            .expect_err("existing destination must fail")
+            .to_string();
+        assert!(error.contains("must not already exist"));
+        assert_eq!(
+            std::fs::read(&destination).expect("preserved destination"),
+            b"operator-owned"
+        );
+        std::fs::remove_file(&destination).expect("remove destination");
+
+        std::fs::write(sidecar_path(&database, "-wal"), b"active").expect("WAL sentinel");
+        let error = export_schema_five_copy(&database, &destination)
+            .expect_err("WAL presence must fail")
+            .to_string();
+        assert!(error.contains("WAL/SHM"));
+        std::fs::remove_file(sidecar_path(&database, "-wal")).expect("remove WAL sentinel");
+
+        let error = export_schema_five_copy_with_publish(&database, &destination, |_, _| {
+            Err(std::io::Error::other("injected schema-5 publish failure"))
+        })
+        .expect_err("publish failure")
+        .to_string();
+        assert!(
+            error.contains("injected schema-5 publish failure"),
+            "unexpected export failure: {error}"
+        );
+        assert!(!destination.exists());
+        assert!(std::fs::read_dir(&root)
+            .expect("export files")
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .contains("schema5-stage")));
+
+        let active = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("unchanged active database");
+        assert_eq!(
+            active
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("active version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            active
+                .query_row(
+                    "SELECT COUNT(*) FROM room_message_revision_state",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("active revision state"),
+            1
+        );
+        drop(active);
+        std::fs::remove_dir_all(root).expect("remove schema-five refusal root");
     }
 }

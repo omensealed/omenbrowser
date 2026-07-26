@@ -118,7 +118,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 5;
+pub(crate) const SCHEMA_VERSION: i64 = 6;
 
 impl OmenchatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -231,11 +231,33 @@ impl OmenchatStore {
         backup_source: Option<&std::path::Path>,
         migration_sql: &str,
         schema_step: F,
-        mut reaction_hook: H,
+        reaction_hook: H,
     ) -> ServerResult<()>
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
         H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            reaction_hook,
+            |_| Ok(()),
+        )
+    }
+
+    fn migrate_with_sql_step_and_hooks<F, H, R>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        mut reaction_hook: H,
+        mut revision_hook: R,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+        R: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
     {
         let current_version: i64 =
             self.connection
@@ -260,9 +282,12 @@ impl OmenchatStore {
         transaction.execute_batch(migration_sql)?;
         schema_step(&transaction)?;
         ensure_reaction_schema_with_hook(&transaction, &mut reaction_hook)?;
+        ensure_message_revision_schema_with_hook(&transaction, &mut revision_hook)?;
         reaction_hook(ReactionMigrationBoundary::BeforeVersionUpdate)?;
+        revision_hook(MessageRevisionMigrationBoundary::BeforeVersionUpdate)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         reaction_hook(ReactionMigrationBoundary::BeforeCommit)?;
+        revision_hook(MessageRevisionMigrationBoundary::BeforeCommit)?;
         transaction.commit()?;
         Ok(())
     }
@@ -928,6 +953,77 @@ where
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MessageRevisionMigrationBoundary {
+    BeforeTables,
+    BetweenTables,
+    BeforeIndexes,
+    BeforeVersionUpdate,
+    BeforeCommit,
+}
+
+fn ensure_message_revision_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
+{
+    hook(MessageRevisionMigrationBoundary::BeforeTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_message_revision_state(
+           room_id INTEGER NOT NULL,
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           latest_revision_event_id INTEGER NOT NULL CHECK(latest_revision_event_id > 0),
+           revision_action INTEGER NOT NULL CHECK(revision_action IN (1, 2)),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           replacement_body BLOB,
+           revision_number INTEGER NOT NULL CHECK(revision_number BETWEEN 1 AND 9),
+           at INTEGER NOT NULL,
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           PRIMARY KEY(room_id, target_event_id),
+           UNIQUE(room_id, latest_revision_event_id),
+           CHECK(
+             (revision_action = 1 AND replacement_body IS NOT NULL) OR
+             (revision_action = 2 AND replacement_body IS NULL)
+           )
+         );",
+    )?;
+
+    hook(MessageRevisionMigrationBoundary::BetweenTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_message_revision_events(
+           room_id INTEGER NOT NULL,
+           revision_event_id INTEGER NOT NULL CHECK(revision_event_id > 0),
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           revision_action INTEGER NOT NULL CHECK(revision_action IN (1, 2)),
+           replacement_body BLOB,
+           revision_number INTEGER NOT NULL CHECK(revision_number BETWEEN 1 AND 9),
+           at INTEGER NOT NULL,
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           PRIMARY KEY(room_id, revision_event_id),
+           CHECK(
+             (revision_action = 1 AND replacement_body IS NOT NULL) OR
+             (revision_action = 2 AND replacement_body IS NULL)
+           )
+         );",
+    )?;
+
+    hook(MessageRevisionMigrationBoundary::BeforeIndexes)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_message_revision_state_event
+         ON room_message_revision_state(room_id, latest_revision_event_id);
+
+         CREATE INDEX IF NOT EXISTS idx_room_message_revision_events_target
+         ON room_message_revision_events(room_id, target_event_id, revision_event_id);
+
+         CREATE INDEX IF NOT EXISTS idx_room_message_revision_events_retention
+         ON room_message_revision_events(at, room_id, revision_event_id);",
+    )?;
+    Ok(())
+}
+
 pub(crate) fn migration_backup_path(
     source_path: &std::path::Path,
     version: i64,
@@ -1378,6 +1474,37 @@ mod tests {
                  PRAGMA user_version = 4;",
             )
             .expect("version four fixture");
+    }
+
+    fn create_version_five_fixture(path: &std::path::Path) {
+        create_version_four_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version five database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version five transaction");
+        ensure_reaction_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version five reaction schema");
+        transaction
+            .execute(
+                "INSERT INTO room_reactions(
+                   room_id, target_event_id, actor_user_id, reaction_token, created_at
+                 ) VALUES (1, 1, 7, 'heart', 1)",
+                [],
+            )
+            .expect("version five reaction state");
+        transaction
+            .execute(
+                "INSERT INTO room_reaction_events(
+                   room_id, reaction_event_id, target_event_id, actor_user_id,
+                   reaction_token, reaction_action, at, retained_bytes
+                 ) VALUES (1, 1, 1, 7, 'heart', 1, 1, 32)",
+                [],
+            )
+            .expect("version five reaction audit");
+        transaction
+            .pragma_update(None, "user_version", 5)
+            .expect("version five marker");
+        transaction.commit().expect("version five commit");
     }
 
     fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
@@ -2119,6 +2246,183 @@ mod tests {
                 4
             );
             assert!(!schema_object_exists(&backup, "table", "room_reactions"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_five_database_adds_dormant_message_revision_schema_without_losing_rows() {
+        let path = isolated_database_path("v5-message-revision-schema");
+        create_version_five_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version six migration");
+        for (kind, name) in [
+            ("table", "room_message_revision_state"),
+            ("table", "room_message_revision_events"),
+            ("index", "idx_room_message_revision_state_event"),
+            ("index", "idx_room_message_revision_events_target"),
+            ("index", "idx_room_message_revision_events_retention"),
+        ] {
+            assert!(
+                schema_object_exists(&store.connection, kind, name),
+                "missing schema-6 object {name}"
+            );
+        }
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM room_reactions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved reaction state"),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM room_reaction_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved reaction audit"),
+            1
+        );
+
+        for statement in [
+            "INSERT INTO room_message_revision_state(
+               room_id, target_event_id, latest_revision_event_id, revision_action,
+               actor_user_id, replacement_body, revision_number, at, retained_bytes
+             ) VALUES (1, 0, 1, 1, 7, X'61', 1, 1, 1)",
+            "INSERT INTO room_message_revision_state(
+               room_id, target_event_id, latest_revision_event_id, revision_action,
+               actor_user_id, replacement_body, revision_number, at, retained_bytes
+             ) VALUES (1, 1, 1, 2, 7, X'61', 1, 1, 1)",
+            "INSERT INTO room_message_revision_events(
+               room_id, revision_event_id, target_event_id, actor_user_id,
+               revision_action, replacement_body, revision_number, at, retained_bytes
+             ) VALUES (1, 1, 1, 7, 1, X'61', 10, 1, 1)",
+        ] {
+            assert!(
+                store.connection.execute(statement, []).is_err(),
+                "schema constraint must reject {statement}"
+            );
+        }
+
+        let backup_path = migration_backup_path(&path, 5);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version five migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            5
+        );
+        assert!(schema_object_exists(&backup, "table", "room_reactions"));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_message_revision_state"
+        ));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_message_revision_events"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_message_revision_schema_fault_boundary_rolls_back_to_version_five() {
+        for boundary in [
+            MessageRevisionMigrationBoundary::BeforeTables,
+            MessageRevisionMigrationBoundary::BetweenTables,
+            MessageRevisionMigrationBoundary::BeforeIndexes,
+            MessageRevisionMigrationBoundary::BeforeVersionUpdate,
+            MessageRevisionMigrationBoundary::BeforeCommit,
+        ] {
+            let path = isolated_database_path(&format!("v6-fault-{boundary:?}"));
+            create_version_five_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_hooks(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |_| Ok(()),
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected message revision migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected message revision migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                5
+            );
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_reactions"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_message_revision_state"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_message_revision_events"
+            ));
+
+            let backup_path = migration_backup_path(&path, 5);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version five rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                5
+            );
+            assert!(schema_object_exists(&backup, "table", "room_reactions"));
+            assert!(!schema_object_exists(
+                &backup,
+                "table",
+                "room_message_revision_state"
+            ));
 
             drop(backup);
             drop(store);

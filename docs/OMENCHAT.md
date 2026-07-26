@@ -45,7 +45,7 @@ five-second caches; moderation mutations and transactional stale-user pruning
 complete asynchronously through the same worker. The command-driven line
 console waits synchronously on that same bounded owner. Upload-ledger repair
 still uses its existing synchronous maintenance path.
-The current schema is recorded as SQLite `user_version = 5`. Version 2 adds an
+The current schema is recorded as SQLite `user_version = 6`. Version 2 adds an
 actor/time index for upload quota planning. Version 3 adds the
 durable-mutation replay table and creation-order index. Version 4 adds nullable
 reply-event and bounded mention-ID metadata plus a partial reply index. The
@@ -64,6 +64,10 @@ enforces active/audit bounds, creates authoritative bounded snapshots, and
 limits reaction-event fan-out to capability-bound Links. omenchatd now accepts
 `reactions-v1` only when an identified Link explicitly requests it together
 with `durable-mutations-v1`; base and legacy Links receive no reaction state.
+Version 6 adds constrained dormant current-state and append-only audit tables
+for the reserved `message-revisions-v1` contract. Migration and recovery
+support is present, but the capability is not requested or accepted and no
+correction/tombstone executor or client action is enabled.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated
@@ -110,7 +114,7 @@ workspace currently represents LXMF conversations, not OMENchat sessions, so
 it does not display OMENchat reaction state.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
-`omenchat.sqlite.pre-v5-from-v<old>.bak`. It never overwrites an existing backup;
+`omenchat.sqlite.pre-v6-from-v<old>.bak`. It never overwrites an existing backup;
 backup failure aborts migration, and a successful backup is retained for
 operator recovery.
 Schema statements and the version update share one immediate transaction, so a
@@ -124,12 +128,16 @@ publication. The selected source remains unchanged and the prior active
 database is retained as an owner-only `pre-restore` backup. Operators must run
 `doctor` before restarting.
 
-An offline non-destructive downgrade artifact can be created with
+An offline non-destructive schema-5 downgrade artifact can be created with
+`omenchatd database export-schema5-copy --to <new-path> --confirm --home
+<path>`. A private staged copy drops only schema-6 revision objects, moves to
+`user_version = 5`, and preserves reaction state. For a deeper schema-4
+artifact, use
 `omenchatd database export-schema4-copy --to <new-path> --confirm --home
-<path>`. The destination must not exist. A private staged SQLite copy drops
-only schema-5 reaction objects, moves to `user_version = 4`, passes
-integrity/foreign-key checks, and is atomically published. The active schema-5
-database is unchanged; reaction state is intentionally omitted from the copy.
+<path>`. That copy drops both schema-6 revisions and schema-5 reactions before
+moving to `user_version = 4`. Both commands require a new destination, pass
+integrity/foreign-key checks, atomically publish, and leave the active schema-6
+database unchanged.
 
 ## Server Commands
 

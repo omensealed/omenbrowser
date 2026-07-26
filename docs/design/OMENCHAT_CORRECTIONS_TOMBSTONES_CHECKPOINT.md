@@ -441,9 +441,13 @@ omenchatd state.
    and replacement; both independent frame codecs preserve the same byte-exact
    correction fixture. The production client does not request the capability
    and omenchatd deliberately omits it from acceptance.
-3. Add schema 6 migration, injected rollback tests, recovery allowlist updates,
-   and the separate schema-5 downgrade-copy command. Keep the capability
-   dormant.
+3. **Complete and dormant.** Schema 6 adds constrained current-state and
+   append-only revision-audit tables plus three lookup/retention indexes in the
+   existing immediate migration transaction. Fault injection covers every
+   table/index/version/commit boundary. Recovery validation recognizes the new
+   objects, schema-4 exports remove both schema-5 and schema-6 layers, and the
+   separate schema-5 downgrade-copy command removes only revisions while
+   preserving reactions. The capability remains unrequested and unaccepted.
 4. Add the dormant transactional omenchatd executor, state/audit bounds,
    exact replay/conflict behavior, reaction cleanup, capability-scoped fan-out,
    and explicit-target snapshots.
@@ -475,14 +479,26 @@ cargo test --locked --no-default-features --features desktop-product \
   cd src/server
   cargo test --locked --no-default-features --features server-headless \
     message_revision --lib
+  cargo test --locked --no-default-features --features server-full \
+    store::tests::every_message_revision_schema_fault_boundary_rolls_back_to_version_five -- --exact
+  cargo test --locked --no-default-features --features server-full \
+    database_recovery::tests
+  cargo test --locked --no-default-features --features server-full
+  cargo clippy --locked --no-default-features --features server-full \
+    --all-targets -- -D warnings
 )
+cargo check --locked --no-default-features --features desktop-product
 git diff --check
 ```
 
 The shared crate now passes 34 tests, including six focused revision/negotiation
-tests. The root fixture and server fixture/dormancy tests pass. These results
-validate only the dormant shared contract. No schema, migration, executor,
-client reducer, native package, mixed-version process, or live Reticulum
+tests. The root fixture and server fixture/dormancy tests pass. The schema
+migration, five rollback boundaries, recovery exports, and schema-5 downgrade
+copy also pass isolated server tests. The full server result is 416 passed and
+9 ignored explicit soak/hardware/upstream cases; strict server Clippy and the
+root desktop-product check pass. These results validate only the dormant
+shared contract and storage foundation. No executor, client reducer, native
+package, mixed-version process, or live Reticulum
 revision test exists yet, and this checkpoint does not claim otherwise.
 
 ## Completion gate

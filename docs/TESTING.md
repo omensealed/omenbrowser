@@ -1323,6 +1323,11 @@ integrity-check a private staging copy, preserve the previous active database,
 and prove the selected source remains unchanged. Corrupt/current-schema inputs
 and active WAL state are refused. An injected atomic-publication failure leaves
 the active and source databases unchanged and removes staging/WAL/SHM files.
+Schema-6 tests migrate a representative schema-5 database without losing
+reaction state and inject failure at every revision table/index/version/commit
+boundary. Recovery tests also prove that a schema-5 export preserves reaction
+state while removing every schema-6 revision object, and that a deeper
+schema-4 export removes both feature layers.
 An injected migration executes one schema statement and then fails on the next.
 That test proves the partial schema is transactionally removed, the source
 marker and version 0 survive, and the backup stays readable.

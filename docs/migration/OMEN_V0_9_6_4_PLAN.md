@@ -1201,14 +1201,24 @@ revision, reaction, and reply projection atomically. No capability, operation,
 schema, persistence, worker, timer, retry, or UI action is activated by this
 checkpoint.
 
-The next dormant slice reserves operations 35–39 in the shared protocol crate
+The first dormant slice reserves operations 35–39 in the shared protocol crate
 and adds exact bounded request, acknowledgement, event, and explicit-target
 snapshot codecs. Negotiation requires the durable base, canonical hashing
 covers every mutation field, and both independent frame codecs share one
 byte-exact correction fixture. Production request and acceptance lists remain
-unchanged and have direct regressions. There is still no schema, storage,
-executor, client state, UI action, worker, timer, retry, or capability
-activation.
+unchanged and have direct regressions.
+
+The second dormant slice advances omenchatd to schema 6 with constrained
+revision current-state and append-only audit tables plus bounded lookup and
+retention indexes. Version-5 reaction rows survive migration. The migration is
+one immediate transaction, creates a private pre-v6 backup, and has injected
+rollback coverage before tables, between tables, before indexes, before the
+version update, and before commit. The confirmation-gated
+`database export-schema5-copy` path stages and atomically publishes a private
+schema-5 copy that omits revisions but preserves reactions. The existing
+schema-4 export now also removes revision objects. Neither command overwrites a
+destination or modifies the active database. There is still no executor,
+client state, UI action, worker, timer, retry, or capability activation.
 
 ### Unit 6F — pins and moderation audit history
 
