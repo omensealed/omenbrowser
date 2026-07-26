@@ -100,6 +100,23 @@ impl SqliteChatStore {
         Ok(store)
     }
 
+    /// Opens an existing client history database without creating or migrating it.
+    ///
+    /// This is intended for bounded background readers such as local history
+    /// search. The connection is additionally placed in SQLite query-only mode
+    /// so an accidentally called mutating store method fails closed.
+    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        let connection = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .context("open existing OMENchat history read-only")?;
+        connection
+            .pragma_update(None, "query_only", true)
+            .context("enable query-only OMENchat history access")?;
+        Ok(Self { connection })
+    }
+
     pub fn in_memory() -> anyhow::Result<Self> {
         let store = Self {
             connection: rusqlite::Connection::open_in_memory()?,
@@ -1092,6 +1109,74 @@ mod tests {
             destination: "abcd1234".into(),
             display_name: "Server A".into(),
         }
+    }
+
+    #[test]
+    fn read_only_store_reads_existing_history_and_fails_closed_on_writes() {
+        let path = isolated_store_path("read-only");
+        {
+            let mut store = SqliteChatStore::open(&path).expect("create store");
+            let server = sample_server();
+            store.save_server(server.clone()).expect("server");
+            store
+                .save_room(ChatRoomSummary {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    name: "lobby".into(),
+                    topic: None,
+                    unread: 0,
+                    joined: true,
+                })
+                .expect("room");
+            store
+                .append_events(vec![ChatEvent {
+                    server_id: server.server_id,
+                    room_id: 1,
+                    event_id: 1,
+                    actor_user_id: Some(7),
+                    actor_display_name: Some("Alice".into()),
+                    at_unix: 10,
+                    kind: ChatEventKind::Message {
+                        body: "read-only history".into(),
+                    },
+                }])
+                .expect("event");
+        }
+
+        let mut store = SqliteChatStore::open_read_only(&path).expect("read-only store");
+        assert_eq!(
+            store
+                .latest_events(&"server-a".into(), 1, 10)
+                .expect("read history")
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value(None, "query_only", |row| row.get::<_, i64>(0))
+                .expect("query-only state"),
+            1
+        );
+        assert!(store.save_server(sample_server()).is_err());
+        drop(store);
+        std::fs::remove_file(path).expect("remove store");
+    }
+
+    #[test]
+    fn read_only_store_does_not_create_a_missing_database_or_parent() {
+        let parent = std::env::temp_dir().join(format!(
+            "omenbrowser-chat-store-read-only-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let path = parent.join("chat.sqlite");
+        assert!(SqliteChatStore::open_read_only(&path).is_err());
+        assert!(!path.exists());
+        assert!(!parent.exists());
     }
 
     #[cfg(feature = "portable-sqlite")]

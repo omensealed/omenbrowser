@@ -571,6 +571,16 @@ It prints reducer-only full-miss and capped-hit durations. It is a measurement,
 not a hardware-specific pass/fail benchmark, and it never opens an application
 root or persistent store.
 
+The OMENchat read-only history-store boundary is covered by:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  read_only_store
+```
+
+These tests use unique temporary paths. They verify read access, query-only
+write rejection, and non-creation of a missing database and parent directory.
+
 Current-product NomadNet page request qualification:
 
 ```bash

@@ -134,6 +134,13 @@ package is `time`). This evidence rejects synchronous Iced update/view
 execution and cloning the maximum resident history for each query. The search
 must run as owned, bounded blocking work against isolated store data.
 
+OMENchat now exposes an explicit `SqliteChatStore::open_read_only` foundation
+for that worker. It opens only an existing database, never creates parent
+directories, never runs migrations, and enables SQLite `query_only` as a
+fail-closed second layer. Focused tests prove existing history remains readable,
+mutating store calls fail, and a missing database/path is not created. The
+method does not yet enumerate or search events.
+
 Next, add the owned one-in-flight store-backed blocking task and a compact
 search surface without persistence or schema changes. UI activation is not
 complete until stale-result, cancellation/supersession, focus, jump, and
