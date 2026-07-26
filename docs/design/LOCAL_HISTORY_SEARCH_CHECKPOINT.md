@@ -154,6 +154,13 @@ data; only joined display names are intended for the search reducer. The loader
 hard-clamps callers to 8,192 rows and 64 MiB, does not interpret query text, and
 does not change the database.
 
+LXMF now has a corresponding `MessageStore::list_threads_read_only` loader.
+It retains the existing inventory limits (256 threads, 64 MiB aggregate, 8 MiB
+per thread), validates every decoded thread, and preserves recent-first
+ordering. Unlike the normal recovery loader, malformed JSON returns an error
+without creating or pruning corrupt-file backups. Search therefore cannot
+mutate message storage merely by reading it.
+
 Next, add the owned one-in-flight store-backed blocking task and a compact
 search surface without persistence or schema changes. UI activation is not
 complete until stale-result, cancellation/supersession, focus, jump, and
