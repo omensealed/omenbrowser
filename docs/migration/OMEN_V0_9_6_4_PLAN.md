@@ -1264,6 +1264,15 @@ resend, and mutation actions. Stale restart rows are not presented as current,
 and redraw does not clone retained revision bodies. Production capability
 request/acceptance remains disabled.
 
+The seventh dormant slice closes the live-delta presentation evidence gap.
+Reconnect still clears revision authority for the server. A subsequently
+validated, negotiated revision delta restores authority only for its explicit
+retained target; it does not make the room or untouched targets authoritative.
+An exact replay restores stale target authority once and then remains
+idempotent. Stale/conflicting deltas restore no evidence. This makes the
+read-only projection react safely to live committed revisions without adding a
+sender, capability request, retry, timer, or room-wide inference.
+
 ### Unit 6F — pins and moderation audit history
 
 - Append bounded pin/unpin and moderation-audit events.

@@ -351,7 +351,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 && desktop
                     .omenchat
                     .chat_client
-                    .message_revision_snapshot_complete(
+                    .message_revision_target_authoritative(
                         session.session_id,
                         session.active_room.room_id,
                         event.event_id,

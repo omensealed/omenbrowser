@@ -135,8 +135,11 @@ projection. It borrows only authoritative rows for retained targets:
 corrections show effective text with an edited marker, while tombstones hide
 the original body plus reply, mention, media, reaction, resend, and mutation
 actions. Stale restored rows remain hidden until an explicit-target snapshot
-re-establishes authority. This adds no capability request, sender, control,
-worker, timer, retry, or per-redraw revision-body clone.
+or a validated negotiated live delta re-establishes authority for that target.
+An exact live replay restores stale target evidence once without changing the
+retained row; stale or conflicting deltas restore nothing, and other targets
+remain stale. This adds no capability request, sender, control, worker, timer,
+retry, or per-redraw revision-body clone.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated

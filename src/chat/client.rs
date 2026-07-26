@@ -747,7 +747,7 @@ impl ChatClient {
             .get(&(server_id.to_owned(), room_id, target_event_id))
     }
 
-    pub fn message_revision_snapshot_complete(
+    pub fn message_revision_target_authoritative(
         &self,
         session_id: ChatSessionId,
         room_id: RoomId,
@@ -758,6 +758,27 @@ impl ChatClient {
                 .get(&session.server.server_id)
                 .is_some_and(|targets| targets.contains(&(room_id, target_event_id)))
         })
+    }
+
+    pub fn message_revision_snapshot_complete(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> bool {
+        self.message_revision_target_authoritative(session_id, room_id, target_event_id)
+    }
+
+    fn mark_message_revision_target_authoritative(
+        &mut self,
+        server_id: ServerId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> bool {
+        self.authoritative_message_revision_targets
+            .entry(server_id)
+            .or_default()
+            .insert((room_id, target_event_id))
     }
 
     pub(crate) fn mark_message_revisions_stale(&mut self, session_id: ChatSessionId) {
@@ -795,7 +816,7 @@ impl ChatClient {
         let server_id = session.server.server_id.clone();
         let key = (server_id.clone(), room_id, event.target_event_id);
         let revision = ChatMessageRevision {
-            server_id,
+            server_id: server_id.clone(),
             room_id,
             target_event_id: event.target_event_id,
             latest_revision_event_id: event.revision_event_id,
@@ -807,7 +828,11 @@ impl ChatClient {
         };
         if let Some(current) = self.message_revisions.get(&key) {
             if current == &revision {
-                return Ok(false);
+                return Ok(self.mark_message_revision_target_authoritative(
+                    server_id,
+                    room_id,
+                    event.target_event_id,
+                ));
             }
             if revision.latest_revision_event_id <= current.latest_revision_event_id
                 || revision.revision_number <= current.revision_number
@@ -822,6 +847,7 @@ impl ChatClient {
             return Err("message revision state exceeds client retention limits");
         }
         self.message_revisions = next;
+        self.mark_message_revision_target_authoritative(server_id, room_id, event.target_event_id);
         Ok(true)
     }
 
@@ -2141,7 +2167,7 @@ mod tests {
         let session_id = client.reserve_session_id();
         assert!(client.push_session(bounded_history_session(
             session_id,
-            vec![bounded_history_event(1, 5)]
+            vec![bounded_history_event(1, 5), bounded_history_event(2, 6)]
         )));
         let correction = MessageRevisionEvent {
             revision_event_id: 2,
@@ -2157,10 +2183,10 @@ mod tests {
             client.apply_message_revision_event(session_id, 1, correction.clone()),
             Ok(true)
         );
-        assert_eq!(
-            client.apply_message_revision_event(session_id, 1, correction),
-            Ok(false)
-        );
+        assert!(client.message_revision_target_authoritative(session_id, 1, 1));
+        assert!(!client.message_revision_target_authoritative(session_id, 1, 2));
+        client.mark_message_revisions_stale(session_id);
+        assert!(!client.message_revision_target_authoritative(session_id, 1, 1));
         assert!(client
             .apply_message_revision_event(
                 session_id,
@@ -2177,6 +2203,16 @@ mod tests {
                 },
             )
             .is_err());
+        assert!(!client.message_revision_target_authoritative(session_id, 1, 1));
+        assert_eq!(
+            client.apply_message_revision_event(session_id, 1, correction.clone()),
+            Ok(true)
+        );
+        assert!(client.message_revision_target_authoritative(session_id, 1, 1));
+        assert_eq!(
+            client.apply_message_revision_event(session_id, 1, correction),
+            Ok(false)
+        );
         client
             .replace_message_revision_snapshot(
                 session_id,

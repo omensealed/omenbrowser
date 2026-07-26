@@ -484,8 +484,12 @@ omenchatd state.
    Corrections replace displayed text and add an `edited` marker while
    preserving message actions. Tombstones suppress original text,
    reply/mention/media/reaction actions, and add a `deleted` marker. Stale
-   restart cache without authoritative snapshot evidence is not rendered as
-   current. No sender, control, capability request, timer, or retry is added.
+   restart cache without authoritative evidence is not rendered as current.
+   An explicit-target snapshot establishes positive or negative authority; a
+   validated negotiated live delta establishes authority only for its target.
+   An exact delta replay re-establishes stale authority once, while stale or
+   conflicting deltas establish nothing. No sender, control, capability
+   request, timer, or retry is added.
 8. Add the bounded durable desktop sender and correction/tombstone controls
    behind the still-dormant capability gate, then run deterministic,
    mixed-version, retention, Resource, restart, fault, and live isolated smoke
@@ -610,6 +614,15 @@ text nor reply, mention, media, reaction, resend, or mutation actions. The live
 view borrows only rows whose explicit target has authoritative snapshot
 evidence, avoiding both stale-cache claims and revision-body clones during
 redraw. Production negotiation and mutation actions remain disabled.
+
+The following target-authority sub-slice makes negotiated live delta evidence
+usable without broadening it into room-wide snapshot evidence. A valid new
+delta marks only its retained target authoritative. An exact replay after
+reconnect/stale marking emits one applied transition to restore presentation;
+another exact replay is idempotent. A stale or conflicting delta cannot restore
+authority, and untouched targets remain stale. Focused client and live-frame
+reducer tests cover these transitions. Production negotiation and mutation
+actions remain disabled.
 
 ## Completion gate
 

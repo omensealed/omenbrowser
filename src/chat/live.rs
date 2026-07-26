@@ -4457,6 +4457,24 @@ mod tests {
             [ChatClientEvent::MessageRevisionDeltaApplied { event, .. }]
                 if event == &revision
         ));
+        assert!(client.message_revision_target_authoritative(session_id, 1, 10));
+        client.mark_message_revisions_stale(session_id);
+        assert!(!client.message_revision_target_authoritative(session_id, 1, 10));
+        events.clear();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            frame.clone(),
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::MessageRevisionDeltaApplied { event, .. }]
+                if event == &revision
+        ));
+        assert!(client.message_revision_target_authoritative(session_id, 1, 10));
         events.clear();
         apply_frame_with_state(
             &mut client,
@@ -4468,7 +4486,7 @@ mod tests {
         );
         assert!(
             events.is_empty(),
-            "exact revision replay must be idempotent"
+            "authoritative exact revision replay must be idempotent"
         );
 
         let snapshot = MessageRevisionSnapshot {
