@@ -405,6 +405,7 @@ fn audit_usage(
 mod tests {
     use super::*;
     use crate::store::ServerRoomEventKind;
+    use std::time::Instant;
 
     fn setup() -> (OmenchatStore, RoomId, UserId, EventId) {
         let store = OmenchatStore::in_memory().expect("store");
@@ -662,5 +663,291 @@ mod tests {
                 .expect("active rows"),
             1
         );
+    }
+
+    #[test]
+    fn global_active_row_limit_rejects_without_audit_or_partial_state() {
+        let (store, room_id, user_id, target_event_id) = setup();
+        store
+            .connection
+            .execute(
+                "WITH RECURSIVE sequence(value) AS (
+                   SELECT 1
+                   UNION ALL
+                   SELECT value + 1 FROM sequence WHERE value < ?1
+                 )
+                 INSERT INTO room_reactions(
+                   room_id, target_event_id, actor_user_id, reaction_token, created_at
+                 )
+                 SELECT 1000 + ((value - 1) / ?2), value, ?3, 'heart', 0
+                 FROM sequence",
+                (MAX_ACTIVE_ROWS_GLOBAL, MAX_ACTIVE_ROWS_PER_ROOM, user_id),
+            )
+            .expect("global active-state fixture");
+
+        assert_eq!(
+            mutate(
+                &store,
+                room_id,
+                user_id,
+                target_event_id,
+                ReactionToken::Heart,
+                ReactionAction::Add,
+                100,
+            ),
+            ReactionMutationResult::Saturated
+        );
+        assert_eq!(
+            store.reaction_row_counts().expect("reaction counts"),
+            (MAX_ACTIVE_ROWS_GLOBAL, 0)
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM room_reactions
+                     WHERE room_id = ?1 AND target_event_id = ?2",
+                    (room_id, target_event_id as i64),
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("target active rows"),
+            0
+        );
+    }
+
+    #[test]
+    fn full_nonexpired_room_audit_replaces_only_one_oldest_row() {
+        let (store, room_id, user_id, target_event_id) = setup();
+        store
+            .connection
+            .execute(
+                "WITH RECURSIVE sequence(value) AS (
+                   SELECT 1
+                   UNION ALL
+                   SELECT value + 1 FROM sequence WHERE value < ?1
+                 )
+                 INSERT INTO room_reaction_events(
+                   room_id, reaction_event_id, target_event_id, actor_user_id,
+                   reaction_token, reaction_action, at, retained_bytes
+                 )
+                 SELECT ?2, value, ?3, ?4, 'heart', 1, 100, 38
+                 FROM sequence",
+                (
+                    MAX_AUDIT_ROWS_PER_ROOM,
+                    room_id,
+                    target_event_id as i64,
+                    user_id,
+                ),
+            )
+            .expect("room audit-capacity fixture");
+
+        assert!(matches!(
+            mutate(
+                &store,
+                room_id,
+                user_id,
+                target_event_id,
+                ReactionToken::Heart,
+                ReactionAction::Add,
+                100,
+            ),
+            ReactionMutationResult::Changed(ReactionEvent {
+                reaction_event_id,
+                ..
+            }) if reaction_event_id == MAX_AUDIT_ROWS_PER_ROOM as u64 + 1
+        ));
+        let audit_rows: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM room_reaction_events WHERE room_id = ?1",
+                [room_id],
+                |row| row.get(0),
+            )
+            .expect("audit rows");
+        assert_eq!(audit_rows, MAX_AUDIT_ROWS_PER_ROOM);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT MIN(reaction_event_id) FROM room_reaction_events
+                     WHERE room_id = ?1",
+                    [room_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("oldest retained audit id"),
+            2
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM room_reactions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("active rows"),
+            1
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit isolated reaction-state retention measurement"]
+    fn reaction_state_retention_measurement() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DATABASE_NONCE: AtomicUsize = AtomicUsize::new(0);
+        let items = std::env::var("OMEN_REACTION_MEASUREMENT_ITEMS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1_024);
+        assert!((256..=MAX_ACTIVE_ROWS_PER_ROOM as usize).contains(&items));
+        let nonce = DATABASE_NONCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "omenchat-reaction-state-measurement-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let store = OmenchatStore::open(&path).expect("measurement store");
+        let room = store
+            .ensure_room("reaction-measurement", None)
+            .expect("measurement room");
+        let user = store
+            .ensure_user(b"reaction-measurement-user", "measurement", None)
+            .expect("measurement user");
+        store
+            .join_room(room.room_id, user.user_id)
+            .expect("measurement join");
+
+        let mut targets = Vec::with_capacity(items);
+        for index in 0..items {
+            let target = store
+                .append_event(
+                    room.room_id,
+                    Some(user.user_id),
+                    ServerRoomEventKind::Message {
+                        body: format!("measurement target {index}"),
+                    },
+                )
+                .expect("measurement target");
+            targets.push(target.event_id);
+        }
+
+        let mut mutation_micros = Vec::with_capacity(items);
+        for (index, target_event_id) in targets.iter().copied().enumerate() {
+            let started = Instant::now();
+            assert!(matches!(
+                mutate(
+                    &store,
+                    room.room_id,
+                    user.user_id,
+                    target_event_id,
+                    ReactionToken::Heart,
+                    ReactionAction::Add,
+                    1_000 + index as i64,
+                ),
+                ReactionMutationResult::Changed(_)
+            ));
+            mutation_micros.push(started.elapsed().as_micros());
+        }
+
+        let mut noop_micros = Vec::with_capacity(256);
+        for target_event_id in targets.iter().copied().rev().take(256) {
+            let started = Instant::now();
+            assert_eq!(
+                mutate(
+                    &store,
+                    room.room_id,
+                    user.user_id,
+                    target_event_id,
+                    ReactionToken::Heart,
+                    ReactionAction::Add,
+                    10_000,
+                ),
+                ReactionMutationResult::Unchanged
+            );
+            noop_micros.push(started.elapsed().as_micros());
+        }
+
+        let mut snapshot_micros = Vec::new();
+        let mut snapshot_entries = 0_usize;
+        for page in targets.chunks(REACTION_SNAPSHOT_MAX_TARGETS) {
+            let started = Instant::now();
+            let snapshot = store
+                .reaction_snapshot(room.room_id, page)
+                .expect("measurement snapshot");
+            snapshot_micros.push(started.elapsed().as_micros());
+            snapshot_entries = snapshot_entries.saturating_add(snapshot.entries.len());
+            assert_eq!(snapshot.target_event_ids, page);
+        }
+
+        let (active_rows, audit_rows) = store.reaction_row_counts().expect("reaction counts");
+        let active_bytes: i64 = store
+            .connection
+            .query_row(
+                "SELECT COALESCE(SUM(24 + length(CAST(reaction_token AS BLOB))), 0)
+                 FROM room_reactions",
+                [],
+                |row| row.get(0),
+            )
+            .expect("active bytes");
+        let audit_bytes: i64 = store
+            .connection
+            .query_row(
+                "SELECT COALESCE(SUM(retained_bytes), 0) FROM room_reaction_events",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit bytes");
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("checkpoint measurement database");
+        let database_bytes = [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ]
+        .into_iter()
+        .filter_map(|candidate| std::fs::metadata(candidate).ok())
+        .map(|metadata| metadata.len())
+        .sum::<u64>();
+
+        let percentile = |samples: &mut Vec<u128>, percent: usize| {
+            samples.sort_unstable();
+            let index = samples
+                .len()
+                .saturating_mul(percent)
+                .saturating_add(99)
+                .checked_div(100)
+                .unwrap_or(0)
+                .saturating_sub(1)
+                .min(samples.len().saturating_sub(1));
+            samples[index]
+        };
+        let mutation_max = mutation_micros.iter().copied().max().unwrap_or(0);
+        let noop_max = noop_micros.iter().copied().max().unwrap_or(0);
+        let snapshot_max = snapshot_micros.iter().copied().max().unwrap_or(0);
+        let mutation_p50 = percentile(&mut mutation_micros.clone(), 50);
+        let mutation_p95 = percentile(&mut mutation_micros, 95);
+        let noop_p50 = percentile(&mut noop_micros.clone(), 50);
+        let noop_p95 = percentile(&mut noop_micros, 95);
+        let snapshot_p50 = percentile(&mut snapshot_micros.clone(), 50);
+        let snapshot_p95 = percentile(&mut snapshot_micros, 95);
+
+        assert_eq!(active_rows, items as i64);
+        assert_eq!(audit_rows, items as i64);
+        assert_eq!(snapshot_entries, items);
+        assert!(active_bytes <= MAX_ACTIVE_BYTES_PER_ROOM);
+        assert!(audit_bytes <= MAX_AUDIT_BYTES_PER_ROOM);
+        println!(
+            "REACTION_STATE_MEASUREMENT items={items} active_rows={active_rows} active_bytes={active_bytes} audit_rows={audit_rows} audit_bytes={audit_bytes} snapshot_pages={} snapshot_entries={snapshot_entries} database_bytes={database_bytes} mutation_p50_us={mutation_p50} mutation_p95_us={mutation_p95} mutation_max_us={mutation_max} noop_p50_us={noop_p50} noop_p95_us={noop_p95} noop_max_us={noop_max} snapshot_p50_us={snapshot_p50} snapshot_p95_us={snapshot_p95} snapshot_max_us={snapshot_max}",
+            snapshot_micros.len()
+        );
+
+        drop(store);
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 }

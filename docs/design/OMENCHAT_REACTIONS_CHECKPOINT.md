@@ -441,8 +441,14 @@ open the maintainer's real browser or omenchatd data.
    acknowledgement terminalizes the intent. Restart recovery never resends
    automatically, and capability loss blocks explicit retry. Production still
    does not request or accept `reactions-v1`.
-7. Run deterministic duplicate/restart/mixed-version/resource/retention gates
-   and isolated measurements.
+7. **Complete.** Deterministic client/server duplicate, replay, conflict,
+   restart, capability-loss, adjacent-fixture, inline/Resource, migration,
+   downgrade, fan-out, and retention gates pass. Exact server-global active-row
+   and full non-expired room-audit boundaries now have direct regressions. The
+   isolated client-intent, server-replay, and reaction-state measurements pass
+   at their documented defaults; reaction state also passes at the exact
+   4,096-row room ceiling. Evidence and host-specific observations are in
+   `docs/audits/omenchat-reactions-qualification.md`.
 8. Activate explicit client request/server acceptance in a separate commit.
 9. Run a real isolated two-client add/remove/restart/Resource smoke before
    release qualification.

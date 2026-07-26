@@ -4072,6 +4072,30 @@ cargo test --locked --no-default-features --features desktop-dev \
   reaction_intent_survives_restart --lib
 ```
 
+Standalone server qualification and explicit isolated measurements:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    reaction --lib
+  cargo test --locked --no-default-features --features server-headless \
+    reaction_state_retention_measurement --lib -- --ignored --nocapture
+  OMEN_REACTION_MEASUREMENT_ITEMS=4096 \
+    cargo test --locked --no-default-features --features server-headless \
+    reaction_state_retention_measurement --lib -- --ignored --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    durable_replay_retention_measurement --lib -- --ignored --nocapture
+)
+cargo test --locked --no-default-features --features desktop-dev \
+  durable_intent_retention_measurement --lib -- --ignored --nocapture
+```
+
+The measurement tests use unique temporary SQLite roots, remove their files,
+and print observations rather than enforcing hardware-dependent latency
+thresholds. The 2026-07-26 qualification results and remaining live smoke are
+recorded in `docs/audits/omenchat-reactions-qualification.md`.
+
 The Ratatui Messages workspace currently covers LXMF conversations and has no
 OMENchat session/timeline model. The omenchatd TUI is server administration and
 has no client-local user identity. These commands therefore do not claim a TUI

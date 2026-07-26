@@ -1019,6 +1019,17 @@ matching acknowledgement. Recovered reactions remain explicit-confirmation
 operations; capability loss blocks retry and restart never resends them.
 Production client request and server acceptance flags remain unchanged.
 
+The seventh qualification slice closes the dormant deterministic gate. Client
+and standalone-server reaction filters, adjacent `0.6.0-1`/`0.9.6-3` ordinary
+wire fixtures, restart/replay/conflict, inline/Resource, schema fault,
+downgrade-copy, capability-loss, and fan-out tests pass. New exact-boundary
+regressions cover server-global active saturation and bounded replacement at a
+full non-expired room audit. An ignored isolated measurement records active,
+audit, snapshot, SQLite, and latency observations at 1,024 rows and at the
+4,096-row room ceiling without imposing hardware-specific thresholds. The
+evidence is in `docs/audits/omenchat-reactions-qualification.md`; production
+activation and the real two-client smoke remain separate.
+
 ### Unit 6C — bounded local search
 
 - Search existing LXMF and OMENchat history by text, sender, room, date,
