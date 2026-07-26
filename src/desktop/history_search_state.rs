@@ -1,4 +1,7 @@
-use crate::history_search::{LocalHistorySearchPage, LocalHistorySearchQuery};
+use crate::history_search::{
+    LocalHistorySearchPage, LocalHistorySearchQuery, LocalHistorySourceFilter,
+    LOCAL_HISTORY_SEARCH_QUERY_MAX_BYTES,
+};
 
 #[derive(Clone, Debug)]
 pub(in crate::desktop) struct LocalHistorySearchJob {
@@ -11,11 +14,46 @@ pub(in crate::desktop) struct LocalHistorySearchDesktopState {
     generation: u64,
     active_generation: Option<u64>,
     pending: Option<LocalHistorySearchJob>,
+    pub(in crate::desktop) draft: String,
+    pub(in crate::desktop) source: LocalHistorySourceFilter,
     pub(in crate::desktop) result: Option<LocalHistorySearchPage>,
     pub(in crate::desktop) error: Option<String>,
 }
 
 impl LocalHistorySearchDesktopState {
+    pub(in crate::desktop) fn update_draft(&mut self, value: String) {
+        if value.len() <= LOCAL_HISTORY_SEARCH_QUERY_MAX_BYTES
+            && !value.chars().any(char::is_control)
+        {
+            self.draft = value;
+            self.error = None;
+        }
+    }
+
+    pub(in crate::desktop) fn cycle_source(&mut self) {
+        self.source = match self.source {
+            LocalHistorySourceFilter::All => LocalHistorySourceFilter::Lxmf,
+            LocalHistorySourceFilter::Lxmf => LocalHistorySourceFilter::OmenChat,
+            LocalHistorySourceFilter::OmenChat => LocalHistorySourceFilter::All,
+        };
+    }
+
+    pub(in crate::desktop) fn current_query(&self) -> LocalHistorySearchQuery {
+        LocalHistorySearchQuery {
+            text: self.draft.clone(),
+            source: self.source,
+            ..LocalHistorySearchQuery::default()
+        }
+    }
+
+    pub(in crate::desktop) fn is_active(&self) -> bool {
+        self.active_generation.is_some()
+    }
+
+    pub(in crate::desktop) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub(in crate::desktop) fn submit(
         &mut self,
         query: LocalHistorySearchQuery,
@@ -138,5 +176,22 @@ mod tests {
         assert!(state.result.is_none());
         assert!(state.error.is_none());
         assert_eq!(state.active_generation(), None);
+    }
+
+    #[test]
+    fn draft_and_source_controls_are_bounded_without_starting_work() {
+        let mut state = LocalHistorySearchDesktopState::default();
+        state.update_draft("ridge map".into());
+        assert_eq!(state.current_query().text, "ridge map");
+        state.update_draft("x".repeat(LOCAL_HISTORY_SEARCH_QUERY_MAX_BYTES + 1));
+        assert_eq!(state.current_query().text, "ridge map");
+        assert_eq!(state.source, LocalHistorySourceFilter::All);
+        state.cycle_source();
+        assert_eq!(state.source, LocalHistorySourceFilter::Lxmf);
+        state.cycle_source();
+        assert_eq!(state.source, LocalHistorySourceFilter::OmenChat);
+        state.cycle_source();
+        assert_eq!(state.source, LocalHistorySourceFilter::All);
+        assert!(!state.is_active());
     }
 }

@@ -17,6 +17,12 @@ impl DesktopApp {
         let presets = action_grid(self.workspace_preset_buttons(), 3);
         let hidden_workspace_panes = self.hidden_workspace_pane_buttons();
         let hidden_conversation_panes = self.hidden_conversation_pane_buttons();
+        let history_search: Element<'_, Message> =
+            if self.app.workspace.active_section == WorkspaceSection::Messages {
+                views::history_search::local_history_search_view(self)
+            } else {
+                column![].into()
+            };
         #[cfg(feature = "chat-client")]
         let omenchat_opener = row![
             text_input(
@@ -286,6 +292,7 @@ impl DesktopApp {
             hidden_workspace_panes,
             hidden_conversation_panes,
             omenchat_opener,
+            history_search,
             grid
         ]
         .spacing(8)
@@ -298,6 +305,7 @@ impl DesktopApp {
             presets,
             hidden_workspace_panes,
             hidden_conversation_panes,
+            history_search,
             grid
         ]
         .spacing(8)

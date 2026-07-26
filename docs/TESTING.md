@@ -4181,3 +4181,25 @@ The Ratatui Messages workspace currently covers LXMF conversations and has no
 OMENchat session/timeline model. The omenchatd TUI is server administration and
 has no client-local user identity. These commands therefore do not claim a TUI
 reaction rendering path.
+
+## Bounded local-history desktop search
+
+These focused desktop-product tests exercise explicit-submit state, the
+one-active/one-replaceable-pending owner, exhaustive message routing, truthful
+limit presentation, and fail-closed validation of persisted LXMF and OMENchat
+jump targets:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::history_search::tests
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::history_search_state::tests
+cargo test --locked --no-default-features --features desktop-product \
+  presentation_labels_sources_and_every_limit_truthfully
+cargo test --locked --no-default-features --features desktop-product \
+  history_search_messages_have_one_compile_time_route
+```
+
+All storage tests use explicit temporary roots. An interactive packaged-app
+smoke must still verify text-input focus, result density, and jump scroll
+restoration; unit tests do not claim display-server behavior.

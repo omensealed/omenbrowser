@@ -1,6 +1,6 @@
 # Local history search checkpoint
 
-Status: bounded read-only domain slice implemented; UI integration pending  
+Status: bounded read-only desktop search surface implemented
 Release target: `v0.9.6-4`  
 Storage baseline: LXMF bounded JSON threads; OMENchat identity-scoped SQLite
 
@@ -53,8 +53,13 @@ The following are intentionally excluded from searchable text:
 
 ## UI and ownership checkpoint
 
-The reducer is not called from the Iced update or view path in this slice. UI
-activation requires one owned search task with:
+The Messages workspace now exposes a compact Iced search surface. Text edits
+only update a 256-byte draft; storage work starts on Enter or an explicit
+Search action. The source control cycles through all retained history, LXMF,
+and OMENchat without creating a timer or subscription.
+
+The reducer runs outside the Iced update/view path through one owned search
+task with:
 
 - one current generation; a newer query cancels or supersedes the old result;
 - at most one in-flight scan;
@@ -66,8 +71,21 @@ activation requires one owned search task with:
 - jump actions that validate the typed result key against current retained
   state before changing selection or scroll position.
 
-Search input should be submitted explicitly or after a bounded debounce. Every
-keystroke must not synchronously scan the maximum resident history.
+One scan can be active and one newer query can wait; submitting again replaces
+that pending query instead of growing a queue. Results expose exact scan and
+result-limit state and render at most 12 retained matches at once. The page
+itself remains capped at 128 results.
+
+Persisted result keys are navigation hints, not authority. An LXMF jump
+requires the same open peer, message index, and stable message key. An OMENchat
+jump requires the same open server session and retained room/event pair.
+Missing, moved, or changed targets fail closed with a truthful recovery
+message. Search never loads older history implicitly merely to satisfy a jump.
+
+The compact surface currently exposes text and source controls. Sender, room,
+date, attachment, and delivery filters remain supported by the bounded domain
+query but are deferred from this compact desktop presentation. The Ratatui
+Messages view does not yet expose local-history search.
 
 ## FTS5 disposition
 
@@ -180,6 +198,14 @@ allowed to finish without applying its result. Explicit completion and storage
 errors return through the exhaustive desktop message router. No timer,
 subscription, indexer, or recurring work was added.
 
-Next, add a compact search surface without persistence or schema changes. UI
-activation is not complete until focus, validated jump, and presentation tests
-pass.
+The compact desktop surface is now active only in the Messages workspace.
+Presentation tests cover source and limit labels, owner tests cover bounded
+drafts and replacement semantics, router tests cover every message variant,
+and target-resolver tests cover valid, missing, moved, and changed jumps. An
+interactive display-server smoke remains required before release qualification
+to confirm keyboard focus, visible density, and scroll restoration in the
+packaged application.
+
+Next, decide whether the TUI needs the same explicit search surface before
+release and whether the domain's advanced filters justify additional compact
+controls. Neither decision requires a schema or index change.

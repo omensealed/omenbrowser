@@ -4,6 +4,7 @@ pub(super) mod diagnostics;
 pub(super) mod directory;
 pub(super) mod directory_model;
 pub(super) mod help;
+pub(super) mod history_search;
 pub(super) mod identities;
 pub(super) mod interfaces;
 pub(super) mod logs;

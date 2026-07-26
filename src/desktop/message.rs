@@ -131,7 +131,11 @@ pub(in crate::desktop) enum RuntimeMessage {
 
 #[derive(Clone, Debug)]
 pub(in crate::desktop) enum HistorySearchMessage {
+    QueryChanged(String),
+    CycleSource,
+    SubmitCurrent,
     Submit(crate::history_search::LocalHistorySearchQuery),
+    Jump(crate::history_search::LocalHistoryResultKey),
     Completed {
         generation: u64,
         result: Result<crate::history_search::LocalHistorySearchPage, String>,

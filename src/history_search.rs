@@ -93,6 +93,7 @@ pub enum LocalHistoryResultKey {
     LxmfStored {
         peer_key: String,
         message_index: usize,
+        message_key: String,
     },
     #[cfg(feature = "chat-client")]
     OmenChatStored {
@@ -274,6 +275,7 @@ impl BoundedSearch<'_, '_> {
                     LocalHistoryResultKey::LxmfStored {
                         peer_key: thread.peer_hash.clone(),
                         message_index,
+                        message_key: crate::app::message_summary_key(message),
                     },
                     message,
                 );
@@ -818,8 +820,10 @@ mod tests {
             &page.results[1].key,
             LocalHistoryResultKey::LxmfStored {
                 peer_key,
-                message_index: 0
+                message_index: 0,
+                message_key
             } if peer_key == "opaque-peer-hash"
+                && message_key == "opaque-message-id"
         ));
         assert!(page.results.iter().all(|result| {
             !result.context.contains("opaque")

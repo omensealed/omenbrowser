@@ -760,15 +760,26 @@ mod tests {
 
     #[test]
     fn history_search_messages_have_one_compile_time_route() {
-        let submit = Message::HistorySearch(Box::new(HistorySearchMessage::Submit(
-            crate::history_search::LocalHistorySearchQuery::default(),
-        )));
-        assert_eq!(submit.route(), MessageRoute::HistorySearch);
-        let completed = Message::HistorySearch(Box::new(HistorySearchMessage::Completed {
-            generation: 1,
-            result: Ok(crate::history_search::LocalHistorySearchPage::default()),
-        }));
-        assert_eq!(completed.route(), MessageRoute::HistorySearch);
+        for message in [
+            HistorySearchMessage::QueryChanged("query".into()),
+            HistorySearchMessage::CycleSource,
+            HistorySearchMessage::SubmitCurrent,
+            HistorySearchMessage::Submit(crate::history_search::LocalHistorySearchQuery::default()),
+            HistorySearchMessage::Jump(crate::history_search::LocalHistoryResultKey::LxmfStored {
+                peer_key: "peer".into(),
+                message_index: 0,
+                message_key: "message".into(),
+            }),
+            HistorySearchMessage::Completed {
+                generation: 1,
+                result: Ok(crate::history_search::LocalHistorySearchPage::default()),
+            },
+        ] {
+            assert_eq!(
+                Message::HistorySearch(Box::new(message)).route(),
+                MessageRoute::HistorySearch
+            );
+        }
     }
 
     #[test]
