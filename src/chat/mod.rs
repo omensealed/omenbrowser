@@ -5,6 +5,7 @@ pub mod codec;
 pub mod commands;
 pub mod descriptor;
 pub mod handoff;
+pub mod invitation;
 pub mod model;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod mutation_intent_worker;
@@ -35,4 +36,8 @@ pub use client::{
     ChatSessionView,
 };
 pub use descriptor::OmenChatDescriptor;
+pub use invitation::{
+    OmenChatInvitation, OmenChatInvitationError, OmenChatInvitationKind,
+    OMENCHAT_INVITATION_MAX_BYTES,
+};
 pub use model::*;

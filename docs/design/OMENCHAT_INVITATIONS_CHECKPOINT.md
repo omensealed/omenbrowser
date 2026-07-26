@@ -1,6 +1,6 @@
 # OMENchat safe invitations checkpoint
 
-Status: pre-implementation contract
+Status: canonical URI domain implemented; confirmation/UI pending
 Release target: `v0.9.6-4`
 Protocol baseline: OMENchat protocol 1; no new frame operation or capability
 
@@ -201,3 +201,20 @@ future caller adopts it.
 
 Do not combine this work with corrections, tombstones, room policy, or a new
 network runtime.
+
+## Implementation progress
+
+Step 1 is complete in `chat::invitation`. The frontend-neutral value accepts
+the exact legacy plain URI or the additive enhanced query, applies the 2 KiB
+outer bound before decoding, normalizes exact 32-character hexadecimal
+destination and identity values, and owns a small percent encoder/decoder for
+the bounded public label. Serialization emits only the fixed no-secret field
+set and order.
+
+Focused tests cover canonical round trip, legacy compatibility, uppercase
+normalization, destination/fingerprint length and hex rules, room boundaries,
+unknown/duplicate/trailing fields, malformed percent and UTF-8 input, control
+bytes, authority tricks, noncanonical schemes, and the label limit. The type
+has no production caller yet and therefore cannot connect, join, trust,
+persist, or render QR data. Step 2, the ephemeral preview and trust-evidence
+reducer, remains the next gate.

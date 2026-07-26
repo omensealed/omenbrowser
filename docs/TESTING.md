@@ -4203,3 +4203,19 @@ cargo test --locked --no-default-features --features desktop-product \
 All storage tests use explicit temporary roots. An interactive packaged-app
 smoke must still verify text-input focus, result density, and jump scroll
 restoration; unit tests do not claim display-server behavior.
+
+## OMENchat safe invitation URI
+
+The first dormant invitation slice is a pure bounded parser/serializer. It has
+no production connection, trust, persistence, or QR caller:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  chat::invitation::tests --lib
+```
+
+The tests cover the exact legacy plain URI, enhanced canonical ordering,
+outer/field boundaries, hexadecimal normalization, room overflow, malformed
+percent/UTF-8 data, unsupported or duplicate fields, authority tricks, and
+secret-field omission. Confirmation, Directory evidence, room selection, and
+QR presentation require separate tests before activation.

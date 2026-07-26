@@ -1112,6 +1112,15 @@ tests. No production parser, generation, QR feature, connection behavior,
 wire, schema, storage, capability, or dependency changes in the checkpoint
 unit.
 
+The first implementation slice adds the frontend-neutral canonical URI value.
+It accepts the exact legacy plain launch form and a 2 KiB enhanced invitation,
+normalizes exact Reticulum destination/fingerprint hashes, decodes only a
+bounded public label, rejects unknown/duplicate/trailing fields and authority
+tricks, and serializes only the fixed no-secret field set. It has no production
+caller, connection action, preview, storage, QR, wire, schema, worker, timer,
+or dependency. Ephemeral confirmation and trust-evidence reduction remain the
+next slice.
+
 ### Unit 6E — corrections and delete tombstones
 
 - Append correction and tombstone events rather than rewriting history.
