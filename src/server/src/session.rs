@@ -46,7 +46,7 @@ const PENDING_UPLOAD_MAX_ITEMS_PER_IDENTITY: usize = 8;
 const PENDING_UPLOAD_TTL_SECONDS: u64 = 6 * 60 * 60;
 const UPLOAD_FILENAME_MAX_BYTES: usize = 255;
 const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
-const REPLY_MENTIONS_SERVER_ENABLED: bool = false;
+const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -4618,7 +4618,7 @@ mod tests {
     }
 
     #[test]
-    fn reply_mentions_capability_remains_unadvertised_until_client_activation() {
+    fn reply_mentions_capability_is_accepted_only_when_explicitly_requested() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(
             FrameBody::Text("Alice".into()),
@@ -4638,7 +4638,10 @@ mod tests {
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(Some(SessionAcceptNegotiation {
-                accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                accepted_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    REPLY_MENTIONS_CAPABILITY.into(),
+                ],
             }))
         );
 

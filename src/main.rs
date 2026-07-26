@@ -1320,6 +1320,17 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
 
     let mut client = ChatClient::new();
     let mut live_state = omenbrowser_rs::chat::live::LiveChatClientState::default();
+    let client_instance_store =
+        omenbrowser_rs::chat::client_instance::ClientInstanceIdStore::for_identity_storage_root(
+            app.paths.identity_storage_root(),
+        );
+    let client_instance_id = client_instance_store.load_or_create().with_context(|| {
+        format!(
+            "failed to initialize isolated OMENchat smoke client instance at {}",
+            client_instance_store.path().display()
+        )
+    })?;
+    live_state.set_client_instance_id(Some(client_instance_id));
     let mut transport = OmenChatSmokeTransport::default();
     let descriptor = OmenChatDescriptor {
         server_destination: destination.clone(),
@@ -1387,6 +1398,15 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         "stage": "join_wait",
         "ok": joined,
         "events": join_events,
+    }));
+    stages.push(serde_json::json!({
+        "stage": "capability_observation",
+        "ok": true,
+        "durable_mutations_negotiated": live_state.durable_mutations_negotiated(session_id),
+        "durable_notice_ack_negotiated": live_state
+            .durable_notice_ack_negotiated(session_id),
+        "reply_mentions_negotiated": live_state.reply_mentions_negotiated(session_id),
+        "local_user_id_bound": live_state.local_user_id(session_id).is_some(),
     }));
 
     if joined {

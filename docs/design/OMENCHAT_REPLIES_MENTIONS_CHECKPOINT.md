@@ -380,9 +380,10 @@ Unit 4 is implemented as a dormant client model and persistence boundary:
   local user ID only after an explicit request/accept sequence, and clears both
   on downgrade or Link retirement.
 
-The production client still does not request `reply-mentions-v1`, the server
-activation constant remains false, and there is no Reply or mention composer
-control yet.
+At the Unit 4 checkpoint, the production client still did not request
+`reply-mentions-v1`, the server activation constant remained false, and there
+was no Reply or mention composer control. Units 5 and the activation section
+below deliberately supersede that intermediate state.
 
 Unit 5A implements read-only presentation without activating mutation:
 
@@ -489,10 +490,10 @@ Unit 6 completes the deterministic pre-activation evidence gate:
   scripts/measure-durable-mutation-retention.sh <isolated-output>`.
 
 There is still no separate mention history, notification worker, polling
-subscription, sound, timer, or capability activation. Read markers remain the
-existing room counters; this unit adds no server-authoritative read receipt.
+subscription, sound, timer, or server-authoritative read receipt. Read markers
+remain the existing room counters.
 
-Across the already dormant server/client boundary:
+Across the previously dormant server/client boundary:
 
 - the single room-event encoder preserves metadata across live fan-out,
   bounded inline history, and resource history;
@@ -506,10 +507,42 @@ resource-history, conflict, and local-user binding tests cover the boundary.
 No new error numbers were needed: the existing typed protocol-v1 errors retain
 their documented meanings.
 
-The deterministic six-unit implementation sequence is complete. The next
-rollback boundary is a separate capability-activation decision followed by a
-real two-process smoke using isolated identities and state. The production
-client still does not request `reply-mentions-v1`, the server activation
-constant remains false, and all new composer controls therefore remain dormant
-in ordinary releases. Deterministic success alone does not authorize or claim
-live Reticulum interoperability.
+The deterministic six-unit implementation sequence is complete.
+
+The separate activation unit enables `reply-mentions-v1` without changing the
+base protocol version:
+
+- a client with a persistent identity-scoped client-instance ID explicitly
+  requests the capability alongside durable mutations and durable notice
+  acknowledgements;
+- the current server accepts it only when the base durable capability, client
+  instance, and explicit rich-message request are all present;
+- legacy clients still receive the legacy unextended session response, and a
+  current client connected to an older server keeps rich controls disabled;
+- reconnect clears prior-Link capability state and requires acceptance again.
+  An uncertain rich mutation is never resent or converted into ordinary text
+  when the replacement server accepts only the durable base capability;
+- the release smoke now loads the same isolated, identity-scoped persistent
+  client-instance ID used by the desktop and records the negotiated capability
+  snapshot without making the optional capability a mixed-version pass/fail
+  requirement.
+
+The isolated two-client plus server-restart smoke passed on 2026-07-26 UTC.
+Initial, post-restart, and second-client reports all recorded durable mutations,
+durable notice acknowledgements, `reply-mentions-v1`, and local numeric user-ID
+binding as active. Ordinary room traffic and persisted history remained
+compatible. Local evidence is under
+`/tmp/omenchat-reply-mentions-activation-smoke-negotiated/omenchat-smoke-20260726T004011Z`;
+the reproducible command is:
+
+```text
+OMENBROWSER_BIN=target/debug/omenbrowser_rs \
+OMENCHATD_BIN=src/server/target/debug/omenchatd \
+bash scripts/release-omenchat-smoke.sh \
+  --multi-client --restart-server \
+  --out /tmp/omenchat-reply-mentions-activation-smoke-negotiated
+```
+
+This proves current Rust client/server negotiation over isolated local
+Reticulum Links. It does not claim mixed-release rich-message support, public
+network behavior, Python interoperability, or hardware-interface evidence.

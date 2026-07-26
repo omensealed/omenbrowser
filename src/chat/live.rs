@@ -672,6 +672,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
                 requested_capabilities: vec![
                     DURABLE_MUTATION_CAPABILITY.into(),
                     DURABLE_NOTICE_ACK_CAPABILITY.into(),
+                    REPLY_MENTIONS_CAPABILITY.into(),
                 ],
                 client_instance_id: Some(client_instance_id),
             },
@@ -703,6 +704,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     }
     if durable_requested {
         state.durable_requests.insert(session_id);
+        state.reply_mentions_requests.insert(session_id);
     }
 
     let room_name = client
@@ -3997,7 +3999,7 @@ mod tests {
     }
 
     #[test]
-    fn live_open_advertises_durable_mutations_only_with_persistent_client_identity() {
+    fn live_open_advertises_durable_mutations_and_rich_messages_with_persistent_client_identity() {
         let client_instance_id = ClientInstanceId::new([7; 16]);
         let mut client = ChatClient::new();
         let mut state = LiveChatClientState::default();
@@ -4027,12 +4029,13 @@ mod tests {
                 requested_capabilities: vec![
                     DURABLE_MUTATION_CAPABILITY.into(),
                     DURABLE_NOTICE_ACK_CAPABILITY.into(),
+                    REPLY_MENTIONS_CAPABILITY.into(),
                 ],
                 client_instance_id: Some(client_instance_id),
             }))
         );
         assert!(state.durable_requests.contains(&1));
-        assert!(state.reply_mentions_requests.is_empty());
+        assert!(state.reply_mentions_requests.contains(&1));
         assert!(!state.durable_mutations_negotiated(1));
         assert!(!state.reply_mentions_negotiated(1));
     }
@@ -4057,6 +4060,7 @@ mod tests {
         let mut state = LiveChatClientState::default();
         state.set_client_instance_id(Some(ClientInstanceId::new([8; 16])));
         state.durable_requests.insert(session_id);
+        state.reply_mentions_requests.insert(session_id);
         let mut transport = NoopChatTransport;
         let mut events = Vec::new();
         let accepted_body = crate::chat::protocol::with_session_accept_negotiation(
@@ -4080,6 +4084,7 @@ mod tests {
         );
         assert!(state.durable_mutations_negotiated(session_id));
         assert!(!state.durable_notice_ack_negotiated(session_id));
+        assert!(!state.reply_mentions_negotiated(session_id));
 
         let notice_accepted_body = crate::chat::protocol::with_session_accept_negotiation(
             FrameBody::Fields(vec![
@@ -6188,13 +6193,37 @@ mod tests {
         ));
         assert!(!state.reply_mentions_negotiated(session_id));
         assert!(!state.durable_mutation_is_pending(session_id, intent.mutation_id));
-        assert!(state.reply_mentions_requests.is_empty());
-        let reconnect_frame_count = transport.sent_frames.len();
+        assert!(state.reply_mentions_requests.contains(&session_id));
 
-        // A replacement peer may reaccept durable mutations without accepting
-        // the richer extension. The uncertain rich intent remains blocked and
-        // is not converted to a legacy message.
-        state.durable_sessions.insert(session_id);
+        // An older replacement peer may reaccept durable mutations without
+        // accepting the richer extension. Applying that response consumes the
+        // pending request while leaving rich messages disabled.
+        let legacy_server_accept = crate::chat::protocol::with_session_accept_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::Array(Vec::new()),
+            ]),
+            &crate::chat::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+            },
+        )
+        .expect("legacy server durable accept");
+        let mut accept_events = Vec::new();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 3, None, legacy_server_accept),
+            &mut accept_events,
+        );
+        assert!(state.durable_mutations_negotiated(session_id));
+        assert!(!state.reply_mentions_negotiated(session_id));
+        assert!(state.reply_mentions_requests.is_empty());
+
+        // The uncertain rich intent remains blocked and is not converted to a
+        // legacy message.
+        let reconnect_frame_count = transport.sent_frames.len();
         let blocked = send_uncertain_durable_room_text(
             &mut client,
             &mut state,

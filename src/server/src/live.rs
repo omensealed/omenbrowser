@@ -2786,7 +2786,7 @@ mod tests {
     }
 
     #[test]
-    fn dormant_reply_binding_exposes_local_user_and_routes_rich_mutation() {
+    fn negotiated_reply_binding_exposes_local_user_and_routes_rich_mutation() {
         let path = temp_store_path("rich-binding");
         let store = OmenchatStore::open(&path).expect("store");
         store.ensure_room("lobby", None).expect("lobby");
@@ -2819,13 +2819,9 @@ mod tests {
         .expect("session response");
         let binding = live
             .durable_sessions
-            .get_mut(&link_id)
+            .get(&link_id)
             .expect("base durable binding");
-        assert!(
-            !binding.reply_mentions,
-            "production negotiation must remain dormant"
-        );
-        binding.reply_mentions = true;
+        assert!(binding.reply_mentions);
 
         live.handle_event(OmenchatLinkEvent::LinkData {
             link_id,

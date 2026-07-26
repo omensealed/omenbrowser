@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn reply_mentions_v1_fixture_is_bidirectionally_exact_but_inert() {
+    fn reply_mentions_v1_fixture_is_bidirectionally_exact_and_capability_scoped() {
         let frame = Frame::new(
             ChatOp::RoomMessage,
             7,
