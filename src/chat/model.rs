@@ -1,5 +1,5 @@
-pub use super::protocol::ReactionToken;
 use super::protocol::{EventId, RoomId, ServerId, UserId};
+pub use super::protocol::{MessageRevisionAction, ReactionToken};
 
 pub const CHAT_CLIENT_MAX_SESSIONS: usize = 64;
 pub const CHAT_SESSION_MAX_ROOMS: usize = 256;
@@ -27,6 +27,13 @@ pub const CHAT_REACTION_MAX_ROWS_PER_SERVER: usize = 8_192;
 pub const CHAT_REACTION_MAX_BYTES_PER_SERVER: usize = 512 * 1024;
 pub const CHAT_REACTION_MAX_ROWS: usize = 32_768;
 pub const CHAT_REACTION_MAX_BYTES: usize = 2 * 1024 * 1024;
+pub const CHAT_MESSAGE_REVISION_MAX_ROWS_PER_ROOM: usize = 1_024;
+pub const CHAT_MESSAGE_REVISION_MAX_BYTES_PER_ROOM: usize = 8 * 1024 * 1024;
+pub const CHAT_MESSAGE_REVISION_MAX_ROWS_PER_SERVER: usize = 8_192;
+pub const CHAT_MESSAGE_REVISION_MAX_BYTES_PER_SERVER: usize = 32 * 1024 * 1024;
+pub const CHAT_MESSAGE_REVISION_MAX_ROWS: usize = 32_768;
+pub const CHAT_MESSAGE_REVISION_MAX_BYTES: usize = 64 * 1024 * 1024;
+const CHAT_MESSAGE_REVISION_FIXED_RETAINED_BYTES: usize = 96;
 
 pub fn bounded_chat_text(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
@@ -183,6 +190,94 @@ impl ChatReaction {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatMessageRevision {
+    pub server_id: ServerId,
+    pub room_id: RoomId,
+    pub target_event_id: EventId,
+    pub latest_revision_event_id: EventId,
+    pub action: MessageRevisionAction,
+    pub actor_user_id: UserId,
+    pub replacement_body: Option<String>,
+    pub at_unix: i64,
+    pub revision_number: u64,
+}
+
+impl ChatMessageRevision {
+    pub fn retained_bytes(&self) -> usize {
+        CHAT_MESSAGE_REVISION_FIXED_RETAINED_BYTES
+            .saturating_add(self.server_id.len())
+            .saturating_add(self.replacement_body.as_ref().map_or(0, String::len))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatMessageRevisionPresentation<'a> {
+    Original(&'a str),
+    Edited { body: &'a str, revision_number: u64 },
+    Deleted { revision_number: u64 },
+}
+
+pub fn chat_message_revision_presentation<'a>(
+    event: &'a ChatEvent,
+    revision: Option<&'a ChatMessageRevision>,
+) -> Option<ChatMessageRevisionPresentation<'a>> {
+    let original = match &event.kind {
+        ChatEventKind::Message { body } | ChatEventKind::RichMessage { body, .. } => body.as_str(),
+        _ => return None,
+    };
+    let Some(revision) = revision.filter(|revision| {
+        revision.server_id == event.server_id
+            && revision.room_id == event.room_id
+            && revision.target_event_id == event.event_id
+    }) else {
+        return Some(ChatMessageRevisionPresentation::Original(original));
+    };
+    match revision.action {
+        MessageRevisionAction::Correct => revision.replacement_body.as_deref().map(|body| {
+            ChatMessageRevisionPresentation::Edited {
+                body,
+                revision_number: revision.revision_number,
+            }
+        }),
+        MessageRevisionAction::Tombstone => Some(ChatMessageRevisionPresentation::Deleted {
+            revision_number: revision.revision_number,
+        }),
+    }
+}
+
+pub fn chat_message_revisions_fit_bounds<'a>(
+    revisions: impl IntoIterator<Item = &'a ChatMessageRevision>,
+) -> bool {
+    let mut total_rows = 0_usize;
+    let mut total_bytes = 0_usize;
+    let mut server_usage = std::collections::BTreeMap::<&str, (usize, usize)>::new();
+    let mut room_usage = std::collections::BTreeMap::<(&str, RoomId), (usize, usize)>::new();
+    for revision in revisions {
+        let bytes = revision.retained_bytes();
+        total_rows = total_rows.saturating_add(1);
+        total_bytes = total_bytes.saturating_add(bytes);
+        let server = server_usage.entry(revision.server_id.as_str()).or_default();
+        server.0 = server.0.saturating_add(1);
+        server.1 = server.1.saturating_add(bytes);
+        let room = room_usage
+            .entry((revision.server_id.as_str(), revision.room_id))
+            .or_default();
+        room.0 = room.0.saturating_add(1);
+        room.1 = room.1.saturating_add(bytes);
+    }
+    total_rows <= CHAT_MESSAGE_REVISION_MAX_ROWS
+        && total_bytes <= CHAT_MESSAGE_REVISION_MAX_BYTES
+        && server_usage.values().all(|(rows, bytes)| {
+            *rows <= CHAT_MESSAGE_REVISION_MAX_ROWS_PER_SERVER
+                && *bytes <= CHAT_MESSAGE_REVISION_MAX_BYTES_PER_SERVER
+        })
+        && room_usage.values().all(|(rows, bytes)| {
+            *rows <= CHAT_MESSAGE_REVISION_MAX_ROWS_PER_ROOM
+                && *bytes <= CHAT_MESSAGE_REVISION_MAX_BYTES_PER_ROOM
+        })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatReactionSummary {
     pub token: ReactionToken,
     pub actor_count: u32,
@@ -335,6 +430,13 @@ pub fn chat_event_supports_reactions(event: &ChatEvent) -> bool {
             | ChatEventKind::Action { .. }
             | ChatEventKind::Notice { .. }
             | ChatEventKind::Upload { .. }
+    )
+}
+
+pub fn chat_event_supports_message_revisions(event: &ChatEvent) -> bool {
+    matches!(
+        event.kind,
+        ChatEventKind::Message { .. } | ChatEventKind::RichMessage { .. }
     )
 }
 
@@ -505,6 +607,86 @@ mod tests {
             ..event
         };
         assert!(chat_reaction_summaries(&reactions, &system, Some(7)).is_empty());
+    }
+
+    #[test]
+    fn message_revision_presentation_preserves_original_and_derives_effective_state() {
+        let event = message_event(10, "original");
+        assert_eq!(
+            chat_message_revision_presentation(&event, None),
+            Some(ChatMessageRevisionPresentation::Original("original"))
+        );
+        let corrected = ChatMessageRevision {
+            server_id: event.server_id.clone(),
+            room_id: event.room_id,
+            target_event_id: event.event_id,
+            latest_revision_event_id: 20,
+            action: MessageRevisionAction::Correct,
+            actor_user_id: 7,
+            replacement_body: Some("corrected".into()),
+            at_unix: 2,
+            revision_number: 1,
+        };
+        assert_eq!(
+            chat_message_revision_presentation(&event, Some(&corrected)),
+            Some(ChatMessageRevisionPresentation::Edited {
+                body: "corrected",
+                revision_number: 1,
+            })
+        );
+        let tombstone = ChatMessageRevision {
+            action: MessageRevisionAction::Tombstone,
+            replacement_body: None,
+            latest_revision_event_id: 21,
+            revision_number: 2,
+            ..corrected
+        };
+        assert_eq!(
+            chat_message_revision_presentation(&event, Some(&tombstone)),
+            Some(ChatMessageRevisionPresentation::Deleted { revision_number: 2 })
+        );
+        assert!(matches!(
+            event.kind,
+            ChatEventKind::Message { ref body } if body == "original"
+        ));
+    }
+
+    #[test]
+    fn message_revision_projection_has_stable_owned_byte_and_scope_bounds() {
+        let revision = |target_event_id, replacement_body: Option<String>| ChatMessageRevision {
+            server_id: "server".into(),
+            room_id: 1,
+            target_event_id,
+            latest_revision_event_id: target_event_id.saturating_add(10_000),
+            action: if replacement_body.is_some() {
+                MessageRevisionAction::Correct
+            } else {
+                MessageRevisionAction::Tombstone
+            },
+            actor_user_id: 7,
+            replacement_body,
+            at_unix: 1,
+            revision_number: 1,
+        };
+        assert_eq!(
+            revision(1, Some("edited".into())).retained_bytes(),
+            CHAT_MESSAGE_REVISION_FIXED_RETAINED_BYTES + "server".len() + "edited".len()
+        );
+        let at_room_limit = (1..=CHAT_MESSAGE_REVISION_MAX_ROWS_PER_ROOM as u64)
+            .map(|target| revision(target, None))
+            .collect::<Vec<_>>();
+        assert!(chat_message_revisions_fit_bounds(&at_room_limit));
+        let mut over_room_limit = at_room_limit;
+        over_room_limit.push(revision(
+            CHAT_MESSAGE_REVISION_MAX_ROWS_PER_ROOM as u64 + 1,
+            None,
+        ));
+        assert!(!chat_message_revisions_fit_bounds(&over_room_limit));
+        let oversized = [revision(
+            1,
+            Some("x".repeat(CHAT_MESSAGE_REVISION_MAX_BYTES_PER_ROOM)),
+        )];
+        assert!(!chat_message_revisions_fit_bounds(&oversized));
     }
 
     fn message_event(event_id: EventId, body: &str) -> ChatEvent {

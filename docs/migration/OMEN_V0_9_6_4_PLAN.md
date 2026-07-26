@@ -1239,6 +1239,21 @@ durable replay returns the original acknowledgement without a second fan-out.
 The production acceptance constant remains false. There is still no client
 state, UI action, worker, timer, retry, or capability activation.
 
+The fifth dormant slice adds the desktop client foundation without activation.
+Original timeline events remain immutable while a separate
+`ChatMessageRevision` projection derives edited/deleted presentation state.
+The projection is limited to one row per retained message target and bounded
+by items and stable retained bytes per room, server, and identity-scoped
+store. An additive SQLite cache replaces only explicit snapshot target sets in
+one transaction, survives restart, and rolls back saturation or malformed
+updates without partial state. Deltas are strictly ordered and exact
+duplicates are idempotent. The reserved durable-intent operation can be
+persisted and recovered, but no sender invokes it. Inline/Resource decoding
+and desktop persistence routing exist behind a test-only negotiated-state
+injection. Production requests still omit `message-revisions-v1`, unsolicited
+acceptance is ignored, and there is no GUI action, timer, retry, or capability
+activation.
+
 ### Unit 6F — pins and moderation audit history
 
 - Append bounded pin/unpin and moderation-audit events.

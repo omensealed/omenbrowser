@@ -4228,8 +4228,20 @@ codecs preserve the same correction bytes. Client and server tests prove the
 capability remains absent from production request/accept negotiation. The
 server-full focus also covers dormant persistence/execution plus test-injected
 Link-scoped fan-out, history snapshots, replay suppression, and retirement.
-These tests do not claim client presentation, mixed-version-process, native
-package, or live Reticulum support.
+The desktop-dev focus covers the separate immutable-event revision projection,
+stable item/byte bounds, additive cache and restart recovery, transactional
+capacity rollback, ordered/idempotent deltas, authoritative snapshots,
+fail-closed snapshot evidence, durable-intent recovery, and inline/Resource
+decoding:
+
+```bash
+cargo test --locked --no-default-features --features desktop-dev \
+  message_revision --lib -- --nocapture
+```
+
+Production request lists remain unchanged and unsolicited acceptance cannot
+activate the dormant reducer. These tests do not claim GUI controls,
+mixed-version-process, native package, or live Reticulum support.
 
 ## Bounded local-history desktop search
 

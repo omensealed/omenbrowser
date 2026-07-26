@@ -601,6 +601,7 @@ fn validate_prepare_request(
             | ChatOp::RoomAction
             | ChatOp::RoomNotice
             | ChatOp::RoomReaction
+            | ChatOp::RoomMessageRevision
             | ChatOp::PartRoom
             | ChatOp::Command
     ) {
@@ -886,6 +887,51 @@ mod tests {
         assert_eq!(recovered[0].op, ChatOp::RoomReaction);
         assert_eq!(recovered[0].body, body);
         assert_eq!(recovered[0].request_hash, request_hash);
+        assert_eq!(recovered[0].state, OutboundMutationState::Prepared);
+        drop(reopened);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn dormant_message_revision_intent_kind_is_restart_safe_without_a_sender() {
+        let root = isolated_root("message-revision-restart");
+        let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
+        let body = crate::chat::protocol::MessageRevisionRequest {
+            target_event_id: 42,
+            action: crate::chat::protocol::MessageRevisionAction::Correct,
+            replacement: Some("corrected".into()),
+        }
+        .into_frame_body()
+        .expect("revision body");
+        let mutation_id = MutationId::new([0x92; 16]);
+        let prepared = store
+            .persist_prepared_with_id(
+                PrepareOutboundMutation {
+                    server_destination: "0123456789abcdef",
+                    authenticated_identity_hash: b"authenticated-peer",
+                    client_instance_id: ClientInstanceId::new([7; 16]),
+                    op: ChatOp::RoomMessageRevision,
+                    room_id: Some(9),
+                    body: body.clone(),
+                    created_at: 100,
+                    expires_at: 200,
+                    correlation_id: None,
+                },
+                mutation_id,
+                PRODUCTION_LIMITS,
+            )
+            .expect("persist dormant revision");
+        drop(store);
+
+        let reopened =
+            MutationIntentStore::open_for_identity_storage_root(&root).expect("reopen store");
+        let recovered = reopened
+            .recover_nonterminal()
+            .expect("recover dormant revision");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].op, ChatOp::RoomMessageRevision);
+        assert_eq!(recovered[0].body, body);
+        assert_eq!(recovered[0].request_hash, prepared.request_hash);
         assert_eq!(recovered[0].state, OutboundMutationState::Prepared);
         drop(reopened);
         fs::remove_dir_all(root).expect("cleanup");

@@ -462,8 +462,16 @@ omenchatd state.
    without repeating fan-out, and identity replacement or Link close clears
    the binding. Normal negotiation still rejects the capability, so these live
    paths remain unreachable by production clients.
-5. Add the bounded client state/cache, persistent intent kind, reducer,
-   snapshots/deltas, restart reconciliation, and dormant GUI controls.
+5. **Client foundation complete and dormant.** The desktop owns one bounded
+   `ChatMessageRevision` projection per retained message target, an additive
+   rebuildable SQLite cache, strict delta ordering/idempotency, authoritative
+   explicit-target snapshot replacement, restart reconciliation, stable
+   retained-byte accounting, and the reserved durable-intent operation kind.
+   Inline and Resource snapshots share the existing bounded transport. Invalid
+   snapshots retain prior rows but clear authoritative evidence. Production
+   session-open frames still do not request the capability, unsolicited
+   acceptance cannot activate it, and no correction/tombstone control is
+   exposed. Dormant GUI controls remain a later sub-slice.
 6. Complete room-history retention/compaction so an original and all dependent
    revision/reaction/reply projections are removed atomically. This is required
    before capability activation.
@@ -556,6 +564,31 @@ repeat fan-out, and binding retirement. They inject the capable binding only
 inside isolated tests; production negotiation remains disabled. These results
 are not client reducer, native package, mixed-version process, or live
 Reticulum interoperability evidence.
+
+The first client sub-slice subsequently passed:
+
+```bash
+cargo test --locked --no-default-features --features desktop-dev \
+  message_revision --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product
+cargo clippy --locked --no-default-features --features desktop-product \
+  --all-targets -- -D warnings
+cargo fmt --all --check
+git diff --check
+```
+
+The focused result is 10 passed. It covers the immutable-original presentation
+reducer, stable item/byte ceilings, additive SQLite restart recovery,
+transactional room-capacity rollback, strict delta ordering and duplicate
+suppression, authoritative snapshot replacement, malformed snapshot
+fail-closed behavior, reserved durable-intent recovery, inline/Resource
+decoding, and test-injected live gating. The current desktop-product library
+result is 1,473 passed and 30 ignored explicit measurement/platform/live cases;
+the full desktop-product target suite and strict Clippy also pass. The normal
+session request still omits
+`message-revisions-v1`, and even an unsolicited acceptance cannot activate the
+client state. These results are not GUI controls, native package,
+mixed-version-process, or live Reticulum interoperability evidence.
 
 ## Completion gate
 

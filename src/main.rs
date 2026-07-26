@@ -2844,6 +2844,30 @@ fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_jso
             "targets": snapshot.target_event_ids.len(),
             "entries": snapshot.entries.len(),
         }),
+        omenbrowser_rs::chat::ChatClientEvent::MessageRevisionDeltaApplied {
+            session_id,
+            room_id,
+            event,
+        } => serde_json::json!({
+            "event": "message_revision_delta_applied",
+            "session_id": session_id,
+            "room_id": room_id,
+            "target_event_id": event.target_event_id,
+            "revision_event_id": event.revision_event_id,
+            "action": event.action as u8,
+            "revision_number": event.revision_number,
+        }),
+        omenbrowser_rs::chat::ChatClientEvent::MessageRevisionSnapshotApplied {
+            session_id,
+            room_id,
+            snapshot,
+        } => serde_json::json!({
+            "event": "message_revision_snapshot_applied",
+            "session_id": session_id,
+            "room_id": room_id,
+            "targets": snapshot.target_event_ids.len(),
+            "entries": snapshot.entries.len(),
+        }),
         omenbrowser_rs::chat::ChatClientEvent::RoomsUpdated { session_id, rooms } => {
             serde_json::json!({"event": "rooms_updated", "session_id": session_id, "rooms": rooms.len()})
         }

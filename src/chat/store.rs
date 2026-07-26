@@ -1,6 +1,7 @@
 use super::model::{
-    chat_text_fits, ChatEvent, ChatEventKind, ChatMessageMetadata, ChatReaction, ChatRoomSummary,
-    ChatServerSummary, ChatUserSummary, CHAT_CLIENT_MAX_SESSIONS, CHAT_REACTION_MAX_BYTES,
+    chat_message_revisions_fit_bounds, chat_text_fits, ChatEvent, ChatEventKind,
+    ChatMessageMetadata, ChatMessageRevision, ChatReaction, ChatRoomSummary, ChatServerSummary,
+    ChatUserSummary, CHAT_CLIENT_MAX_SESSIONS, CHAT_REACTION_MAX_BYTES,
     CHAT_REACTION_MAX_BYTES_PER_ROOM, CHAT_REACTION_MAX_BYTES_PER_SERVER, CHAT_REACTION_MAX_ROWS,
     CHAT_REACTION_MAX_ROWS_PER_ROOM, CHAT_REACTION_MAX_ROWS_PER_SERVER,
     CHAT_REACTION_MAX_ROWS_PER_TARGET, CHAT_REACTION_MAX_TOKENS_PER_ACTOR_TARGET,
@@ -10,10 +11,12 @@ use super::model::{
     CHAT_USER_DISPLAY_MAX_BYTES,
 };
 use super::protocol::{
-    EventId, ReactionAction, ReactionEvent, ReactionSnapshot, ReactionToken, RoomId, ServerId,
-    UserId, REACTION_SNAPSHOT_MAX_ENTRIES,
+    EventId, MessageRevisionAction, MessageRevisionEvent, MessageRevisionSnapshot,
+    MessageRevisionSnapshotEntry, ReactionAction, ReactionEvent, ReactionSnapshot, ReactionToken,
+    RoomId, ServerId, UserId, MESSAGE_REVISION_SNAPSHOT_MAX_ENTRIES, REACTION_SNAPSHOT_MAX_ENTRIES,
 };
 use anyhow::Context;
+use rusqlite::OptionalExtension;
 
 pub trait ChatStore {
     fn save_server(&mut self, server: ChatServerSummary) -> anyhow::Result<()>;
@@ -70,6 +73,24 @@ pub trait ChatStore {
         room_id: RoomId,
         target_event_ids: &[EventId],
     ) -> anyhow::Result<Vec<ChatReaction>>;
+    fn apply_message_revision_event(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        event: MessageRevisionEvent,
+    ) -> anyhow::Result<bool>;
+    fn replace_message_revision_snapshot(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        snapshot: MessageRevisionSnapshot,
+    ) -> anyhow::Result<()>;
+    fn message_revisions_for_targets(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        target_event_ids: &[EventId],
+    ) -> anyhow::Result<Vec<ChatMessageRevision>>;
     fn latest_events(
         &self,
         server_id: &ServerId,
@@ -253,7 +274,24 @@ impl SqliteChatStore {
                PRIMARY KEY(server_id, room_id, target_event_id, actor_user_id, reaction_token)
              );
              CREATE INDEX IF NOT EXISTS idx_client_room_reactions_target
-             ON room_reactions(server_id, room_id, target_event_id, reaction_token, actor_user_id);",
+             ON room_reactions(server_id, room_id, target_event_id, reaction_token, actor_user_id);
+             CREATE TABLE IF NOT EXISTS room_message_revision_state(
+               server_id TEXT NOT NULL,
+               room_id INTEGER NOT NULL CHECK(room_id > 0),
+               target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+               latest_revision_event_id INTEGER NOT NULL CHECK(latest_revision_event_id > 0),
+               revision_action INTEGER NOT NULL CHECK(revision_action IN (1, 2)),
+               actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+               replacement_body TEXT,
+               revision_number INTEGER NOT NULL CHECK(revision_number BETWEEN 1 AND 9),
+               at INTEGER NOT NULL CHECK(at >= 0),
+               retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+               PRIMARY KEY(server_id, room_id, target_event_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_client_room_message_revisions_target
+             ON room_message_revision_state(
+               server_id, room_id, target_event_id, latest_revision_event_id
+             );",
         )?;
         transaction.commit()?;
         Ok(())
@@ -322,6 +360,10 @@ impl ChatStore for SqliteChatStore {
 
     fn delete_server(&mut self, server_id: &ServerId) -> anyhow::Result<bool> {
         let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM room_message_revision_state WHERE server_id = ?1",
+            [server_id],
+        )?;
         transaction.execute(
             "DELETE FROM room_reactions WHERE server_id = ?1",
             [server_id],
@@ -850,6 +892,180 @@ impl ChatStore for SqliteChatStore {
             .collect()
     }
 
+    fn apply_message_revision_event(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        event: MessageRevisionEvent,
+    ) -> anyhow::Result<bool> {
+        event
+            .clone()
+            .into_frame_body()
+            .context("invalid OMENchat message revision event")?;
+        anyhow::ensure!(
+            chat_text_fits(server_id, CHAT_SERVER_ID_MAX_BYTES),
+            "message revision server id exceeds client limits"
+        );
+        let target_event_id = i64::try_from(event.target_event_id)
+            .context("message revision target event id does not fit SQLite")?;
+        let revision = ChatMessageRevision {
+            server_id: server_id.clone(),
+            room_id,
+            target_event_id: event.target_event_id,
+            latest_revision_event_id: event.revision_event_id,
+            action: event.action,
+            actor_user_id: event.actor_user_id,
+            replacement_body: event.replacement,
+            at_unix: event.at_unix,
+            revision_number: event.revision_number,
+        };
+        let transaction = self.connection.transaction()?;
+        ensure_message_revision_target(&transaction, server_id, room_id, target_event_id)?;
+        if let Some(current) =
+            load_message_revision(&transaction, server_id, room_id, target_event_id)?
+        {
+            if current == revision {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            anyhow::ensure!(
+                revision.latest_revision_event_id > current.latest_revision_event_id
+                    && revision.revision_number > current.revision_number
+                    && current.action != MessageRevisionAction::Tombstone,
+                "message revision event is stale or conflicts with retained state"
+            );
+        }
+        upsert_message_revision(&transaction, &revision)?;
+        anyhow::ensure!(
+            message_revision_scope_capacity_ok(&transaction, server_id, room_id)?,
+            "message revision state exceeds client retention limits"
+        );
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    fn replace_message_revision_snapshot(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        snapshot: MessageRevisionSnapshot,
+    ) -> anyhow::Result<()> {
+        snapshot
+            .clone()
+            .into_frame_body()
+            .context("invalid OMENchat message revision snapshot")?;
+        anyhow::ensure!(
+            chat_text_fits(server_id, CHAT_SERVER_ID_MAX_BYTES),
+            "message revision server id exceeds client limits"
+        );
+        let target_event_ids = snapshot
+            .target_event_ids
+            .iter()
+            .map(|event_id| {
+                i64::try_from(*event_id)
+                    .context("message revision target event id does not fit SQLite")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let transaction = self.connection.transaction()?;
+        for target_event_id in &target_event_ids {
+            ensure_message_revision_target(&transaction, server_id, room_id, *target_event_id)?;
+        }
+        if !target_event_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", target_event_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "DELETE FROM room_message_revision_state
+                 WHERE server_id = ? AND room_id = ? AND target_event_id IN ({placeholders})"
+            );
+            let mut parameters = Vec::<rusqlite::types::Value>::with_capacity(
+                target_event_ids.len().saturating_add(2),
+            );
+            parameters.push(server_id.clone().into());
+            parameters.push(i64::from(room_id).into());
+            parameters.extend(target_event_ids.iter().copied().map(Into::into));
+            transaction.execute(&sql, rusqlite::params_from_iter(parameters))?;
+        }
+        for entry in snapshot.entries {
+            upsert_message_revision(
+                &transaction,
+                &ChatMessageRevision {
+                    server_id: server_id.clone(),
+                    room_id,
+                    target_event_id: entry.target_event_id,
+                    latest_revision_event_id: entry.latest_revision_event_id,
+                    action: entry.action,
+                    actor_user_id: entry.actor_user_id,
+                    replacement_body: entry.replacement,
+                    at_unix: entry.at_unix,
+                    revision_number: entry.revision_number,
+                },
+            )?;
+        }
+        anyhow::ensure!(
+            message_revision_scope_capacity_ok(&transaction, server_id, room_id)?,
+            "message revision snapshot exceeds client retention limits"
+        );
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn message_revisions_for_targets(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        target_event_ids: &[EventId],
+    ) -> anyhow::Result<Vec<ChatMessageRevision>> {
+        MessageRevisionSnapshot {
+            target_event_ids: target_event_ids.to_vec(),
+            entries: Vec::new(),
+        }
+        .into_frame_body()
+        .context("invalid message revision target set")?;
+        if target_event_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let target_event_ids = target_event_ids
+            .iter()
+            .map(|event_id| {
+                i64::try_from(*event_id)
+                    .context("message revision target event id does not fit SQLite")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let placeholders = std::iter::repeat_n("?", target_event_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT target_event_id, latest_revision_event_id, revision_action,
+                    actor_user_id, replacement_body, at, revision_number, retained_bytes
+             FROM room_message_revision_state
+             WHERE server_id = ? AND room_id = ? AND target_event_id IN ({placeholders})
+             ORDER BY target_event_id
+             LIMIT ?"
+        );
+        let mut parameters =
+            Vec::<rusqlite::types::Value>::with_capacity(target_event_ids.len().saturating_add(3));
+        parameters.push(server_id.clone().into());
+        parameters.push(i64::from(room_id).into());
+        parameters.extend(target_event_ids.iter().copied().map(Into::into));
+        parameters.push(((MESSAGE_REVISION_SNAPSHOT_MAX_ENTRIES + 1) as i64).into());
+        let mut statement = self.connection.prepare(&sql)?;
+        let revisions = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                decode_message_revision_row(server_id, room_id, row)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        anyhow::ensure!(
+            revisions.len() <= MESSAGE_REVISION_SNAPSHOT_MAX_ENTRIES,
+            "stored message revision target set exceeds snapshot limits"
+        );
+        anyhow::ensure!(
+            chat_message_revisions_fit_bounds(&revisions),
+            "stored message revision state exceeds client retention limits"
+        );
+        Ok(revisions)
+    }
+
     fn latest_events(
         &self,
         server_id: &ServerId,
@@ -888,6 +1104,209 @@ impl ChatStore for SqliteChatStore {
         events.reverse();
         Ok(events)
     }
+}
+
+fn ensure_message_revision_target(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+    room_id: RoomId,
+    target_event_id: i64,
+) -> anyhow::Result<()> {
+    let eligible = transaction.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM room_events
+           WHERE server_id = ?1 AND room_id = ?2 AND event_id = ?3
+             AND deleted = 0 AND event_kind = 1
+         )",
+        (server_id, room_id, target_event_id),
+        |row| row.get::<_, bool>(0),
+    )?;
+    anyhow::ensure!(
+        eligible,
+        "message revision target is not retained as an eligible room message"
+    );
+    Ok(())
+}
+
+fn load_message_revision(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+    room_id: RoomId,
+    target_event_id: i64,
+) -> anyhow::Result<Option<ChatMessageRevision>> {
+    transaction
+        .query_row(
+            "SELECT target_event_id, latest_revision_event_id, revision_action,
+                    actor_user_id, replacement_body, at, revision_number, retained_bytes
+             FROM room_message_revision_state
+             WHERE server_id = ?1 AND room_id = ?2 AND target_event_id = ?3",
+            (server_id, room_id, target_event_id),
+            |row| decode_message_revision_row(server_id, room_id, row),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn upsert_message_revision(
+    transaction: &rusqlite::Transaction<'_>,
+    revision: &ChatMessageRevision,
+) -> anyhow::Result<()> {
+    MessageRevisionSnapshot {
+        target_event_ids: vec![revision.target_event_id],
+        entries: vec![MessageRevisionSnapshotEntry {
+            target_event_id: revision.target_event_id,
+            latest_revision_event_id: revision.latest_revision_event_id,
+            action: revision.action,
+            actor_user_id: revision.actor_user_id,
+            at_unix: revision.at_unix,
+            replacement: revision.replacement_body.clone(),
+            revision_number: revision.revision_number,
+        }],
+    }
+    .into_frame_body()
+    .context("invalid retained message revision")?;
+    let retained_bytes = i64::try_from(revision.retained_bytes())
+        .context("message revision retained bytes do not fit SQLite")?;
+    transaction.execute(
+        "INSERT INTO room_message_revision_state(
+           server_id, room_id, target_event_id, latest_revision_event_id,
+           revision_action, actor_user_id, replacement_body, revision_number,
+           at, retained_bytes
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(server_id, room_id, target_event_id) DO UPDATE SET
+           latest_revision_event_id = excluded.latest_revision_event_id,
+           revision_action = excluded.revision_action,
+           actor_user_id = excluded.actor_user_id,
+           replacement_body = excluded.replacement_body,
+           revision_number = excluded.revision_number,
+           at = excluded.at,
+           retained_bytes = excluded.retained_bytes",
+        rusqlite::params![
+            &revision.server_id,
+            i64::from(revision.room_id),
+            i64::try_from(revision.target_event_id)
+                .context("message revision target id does not fit SQLite")?,
+            i64::try_from(revision.latest_revision_event_id)
+                .context("message revision event id does not fit SQLite")?,
+            revision.action as u8,
+            revision.actor_user_id,
+            revision.replacement_body.as_deref(),
+            i64::try_from(revision.revision_number)
+                .context("message revision number does not fit SQLite")?,
+            revision.at_unix,
+            retained_bytes,
+        ],
+    )?;
+    Ok(())
+}
+
+fn decode_message_revision_row(
+    server_id: &ServerId,
+    room_id: RoomId,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ChatMessageRevision> {
+    let target_event_id = positive_u64_column(row, 0, "message revision target id")?;
+    let latest_revision_event_id = positive_u64_column(row, 1, "message revision event id")?;
+    let action_value = positive_u64_column(row, 2, "message revision action")?;
+    let action = MessageRevisionAction::try_from(action_value)
+        .map_err(|error| invalid_stored_column(2, error.to_string()))?;
+    let actor_user_id = row
+        .get::<_, i64>(3)
+        .ok()
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value != 0)
+        .ok_or_else(|| invalid_stored_column(3, "message revision actor id is invalid"))?;
+    let revision = ChatMessageRevision {
+        server_id: server_id.clone(),
+        room_id,
+        target_event_id,
+        latest_revision_event_id,
+        action,
+        actor_user_id,
+        replacement_body: row.get(4)?,
+        at_unix: row.get(5)?,
+        revision_number: positive_u64_column(row, 6, "message revision number")?,
+    };
+    let retained_bytes = row.get::<_, i64>(7)?;
+    let expected = i64::try_from(revision.retained_bytes())
+        .map_err(|_| invalid_stored_column(7, "message revision retained bytes overflow"))?;
+    if retained_bytes != expected {
+        return Err(invalid_stored_column(
+            7,
+            "message revision retained-byte accounting is invalid",
+        ));
+    }
+    MessageRevisionSnapshot {
+        target_event_ids: vec![revision.target_event_id],
+        entries: vec![MessageRevisionSnapshotEntry {
+            target_event_id: revision.target_event_id,
+            latest_revision_event_id: revision.latest_revision_event_id,
+            action: revision.action,
+            actor_user_id: revision.actor_user_id,
+            at_unix: revision.at_unix,
+            replacement: revision.replacement_body.clone(),
+            revision_number: revision.revision_number,
+        }],
+    }
+    .into_frame_body()
+    .map_err(|error| invalid_stored_column(4, error.to_string()))?;
+    Ok(revision)
+}
+
+fn positive_u64_column(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    label: &str,
+) -> rusqlite::Result<u64> {
+    row.get::<_, i64>(index)
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value != 0)
+        .ok_or_else(|| invalid_stored_column(index, format!("{label} is invalid")))
+}
+
+fn invalid_stored_column(index: usize, message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Integer,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message.into(),
+        )),
+    )
+}
+
+fn message_revision_scope_capacity_ok(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+    room_id: RoomId,
+) -> anyhow::Result<bool> {
+    let (room_rows, room_bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(retained_bytes), 0)
+         FROM room_message_revision_state WHERE server_id = ?1 AND room_id = ?2",
+        (server_id, room_id),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (server_rows, server_bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(retained_bytes), 0)
+         FROM room_message_revision_state WHERE server_id = ?1",
+        [server_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (global_rows, global_bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(retained_bytes), 0)
+         FROM room_message_revision_state",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(
+        room_rows <= super::model::CHAT_MESSAGE_REVISION_MAX_ROWS_PER_ROOM as i64
+            && room_bytes <= super::model::CHAT_MESSAGE_REVISION_MAX_BYTES_PER_ROOM as i64
+            && server_rows <= super::model::CHAT_MESSAGE_REVISION_MAX_ROWS_PER_SERVER as i64
+            && server_bytes <= super::model::CHAT_MESSAGE_REVISION_MAX_BYTES_PER_SERVER as i64
+            && global_rows <= super::model::CHAT_MESSAGE_REVISION_MAX_ROWS as i64
+            && global_bytes <= super::model::CHAT_MESSAGE_REVISION_MAX_BYTES as i64,
+    )
 }
 
 fn ensure_reaction_target(
@@ -1579,6 +1998,219 @@ mod tests {
     }
 
     #[test]
+    fn message_revision_store_is_restart_safe_ordered_and_snapshot_authoritative() {
+        let path = isolated_store_path("message-revisions");
+        let server = sample_server();
+        {
+            let mut store = SqliteChatStore::open(&path).expect("store");
+            store.save_server(server.clone()).expect("server");
+            store
+                .save_room(ChatRoomSummary {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    name: "lobby".into(),
+                    topic: None,
+                    unread: 0,
+                    joined: true,
+                })
+                .expect("room");
+            store
+                .append_events(vec![ChatEvent {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    event_id: 10,
+                    actor_user_id: Some(1),
+                    actor_display_name: Some("Alice".into()),
+                    at_unix: 1,
+                    kind: ChatEventKind::Message {
+                        body: "immutable original".into(),
+                    },
+                }])
+                .expect("target");
+            let correction = MessageRevisionEvent {
+                revision_event_id: 20,
+                target_event_id: 10,
+                action: MessageRevisionAction::Correct,
+                actor_user_id: 1,
+                at_unix: 2,
+                replacement: Some("corrected".into()),
+                revision_number: 1,
+                actor_display_name: Some("Alice".into()),
+            };
+            assert!(store
+                .apply_message_revision_event(&server.server_id, 1, correction.clone())
+                .expect("correction"));
+            assert!(!store
+                .apply_message_revision_event(&server.server_id, 1, correction)
+                .expect("exact duplicate"));
+            assert!(store
+                .apply_message_revision_event(
+                    &server.server_id,
+                    1,
+                    MessageRevisionEvent {
+                        revision_event_id: 19,
+                        target_event_id: 10,
+                        action: MessageRevisionAction::Correct,
+                        actor_user_id: 1,
+                        at_unix: 3,
+                        replacement: Some("stale".into()),
+                        revision_number: 1,
+                        actor_display_name: None,
+                    },
+                )
+                .is_err());
+        }
+        {
+            let mut store = SqliteChatStore::open(&path).expect("reopen");
+            let retained = store
+                .message_revisions_for_targets(&server.server_id, 1, &[10])
+                .expect("restored revision");
+            assert_eq!(retained.len(), 1);
+            assert_eq!(retained[0].replacement_body.as_deref(), Some("corrected"));
+            assert_eq!(
+                store
+                    .latest_events(&server.server_id, 1, 10)
+                    .expect("original history")[0]
+                    .kind,
+                ChatEventKind::Message {
+                    body: "immutable original".into()
+                }
+            );
+            store
+                .replace_message_revision_snapshot(
+                    &server.server_id,
+                    1,
+                    MessageRevisionSnapshot {
+                        target_event_ids: vec![10],
+                        entries: vec![MessageRevisionSnapshotEntry {
+                            target_event_id: 10,
+                            latest_revision_event_id: 21,
+                            action: MessageRevisionAction::Tombstone,
+                            actor_user_id: 2,
+                            at_unix: 4,
+                            replacement: None,
+                            revision_number: 2,
+                        }],
+                    },
+                )
+                .expect("authoritative tombstone");
+            assert_eq!(
+                store
+                    .message_revisions_for_targets(&server.server_id, 1, &[10])
+                    .expect("tombstone")[0]
+                    .action,
+                MessageRevisionAction::Tombstone
+            );
+            store
+                .replace_message_revision_snapshot(
+                    &server.server_id,
+                    1,
+                    MessageRevisionSnapshot {
+                        target_event_ids: vec![10],
+                        entries: Vec::new(),
+                    },
+                )
+                .expect("authoritative clear");
+            assert!(store
+                .message_revisions_for_targets(&server.server_id, 1, &[10])
+                .expect("cleared")
+                .is_empty());
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn message_revision_snapshot_capacity_rolls_back_without_partial_replacement() {
+        let mut store = SqliteChatStore::in_memory().expect("store");
+        let server = sample_server();
+        store.save_server(server.clone()).expect("server");
+        store
+            .save_room(ChatRoomSummary {
+                server_id: server.server_id.clone(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            })
+            .expect("room");
+        let target_count = super::super::model::CHAT_MESSAGE_REVISION_MAX_ROWS_PER_ROOM + 1;
+        store
+            .append_events(
+                (1..=target_count as u64)
+                    .map(|event_id| ChatEvent {
+                        server_id: server.server_id.clone(),
+                        room_id: 1,
+                        event_id,
+                        actor_user_id: Some(1),
+                        actor_display_name: None,
+                        at_unix: 1,
+                        kind: ChatEventKind::Message {
+                            body: "target".into(),
+                        },
+                    })
+                    .collect(),
+            )
+            .expect("targets");
+        for targets in (1..=super::super::model::CHAT_MESSAGE_REVISION_MAX_ROWS_PER_ROOM as u64)
+            .collect::<Vec<_>>()
+            .chunks(MESSAGE_REVISION_SNAPSHOT_MAX_ENTRIES)
+        {
+            store
+                .replace_message_revision_snapshot(
+                    &server.server_id,
+                    1,
+                    MessageRevisionSnapshot {
+                        target_event_ids: targets.to_vec(),
+                        entries: targets
+                            .iter()
+                            .map(|target| MessageRevisionSnapshotEntry {
+                                target_event_id: *target,
+                                latest_revision_event_id: target.saturating_add(10_000),
+                                action: MessageRevisionAction::Tombstone,
+                                actor_user_id: 1,
+                                at_unix: 2,
+                                replacement: None,
+                                revision_number: 1,
+                            })
+                            .collect(),
+                    },
+                )
+                .expect("bounded page");
+        }
+        let overflow_target = target_count as u64;
+        assert!(store
+            .replace_message_revision_snapshot(
+                &server.server_id,
+                1,
+                MessageRevisionSnapshot {
+                    target_event_ids: vec![overflow_target],
+                    entries: vec![MessageRevisionSnapshotEntry {
+                        target_event_id: overflow_target,
+                        latest_revision_event_id: overflow_target.saturating_add(10_000),
+                        action: MessageRevisionAction::Tombstone,
+                        actor_user_id: 1,
+                        at_unix: 3,
+                        replacement: None,
+                        revision_number: 1,
+                    }],
+                },
+            )
+            .is_err());
+        assert_eq!(
+            store
+                .message_revisions_for_targets(&server.server_id, 1, &[1])
+                .expect("prior state")
+                .len(),
+            1
+        );
+        assert!(store
+            .message_revisions_for_targets(&server.server_id, 1, &[overflow_target])
+            .expect("overflow rollback")
+            .is_empty());
+    }
+
+    #[test]
     fn reaction_snapshot_overload_rolls_back_prior_page_state() {
         let mut store = SqliteChatStore::in_memory().expect("store");
         let server = sample_server();
@@ -2036,6 +2668,8 @@ mod tests {
         for (object_type, name) in [
             ("table", "room_reactions"),
             ("index", "idx_client_room_reactions_target"),
+            ("table", "room_message_revision_state"),
+            ("index", "idx_client_room_message_revisions_target"),
         ] {
             assert!(store
                 .connection

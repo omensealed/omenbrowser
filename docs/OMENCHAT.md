@@ -73,6 +73,14 @@ accepted, so normal clients cannot reach it and no client action is enabled.
 Dormant Link-scoped event and history-snapshot plumbing exists behind that
 disabled acceptance gate; its presence does not advertise or activate the
 wire feature.
+The desktop has a matching dormant, rebuildable revision projection outside
+immutable room history. It is bounded per room, server, and identity-scoped
+cache by rows and stable retained bytes; strict deltas and authoritative
+explicit-target snapshots are persisted transactionally and reconciled after
+restart. Invalid snapshots retain prior rows while clearing authoritative
+evidence. The reserved durable-intent operation is storage-capable, but there
+is no sender or GUI action. Session-open still omits `message-revisions-v1`,
+and unsolicited acceptance cannot enable it.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated

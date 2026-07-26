@@ -1,7 +1,8 @@
 use super::descriptor::OmenChatDescriptor;
 use super::model::{
-    bounded_chat_text, chat_event_supports_reactions, chat_reactions_fit_bounds, chat_text_fits,
-    ChatEvent, ChatReaction, ChatRoomSummary, ChatServerSummary, ChatUserSummary,
+    bounded_chat_text, chat_event_supports_message_revisions, chat_event_supports_reactions,
+    chat_message_revisions_fit_bounds, chat_reactions_fit_bounds, chat_text_fits, ChatEvent,
+    ChatMessageRevision, ChatReaction, ChatRoomSummary, ChatServerSummary, ChatUserSummary,
     CHAT_ACTOR_DISPLAY_MAX_BYTES, CHAT_MOTD_MAX_BYTES, CHAT_ROOM_NAME_MAX_BYTES,
     CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES,
     CHAT_SERVER_ID_MAX_BYTES, CHAT_STATUS_MAX_BYTES, CHAT_UPLOAD_FILENAME_MAX_BYTES,
@@ -12,8 +13,10 @@ pub use super::model::{
     CHAT_SESSION_MAX_USERS, CHAT_SESSION_MAX_USER_BYTES,
 };
 use super::protocol::{
-    EventId, ReactionAction, ReactionEvent, ReactionSnapshot, ReactionSnapshotEntry, ReactionToken,
-    RoomId, ServerId, REACTION_SNAPSHOT_MAX_TARGETS,
+    EventId, MessageRevisionAction, MessageRevisionEvent, MessageRevisionSnapshot,
+    MessageRevisionSnapshotEntry, ReactionAction, ReactionEvent, ReactionSnapshot,
+    ReactionSnapshotEntry, ReactionToken, RoomId, ServerId, MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS,
+    REACTION_SNAPSHOT_MAX_TARGETS,
 };
 use super::store::ChatStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -265,6 +268,16 @@ pub enum ChatClientEvent {
         room_id: RoomId,
         snapshot: ReactionSnapshot,
     },
+    MessageRevisionDeltaApplied {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event: MessageRevisionEvent,
+    },
+    MessageRevisionSnapshotApplied {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        snapshot: MessageRevisionSnapshot,
+    },
     UploadAccepted {
         session_id: ChatSessionId,
         resource_id: String,
@@ -436,6 +449,8 @@ pub struct ChatClient {
         ChatReaction,
     >,
     authoritative_reaction_targets: BTreeMap<ServerId, BTreeSet<(RoomId, EventId)>>,
+    message_revisions: BTreeMap<(ServerId, RoomId, EventId), ChatMessageRevision>,
+    authoritative_message_revision_targets: BTreeMap<ServerId, BTreeSet<(RoomId, EventId)>>,
 }
 
 impl ChatClient {
@@ -447,6 +462,8 @@ impl ChatClient {
             mute_except_mentions: BTreeMap::new(),
             reactions: BTreeMap::new(),
             authoritative_reaction_targets: BTreeMap::new(),
+            message_revisions: BTreeMap::new(),
+            authoritative_message_revision_targets: BTreeMap::new(),
         }
     }
 
@@ -719,6 +736,178 @@ impl ChatClient {
         Ok(())
     }
 
+    pub fn message_revision_for_target(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> Option<&ChatMessageRevision> {
+        let server_id = self.session(session_id)?.server.server_id.as_str();
+        self.message_revisions
+            .get(&(server_id.to_owned(), room_id, target_event_id))
+    }
+
+    pub fn message_revision_snapshot_complete(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> bool {
+        self.session(session_id).is_some_and(|session| {
+            self.authoritative_message_revision_targets
+                .get(&session.server.server_id)
+                .is_some_and(|targets| targets.contains(&(room_id, target_event_id)))
+        })
+    }
+
+    pub(crate) fn mark_message_revisions_stale(&mut self, session_id: ChatSessionId) {
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.clone())
+        else {
+            return;
+        };
+        self.authoritative_message_revision_targets
+            .remove(&server_id);
+    }
+
+    pub(crate) fn apply_message_revision_event(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event: MessageRevisionEvent,
+    ) -> Result<bool, &'static str> {
+        event
+            .clone()
+            .into_frame_body()
+            .map_err(|_| "message revision event is invalid")?;
+        let Some(session) = self.session(session_id) else {
+            return Err("message revision session is unavailable");
+        };
+        if !session.events.iter().any(|candidate| {
+            candidate.room_id == room_id
+                && candidate.event_id == event.target_event_id
+                && !is_transient_local_event_id(candidate.event_id)
+                && chat_event_supports_message_revisions(candidate)
+        }) {
+            return Err("message revision target is not retained");
+        }
+        let server_id = session.server.server_id.clone();
+        let key = (server_id.clone(), room_id, event.target_event_id);
+        let revision = ChatMessageRevision {
+            server_id,
+            room_id,
+            target_event_id: event.target_event_id,
+            latest_revision_event_id: event.revision_event_id,
+            action: event.action,
+            actor_user_id: event.actor_user_id,
+            replacement_body: event.replacement,
+            at_unix: event.at_unix,
+            revision_number: event.revision_number,
+        };
+        if let Some(current) = self.message_revisions.get(&key) {
+            if current == &revision {
+                return Ok(false);
+            }
+            if revision.latest_revision_event_id <= current.latest_revision_event_id
+                || revision.revision_number <= current.revision_number
+                || current.action == MessageRevisionAction::Tombstone
+            {
+                return Err("message revision event is stale or conflicts with retained state");
+            }
+        }
+        let mut next = self.message_revisions.clone();
+        next.insert(key, revision);
+        if !chat_message_revisions_fit_bounds(next.values()) {
+            return Err("message revision state exceeds client retention limits");
+        }
+        self.message_revisions = next;
+        Ok(true)
+    }
+
+    pub(crate) fn replace_message_revision_snapshot(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        snapshot: &MessageRevisionSnapshot,
+    ) -> Result<(), &'static str> {
+        let result = self
+            .replace_message_revision_snapshot_with_authority(session_id, room_id, snapshot, true);
+        if result.is_err() {
+            self.mark_message_revisions_stale(session_id);
+        }
+        result
+    }
+
+    fn replace_message_revision_snapshot_with_authority(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        snapshot: &MessageRevisionSnapshot,
+        authoritative: bool,
+    ) -> Result<(), &'static str> {
+        snapshot
+            .clone()
+            .into_frame_body()
+            .map_err(|_| "message revision snapshot is invalid")?;
+        let Some(session) = self.session(session_id) else {
+            return Err("message revision session is unavailable");
+        };
+        let target_set = snapshot
+            .target_event_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !target_set.iter().all(|target_event_id| {
+            session.events.iter().any(|event| {
+                event.room_id == room_id
+                    && event.event_id == *target_event_id
+                    && !is_transient_local_event_id(event.event_id)
+                    && chat_event_supports_message_revisions(event)
+            })
+        }) {
+            return Err("message revision snapshot target is not retained");
+        }
+        let server_id = session.server.server_id.clone();
+        let mut next = self.message_revisions.clone();
+        next.retain(|(stored_server, stored_room, target), _| {
+            stored_server != &server_id || *stored_room != room_id || !target_set.contains(target)
+        });
+        for entry in &snapshot.entries {
+            next.insert(
+                (server_id.clone(), room_id, entry.target_event_id),
+                ChatMessageRevision {
+                    server_id: server_id.clone(),
+                    room_id,
+                    target_event_id: entry.target_event_id,
+                    latest_revision_event_id: entry.latest_revision_event_id,
+                    action: entry.action,
+                    actor_user_id: entry.actor_user_id,
+                    replacement_body: entry.replacement.clone(),
+                    at_unix: entry.at_unix,
+                    revision_number: entry.revision_number,
+                },
+            );
+        }
+        if !chat_message_revisions_fit_bounds(next.values()) {
+            return Err("message revision snapshot exceeds client retention limits");
+        }
+        self.message_revisions = next;
+        if authoritative {
+            self.prune_message_revision_state_for_server(&server_id);
+            self.authoritative_message_revision_targets
+                .entry(server_id)
+                .or_default()
+                .extend(
+                    snapshot
+                        .target_event_ids
+                        .iter()
+                        .map(|target| (room_id, *target)),
+                );
+        }
+        Ok(())
+    }
+
     pub fn room_mute_except_mentions(&self, session_id: ChatSessionId, room_id: RoomId) -> bool {
         self.session(session_id).is_some_and(|session| {
             self.mute_except_mentions
@@ -821,6 +1010,12 @@ impl ChatClient {
                 .retain(|(server_id, ..), _| server_id != &removed.server.server_id);
             self.authoritative_reaction_targets
                 .remove(&removed.server.server_id);
+            self.message_revisions
+                .retain(|(server_id, ..), _| server_id != &removed.server.server_id);
+            self.authoritative_message_revision_targets
+                .remove(&removed.server.server_id);
+        } else {
+            self.prune_message_revision_state_for_server(&removed.server.server_id);
         }
         Some(removed)
     }
@@ -845,6 +1040,40 @@ impl ChatClient {
             targets.retain(|target| retained.contains(target));
             if targets.is_empty() {
                 self.authoritative_reaction_targets.remove(server_id);
+            }
+        }
+    }
+
+    fn prune_message_revision_state_for_server(&mut self, server_id: &ServerId) {
+        if self.message_revisions.is_empty()
+            && self.authoritative_message_revision_targets.is_empty()
+        {
+            return;
+        }
+        let retained = self
+            .sessions
+            .iter()
+            .filter(|session| session.server.server_id == *server_id)
+            .flat_map(|session| {
+                session
+                    .events
+                    .iter()
+                    .filter(|event| chat_event_supports_message_revisions(event))
+                    .map(|event| (event.room_id, event.event_id))
+            })
+            .collect::<BTreeSet<_>>();
+        self.message_revisions
+            .retain(|(stored_server, room_id, target), _| {
+                stored_server != server_id || retained.contains(&(*room_id, *target))
+            });
+        if let Some(targets) = self
+            .authoritative_message_revision_targets
+            .get_mut(server_id)
+        {
+            targets.retain(|target| retained.contains(target));
+            if targets.is_empty() {
+                self.authoritative_message_revision_targets
+                    .remove(server_id);
             }
         }
     }
@@ -926,6 +1155,50 @@ impl ChatClient {
                 )?;
             }
         }
+        for room_id in session
+            .events
+            .iter()
+            .map(|event| event.room_id)
+            .collect::<BTreeSet<_>>()
+        {
+            let target_event_ids = session
+                .events
+                .iter()
+                .filter(|event| {
+                    event.room_id == room_id
+                        && !is_transient_local_event_id(event.event_id)
+                        && chat_event_supports_message_revisions(event)
+                })
+                .map(|event| event.event_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            for targets in target_event_ids.chunks(MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS) {
+                let entries = targets
+                    .iter()
+                    .filter_map(|target| {
+                        self.message_revision_for_target(session_id, room_id, *target)
+                    })
+                    .map(|revision| MessageRevisionSnapshotEntry {
+                        target_event_id: revision.target_event_id,
+                        latest_revision_event_id: revision.latest_revision_event_id,
+                        action: revision.action,
+                        actor_user_id: revision.actor_user_id,
+                        at_unix: revision.at_unix,
+                        replacement: revision.replacement_body.clone(),
+                        revision_number: revision.revision_number,
+                    })
+                    .collect();
+                store.replace_message_revision_snapshot(
+                    &session.server.server_id,
+                    room_id,
+                    MessageRevisionSnapshot {
+                        target_event_ids: targets.to_vec(),
+                        entries,
+                    },
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -970,6 +1243,8 @@ impl ChatClient {
         if added > 0 {
             session.status = format!("loaded {added} older cached event(s)");
         }
+        let server_id = session.server.server_id.clone();
+        self.prune_message_revision_state_for_server(&server_id);
         added
     }
 
@@ -998,10 +1273,13 @@ impl ChatClient {
                 .sort_by_key(|event| (event.room_id, event.event_id));
         }
         enforce_history_window(&mut session.events, edge, Some(key));
-        session
+        let retained = session
             .events
             .iter()
-            .any(|event| (event.room_id, event.event_id) == key)
+            .any(|event| (event.room_id, event.event_id) == key);
+        let server_id = session.server.server_id.clone();
+        self.prune_message_revision_state_for_server(&server_id);
+        retained
     }
 
     pub fn load_cached_history_before<S: ChatStore>(
@@ -1135,6 +1413,50 @@ impl ChatClient {
                             .collect(),
                     };
                     self.replace_reaction_snapshot_with_authority(
+                        session_id, room_id, &snapshot, false,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                }
+            }
+            let retained_revision_targets = self
+                .session(session_id)
+                .map(|session| {
+                    let mut retained = BTreeMap::<RoomId, Vec<EventId>>::new();
+                    for event in &session.events {
+                        if !is_transient_local_event_id(event.event_id)
+                            && chat_event_supports_message_revisions(event)
+                        {
+                            retained
+                                .entry(event.room_id)
+                                .or_default()
+                                .push(event.event_id);
+                        }
+                    }
+                    retained
+                })
+                .unwrap_or_default();
+            for (room_id, mut target_event_ids) in retained_revision_targets {
+                target_event_ids.sort_unstable();
+                target_event_ids.dedup();
+                for targets in target_event_ids.chunks(MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS) {
+                    let revisions =
+                        store.message_revisions_for_targets(&server_id, room_id, targets)?;
+                    let snapshot = MessageRevisionSnapshot {
+                        target_event_ids: targets.to_vec(),
+                        entries: revisions
+                            .into_iter()
+                            .map(|revision| MessageRevisionSnapshotEntry {
+                                target_event_id: revision.target_event_id,
+                                latest_revision_event_id: revision.latest_revision_event_id,
+                                action: revision.action,
+                                actor_user_id: revision.actor_user_id,
+                                at_unix: revision.at_unix,
+                                replacement: revision.replacement_body,
+                                revision_number: revision.revision_number,
+                            })
+                            .collect(),
+                    };
+                    self.replace_message_revision_snapshot_with_authority(
                         session_id, room_id, &snapshot, false,
                     )
                     .map_err(anyhow::Error::msg)?;
@@ -1810,6 +2132,162 @@ mod tests {
         assert!(restored
             .reactions_for_targets(restored_session, 1, &[1])
             .is_empty());
+    }
+
+    #[test]
+    fn client_message_revisions_are_dormant_ordered_and_restart_safe() {
+        let mut store = SqliteChatStore::in_memory().expect("store");
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(bounded_history_session(
+            session_id,
+            vec![bounded_history_event(1, 5)]
+        )));
+        let correction = MessageRevisionEvent {
+            revision_event_id: 2,
+            target_event_id: 1,
+            action: MessageRevisionAction::Correct,
+            actor_user_id: 7,
+            at_unix: 10,
+            replacement: Some("corrected".into()),
+            revision_number: 1,
+            actor_display_name: Some("Alice".into()),
+        };
+        assert_eq!(
+            client.apply_message_revision_event(session_id, 1, correction.clone()),
+            Ok(true)
+        );
+        assert_eq!(
+            client.apply_message_revision_event(session_id, 1, correction),
+            Ok(false)
+        );
+        assert!(client
+            .apply_message_revision_event(
+                session_id,
+                1,
+                MessageRevisionEvent {
+                    revision_event_id: 1,
+                    target_event_id: 1,
+                    action: MessageRevisionAction::Correct,
+                    actor_user_id: 7,
+                    at_unix: 11,
+                    replacement: Some("stale".into()),
+                    revision_number: 1,
+                    actor_display_name: None,
+                },
+            )
+            .is_err());
+        client
+            .replace_message_revision_snapshot(
+                session_id,
+                1,
+                &MessageRevisionSnapshot {
+                    target_event_ids: vec![1],
+                    entries: vec![MessageRevisionSnapshotEntry {
+                        target_event_id: 1,
+                        latest_revision_event_id: 3,
+                        action: MessageRevisionAction::Tombstone,
+                        actor_user_id: 8,
+                        at_unix: 12,
+                        replacement: None,
+                        revision_number: 2,
+                    }],
+                },
+            )
+            .expect("authoritative tombstone");
+        assert_eq!(
+            client
+                .message_revision_for_target(session_id, 1, 1)
+                .expect("revision")
+                .action,
+            MessageRevisionAction::Tombstone
+        );
+        assert!(client.message_revision_snapshot_complete(session_id, 1, 1));
+        assert!(client
+            .replace_message_revision_snapshot(
+                session_id,
+                1,
+                &MessageRevisionSnapshot {
+                    target_event_ids: vec![99],
+                    entries: Vec::new(),
+                },
+            )
+            .is_err());
+        assert!(!client.message_revision_snapshot_complete(session_id, 1, 1));
+        assert_eq!(
+            client
+                .message_revision_for_target(session_id, 1, 1)
+                .expect("prior revision retained")
+                .action,
+            MessageRevisionAction::Tombstone
+        );
+        assert!(matches!(
+            client.session(session_id).expect("session").events[0].kind,
+            ChatEventKind::Message { .. }
+        ));
+
+        client
+            .persist_session(&mut store, session_id)
+            .expect("persist message revision");
+        let mut restored = ChatClient::new();
+        assert_eq!(
+            restored
+                .restore_from_store(&store, 50)
+                .expect("restore message revision"),
+            1
+        );
+        let restored_session = restored.sessions()[0].session_id;
+        assert_eq!(
+            restored
+                .message_revision_for_target(restored_session, 1, 1)
+                .expect("restored revision")
+                .action,
+            MessageRevisionAction::Tombstone
+        );
+        assert!(!restored.message_revision_snapshot_complete(restored_session, 1, 1));
+        restored.remove_session(restored_session);
+        assert!(restored
+            .message_revision_for_target(restored_session, 1, 1)
+            .is_none());
+    }
+
+    #[test]
+    fn message_revision_projection_follows_retained_session_history() {
+        let mut client = ChatClient::new();
+        let first_session = client.reserve_session_id();
+        assert!(client.push_session(bounded_history_session(
+            first_session,
+            vec![bounded_history_event(1, 5)]
+        )));
+        assert_eq!(
+            client.apply_message_revision_event(
+                first_session,
+                1,
+                MessageRevisionEvent {
+                    revision_event_id: 2,
+                    target_event_id: 1,
+                    action: MessageRevisionAction::Correct,
+                    actor_user_id: 7,
+                    at_unix: 2,
+                    replacement: Some("corrected".into()),
+                    revision_number: 1,
+                    actor_display_name: None,
+                },
+            ),
+            Ok(true)
+        );
+        let second_session = client.reserve_session_id();
+        assert!(client.push_session(bounded_history_session(
+            second_session,
+            vec![bounded_history_event(2, 5)]
+        )));
+
+        client.remove_session(first_session).expect("remove first");
+
+        assert!(client
+            .message_revision_for_target(second_session, 1, 1)
+            .is_none());
+        assert!(client.message_revisions.is_empty());
     }
 
     #[test]
