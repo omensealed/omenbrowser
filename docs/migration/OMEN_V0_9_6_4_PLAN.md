@@ -1078,6 +1078,19 @@ FTS5 probe, but a persistent index remains deferred until measurement justifies
 its owner/rebuild lifecycle. UI activation requires one cancellable or
 superseding owned task and may not scan history on Iced's update/view path.
 
+Status: bounded desktop surface complete. Read-only store loaders search both
+authoritative histories sequentially with a fair 4,096-item reservation per
+source, one active blocking scan, and one replaceable pending query. The
+Messages workspace submits explicitly, exposes source and exact limit state,
+and renders a bounded result window. Persisted LXMF keys require the same open
+peer, index, and stable message key before navigation; OMENchat keys require
+the same open server and retained room/event. Missing, moved, or changed
+targets fail closed. The reducer measurement, owner, presentation, router,
+store, and target validation tests pass. Advanced desktop filter controls,
+Ratatui search, and an interactive packaged-display smoke remain explicit
+follow-ups; no index, schema, timer, subscription, or recurring worker was
+added.
+
 ### Unit 6D — safe invitations
 
 - Include server destination, room, verified server fingerprint/evidence, and
@@ -1086,6 +1099,18 @@ superseding owned task and may not scan history on Iced's update/view path.
   credentials.
 - Bound URI/QR input before decode and require user confirmation before trust
   or connection changes.
+
+Unit 6D begins with
+`docs/design/OMENCHAT_INVITATIONS_CHECKPOINT.md`. The repository already owns
+the compatible plain `omenchat://<destination>` launch path and optional locked
+Iced QR support. The checkpoint deliberately does not reuse the dormant
+secret-bearing LXMF invite JSON shape. It defines a 2 KiB canonical no-secret
+URI, fixed public fields, claimed-versus-verified identity evidence, one
+ephemeral confirmation owner, exact room-catalog admission, mixed-version
+fallback, QR-as-identical-text behavior, and exhaustive malformed/boundary
+tests. No production parser, generation, QR feature, connection behavior,
+wire, schema, storage, capability, or dependency changes in the checkpoint
+unit.
 
 ### Unit 6E — corrections and delete tombstones
 
