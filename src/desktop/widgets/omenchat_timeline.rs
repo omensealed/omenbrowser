@@ -1,9 +1,10 @@
 use crate::app::current_epoch_ms;
 use crate::chat::protocol::RoomId;
 use crate::chat::{
-    chat_event_supports_reactions, chat_message_presentation, chat_reaction_summaries, ChatEvent,
-    ChatEventKind, ChatReaction, ChatReactionSummary, ChatReplyPresentation, ChatSessionId,
-    ChatSessionView,
+    chat_event_supports_reactions, chat_message_presentation, chat_message_revision_presentation,
+    chat_reaction_summaries, ChatEvent, ChatEventKind, ChatMessageRevision,
+    ChatMessageRevisionPresentation, ChatReaction, ChatReactionSummary, ChatReplyPresentation,
+    ChatSessionId, ChatSessionView,
 };
 use std::collections::BTreeMap;
 
@@ -31,6 +32,13 @@ pub(in crate::desktop) struct ChatTimelineBody {
     pub(in crate::desktop) reaction_target: Option<u64>,
     pub(in crate::desktop) upload: Option<ChatTimelineUpload>,
     pub(in crate::desktop) resend: Option<ChatTimelineResend>,
+    pub(in crate::desktop) revision: Option<ChatTimelineRevision>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) enum ChatTimelineRevision {
+    Edited { revision_number: u64 },
+    Deleted { revision_number: u64 },
 }
 
 pub(in crate::desktop) enum ChatTimelineReply {
@@ -79,9 +87,21 @@ pub(in crate::desktop) fn chat_event_body<'a>(
     event: &ChatEvent,
     local_user_id: Option<u32>,
     reactions: impl IntoIterator<Item = &'a ChatReaction>,
+    revision: Option<&ChatMessageRevision>,
 ) -> ChatTimelineBody {
     let presentation = chat_message_presentation(&session.events, event, local_user_id);
-    let reactions = chat_reaction_summaries(reactions, event, local_user_id);
+    let revision = chat_message_revision_presentation(event, revision);
+    let deleted_revision = match revision.as_ref() {
+        Some(ChatMessageRevisionPresentation::Deleted { revision_number }) => {
+            Some(*revision_number)
+        }
+        _ => None,
+    };
+    let reactions = if deleted_revision.is_some() {
+        Vec::new()
+    } else {
+        chat_reaction_summaries(reactions, event, local_user_id)
+    };
     let reply_target = matches!(
         event.kind,
         ChatEventKind::Message { .. } | ChatEventKind::RichMessage { .. }
@@ -91,23 +111,27 @@ pub(in crate::desktop) fn chat_event_body<'a>(
     let reaction_target = chat_event_supports_reactions(event)
         .then_some(event.event_id)
         .filter(|_| !is_omenchat_local_echo_event(event));
-    let reply = presentation.reply.map(|reply| match reply {
-        ChatReplyPresentation::Available {
-            event_id,
-            actor_display_name,
-            preview,
-        } => ChatTimelineReply::Available {
-            session_id: session.session_id,
-            room_id: event.room_id,
-            event_id,
-            label: actor_display_name
-                .map(|actor| format!("↳ {actor}: {preview}"))
-                .unwrap_or_else(|| format!("↳ {preview}")),
-        },
-        ChatReplyPresentation::Unavailable { event_id } => {
-            ChatTimelineReply::Unavailable { event_id }
-        }
-    });
+    let reply = deleted_revision
+        .is_none()
+        .then_some(presentation.reply)
+        .flatten()
+        .map(|reply| match reply {
+            ChatReplyPresentation::Available {
+                event_id,
+                actor_display_name,
+                preview,
+            } => ChatTimelineReply::Available {
+                session_id: session.session_id,
+                room_id: event.room_id,
+                event_id,
+                label: actor_display_name
+                    .map(|actor| format!("↳ {actor}: {preview}"))
+                    .unwrap_or_else(|| format!("↳ {preview}")),
+            },
+            ChatReplyPresentation::Unavailable { event_id } => {
+                ChatTimelineReply::Unavailable { event_id }
+            }
+        });
     match &event.kind {
         ChatEventKind::Action { body } => ChatTimelineBody {
             text: format!("* {} {body}", chat_event_actor_label(session, event)),
@@ -120,11 +144,50 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             reaction_target,
             upload: None,
             resend: local_echo_resend(session, event, body, true),
+            revision: None,
         },
-        ChatEventKind::Message { body }
-        | ChatEventKind::RichMessage { body, .. }
-        | ChatEventKind::Notice { body }
-        | ChatEventKind::System { body } => ChatTimelineBody {
+        ChatEventKind::Message { body } | ChatEventKind::RichMessage { body, .. } => {
+            let (text, revision) = match revision {
+                Some(ChatMessageRevisionPresentation::Edited {
+                    body,
+                    revision_number,
+                }) => (
+                    body.to_owned(),
+                    Some(ChatTimelineRevision::Edited { revision_number }),
+                ),
+                Some(ChatMessageRevisionPresentation::Deleted { revision_number }) => (
+                    "Message deleted".into(),
+                    Some(ChatTimelineRevision::Deleted { revision_number }),
+                ),
+                Some(ChatMessageRevisionPresentation::Original(body)) => (body.to_owned(), None),
+                None => (body.clone(), None),
+            };
+            ChatTimelineBody {
+                text,
+                is_action: false,
+                pending_acceptance: is_omenchat_local_echo_event(event),
+                mentions_local_user: deleted_revision.is_none() && presentation.mentions_local_user,
+                reactions,
+                reply,
+                reply_target: deleted_revision.is_none().then_some(reply_target).flatten(),
+                reaction_target: deleted_revision
+                    .is_none()
+                    .then_some(reaction_target)
+                    .flatten(),
+                upload: None,
+                resend: deleted_revision
+                    .is_none()
+                    .then(|| match &event.kind {
+                        ChatEventKind::Message { body } => {
+                            local_echo_resend(session, event, body, false)
+                        }
+                        _ => None,
+                    })
+                    .flatten(),
+                revision,
+            }
+        }
+        ChatEventKind::Notice { body } | ChatEventKind::System { body } => ChatTimelineBody {
             text: body.clone(),
             is_action: false,
             pending_acceptance: is_omenchat_local_echo_event(event),
@@ -134,10 +197,8 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             reply_target,
             reaction_target,
             upload: None,
-            resend: match &event.kind {
-                ChatEventKind::Message { body } => local_echo_resend(session, event, body, false),
-                _ => None,
-            },
+            resend: None,
+            revision: None,
         },
         ChatEventKind::Upload {
             resource_id,
@@ -157,6 +218,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
                 resource_id: resource_id.clone(),
             }),
             resend: None,
+            revision: None,
         },
     }
 }
@@ -168,6 +230,15 @@ pub(in crate::desktop) fn chat_timeline_body_text(body: &ChatTimelineBody) -> St
     }
     if body.pending_acceptance {
         text.push_str("  [queued · awaiting server acceptance]");
+    }
+    match body.revision {
+        Some(ChatTimelineRevision::Edited { revision_number }) => {
+            text.push_str(&format!("  [edited · revision {revision_number}]"));
+        }
+        Some(ChatTimelineRevision::Deleted { revision_number }) => {
+            text.push_str(&format!("  [deleted · revision {revision_number}]"));
+        }
+        None => {}
     }
     text
 }
@@ -222,6 +293,20 @@ pub(in crate::desktop) fn chat_timeline_groups_for_local_user_and_reactions(
     local_user_id: Option<u32>,
     reactions: &[ChatReaction],
 ) -> Vec<ChatTimelineGroup> {
+    chat_timeline_groups_for_local_user_reactions_and_revisions(
+        session,
+        local_user_id,
+        reactions,
+        std::iter::empty(),
+    )
+}
+
+pub(in crate::desktop) fn chat_timeline_groups_for_local_user_reactions_and_revisions<'a>(
+    session: &ChatSessionView,
+    local_user_id: Option<u32>,
+    reactions: &[ChatReaction],
+    revisions: impl IntoIterator<Item = &'a ChatMessageRevision>,
+) -> Vec<ChatTimelineGroup> {
     let mut groups: Vec<ChatTimelineGroup> = Vec::new();
     let mut reactions_by_target = BTreeMap::<u64, Vec<&ChatReaction>>::new();
     for reaction in reactions {
@@ -230,6 +315,10 @@ pub(in crate::desktop) fn chat_timeline_groups_for_local_user_and_reactions(
             .or_default()
             .push(reaction);
     }
+    let revisions_by_target = revisions
+        .into_iter()
+        .map(|revision| (revision.target_event_id, revision))
+        .collect::<BTreeMap<_, _>>();
     for event in session
         .events
         .iter()
@@ -245,6 +334,7 @@ pub(in crate::desktop) fn chat_timeline_groups_for_local_user_and_reactions(
                 .into_iter()
                 .flatten()
                 .copied(),
+            revisions_by_target.get(&event.event_id).copied(),
         );
         if let Some(last) = groups.last_mut() {
             if last.actor_key == actor_key
@@ -322,6 +412,25 @@ mod tests {
             actor_display_name: None,
             at_unix,
             kind: ChatEventKind::Message { body: body.into() },
+        }
+    }
+
+    fn revision(
+        target_event_id: u64,
+        action: crate::chat::protocol::MessageRevisionAction,
+        replacement_body: Option<&str>,
+        revision_number: u64,
+    ) -> ChatMessageRevision {
+        ChatMessageRevision {
+            server_id: "server-a".into(),
+            room_id: 1,
+            target_event_id,
+            latest_revision_event_id: 20 + revision_number,
+            action,
+            actor_user_id: 7,
+            replacement_body: replacement_body.map(str::to_owned),
+            at_unix: 10,
+            revision_number,
         }
     }
 
@@ -460,6 +569,94 @@ mod tests {
             }]
         );
         assert_eq!(groups[0].bodies[0].reactions[0].label(), "heart 2 · you");
+    }
+
+    #[test]
+    fn corrected_timeline_uses_effective_text_and_preserves_message_actions() {
+        let session = timeline_session(1, vec![message(1, 10, 1, "original")]);
+        let revisions = vec![revision(
+            10,
+            crate::chat::protocol::MessageRevisionAction::Correct,
+            Some("corrected"),
+            2,
+        )];
+
+        let groups = chat_timeline_groups_for_local_user_reactions_and_revisions(
+            &session,
+            Some(7),
+            &[],
+            &revisions,
+        );
+        let body = &groups[0].bodies[0];
+        assert_eq!(body.text, "corrected");
+        assert_eq!(
+            body.revision,
+            Some(ChatTimelineRevision::Edited { revision_number: 2 })
+        );
+        assert_eq!(
+            chat_timeline_body_text(body),
+            "corrected  [edited · revision 2]"
+        );
+        assert_eq!(body.reply_target, Some(10));
+        assert_eq!(body.reaction_target, Some(10));
+    }
+
+    #[test]
+    fn tombstoned_timeline_hides_original_metadata_media_and_actions() {
+        let rich = ChatEvent {
+            server_id: "server-a".into(),
+            room_id: 1,
+            event_id: 11,
+            actor_user_id: Some(8),
+            actor_display_name: Some("Bob".into()),
+            at_unix: 2,
+            kind: ChatEventKind::RichMessage {
+                body: "secret https://example.invalid/image.png".into(),
+                metadata: ChatMessageMetadata {
+                    reply_to_event_id: Some(10),
+                    mentioned_user_ids: vec![7],
+                },
+            },
+        };
+        let session = timeline_session(1, vec![message(1, 10, 1, "original"), rich]);
+        let reactions = vec![ChatReaction {
+            server_id: "server-a".into(),
+            room_id: 1,
+            target_event_id: 11,
+            actor_user_id: 7,
+            token: ReactionToken::Heart,
+            created_at_unix: 3,
+        }];
+        let revisions = vec![revision(
+            11,
+            crate::chat::protocol::MessageRevisionAction::Tombstone,
+            None,
+            3,
+        )];
+
+        let groups = chat_timeline_groups_for_local_user_reactions_and_revisions(
+            &session,
+            Some(7),
+            &reactions,
+            &revisions,
+        );
+        let body = &groups[1].bodies[0];
+        assert_eq!(body.text, "Message deleted");
+        assert_eq!(
+            body.revision,
+            Some(ChatTimelineRevision::Deleted { revision_number: 3 })
+        );
+        assert_eq!(
+            chat_timeline_body_text(body),
+            "Message deleted  [deleted · revision 3]"
+        );
+        assert!(!body.mentions_local_user);
+        assert!(body.reply.is_none());
+        assert!(body.reactions.is_empty());
+        assert!(body.reply_target.is_none());
+        assert!(body.reaction_target.is_none());
+        assert!(body.upload.is_none());
+        assert!(body.resend.is_none());
     }
 
     #[test]

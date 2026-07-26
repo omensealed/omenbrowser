@@ -130,6 +130,13 @@ restart. Invalid snapshots retain prior rows while clearing authoritative
 evidence. The reserved durable-intent operation is storage-capable, but there
 is no sender or GUI action. Session-open still omits `message-revisions-v1`,
 and unsolicited acceptance cannot enable it.
+The shared Iced timeline now has dormant read-only presentation for that
+projection. It borrows only authoritative rows for retained targets:
+corrections show effective text with an edited marker, while tombstones hide
+the original body plus reply, mention, media, reaction, resend, and mutation
+actions. Stale restored rows remain hidden until an explicit-target snapshot
+re-establishes authority. This adds no capability request, sender, control,
+worker, timer, retry, or per-redraw revision-body clone.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated

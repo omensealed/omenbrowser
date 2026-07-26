@@ -343,9 +343,34 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         session.active_room.room_id,
         &reaction_target_ids,
     );
-    for group in
-        chat_timeline_groups_for_local_user_and_reactions(session, local_user_id, &reactions)
-    {
+    let revisions = session
+        .events
+        .iter()
+        .filter(|event| {
+            event.room_id == session.active_room.room_id
+                && desktop
+                    .omenchat
+                    .chat_client
+                    .message_revision_snapshot_complete(
+                        session.session_id,
+                        session.active_room.room_id,
+                        event.event_id,
+                    )
+        })
+        .filter_map(|event| {
+            desktop.omenchat.chat_client.message_revision_for_target(
+                session.session_id,
+                session.active_room.room_id,
+                event.event_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    for group in chat_timeline_groups_for_local_user_reactions_and_revisions(
+        session,
+        local_user_id,
+        &reactions,
+        revisions,
+    ) {
         let header = row![
             text(group.actor).size(ui_size(12)),
             text(chat_event_time_label(group.at_unix)).size(ui_size(11)),

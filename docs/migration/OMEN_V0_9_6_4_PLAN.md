@@ -1254,6 +1254,16 @@ injection. Production requests still omit `message-revisions-v1`, unsolicited
 acceptance is ignored, and there is no GUI action, timer, retry, or capability
 activation.
 
+The sixth dormant slice connects that project-owned projection to the shared
+Iced OMENchat timeline without adding a mutation action. Only retained targets
+with authoritative snapshot evidence supply borrowed revision rows.
+Corrections derive effective displayed text and an edited marker while
+preserving reply/reaction actions. Tombstones replace the body with an explicit
+deleted presentation and suppress original reply, mention, media, reaction,
+resend, and mutation actions. Stale restart rows are not presented as current,
+and redraw does not clone retained revision bodies. Production capability
+request/acceptance remains disabled.
+
 ### Unit 6F — pins and moderation audit history
 
 - Append bounded pin/unpin and moderation-audit events.

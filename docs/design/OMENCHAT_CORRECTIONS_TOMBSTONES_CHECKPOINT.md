@@ -1,6 +1,6 @@
 # OMENchat corrections and tombstones checkpoint
 
-Status: design checkpoint; no capability, wire operation, schema, or UI action is active  
+Status: dormant implementation checkpoint; capability and mutation actions remain inactive
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`  
 Protocol baseline: `omenchat-v0.1`, numeric protocol version 1  
 Required base capability: `durable-mutations-v1`
@@ -28,11 +28,12 @@ messages, including messages carrying reply/mention metadata. It does not edit
 actions, notices, uploads, system events, reactions, pins, moderation records,
 or room metadata.
 
-This checkpoint does not authorize activation. The current server retains
-ordinary room history indefinitely, so a tombstone cannot yet be pruned without
-either resurrecting its target or removing the target and tombstone together.
-The capability must remain dormant until Unit 6G supplies a tested room-history
-retention/compaction rule or the release explicitly defers this feature.
+This checkpoint does not authorize activation. Unit 6G now supplies persistent
+event-ID sequences, bounded usage accounting, dependency-aware compaction, a
+disabled-by-default policy, atomic admission integration, and explicit bounded
+ledger maintenance. That closes the structural retention prerequisite.
+The capability remains dormant until its durable desktop sender/actions and
+live current/current plus mixed-version gates pass.
 
 ## Existing boundaries verified
 
@@ -472,15 +473,24 @@ omenchatd state.
    session-open frames still do not request the capability, unsolicited
    acceptance cannot activate it, and no correction/tombstone control is
    exposed. Dormant GUI controls remain a later sub-slice.
-6. **Design checkpoint complete; implementation pending.**
-   `OMENCHAT_ROOM_RETENTION_CHECKPOINT.md` records the disabled compatibility
-   default, persistent event-ID high-water mark, bounded usage-ledger backfill,
-   atomic revision/reaction/reply cleanup, rollback boundary, and test matrix.
-   The current `MAX(event_id) + 1` allocator must be replaced before any event
-   deletion can be safe. This remains required before capability activation.
-7. Run deterministic, mixed-version, retention, Resource, restart, fault, and
-   live isolated smoke gates.
-8. Request and accept `message-revisions-v1` only after every gate passes.
+6. **Retention prerequisite complete.**
+   `OMENCHAT_ROOM_RETENTION_CHECKPOINT.md` now records and tests the persistent
+   event-ID high-water mark, bounded resumable usage ledger, atomic
+   revision/reaction/reply cleanup, disabled-by-default policy, live admission
+   integration, rollback boundary, deterministic restart/Resource evidence,
+   and explicit stopped-server ledger maintenance.
+7. **Read-only presentation complete and dormant.** The shared Iced timeline
+   borrows only authoritative revision rows for retained visible targets.
+   Corrections replace displayed text and add an `edited` marker while
+   preserving message actions. Tombstones suppress original text,
+   reply/mention/media/reaction actions, and add a `deleted` marker. Stale
+   restart cache without authoritative snapshot evidence is not rendered as
+   current. No sender, control, capability request, timer, or retry is added.
+8. Add the bounded durable desktop sender and correction/tombstone controls
+   behind the still-dormant capability gate, then run deterministic,
+   mixed-version, retention, Resource, restart, fault, and live isolated smoke
+   gates.
+9. Request and accept `message-revisions-v1` only after every gate passes.
 
 Each step must leave root and standalone server builds valid and independently
 reversible. No step may introduce automatic retry.
@@ -592,6 +602,14 @@ session request still omits
 `message-revisions-v1`, and even an unsolicited acceptance cannot activate the
 client state. These results are not GUI controls, native package,
 mixed-version-process, or live Reticulum interoperability evidence.
+
+The dormant read-only presentation sub-slice subsequently passed ten focused
+timeline tests under `desktop-product`. Corrected text retains reply/reaction
+actions and carries its revision marker; a tombstone exposes neither original
+text nor reply, mention, media, reaction, resend, or mutation actions. The live
+view borrows only rows whose explicit target has authoritative snapshot
+evidence, avoiding both stale-cache claims and revision-body clones during
+redraw. Production negotiation and mutation actions remain disabled.
 
 ## Completion gate
 
