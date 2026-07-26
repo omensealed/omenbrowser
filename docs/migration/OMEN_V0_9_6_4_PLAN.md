@@ -1043,6 +1043,14 @@ Resource snapshots. It exposed and fixed missing live snapshot attachment,
 missing `ReactionSnapshotResource` transport dispatch/release coverage, and
 the client's missing `recent` history Resource-purpose acceptance.
 
+The ninth presentation slice replaces the wrapping textual reaction-button
+block with the same fixed eight-token vocabulary rendered as compact emoji
+controls. Semantic hover labels preserve discoverability, authoritative
+summary chips retain actor counts and the explicit `you` marker, and the reply
+action uses the existing Nerd Font/tooltip infrastructure. This is a
+presentation-only change: negotiation, durable intent ownership, wire tokens,
+storage, bounds, and fallback behavior are unchanged.
+
 ### Unit 6C — bounded local search
 
 - Search existing LXMF and OMENchat history by text, sender, room, date,

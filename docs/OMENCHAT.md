@@ -85,6 +85,11 @@ mutation owner before sending and never update counts optimistically.
 Production session-open frames request `reactions-v1` only when the persistent
 durable-mutation owner is ready. Older or capability-absent servers leave the
 controls hidden and ordinary room behavior unchanged.
+The desktop exposes the fixed reaction vocabulary as a compact emoji strip
+with semantic hover labels instead of a wrapping block of textual buttons.
+Reply uses the compact Nerd Font comments glyph with a `Reply` tooltip. Reaction
+summaries use the same emoji vocabulary while retaining actor counts and the
+explicit `you` marker.
 Negotiated Links now receive an explicit reaction snapshot after join and
 recent-history synchronization. The snapshot covers only the bounded history
 range represented to that client. Inline and Resource forms use the same strict

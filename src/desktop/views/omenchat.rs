@@ -116,26 +116,72 @@ fn omenchat_reaction_summary_row(
         } else {
             status_container_style
         };
+        let local_label = if summary.reacted_by_local_user {
+            " · you"
+        } else {
+            ""
+        };
         summaries_row = summaries_row.push(
-            container(text(summary.label()).size(ui_size(11)))
-                .padding([2, 6])
-                .style(style),
+            container(
+                row![
+                    text(reaction_token_presentation(summary.token).emoji)
+                        .font(emoji_font())
+                        .size(ui_size(13)),
+                    text(format!("{}{local_label}", summary.actor_count)).size(ui_size(11)),
+                ]
+                .spacing(3)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([2, 6])
+            .style(style),
         );
     }
     summaries_row.wrap().into()
 }
 
-fn reaction_token_label(token: crate::chat::protocol::ReactionToken) -> &'static str {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReactionTokenPresentation {
+    emoji: &'static str,
+    label: &'static str,
+}
+
+fn reaction_token_presentation(
+    token: crate::chat::protocol::ReactionToken,
+) -> ReactionTokenPresentation {
     use crate::chat::protocol::ReactionToken;
     match token {
-        ReactionToken::ThumbsUp => "+1",
-        ReactionToken::Heart => "heart",
-        ReactionToken::Laugh => "laugh",
-        ReactionToken::Surprised => "wow",
-        ReactionToken::Sad => "sad",
-        ReactionToken::ThumbsDown => "-1",
-        ReactionToken::Celebrate => "celebrate",
-        ReactionToken::Question => "?",
+        ReactionToken::ThumbsUp => ReactionTokenPresentation {
+            emoji: "👍",
+            label: "Like",
+        },
+        ReactionToken::Heart => ReactionTokenPresentation {
+            emoji: "❤️",
+            label: "Heart",
+        },
+        ReactionToken::Laugh => ReactionTokenPresentation {
+            emoji: "😂",
+            label: "Laugh",
+        },
+        ReactionToken::Surprised => ReactionTokenPresentation {
+            emoji: "😮",
+            label: "Surprised",
+        },
+        ReactionToken::Sad => ReactionTokenPresentation {
+            emoji: "😢",
+            label: "Sad",
+        },
+        ReactionToken::ThumbsDown => ReactionTokenPresentation {
+            emoji: "👎",
+            label: "Dislike",
+        },
+        ReactionToken::Celebrate => ReactionTokenPresentation {
+            emoji: "🎉",
+            label: "Celebrate",
+        },
+        ReactionToken::Question => ReactionTokenPresentation {
+            emoji: "❓",
+            label: "Question",
+        },
     }
 }
 
@@ -145,16 +191,24 @@ fn omenchat_reaction_controls(
     room_id: crate::chat::protocol::RoomId,
     event_id: u64,
 ) -> Element<'static, Message> {
-    let mut controls = row![text("React:").size(ui_size(11))].spacing(4);
+    let mut controls = row![].spacing(1);
     for token in crate::chat::protocol::ReactionToken::ALL {
-        controls = controls.push(subtle_button_owned(
-            reaction_token_label(token).to_string(),
-            Message::OmenChat(OmenChatMessage::ToggleReaction {
+        let presentation = reaction_token_presentation(token);
+        controls = controls.push(tooltip_button(
+            button(
+                text(presentation.emoji)
+                    .font(emoji_font())
+                    .size(ui_size(15)),
+            )
+            .on_press(Message::OmenChat(OmenChatMessage::ToggleReaction {
                 session_id,
                 room_id,
                 event_id,
                 token,
-            }),
+            }))
+            .padding([1, 3])
+            .style(inline_icon_button_style),
+            presentation.label,
         ));
     }
     controls.wrap().into()
@@ -343,8 +397,9 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 group_content = group_content.push(
                     row![
                         line,
-                        subtle_button_owned(
-                            "Reply".to_string(),
+                        inline_icon_button_owned(
+                            ICON_REPLY,
+                            "Reply",
                             Message::OmenChat(OmenChatMessage::BeginReply {
                                 session_id: session.session_id,
                                 room_id: session.active_room.room_id,
@@ -873,9 +928,10 @@ fn omenchat_recovered_mutations_panel(
 mod accessibility_tests {
     use super::{
         compact_recovery_destination, omenchat_media_animation_allowed,
-        recovered_mutation_expiry_label, recovered_mutation_notice, recovered_mutation_operation,
+        reaction_token_presentation, recovered_mutation_expiry_label, recovered_mutation_notice,
+        recovered_mutation_operation,
     };
-    use crate::chat::protocol::{ChatOp, FrameBody};
+    use crate::chat::protocol::{ChatOp, FrameBody, ReactionToken};
     use crate::chat::ChatConnectionState;
 
     #[test]
@@ -937,5 +993,28 @@ mod accessibility_tests {
         let plural = recovered_mutation_notice(2, ChatConnectionState::Reconnecting);
         assert!(plural.contains("2 earlier sends"));
         assert!(plural.contains("Current connection: reconnecting"));
+    }
+
+    #[test]
+    fn reaction_controls_have_compact_emoji_and_semantic_labels() {
+        let presentations = ReactionToken::ALL.map(reaction_token_presentation);
+        assert_eq!(
+            presentations.map(|presentation| presentation.emoji),
+            ["👍", "❤️", "😂", "😮", "😢", "👎", "🎉", "❓"]
+        );
+        assert_eq!(
+            presentations.map(|presentation| presentation.label),
+            [
+                "Like",
+                "Heart",
+                "Laugh",
+                "Surprised",
+                "Sad",
+                "Dislike",
+                "Celebrate",
+                "Question",
+            ]
+        );
+        assert_eq!(crate::desktop::ICON_REPLY, "\u{f086}");
     }
 }
