@@ -1051,6 +1051,13 @@ action uses the existing Nerd Font/tooltip infrastructure. This is a
 presentation-only change: negotiation, durable intent ownership, wire tokens,
 storage, bounds, and fallback behavior are unchanged.
 
+The tenth qualification slice extends the existing single-process reconnect
+harness. The same client now completes reactions before restart, observes Link
+replacement, renegotiates the capability, and repeats lost-ack exact replay,
+authoritative Resource reconciliation, semantic no-op, removal, and persistent
+intent cleanup against a post-reconnect message. Stage names are separately
+prefixed so pre-restart evidence cannot satisfy the replacement-Link gate.
+
 ### Unit 6C — bounded local search
 
 - Search existing LXMF and OMENchat history by text, sender, room, date,

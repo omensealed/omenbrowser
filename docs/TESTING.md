@@ -521,6 +521,9 @@ The first exchange creates a marker only inside the harness's temporary root.
 The wrapper then drains and restarts current omenchatd without stopping the
 client process. The client must observe the old link close, open a different
 link, reconnect the same in-memory session, and receive a second echoed message.
+It also negotiates reactions before and after replacement, deliberately loses
+and exactly replays an acknowledgement on the replacement Link, and requires
+authoritative Resource snapshot, no-op, removal, and clean-intent evidence.
 The retained report contains only versions and booleans. This exercises the
 headless product smoke path; an interactive Iced-window restart soak remains a
 separate presentation/lifecycle check.

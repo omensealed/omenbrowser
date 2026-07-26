@@ -450,13 +450,15 @@ continuous_link_closed=0
 continuous_link_reopened=0
 continuous_session_reconnected=0
 continuous_message_echoed=0
+continuous_reaction_recovered=0
 if [[ "$continuous_client_reconnect" -eq 1 ]]; then
-  python3 - "$run_dir/omenchat-smoke.json" <<'PY'
+  python3 - "$run_dir/omenchat-smoke.json" "$reaction_smoke" <<'PY'
 import json
 import pathlib
 import sys
 
 report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+reaction_smoke = sys.argv[2] == "1"
 stages = {
     stage.get("stage"): stage
     for stage in report.get("stages", [])
@@ -473,11 +475,27 @@ if any(stages.get(name, {}).get("ok") is not True for name in required):
     raise SystemExit("continuous reconnect stage evidence was incomplete")
 if stages["continuous_link_reopen"].get("link_changed") is not True:
     raise SystemExit("continuous reconnect reused the closed link identifier")
+if reaction_smoke:
+    reaction_required = (
+        "continuous_reaction_capability",
+        "continuous_reaction_lost_ack",
+        "continuous_reaction_exact_replay",
+        "continuous_reaction_resource_snapshot",
+        "continuous_reaction_noop_add",
+        "continuous_reaction_remove",
+        "continuous_reaction_remove_snapshot",
+        "continuous_reaction_intent_persistence",
+    )
+    if any(stages.get(name, {}).get("ok") is not True for name in reaction_required):
+        raise SystemExit("replacement-link reaction evidence was incomplete")
 PY
   continuous_link_closed=1
   continuous_link_reopened=1
   continuous_session_reconnected=1
   continuous_message_echoed=1
+  if [[ "$reaction_smoke" -eq 1 ]]; then
+    continuous_reaction_recovered=1
+  fi
 fi
 
 if [[ "$restart_server" -eq 1 ]]; then
@@ -640,6 +658,7 @@ continuous_link_closed: $continuous_link_closed
 continuous_link_reopened: $continuous_link_reopened
 continuous_session_reconnected: $continuous_session_reconnected
 continuous_message_echoed: $continuous_message_echoed
+continuous_reaction_recovered: $continuous_reaction_recovered
 restart_destination_stable: $restart_destination_stable
 restart_stop: $restart_stop
 server_large_batch_threshold_bytes: $([[ -n "$server_large_batch_threshold_bytes" ]] && printf '%s' "$server_large_batch_threshold_bytes" || printf 'default')

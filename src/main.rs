@@ -1464,16 +1464,21 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
     }));
 
     let mut reaction_ok = true;
-    if joined && message_seen && reaction_smoke {
-        let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
-            .context("OMENchat reaction smoke target message was not retained")?;
-        let authenticated_identity_hash = app
-            .runtime_status
+    let reaction_identity_storage_root = app.paths.identity_storage_root();
+    let reaction_identity_hash = if reaction_smoke {
+        app.runtime_status
             .active_identity
             .as_ref()
             .map(|identity| parse_16_byte_hex_hash(&identity.hash_hex))
             .transpose()?
-            .context("OMENchat reaction smoke has no active identity")?;
+    } else {
+        None
+    };
+    if joined && message_seen && reaction_smoke {
+        let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
+            .context("OMENchat reaction smoke target message was not retained")?;
+        let authenticated_identity_hash =
+            reaction_identity_hash.context("OMENchat reaction smoke has no active identity")?;
         let room_id = client
             .session(session_id)
             .map(|session| session.active_room.room_id)
@@ -1490,7 +1495,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
                 room_id,
                 target_event_id,
                 server_destination: &destination,
-                identity_storage_root: &app.paths.identity_storage_root(),
+                identity_storage_root: &reaction_identity_storage_root,
                 authenticated_identity_hash,
                 wait: Duration::from_secs(response_wait_secs),
             },
@@ -1662,6 +1667,10 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
                     wait: Duration::from_secs(reconnect_wait_secs),
                     link_timeout: Duration::from_secs(link_timeout_secs),
                     response_wait: Duration::from_secs(response_wait_secs),
+                    reaction_smoke,
+                    server_destination: &destination,
+                    identity_storage_root: &reaction_identity_storage_root,
+                    authenticated_identity_hash: reaction_identity_hash,
                 })
                 .await?;
             reconnect_ok = passed;
@@ -1876,6 +1885,10 @@ struct OmenChatContinuousReconnectSmoke<'a> {
     wait: Duration,
     link_timeout: Duration,
     response_wait: Duration,
+    reaction_smoke: bool,
+    server_destination: &'a str,
+    identity_storage_root: &'a std::path::Path,
+    authenticated_identity_hash: Option<[u8; 16]>,
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -2034,8 +2047,60 @@ async fn run_omenchat_continuous_reconnect_smoke(
         "ok": message_seen,
         "events": message_events,
     }));
+    let mut reaction_ok = true;
+    if input.reaction_smoke && message_seen {
+        let target_event_id =
+            omenchat_session_message_event_id(input.client, input.session_id, &reconnect_message)
+                .context("continuous reconnect reaction target message was not retained")?;
+        let room_id = input
+            .client
+            .session(input.session_id)
+            .map(|session| session.active_room.room_id)
+            .unwrap_or(1);
+        let Some(authenticated_identity_hash) = input.authenticated_identity_hash else {
+            stages.push(serde_json::json!({
+                "stage": "continuous_reaction_identity",
+                "ok": false,
+                "reason": "active identity was unavailable",
+            }));
+            return Ok((false, Some(opened.link_id), stages));
+        };
+        let (passed, reaction_stages) = run_omenchat_reaction_smoke(
+            input.runtime,
+            input.runtime_events,
+            input.client,
+            input.live_state,
+            input.transport,
+            OmenChatReactionSmokeOptions {
+                link_id: opened.link_id,
+                session_id: input.session_id,
+                room_id,
+                target_event_id,
+                server_destination: input.server_destination,
+                identity_storage_root: input.identity_storage_root,
+                authenticated_identity_hash,
+                wait: input.response_wait,
+            },
+        )
+        .await?;
+        reaction_ok = passed;
+        stages.extend(reaction_stages.into_iter().map(|mut stage| {
+            if let Some(name) = stage
+                .get("stage")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+            {
+                stage["stage"] = serde_json::Value::String(format!("continuous_{name}"));
+            }
+            stage
+        }));
+    }
     Ok((
-        reconnect_started && send_ok && message_seen && opened.link_id != input.old_link_id,
+        reconnect_started
+            && send_ok
+            && message_seen
+            && reaction_ok
+            && opened.link_id != input.old_link_id,
         Some(opened.link_id),
         stages,
     ))

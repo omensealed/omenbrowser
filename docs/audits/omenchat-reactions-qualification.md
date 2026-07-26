@@ -117,6 +117,11 @@ Clippy, and full root/server commands are recorded in `docs/TESTING.md`.
   `/tmp/omenchat-reactions-v0964-full-fixed/omenchat-smoke-20260726T132850Z`.
 - Capability-absent behavior remains covered by the explicit link-scoped
   negotiation regression; ordinary traffic is unchanged.
-- Continuous same-process Link replacement remains covered by the existing
-  reconnect smoke and deterministic replacement-Link replay tests; it was not
-  combined with the mutually exclusive graceful-restart mode in this run.
+- Continuous same-process Link replacement is now part of the isolated
+  reaction harness. One browser process must react before restart, observe the
+  old Link close, negotiate a different Link after an orderly omenchatd
+  restart, echo a new message, and complete lost-ack/exact-replay,
+  authoritative-Resource, no-op, removal, and clean-intent checks against that
+  replacement Link. This passed on 2026-07-26; the redacted boolean report is
+  retained at
+  `target/omenchat-continuous-reconnect-reaction-report.json`.

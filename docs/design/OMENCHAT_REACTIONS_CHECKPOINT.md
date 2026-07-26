@@ -465,6 +465,12 @@ open the maintainer's real browser or omenchatd data.
    the server Resource dispatcher did not include
    `ReactionSnapshotResource`. It also qualified the server-emitted `recent`
    history Resource purpose used while rebuilding snapshot targets.
+10. **Complete.** One continuously running client passed an orderly server
+    restart on 2026-07-26. The replacement Link had a different identifier,
+    retained the server destination and in-memory session, renegotiated durable
+    mutations and reactions, and passed lost-ack exact replay, authoritative
+    Resource snapshot, no-op, removal, and intent cleanup against a
+    post-reconnect message.
 
 Each unit is independently reversible and must leave both Cargo roots
 buildable. No unit adds a worker, timer, polling subscription, dependency, or
