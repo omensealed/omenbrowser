@@ -907,24 +907,37 @@ client-column migrations, guarded rollback, mixed-version behavior, crash
 boundaries, and the staged activation order. No production capability, wire,
 schema, setting, or UI behavior is activated by the checkpoint itself.
 
-Implementation has completed the inert shared contract, dormant omenchatd
-schema-v4 storage, dormant server validation/transaction/fan-out, and dormant
-client model/storage/parsing units. Read-only bounded reply previews, retained
-jump targeting, and authoritative numeric mention presentation are also in
-place. The server-scoped local user binding now persists with cached sessions,
-room labels derive saturating mention totals only from bounded retained
-history, and the default-off per-room mentions-only preference now gates both
-inactive-room and hidden-pane unread increments on the exact numeric binding.
-The preference is additive local SQLite state and does not suppress event
-storage, history reconciliation, or moderation/system events.
-Production negotiation still omits `reply-mentions-v1`; composer actions and
-the final mixed-version gates must land before activation.
+Status: complete and activated. The inert shared contract, omenchatd schema-v4
+storage, transactional server validation/replay/fan-out, client
+model/storage/parsing, read-only presentation, server-scoped local user
+binding, bounded composer controls, durable send/recovery bridge, exact legacy
+fixtures, and deterministic retention evidence all pass. The client now
+requests `reply-mentions-v1` only with its persistent identity-scoped instance
+ID, and the server accepts it only with the durable base capability.
+Capability rejection/loss keeps controls disabled and cannot downgrade or
+resend an uncertain rich mutation.
+
+An isolated current/current two-client smoke passed before and after an
+omenchatd restart. All three Links recorded durable mutations, notice
+acknowledgements, replies/mentions, and local numeric user binding as active;
+ordinary room traffic and persisted history remained compatible. Exact scope,
+bounds, rollback, tests, measurements, and the local evidence path are recorded
+in `docs/design/OMENCHAT_REPLIES_MENTIONS_CHECKPOINT.md`.
 
 ### Unit 6B — reactions
 
 - Append-only add/remove events keyed by event ID, actor, and bounded reaction.
 - Per-event/per-actor/global retention limits.
 - Durable exact replay without duplicate counts or fan-out.
+
+The pre-implementation contract is
+`docs/design/OMENCHAT_REACTIONS_CHECKPOINT.md`. It proposes an additive
+`reactions-v1` capability, exact operation/body/result/snapshot shapes,
+fixed ASCII reaction tokens, separate bounded active and append-only audit
+tables, server schema 5 with a validated downgrade-copy path, additive
+identity-scoped client state, item/byte/age/pruning-work ceilings, staged
+activation, and the complete fault/mixed-version matrix. The checkpoint changes
+no production capability, wire, schema, storage, or UI behavior.
 
 ### Unit 6C — bounded local search
 
@@ -1057,21 +1070,21 @@ After the candidate is stable:
 ### Required
 
 - [x] v0.9.6-3 evidence and ledgers reconciled.
-- [ ] Selected mechanical `src/app.rs` extractions complete and validated.
-- [ ] Durable activation covers every mutation advertised by the client.
+- [x] Selected mechanical `src/app.rs` extractions complete and validated.
+- [x] Durable activation covers every mutation advertised by the client.
 - [ ] Legacy/mixed peers retain cautious no-automatic-retry behavior.
-- [ ] Shared bounded Operations/Transfers model drives GUI and TUI.
-- [ ] Delivery/propagation policies have conservative migrated defaults.
+- [x] Shared bounded Operations/Transfers model drives GUI and TUI.
+- [x] Delivery/propagation policies have conservative migrated defaults.
 - [x] Command palette, actionable errors, workspace presets, and selected TUI
       QoL pass focus/input/resource tests.
 - [ ] Replies/mentions, reactions, search, invitations, corrections,
       tombstones, pins, moderation history, retention, announcement rooms,
       slow mode, and room media policy pass their complete gates.
 - [ ] No unbounded queue, cache, history, retry, timer, worker, or index.
-- [ ] Managed Reticulum remains the supported default.
-- [ ] External/shared mode remains explicitly deferred and fail-closed.
+- [x] Managed Reticulum remains the supported default.
+- [x] External/shared mode remains explicitly deferred and fail-closed.
 - [ ] Root and standalone server report `0.9.6-4`.
-- [ ] Exact Reticulum/LXMF 0.9.6 train remains coherent.
+- [x] Exact Reticulum/LXMF 0.9.6 train remains coherent.
 - [ ] Local product/server/protocol/release gates pass.
 - [ ] Native CI and bundled interoperability checkpoint pass.
 - [ ] Resource measurements show no unexplained regression.
