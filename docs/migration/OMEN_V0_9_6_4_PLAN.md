@@ -939,6 +939,17 @@ identity-scoped client state, item/byte/age/pruning-work ceilings, staged
 activation, and the complete fault/mixed-version matrix. The checkpoint changes
 no production capability, wire, schema, storage, or UI behavior.
 
+The first dormant protocol slice is complete. `omenchat-protocol` reserves
+operations 25–29 and owns strict bounded request, acknowledgement, event, and
+explicit-target snapshot types, a fixed eight-token ASCII catalog, canonical
+durable hash coverage, and the `reactions-v1` dependency on
+`durable-mutations-v1`. The independent desktop and omenchatd codecs share a
+byte-exact fixture. No client or server advertises or accepts the capability,
+and no schema, storage, executor, fan-out, history, or UI behavior changed.
+Implementation exposed and corrected one checkpoint ambiguity: even an empty
+snapshot carries its sorted target-event set, so reconciliation cannot clear
+another page's state.
+
 ### Unit 6C — bounded local search
 
 - Search existing LXMF and OMENchat history by text, sender, room, date,

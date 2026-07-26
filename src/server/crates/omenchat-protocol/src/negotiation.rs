@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::{
     ClientInstanceId, FrameBody, FrameValue, DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
-    REPLY_MENTIONS_CAPABILITY,
+    REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 
 pub const SESSION_CAPABILITY_MAX_ITEMS: usize = 64;
@@ -199,6 +199,9 @@ fn validate_capability_list(capabilities: &[String]) -> Result<(), SessionNegoti
     if unique.contains(REPLY_MENTIONS_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
         return Err(SessionNegotiationError::MissingCapabilityDependency);
     }
+    if unique.contains(REACTIONS_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
+        return Err(SessionNegotiationError::MissingReactionsDependency);
+    }
     Ok(())
 }
 
@@ -238,6 +241,8 @@ pub enum SessionNegotiationError {
     DuplicateCapability,
     #[error("{REPLY_MENTIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
     MissingCapabilityDependency,
+    #[error("{REACTIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
+    MissingReactionsDependency,
     #[error(transparent)]
     Durable(#[from] crate::DurableMutationError),
 }
@@ -384,6 +389,27 @@ mod tests {
             accepted_capabilities: vec![
                 DURABLE_MUTATION_CAPABILITY.into(),
                 REPLY_MENTIONS_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("dependent capability set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn reactions_capability_requires_durable_mutations() {
+        let missing_base = SessionAcceptNegotiation {
+            accepted_capabilities: vec![REACTIONS_CAPABILITY.into()],
+        };
+        assert_eq!(
+            with_session_accept_negotiation(current_session_accept(), &missing_base),
+            Err(SessionNegotiationError::MissingReactionsDependency)
+        );
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                REACTIONS_CAPABILITY.into(),
             ],
         };
         let body = with_session_accept_negotiation(current_session_accept(), &complete)

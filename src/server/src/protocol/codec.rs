@@ -317,8 +317,10 @@ mod tests {
     use crate::protocol::batch::{resource_offer_body, ResourceOffer};
     use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
-    use omenchat_protocol::fixtures::{reply_mentions_v1, v0_6_0_1, v0_9_6_3};
-    use omenchat_protocol::{ReplyReference, RichMessageBody};
+    use omenchat_protocol::fixtures::{reactions_v1, reply_mentions_v1, v0_6_0_1, v0_9_6_3};
+    use omenchat_protocol::{
+        ReactionAction, ReactionRequest, ReactionToken, ReplyReference, RichMessageBody,
+    };
 
     #[test]
     fn v0_6_0_1_frame_fixtures_remain_bidirectionally_exact() {
@@ -436,6 +438,31 @@ mod tests {
         );
         assert_eq!(
             decode_frame(reply_mentions_v1::ROOM_MESSAGE).expect("decode rich message"),
+            frame
+        );
+    }
+
+    #[test]
+    fn reactions_v1_fixture_is_bidirectionally_exact_and_capability_scoped() {
+        let frame = Frame::new(
+            ChatOp::RoomReaction,
+            8,
+            Some(7),
+            ReactionRequest {
+                target_event_id: 42,
+                token: ReactionToken::Heart,
+                action: ReactionAction::Add,
+            }
+            .into_frame_body()
+            .expect("bounded reaction"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode reaction"),
+            reactions_v1::ROOM_REACTION_ADD
+        );
+        assert_eq!(
+            decode_frame(reactions_v1::ROOM_REACTION_ADD).expect("decode reaction"),
             frame
         );
     }

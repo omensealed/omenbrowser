@@ -144,19 +144,30 @@ message, mention, or typing/presence signal.
 ### History snapshot
 
 Every capable history page returns the active reaction rows for only the target
-events represented by that page. An inline or Resource snapshot contains:
+events represented by that page. An inline or Resource snapshot contains this
+exact tagged body:
 
 ```text
 [
-  [target_event_id, actor_user_id, reaction_token, created_at_unix],
-  ...
+  "reaction-snapshot-v1",
+  [target_event_id, ...],
+  [
+    [target_event_id, actor_user_id, reaction_token, created_at_unix],
+    ...
+  ]
 ]
 ```
 
 Rows are sorted by target event, token, then actor ID. A snapshot replaces the
-client's reaction state only for the explicitly listed target-event set; it
+client's reaction state only for the sorted, unique, explicitly listed
+target-event set; every row must belong to that set. It
 must not clear reactions for another page or room. Empty snapshots are
 explicit so stale cached state can be removed.
+
+The shared contract limits one snapshot body to 256 target events and 1,024
+active rows. These are decoder bounds, not a promise that the inline frame can
+carry the maximum encoded body; the existing byte/value limits still apply and
+the server must select the Resource operation before the inline threshold.
 
 Inline and Resource forms share one decoder and the existing compressed-batch,
 decompression, item, byte, cancellation, and Link-ownership rules. The server
@@ -371,8 +382,13 @@ open the maintainer's real browser or omenchatd data.
 
 ## Implementation sequence
 
-1. Add inert shared protocol constants, exact codecs, canonical hash vectors,
-   negotiation dependency checks, and legacy byte fixtures.
+1. **Complete.** Shared protocol constants reserve operations 25–29; exact
+   request, acknowledgement, event, and explicit-target snapshot codecs enforce
+   the fixed token catalog and item bounds; the canonical durable hash vector
+   covers room, target, token, and action; negotiation rejects
+   `reactions-v1` without `durable-mutations-v1`; and both independent
+   client/server codecs preserve the same byte-exact add fixture. The
+   capability remains unrequested and unaccepted in production.
 2. Add schema-5 migration, guarded downgrade-copy command, and fault tests with
    the capability still unadvertised.
 3. Add dormant transactional server executor, bounds, replay, snapshots, and

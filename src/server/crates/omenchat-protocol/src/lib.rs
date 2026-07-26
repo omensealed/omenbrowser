@@ -5,10 +5,12 @@
 
 mod durable;
 mod negotiation;
+mod reactions;
 mod rich_message;
 
 pub use durable::*;
 pub use negotiation::*;
+pub use reactions::*;
 pub use rich_message::*;
 
 pub type ServerId = String;
@@ -44,6 +46,11 @@ pub enum ChatOp {
     RoomNotice = 22,
     RoomEvent = 23,
     MessageAck = 24,
+    RoomReaction = 25,
+    ReactionAck = 26,
+    ReactionEvent = 27,
+    ReactionSnapshotInline = 28,
+    ReactionSnapshotResource = 29,
     UserListSnapshotInline = 30,
     UserListSnapshotResource = 31,
     UserDelta = 32,
@@ -91,6 +98,11 @@ impl TryFrom<u64> for ChatOp {
             22 => Ok(Self::RoomNotice),
             23 => Ok(Self::RoomEvent),
             24 => Ok(Self::MessageAck),
+            25 => Ok(Self::RoomReaction),
+            26 => Ok(Self::ReactionAck),
+            27 => Ok(Self::ReactionEvent),
+            28 => Ok(Self::ReactionSnapshotInline),
+            29 => Ok(Self::ReactionSnapshotResource),
             30 => Ok(Self::UserListSnapshotInline),
             31 => Ok(Self::UserListSnapshotResource),
             32 => Ok(Self::UserDelta),
@@ -224,6 +236,11 @@ pub enum ProtocolError {
 }
 
 pub mod fixtures {
+    pub mod reactions_v1 {
+        pub const ROOM_REACTION_ADD: &[u8] =
+            b"\x96\x01\x19\x00\x08\x07\x94\xabreaction-v1\x2a\xa5heart\x01";
+    }
+
     pub mod reply_mentions_v1 {
         pub const ROOM_MESSAGE: &[u8] =
             b"\x96\x01\x14\x00\x07\x07\x94\xa5hello\xb1reply-mentions-v1\x92\x07\x2a\x92\x02\x09";
@@ -254,10 +271,13 @@ mod tests {
         assert_eq!(PROTOCOL_NAME, "omenchat-v0.1");
         assert_eq!(ChatOp::SessionOpen as u16, 1);
         assert_eq!(ChatOp::RoomMessage as u16, 20);
+        assert_eq!(ChatOp::RoomReaction as u16, 25);
+        assert_eq!(ChatOp::ReactionSnapshotResource as u16, 29);
         assert_eq!(ChatOp::HistoryResourceOffer as u16, 42);
         assert_eq!(ChatErrorCode::MalformedFrame as u16, 1007);
         assert_eq!(ChatErrorCode::DurableMutationNotNegotiated as u16, 1011);
         assert_eq!(DURABLE_MUTATION_CAPABILITY, "durable-mutations-v1");
+        assert_eq!(REACTIONS_CAPABILITY, "reactions-v1");
         assert_eq!(DURABLE_NOTICE_ACK_CAPABILITY, "durable-room-notice-ack-v1");
         assert_eq!(ChatErrorCode::DurableMutationMalformed as u16, 1012);
         assert_eq!(ChatErrorCode::DurableMutationConflict as u16, 1013);
