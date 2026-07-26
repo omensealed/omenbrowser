@@ -11,6 +11,12 @@ pub struct DatabaseRestoreReport {
     pub preserved_database: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseSchemaFourExportReport {
+    pub source_version: i64,
+    pub destination: PathBuf,
+}
+
 pub fn restore_migration_backup(
     database: &Path,
     backup: &Path,
@@ -84,6 +90,125 @@ where
     Ok(DatabaseRestoreReport {
         source_version,
         preserved_database,
+    })
+}
+
+pub fn export_schema_four_copy(
+    database: &Path,
+    destination: &Path,
+) -> ServerResult<DatabaseSchemaFourExportReport> {
+    export_schema_four_copy_with_publish(database, destination, atomic_replace)
+}
+
+fn export_schema_four_copy_with_publish<F>(
+    database: &Path,
+    destination: &Path,
+    mut publish: F,
+) -> ServerResult<DatabaseSchemaFourExportReport>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    validate_regular_file(database, "active database")?;
+    if database == destination {
+        return Err(ServerError::Message(
+            "schema-4 export destination must differ from the active database".into(),
+        ));
+    }
+    if sidecar_path(database, "-wal").exists() || sidecar_path(database, "-shm").exists() {
+        return Err(ServerError::Message(
+            "schema-4 export refused while SQLite WAL/SHM files exist; stop omenchatd cleanly and retry"
+                .into(),
+        ));
+    }
+    let destination_parent = destination.parent().ok_or_else(|| {
+        ServerError::Message("schema-4 export requires a destination parent directory".into())
+    })?;
+    let destination_reservation = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| {
+            ServerError::Message(format!(
+                "schema-4 export destination must not already exist: {}: {error}",
+                destination.display()
+            ))
+        })?;
+    if let Err(error) = set_private_permissions(destination) {
+        let _ = std::fs::remove_file(destination);
+        return Err(error);
+    }
+    drop(destination_reservation);
+
+    let source_validation = (|| -> ServerResult<()> {
+        prove_exclusive_database_access(database)?;
+        validate_current_database(database)
+    })();
+    if let Err(error) = source_validation {
+        let _ = std::fs::remove_file(destination);
+        return Err(error);
+    }
+
+    let (stage, stage_reservation) = match reserve_sibling(destination, "schema4-stage", "sqlite") {
+        Ok(stage) => stage,
+        Err(error) => {
+            let _ = std::fs::remove_file(destination);
+            return Err(error);
+        }
+    };
+    drop(stage_reservation);
+    if let Err(error) = set_private_permissions(&stage) {
+        remove_sqlite_files(&stage);
+        let _ = std::fs::remove_file(destination);
+        return Err(error);
+    }
+
+    let prepare_result = (|| -> ServerResult<()> {
+        copy_sqlite_database(database, &stage)?;
+        let connection = rusqlite::Connection::open_with_flags(
+            &stage,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        transaction.execute_batch(
+            "DROP INDEX IF EXISTS idx_room_reaction_events_retention;
+             DROP INDEX IF EXISTS idx_room_reactions_target;
+             DROP TABLE IF EXISTS room_reaction_events;
+             DROP TABLE IF EXISTS room_reactions;",
+        )?;
+        transaction.pragma_update(None, "user_version", 4)?;
+        transaction.commit()?;
+        drop(connection);
+        checkpoint_staged_database(&stage)?;
+        validate_schema_four_copy(&stage)?;
+        Ok(())
+    })();
+    if let Err(error) = prepare_result {
+        remove_sqlite_files(&stage);
+        let _ = std::fs::remove_file(destination);
+        return Err(error);
+    }
+
+    if let Err(error) = publish(&stage, destination) {
+        remove_sqlite_files(&stage);
+        let _ = std::fs::remove_file(destination);
+        return Err(error.into());
+    }
+    let publication_result = (|| -> ServerResult<()> {
+        set_private_permissions(destination)?;
+        sync_directory(destination_parent)?;
+        validate_schema_four_copy(destination)
+    })();
+    if let Err(error) = publication_result {
+        remove_sqlite_files(destination);
+        return Err(error);
+    }
+
+    Ok(DatabaseSchemaFourExportReport {
+        source_version: SCHEMA_VERSION,
+        destination: destination.to_path_buf(),
     })
 }
 
@@ -163,6 +288,48 @@ fn validate_current_database(path: &Path) -> ServerResult<()> {
         return Err(ServerError::Message(format!(
             "restored database failed foreign_key_check in table {table}"
         )));
+    }
+    Ok(())
+}
+
+fn validate_schema_four_copy(path: &Path) -> ServerResult<()> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version != 4 {
+        return Err(ServerError::Message(format!(
+            "schema-4 export has unexpected schema version {version}"
+        )));
+    }
+    let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(ServerError::Message(format!(
+            "schema-4 export failed SQLite integrity_check: {integrity}"
+        )));
+    }
+    let foreign_key_failure: Option<String> = connection
+        .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
+        .optional()?;
+    if let Some(table) = foreign_key_failure {
+        return Err(ServerError::Message(format!(
+            "schema-4 export failed foreign_key_check in table {table}"
+        )));
+    }
+    let reaction_objects: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE name IN (
+           'room_reactions',
+           'room_reaction_events',
+           'idx_room_reactions_target',
+           'idx_room_reaction_events_retention'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if reaction_objects != 0 {
+        return Err(ServerError::Message(
+            "schema-4 export retained schema-5 reaction objects".into(),
+        ));
     }
     Ok(())
 }
@@ -354,6 +521,47 @@ mod tests {
         (root, database, backup)
     }
 
+    fn setup_current_for_schema_four_export(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = isolated_root(label);
+        std::fs::create_dir_all(&root).expect("export root");
+        let database = root.join("omenchat.sqlite");
+        let destination = root.join("omenchat-schema4.sqlite");
+        let store = OmenchatStore::open(&database).expect("current database");
+        let room = store
+            .ensure_room("preserved-export", Some("schema four copy"))
+            .expect("export room");
+        drop(store);
+
+        let connection = rusqlite::Connection::open(&database).expect("export fixture");
+        connection
+            .execute(
+                "INSERT INTO room_events(
+                   room_id, event_id, event_kind, at, payload
+                 ) VALUES (?1, 1, 1, 1, X'707265736572766564')",
+                [room.room_id],
+            )
+            .expect("preserved room event");
+        connection
+            .execute(
+                "INSERT INTO room_reactions(
+                   room_id, target_event_id, actor_user_id, reaction_token, created_at
+                 ) VALUES (?1, 1, 7, 'heart', 1)",
+                [room.room_id],
+            )
+            .expect("reaction state");
+        connection
+            .execute(
+                "INSERT INTO room_reaction_events(
+                   room_id, reaction_event_id, target_event_id, actor_user_id,
+                   reaction_token, reaction_action, at, retained_bytes
+                 ) VALUES (?1, 1, 1, 7, 'heart', 1, 1, 32)",
+                [room.room_id],
+            )
+            .expect("reaction audit");
+        drop(connection);
+        (root, database, destination)
+    }
+
     #[test]
     fn validated_restore_migrates_backup_and_preserves_previous_database() {
         let (root, database, backup) = setup_current_and_version_one_backup("success");
@@ -493,6 +701,159 @@ mod tests {
             .expect("current marker")
             .is_some());
         drop(current);
+        std::fs::remove_dir_all(root).expect("remove refusal root");
+    }
+
+    #[test]
+    fn schema_four_export_is_separate_integral_and_preserves_non_reaction_data() {
+        let (root, database, destination) = setup_current_for_schema_four_export("schema4-success");
+        let report = export_schema_four_copy(&database, &destination).expect("schema four export");
+        assert_eq!(report.source_version, SCHEMA_VERSION);
+        assert_eq!(report.destination, destination);
+
+        let active = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("active database");
+        assert_eq!(
+            active
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("active version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            active
+                .query_row("SELECT COUNT(*) FROM room_reactions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("active reactions"),
+            1
+        );
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("schema four database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("export version"),
+            4
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM rooms WHERE name = 'preserved-export'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("preserved room"),
+            1
+        );
+        assert_eq!(
+            exported
+                .query_row("SELECT COUNT(*) FROM room_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved room events"),
+            1
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE name IN ('room_reactions', 'room_reaction_events')",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("reaction tables absent"),
+            0
+        );
+        let integrity: String = exported
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("integrity check");
+        assert_eq!(integrity, "ok");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&destination)
+                    .expect("export metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        drop(exported);
+        drop(active);
+        std::fs::remove_dir_all(root).expect("remove export root");
+    }
+
+    #[test]
+    fn schema_four_export_refuses_overwrite_active_sidecars_and_source_replacement() {
+        let (root, database, destination) =
+            setup_current_for_schema_four_export("schema4-refusals");
+
+        std::fs::write(&destination, b"operator-owned").expect("existing destination");
+        let error = export_schema_four_copy(&database, &destination)
+            .expect_err("existing destination must fail")
+            .to_string();
+        assert!(error.contains("must not already exist"));
+        assert_eq!(
+            std::fs::read(&destination).expect("preserved destination"),
+            b"operator-owned"
+        );
+        std::fs::remove_file(&destination).expect("remove destination");
+
+        std::fs::write(sidecar_path(&database, "-wal"), b"active").expect("WAL sentinel");
+        let error = export_schema_four_copy(&database, &destination)
+            .expect_err("WAL presence must fail")
+            .to_string();
+        assert!(error.contains("WAL/SHM"));
+        std::fs::remove_file(sidecar_path(&database, "-wal")).expect("remove WAL sentinel");
+
+        let error = export_schema_four_copy_with_publish(&database, &destination, |_, _| {
+            Err(std::io::Error::other("injected schema-4 publish failure"))
+        })
+        .expect_err("publish failure")
+        .to_string();
+        assert!(
+            error.contains("injected schema-4 publish failure"),
+            "unexpected export failure: {error}"
+        );
+        assert!(!destination.exists());
+        assert!(std::fs::read_dir(&root)
+            .expect("export files")
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .contains("schema4-stage")));
+
+        let active = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("unchanged active database");
+        assert_eq!(
+            active
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("active version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            active
+                .query_row("SELECT COUNT(*) FROM room_reactions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("active reaction"),
+            1
+        );
+        drop(active);
         std::fs::remove_dir_all(root).expect("remove refusal root");
     }
 }

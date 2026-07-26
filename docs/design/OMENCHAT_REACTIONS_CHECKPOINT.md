@@ -389,8 +389,15 @@ open the maintainer's real browser or omenchatd data.
    `reactions-v1` without `durable-mutations-v1`; and both independent
    client/server codecs preserve the same byte-exact add fixture. The
    capability remains unrequested and unaccepted in production.
-2. Add schema-5 migration, guarded downgrade-copy command, and fault tests with
-   the capability still unadvertised.
+2. **Complete.** omenchatd schema 5 adds the two constrained reaction tables
+   and indexes in the existing immediate migration transaction. Isolated
+   version 0–4 coverage and injected failures before tables, between tables,
+   before indexes, before the version update, and before commit prove rollback
+   and retained pre-v5 backups. The confirmation-gated stopped-server
+   `database export-schema4-copy` command stages a separate schema-4 copy,
+   drops only reaction objects, validates integrity/foreign keys, publishes
+   atomically without overwrite, and never modifies the active database. The
+   capability remains unadvertised.
 3. Add dormant transactional server executor, bounds, replay, snapshots, and
    Link-scoped fan-out.
 4. Add the separate bounded client model/table, snapshot reconciliation, and

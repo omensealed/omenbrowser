@@ -37,6 +37,7 @@ pub enum CliCommand {
     DoctorJson(ServerOptions),
     UploadsRepairLedger(ServerOptions),
     DatabaseRestoreMigrationBackup(ServerOptions, DatabaseRestoreOptions),
+    DatabaseExportSchemaFour(ServerOptions, DatabaseExportOptions),
     ConfigShow(ServerOptions),
     ConfigSet(ServerOptions, ConfigSetOptions),
     RoomsList(ServerOptions),
@@ -79,6 +80,11 @@ pub struct ConfigSetOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DatabaseRestoreOptions {
     pub backup: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseExportOptions {
+    pub destination: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -281,6 +287,23 @@ impl Omenchatd {
                 );
                 Ok(())
             }
+            CliCommand::DatabaseExportSchemaFour(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_four_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-4 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-4 copy: {}", report.destination.display());
+                println!(
+                    "Reaction state is intentionally absent; the active database was not modified."
+                );
+                Ok(())
+            }
             CliCommand::ConfigShow(options) => {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
@@ -470,33 +493,48 @@ fn parse_uploads_command(args: impl IntoIterator<Item = String>) -> CliCommand {
 
 fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand {
     let mut args = args.into_iter();
-    if args.next().as_deref() != Some("restore-migration-backup") {
+    let Some(command) = args.next() else {
         return CliCommand::Help;
-    }
+    };
     let mut confirmed = false;
-    let mut backup = None;
+    let mut path = None;
     let mut options = ServerOptions::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--confirm" => confirmed = true,
-            "--from" => backup = args.next().map(PathBuf::from),
+            "--from" if command == "restore-migration-backup" => {
+                path = args.next().map(PathBuf::from)
+            }
+            "--to" if command == "export-schema4-copy" => path = args.next().map(PathBuf::from),
             "--home" => options.home = args.next().map(PathBuf::from),
             other => {
-                return CliCommand::Invalid(format!("unknown database restore option: {other}"));
+                return CliCommand::Invalid(format!(
+                    "unknown database maintenance option: {other}"
+                ));
             }
         }
     }
     if !confirmed {
         return CliCommand::Invalid(
-            "database restore requires --confirm and must be run while omenchatd is stopped".into(),
+            "database maintenance requires --confirm and must be run while omenchatd is stopped"
+                .into(),
         );
     }
-    let Some(backup) = backup else {
-        return CliCommand::Invalid(
+    match (command.as_str(), path) {
+        ("restore-migration-backup", Some(backup)) => {
+            CliCommand::DatabaseRestoreMigrationBackup(options, DatabaseRestoreOptions { backup })
+        }
+        ("restore-migration-backup", None) => CliCommand::Invalid(
             "database restore requires --from <generated-migration-backup>".into(),
-        );
-    };
-    CliCommand::DatabaseRestoreMigrationBackup(options, DatabaseRestoreOptions { backup })
+        ),
+        ("export-schema4-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaFour(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema4-copy", None) => {
+            CliCommand::Invalid("schema-4 export requires --to <new-database-path>".into())
+        }
+        _ => CliCommand::Help,
+    }
 }
 
 fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
@@ -932,6 +970,7 @@ fn print_help() {
     println!("  doctor [--home <path>] [--json]");
     println!("  uploads repair-ledger --confirm [--home <path>]  # server must be stopped");
     println!("  database restore-migration-backup --from <path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema4-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  config show [--home <path>]");
     println!(
         "  config set [--home <path>] [--name <name>] [--operator-label <label>] [--motd <text>] [--announce-interval <minutes>]"
@@ -2022,6 +2061,48 @@ mod tests {
     }
 
     #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_four_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema4-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema4.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema4-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema4-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema4.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaFour(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema4.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
     fn cli_database_restore_uses_only_the_selected_isolated_home() {
         let root = std::env::temp_dir().join(format!(
             "omenchatd-cli-database-restore-{}-{}",
@@ -2082,6 +2163,72 @@ mod tests {
         drop(restored);
         assert!(backup.is_file(), "selected source remains intact");
         std::fs::remove_dir_all(root).expect("remove isolated CLI restore home");
+    }
+
+    #[test]
+    fn cli_schema_four_export_uses_only_the_selected_isolated_home() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-database-export-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let current = crate::store::OmenchatStore::open(&config.database_path)
+            .expect("open current database");
+        current
+            .ensure_room("exported-cli", None)
+            .expect("current marker");
+        drop(current);
+        let destination = root.join("operator-schema4.sqlite");
+
+        Omenchatd
+            .run(CliCommand::DatabaseExportSchemaFour(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseExportOptions {
+                    destination: destination.clone(),
+                },
+            ))
+            .expect("CLI schema four export");
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("exported database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("exported version"),
+            4
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM rooms WHERE name = 'exported-cli'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("exported marker"),
+            1
+        );
+        drop(exported);
+
+        let active =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("active current database");
+        assert!(active
+            .room_by_name("exported-cli")
+            .expect("active marker")
+            .is_some());
+        drop(active);
+        std::fs::remove_dir_all(root).expect("remove isolated CLI export home");
     }
 
     #[test]

@@ -950,6 +950,16 @@ Implementation exposed and corrected one checkpoint ambiguity: even an empty
 snapshot carries its sorted target-event set, so reconciliation cannot clear
 another page's state.
 
+The second dormant slice is complete. omenchatd schema 5 creates constrained
+active-reaction and append-only audit tables plus target/retention indexes in
+the existing immediate migration transaction. Existing version 0–4 fixtures,
+pre-v5 backups, and injected failures at all schema/version/commit boundaries
+prove recoverability. The stopped-server, confirmation-gated
+`database export-schema4-copy` command creates a private, integrity-checked
+schema-4-compatible copy through staged atomic publication, refuses overwrite
+or active WAL/SHM state, omits only reaction state, and never modifies the
+active database. `reactions-v1` remains unrequested and unaccepted.
+
 ### Unit 6C — bounded local search
 
 - Search existing LXMF and OMENchat history by text, sender, room, date,

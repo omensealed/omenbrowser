@@ -187,7 +187,7 @@ server cleanly and run:
 
 ```bash
 omenchatd database restore-migration-backup \
-  --from ~/.omenchatd/omenchat.sqlite.pre-v4-from-v3.bak \
+  --from ~/.omenchatd/omenchat.sqlite.pre-v5-from-v4.bak \
   --confirm --home ~/.omenchatd
 ```
 
@@ -200,6 +200,23 @@ The previous active database is retained as a unique owner-only
 `omenchat.sqlite.pre-restore-*.bak`; neither the selected source nor upload
 files are modified. Run `doctor` before restarting. Restore is deliberately an
 offline, explicit `--confirm` operation.
+
+To prepare a separate schema-4-compatible rollback copy while retaining the
+active schema-5 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema4-copy \
+  --to ~/.omenchatd/omenchat-schema4.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command refuses active WAL/SHM state,
+proves exclusive access, copies through SQLite's backup API, removes only the
+schema-5 reaction tables and indexes in a staged transaction, sets
+`user_version = 4`, and validates integrity and foreign keys before atomic
+publication. The active database is never replaced or modified. Reaction state
+is intentionally absent from the rollback copy; rooms, users, ordinary
+history, uploads, durable replay records, identities, and configuration remain.
 
 Available console commands:
 
@@ -436,19 +453,20 @@ priority survival, graceful drain, RSS/FD stability, and the 32 MiB per-writer
 retention cap. The delay is a reproducible slow-disk simulation, not a benchmark
 of a particular storage device.
 
-The schema currently uses SQLite `user_version = 4`. Version 2 added the upload
-ledger actor/time index used by quota planning. Version 3 adds the dormant,
+The schema currently uses SQLite `user_version = 5`. Version 2 added the upload
+ledger actor/time index used by quota planning. Version 3 adds the
 bounded-shape durable-mutation replay table, client-instance retirement table,
 and their indexes. Version 4 adds nullable reply-event and bounded mention-ID
 metadata to room events plus a partial reply index. Existing event rows retain
 their original columns byte-for-byte and read as messages without metadata.
-The reply/mention capability is not advertised and no live request writes the
-new columns yet. The dormant server path already validates joined senders,
+The negotiated reply/mention path validates joined senders,
 same-room non-deleted reply targets, and current numeric mention membership in
 the same durable transaction that inserts the event and replay result. Its
 single event encoder preserves metadata across fan-out, inline history, and
-resource history; restart replay cannot duplicate the event. Activation stays
-blocked until the client and mixed-version gates are complete.
+resource history; restart replay cannot duplicate the event. Version 5 adds
+constrained active-reaction and append-only reaction-audit tables plus their
+target/retention indexes. `reactions-v1` remains unadvertised and no live
+request reads or writes those tables.
 The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental
@@ -456,15 +474,14 @@ deletions per commit. Before deleting a replay result it permanently retires
 the associated authenticated identity/client-instance pair; all later requests
 from that instance return `Expired` without mutation execution, including after
 restart. Remembered instances are capped at 100,000 globally and 1,024 per
-identity, with capacity exhaustion failing closed. Activation remains blocked
-pending retention measurements and end-to-end mixed-version recovery tests.
-Protocol-v1 error numbers 1011 through 1015 are reserved for the dormant
-durable outcomes but are not emitted by live sessions. Older files are migrated
+identity, with capacity exhaustion failing closed. Protocol-v1 error numbers
+1011 through 1015 describe negotiated durable outcomes; ordinary sessions do
+not emit them. Older files are migrated
 transactionally. Files with
 a newer schema version are rejected without modification; run the matching or
 newer omenchatd rather than forcing the version backward.
 Migration of a non-empty older database first retains an online SQLite backup
-at `omenchat.sqlite.pre-v4-from-v<old>.bak`. The backup is owner-only on
+at `omenchat.sqlite.pre-v5-from-v<old>.bak`. The backup is owner-only on
 Unix and is never overwritten. If that path already exists or backup creation
 fails, startup aborts before changing the source database.
 Migration schema work and its version update are transactional. On failure the
@@ -473,6 +490,8 @@ and the completed pre-migration backup remains available.
 The confirmation-gated restore command described above validates and migrates
 that retained artifact through a staging database before replacement, and
 preserves the prior active database for rollback.
+The separate `export-schema4-copy` command provides a non-destructive downgrade
+artifact and never edits the active schema-5 database.
 
 The SQLite store can compare its upload ledger with an identity directory and
 report missing, byte-mismatched, orphaned, and out-of-root paths without

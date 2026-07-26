@@ -117,7 +117,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 4;
+pub(crate) const SCHEMA_VERSION: i64 = 5;
 
 impl OmenchatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -217,6 +217,25 @@ impl OmenchatStore {
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
     {
+        self.migrate_with_sql_step_and_reaction_hook(
+            backup_source,
+            migration_sql,
+            schema_step,
+            |_| Ok(()),
+        )
+    }
+
+    fn migrate_with_sql_step_and_reaction_hook<F, H>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        mut reaction_hook: H,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+    {
         let current_version: i64 =
             self.connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -239,7 +258,10 @@ impl OmenchatStore {
         )?;
         transaction.execute_batch(migration_sql)?;
         schema_step(&transaction)?;
+        ensure_reaction_schema_with_hook(&transaction, &mut reaction_hook)?;
+        reaction_hook(ReactionMigrationBoundary::BeforeVersionUpdate)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        reaction_hook(ReactionMigrationBoundary::BeforeCommit)?;
         transaction.commit()?;
         Ok(())
     }
@@ -851,6 +873,60 @@ fn ensure_event_metadata_schema(transaction: &rusqlite::Transaction<'_>) -> Serv
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReactionMigrationBoundary {
+    BeforeTables,
+    BetweenTables,
+    BeforeIndexes,
+    BeforeVersionUpdate,
+    BeforeCommit,
+}
+
+fn ensure_reaction_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+{
+    hook(ReactionMigrationBoundary::BeforeTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_reactions(
+           room_id INTEGER NOT NULL,
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           reaction_token TEXT NOT NULL CHECK(length(reaction_token) BETWEEN 1 AND 16),
+           created_at INTEGER NOT NULL,
+           PRIMARY KEY(room_id, target_event_id, actor_user_id, reaction_token)
+         );",
+    )?;
+
+    hook(ReactionMigrationBoundary::BetweenTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_reaction_events(
+           room_id INTEGER NOT NULL,
+           reaction_event_id INTEGER NOT NULL CHECK(reaction_event_id > 0),
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           reaction_token TEXT NOT NULL CHECK(length(reaction_token) BETWEEN 1 AND 16),
+           reaction_action INTEGER NOT NULL CHECK(reaction_action IN (1, 2)),
+           at INTEGER NOT NULL,
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           PRIMARY KEY(room_id, reaction_event_id)
+         );",
+    )?;
+
+    hook(ReactionMigrationBoundary::BeforeIndexes)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_reactions_target
+         ON room_reactions(room_id, target_event_id, reaction_token, actor_user_id);
+
+         CREATE INDEX IF NOT EXISTS idx_room_reaction_events_retention
+         ON room_reaction_events(at, room_id, reaction_event_id);",
+    )?;
+    Ok(())
+}
+
 pub(crate) fn migration_backup_path(
     source_path: &std::path::Path,
     version: i64,
@@ -1277,6 +1353,42 @@ mod tests {
                  PRAGMA user_version = 3;",
             )
             .expect("version three fixture");
+    }
+
+    fn create_version_four_fixture(path: &std::path::Path) {
+        let connection = rusqlite::Connection::open(path).expect("version four database");
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .expect("version four schema");
+        connection
+            .execute_batch(
+                "INSERT INTO rooms(room_id, name, topic, created_at)
+                 VALUES (1, 'preserved-v4-room', 'must survive migration', 1);
+                 INSERT INTO room_events(
+                   room_id, event_id, event_kind, at, payload
+                 ) VALUES (1, 1, 1, 1, X'7072657365727665642D7634');
+                 INSERT INTO durable_mutation_results(
+                   identity_hash, client_instance_id, mutation_id, request_hash,
+                   result_frame, retained_bytes, created_at, last_seen_at
+                 ) VALUES (
+                   X'01', zeroblob(16), zeroblob(16), zeroblob(32),
+                   X'02', 1, 1, 1
+                 );
+                 PRAGMA user_version = 4;",
+            )
+            .expect("version four fixture");
+    }
+
+    fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2
+                 )",
+                (kind, name),
+                |row| row.get(0),
+            )
+            .expect("schema object lookup")
     }
 
     fn room_event_columns(connection: &rusqlite::Connection) -> Vec<String> {
@@ -1832,6 +1944,186 @@ mod tests {
         drop(store);
         std::fs::remove_file(backup_path).expect("remove migration backup");
         remove_database_files(&path);
+    }
+
+    #[test]
+    fn version_four_database_adds_dormant_reaction_schema_without_losing_rows() {
+        let path = isolated_database_path("v4-reaction-schema");
+        create_version_four_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version five migration");
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_reactions"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_reaction_events"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "index",
+            "idx_room_reactions_target"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "index",
+            "idx_room_reaction_events_retention"
+        ));
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM rooms WHERE name = 'preserved-v4-room'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("preserved room"),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM durable_mutation_results", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved durable result"),
+            1
+        );
+
+        for statement in [
+            "INSERT INTO room_reactions(
+               room_id, target_event_id, actor_user_id, reaction_token, created_at
+             ) VALUES (1, 0, 1, 'heart', 1)",
+            "INSERT INTO room_reactions(
+               room_id, target_event_id, actor_user_id, reaction_token, created_at
+             ) VALUES (1, 1, 1, '', 1)",
+            "INSERT INTO room_reaction_events(
+               room_id, reaction_event_id, target_event_id, actor_user_id,
+               reaction_token, reaction_action, at, retained_bytes
+             ) VALUES (1, 1, 1, 1, 'heart', 3, 1, 1)",
+        ] {
+            assert!(
+                store.connection.execute(statement, []).is_err(),
+                "schema constraint must reject {statement}"
+            );
+        }
+
+        let backup_path = migration_backup_path(&path, 4);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version four migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            4
+        );
+        assert!(!schema_object_exists(&backup, "table", "room_reactions"));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_reaction_events"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_reaction_schema_fault_boundary_rolls_back_to_version_four() {
+        for boundary in [
+            ReactionMigrationBoundary::BeforeTables,
+            ReactionMigrationBoundary::BetweenTables,
+            ReactionMigrationBoundary::BeforeIndexes,
+            ReactionMigrationBoundary::BeforeVersionUpdate,
+            ReactionMigrationBoundary::BeforeCommit,
+        ] {
+            let path = isolated_database_path(&format!("v5-fault-{boundary:?}"));
+            create_version_four_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_reaction_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected reaction migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected reaction migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                4
+            );
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_reactions"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_reaction_events"
+            ));
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM rooms WHERE name = 'preserved-v4-room'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("preserved room"),
+                1
+            );
+
+            let backup_path = migration_backup_path(&path, 4);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("retained version four backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                4
+            );
+            assert!(!schema_object_exists(&backup, "table", "room_reactions"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
     }
 
     #[test]

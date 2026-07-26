@@ -45,28 +45,32 @@ five-second caches; moderation mutations and transactional stale-user pruning
 complete asynchronously through the same worker. The command-driven line
 console waits synchronously on that same bounded owner. Upload-ledger repair
 still uses its existing synchronous maintenance path.
-The current schema is recorded as SQLite `user_version = 4`. Version 2 adds an
-actor/time index for upload quota planning. Version 3 adds the dormant
+The current schema is recorded as SQLite `user_version = 5`. Version 2 adds an
+actor/time index for upload quota planning. Version 3 adds the
 durable-mutation replay table and creation-order index. Version 4 adds nullable
 reply-event and bounded mention-ID metadata plus a partial reply index. The
-reply/mention capability remains unadvertised, so current live writes preserve
-legacy `NULL` metadata. A dormant durable server path validates same-room live
+negotiated durable server path validates same-room live
 reply targets and current numeric mention membership transactionally and uses
 one encoder for fan-out and both history forms. Existing version-0 through
-version-3 databases migrate
+version-4 databases migrate
 in one immediate transaction. A database from a
 newer omenchatd version is refused without modification instead of being
 silently downgraded.
+
+Version 5 adds the constrained `room_reactions` active-state table and
+`room_reaction_events` append-only audit table plus target/retention indexes.
+The `reactions-v1` capability remains unadvertised and no live path reads or
+writes these tables.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated
 nonzero local OMENchat user ID is known. When enabled, exact numeric rich
 message metadata for that ID is required to increment the local room unread
 counter; ordinary events remain stored and reconciled normally. This preference
-does not advertise or enable the dormant reply/mention wire capability.
+does not itself request or enable the negotiated reply/mention wire capability.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
-`omenchat.sqlite.pre-v4-from-v<old>.bak`. It never overwrites an existing backup;
+`omenchat.sqlite.pre-v5-from-v<old>.bak`. It never overwrites an existing backup;
 backup failure aborts migration, and a successful backup is retained for
 operator recovery.
 Schema statements and the version update share one immediate transaction, so a
@@ -79,6 +83,13 @@ copy must migrate and pass SQLite integrity/foreign-key checks before atomic
 publication. The selected source remains unchanged and the prior active
 database is retained as an owner-only `pre-restore` backup. Operators must run
 `doctor` before restarting.
+
+An offline non-destructive downgrade artifact can be created with
+`omenchatd database export-schema4-copy --to <new-path> --confirm --home
+<path>`. The destination must not exist. A private staged SQLite copy drops
+only schema-5 reaction objects, moves to `user_version = 4`, passes
+integrity/foreign-key checks, and is atomically published. The active schema-5
+database is unchanged; reaction state is intentionally omitted from the copy.
 
 ## Server Commands
 
