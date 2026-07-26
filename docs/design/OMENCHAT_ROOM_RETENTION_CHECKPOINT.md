@@ -232,8 +232,12 @@ Required before enabling retention:
 
 ## Implementation order
 
-1. Add schema-7 event sequence storage, guarded migration/recovery/downgrade,
-   and replace `MAX(event_id)+1` allocation.
+1. **Complete.** Schema 7 adds lazy persistent event sequence storage, guarded
+   migration/fault coverage, and a separate confirmation-gated schema-6 copy
+   export. Allocation now advances the high-water mark in the same immediate
+   transaction as insertion. Concurrent writers remain monotonic; deletion of
+   the newest or every retained event cannot reuse an ID; exhaustion fails
+   closed. No history is deleted and retention remains disabled.
 2. Add the usage ledger and bounded resumable backfill.
 3. Add the atomic bounded compaction primitive and fault tests.
 4. Add disabled-by-default validated configuration and explicit maintenance
@@ -247,4 +251,3 @@ Required before enabling retention:
 Each step must leave omenchatd independently buildable and reversible. No step
 adds a polling worker, recurring timer, automatic network retry, or client
 control.
-

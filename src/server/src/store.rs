@@ -119,7 +119,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 6;
+pub(crate) const SCHEMA_VERSION: i64 = 7;
 
 impl OmenchatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -252,13 +252,38 @@ impl OmenchatStore {
         backup_source: Option<&std::path::Path>,
         migration_sql: &str,
         schema_step: F,
-        mut reaction_hook: H,
-        mut revision_hook: R,
+        reaction_hook: H,
+        revision_hook: R,
     ) -> ServerResult<()>
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
         H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
         R: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_all_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            reaction_hook,
+            revision_hook,
+            |_| Ok(()),
+        )
+    }
+
+    fn migrate_with_sql_step_and_all_hooks<F, H, R, S>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        mut reaction_hook: H,
+        mut revision_hook: R,
+        mut sequence_hook: S,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+        R: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
+        S: FnMut(EventSequenceMigrationBoundary) -> ServerResult<()>,
     {
         let current_version: i64 =
             self.connection
@@ -284,11 +309,14 @@ impl OmenchatStore {
         schema_step(&transaction)?;
         ensure_reaction_schema_with_hook(&transaction, &mut reaction_hook)?;
         ensure_message_revision_schema_with_hook(&transaction, &mut revision_hook)?;
+        ensure_event_sequence_schema_with_hook(&transaction, &mut sequence_hook)?;
         reaction_hook(ReactionMigrationBoundary::BeforeVersionUpdate)?;
         revision_hook(MessageRevisionMigrationBoundary::BeforeVersionUpdate)?;
+        sequence_hook(EventSequenceMigrationBoundary::VersionUpdate)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         reaction_hook(ReactionMigrationBoundary::BeforeCommit)?;
         revision_hook(MessageRevisionMigrationBoundary::BeforeCommit)?;
+        sequence_hook(EventSequenceMigrationBoundary::Commit)?;
         transaction.commit()?;
         Ok(())
     }
@@ -963,6 +991,30 @@ enum MessageRevisionMigrationBoundary {
     BeforeCommit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventSequenceMigrationBoundary {
+    Table,
+    VersionUpdate,
+    Commit,
+}
+
+fn ensure_event_sequence_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(EventSequenceMigrationBoundary) -> ServerResult<()>,
+{
+    hook(EventSequenceMigrationBoundary::Table)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_event_sequences(
+           room_id INTEGER PRIMARY KEY,
+           last_event_id INTEGER NOT NULL CHECK(last_event_id >= 0)
+         );",
+    )?;
+    Ok(())
+}
+
 fn ensure_message_revision_schema_with_hook<H>(
     transaction: &rusqlite::Transaction<'_>,
     hook: &mut H,
@@ -1095,12 +1147,31 @@ fn next_event_id(
     transaction: &rusqlite::Transaction<'_>,
     room_id: RoomId,
 ) -> ServerResult<EventId> {
-    let event_id = transaction.query_row(
-        "SELECT COALESCE(MAX(event_id), 0) + 1 FROM room_events WHERE room_id = ?1",
+    transaction.execute(
+        "INSERT INTO room_event_sequences(room_id, last_event_id)
+         SELECT ?1, COALESCE(MAX(event_id), 0)
+         FROM room_events WHERE room_id = ?1
+         ON CONFLICT(room_id) DO NOTHING",
         [room_id],
-        |row| row.get::<_, i64>(0),
     )?;
-    Ok(event_id as EventId)
+    let event_id = transaction
+        .query_row(
+            "UPDATE room_event_sequences
+             SET last_event_id = last_event_id + 1
+             WHERE room_id = ?1 AND last_event_id < 9223372036854775807
+             RETURNING last_event_id",
+            [room_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            crate::error::ServerError::Message(format!(
+                "room {room_id} event identifier space is exhausted"
+            ))
+        })?;
+    EventId::try_from(event_id).map_err(|_| {
+        crate::error::ServerError::Message(format!("room {room_id} event identifier is invalid"))
+    })
 }
 
 fn ensure_user_on(
@@ -1431,6 +1502,7 @@ mod tests {
         connection
             .execute_batch(
                 "DROP INDEX IF EXISTS idx_room_events_reply;
+                 DROP TABLE IF EXISTS room_event_sequences;
                  DROP TABLE room_events;
                  CREATE TABLE room_events (
                    room_id INTEGER NOT NULL,
@@ -1460,7 +1532,8 @@ mod tests {
             .expect("version four schema");
         connection
             .execute_batch(
-                "INSERT INTO rooms(room_id, name, topic, created_at)
+                "DROP TABLE IF EXISTS room_event_sequences;
+                 INSERT INTO rooms(room_id, name, topic, created_at)
                  VALUES (1, 'preserved-v4-room', 'must survive migration', 1);
                  INSERT INTO room_events(
                    room_id, event_id, event_kind, at, payload
@@ -1506,6 +1579,20 @@ mod tests {
             .pragma_update(None, "user_version", 5)
             .expect("version five marker");
         transaction.commit().expect("version five commit");
+    }
+
+    fn create_version_six_fixture(path: &std::path::Path) {
+        create_version_five_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version six database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version six transaction");
+        ensure_message_revision_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version six message revision schema");
+        transaction
+            .pragma_update(None, "user_version", 6)
+            .expect("version six marker");
+        transaction.commit().expect("version six commit");
     }
 
     fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
@@ -2433,6 +2520,156 @@ mod tests {
     }
 
     #[test]
+    fn version_six_database_adds_empty_room_event_sequence_schema_without_scanning_history() {
+        let path = isolated_database_path("v6-event-sequence-schema");
+        create_version_six_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version seven migration");
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_event_sequences"
+        ));
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM room_event_sequences", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("sequence row count"),
+            0,
+            "migration must not scan or eagerly seed legacy room history"
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        let room = store
+            .room_by_name("preserved-v4-room")
+            .expect("room lookup")
+            .expect("legacy room");
+        let event = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "after migration".into(),
+                },
+            )
+            .expect("append after lazy seed");
+        assert_eq!(event.event_id, 2);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT last_event_id FROM room_event_sequences WHERE room_id = ?1",
+                    [room.room_id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("sequence high-water mark"),
+            2
+        );
+
+        let backup_path = migration_backup_path(&path, 6);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version six migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            6
+        );
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_event_sequences"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_event_sequence_schema_fault_boundary_rolls_back_to_version_six() {
+        for boundary in [
+            EventSequenceMigrationBoundary::Table,
+            EventSequenceMigrationBoundary::VersionUpdate,
+            EventSequenceMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v7-fault-{boundary:?}"));
+            create_version_six_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_all_hooks(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |_| Ok(()),
+                    |_| Ok(()),
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected event sequence migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected event sequence migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                6
+            );
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_event_sequences"
+            ));
+
+            let backup_path = migration_backup_path(&path, 6);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version six rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                6
+            );
+            assert!(!schema_object_exists(
+                &backup,
+                "table",
+                "room_event_sequences"
+            ));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
     fn version_four_metadata_round_trips_and_rejects_invalid_storage_shapes() {
         let store = OmenchatStore::in_memory().expect("store");
         let metadata = RichMessageEventMetadata {
@@ -2768,6 +3005,82 @@ mod tests {
         assert_eq!(event_ids, (1..=WRITERS as EventId).collect::<Vec<_>>());
 
         remove_database_files(&path);
+    }
+
+    #[test]
+    fn room_event_sequence_never_reuses_deleted_newest_or_all_event_ids() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("sequence", None).expect("room");
+        for body in ["one", "two", "three"] {
+            store
+                .append_event(
+                    room.room_id,
+                    None,
+                    ServerRoomEventKind::Message { body: body.into() },
+                )
+                .expect("append");
+        }
+        store
+            .connection
+            .execute(
+                "DELETE FROM room_events WHERE room_id = ?1 AND event_id = 3",
+                [room.room_id],
+            )
+            .expect("delete newest");
+        let fourth = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "four".into(),
+                },
+            )
+            .expect("append after newest deletion");
+        assert_eq!(fourth.event_id, 4);
+
+        store
+            .connection
+            .execute("DELETE FROM room_events WHERE room_id = ?1", [room.room_id])
+            .expect("delete all retained history");
+        let fifth = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "five".into(),
+                },
+            )
+            .expect("append after all history deletion");
+        assert_eq!(fifth.event_id, 5);
+    }
+
+    #[test]
+    fn room_event_sequence_exhaustion_fails_without_wrapping_or_inserting() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("exhausted", None).expect("room");
+        store
+            .connection
+            .execute(
+                "INSERT INTO room_event_sequences(room_id, last_event_id)
+                 VALUES (?1, 9223372036854775807)",
+                [room.room_id],
+            )
+            .expect("seed exhausted sequence");
+        let error = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "must fail".into(),
+                },
+            )
+            .expect_err("exhausted sequence must fail")
+            .to_string();
+        assert!(error.contains("event identifier space is exhausted"));
+        assert!(store
+            .latest_events(room.room_id, 10)
+            .expect("history")
+            .is_empty());
     }
 
     #[test]

@@ -1281,6 +1281,15 @@ reply projection; reaction and revision state/audit for a deleted target are
 removed in the same transaction. No retention behavior or
 `message-revisions-v1` activation is introduced by the checkpoint.
 
+The first implementation slice advances omenchatd to schema 7 with a persistent
+per-room event-ID high-water mark. Legacy rooms seed lazily from the indexed
+maximum, avoiding a migration history scan; committed IDs remain monotonic
+after deleting newest or all retained rows, while transaction rollback may
+reuse only an uncommitted allocation. Integer exhaustion fails closed. A
+confirmation-gated schema-6 copy export removes only this metadata from a
+staged copy and preserves history, reactions, and dormant revision state.
+Retention remains disabled and no production path deletes history.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

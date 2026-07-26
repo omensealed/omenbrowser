@@ -1328,6 +1328,13 @@ reaction state and inject failure at every revision table/index/version/commit
 boundary. Recovery tests also prove that a schema-5 export preserves reaction
 state while removing every schema-6 revision object, and that a deeper
 schema-4 export removes both feature layers.
+Schema-7 tests migrate representative schema-6 history without eagerly seeding
+or scanning it, lazily initialize the high-water mark, inject rollback at every
+sequence table/version/commit boundary, preserve monotonic IDs across
+concurrent writers and deletion of newest/all retained rows, and fail closed
+at SQLite integer exhaustion. The confirmation-gated schema-6 export removes
+only sequence metadata while retaining ordinary history, reactions, and
+message revisions.
 Focused dormant revision-executor tests cover author/moderator/mute policy,
 immutable originals, cross-room/non-message/deleted targets, eight corrections
 plus tombstone, reaction cleanup, soft/hard state saturation, bounded audit

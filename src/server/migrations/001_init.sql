@@ -55,6 +55,11 @@ CREATE TABLE IF NOT EXISTS room_events (
   PRIMARY KEY(room_id, event_id)
 );
 
+CREATE TABLE IF NOT EXISTS room_event_sequences (
+  room_id INTEGER PRIMARY KEY,
+  last_event_id INTEGER NOT NULL CHECK(last_event_id >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS upload_files (
   resource_id TEXT PRIMARY KEY,
   room_id INTEGER NOT NULL,
