@@ -1,11 +1,41 @@
 use iced::Task;
 
-use crate::chat::{ChatSessionId, OmenChatInvitation};
+use crate::chat::{ChatSessionId, OmenChatInvitation, OmenChatInvitationError};
 use crate::directory::DirectoryKind;
+use crate::micron::LinkAction;
 
 use super::{DesktopApp, Message};
 
 impl DesktopApp {
+    pub(in crate::desktop) fn preview_omenchat_invitation(
+        &mut self,
+        value: &str,
+    ) -> Result<(), OmenChatInvitationError> {
+        self.omenchat.omenchat_invitation_room = None;
+        self.omenchat
+            .omenchat_invitation_preview
+            .replace_from_uri(value, &self.app.directory_state.entries)
+    }
+
+    pub(in crate::desktop) fn preview_or_open_omenchat_link(
+        &mut self,
+        link: LinkAction,
+    ) -> Option<Task<Message>> {
+        if link.target.starts_with("omenchat://") && link.target.contains('?') {
+            match self.preview_omenchat_invitation(&link.target) {
+                Ok(()) => {
+                    self.app.status.task =
+                        "review the OMENchat invitation; no connection has been opened".into();
+                }
+                Err(error) => {
+                    self.app.status.task = format!("invalid OMENchat invitation: {error}");
+                }
+            }
+            return Some(Task::none());
+        }
+        self.open_omenchat_link(link)
+    }
+
     pub(in crate::desktop) fn omenchat_invitation_uri(
         &self,
         session_id: ChatSessionId,
@@ -72,6 +102,7 @@ mod tests {
     use crate::app::App;
     use crate::chat::OmenChatDescriptor;
     use crate::directory::DirectoryEntry;
+    use crate::micron::render::HitAction;
 
     const DESTINATION: &str = "00112233445566778899aabbccddeeff";
     const IDENTITY: &str = "ffeeddccbbaa99887766554433221100";
@@ -166,5 +197,86 @@ mod tests {
         let _ = desktop.update_copy_omenchat_invitation(u64::MAX);
         assert!(desktop.app.status.task.contains("could not create"));
         assert_eq!(desktop.omenchat.chat_client.sessions(), sessions_before);
+    }
+
+    #[test]
+    fn enhanced_micron_link_enters_confirmation_without_opening_or_trusting() {
+        let (mut desktop, _) =
+            desktop_with_session("omenbrowser-rs-enhanced-omenchat-micron-invitation");
+        desktop.omenchat.chat_client = crate::chat::ChatClient::new();
+        let sessions_before = desktop.omenchat.chat_client.sessions().len();
+        let directory_before = desktop.app.directory_state.entries.clone();
+        let action = HitAction::Link(LinkAction {
+            target: format!(
+                "omenchat://{DESTINATION}?invite=1&room=7&label=Field%20Ops&identity={IDENTITY}"
+            ),
+            fields: vec!["ignored-form-field=not-an-invitation-field".into()],
+        });
+
+        assert!(desktop
+            .activate_omenchat_hit_action_if_needed(&action)
+            .is_some());
+
+        let preview = desktop
+            .omenchat
+            .omenchat_invitation_preview
+            .pending()
+            .expect("preview");
+        assert_eq!(preview.invitation.room_id, Some(7));
+        assert_eq!(
+            desktop.omenchat.chat_client.sessions().len(),
+            sessions_before
+        );
+        assert_eq!(desktop.app.directory_state.entries, directory_before);
+        assert!(desktop.app.status.task.contains("no connection"));
+    }
+
+    #[test]
+    fn malformed_enhanced_micron_link_is_handled_without_opening() {
+        let (mut desktop, _) =
+            desktop_with_session("omenbrowser-rs-invalid-omenchat-micron-invitation");
+        desktop.omenchat.chat_client = crate::chat::ChatClient::new();
+        let action = HitAction::Link(LinkAction {
+            target: format!("omenchat://{DESTINATION}?invite=1&secret=credential"),
+            fields: Vec::new(),
+        });
+
+        assert!(desktop
+            .activate_omenchat_hit_action_if_needed(&action)
+            .is_some());
+        assert!(desktop
+            .omenchat
+            .omenchat_invitation_preview
+            .pending()
+            .is_none());
+        assert!(desktop.omenchat.chat_client.sessions().is_empty());
+        assert!(desktop.app.status.task.contains("invalid"));
+    }
+
+    #[cfg(feature = "mock-runtime")]
+    #[test]
+    fn plain_micron_omenchat_link_retains_existing_open_behavior() {
+        let (mut desktop, _) = desktop_with_session("omenbrowser-rs-plain-omenchat-micron-link");
+        desktop.omenchat.chat_client = crate::chat::ChatClient::new();
+        desktop.app.runtime_status.connected = false;
+        let action = HitAction::Link(LinkAction {
+            target: format!("omenchat://{DESTINATION}"),
+            fields: Vec::new(),
+        });
+
+        assert!(desktop
+            .activate_omenchat_hit_action_if_needed(&action)
+            .is_some());
+        assert!(desktop
+            .omenchat
+            .chat_client
+            .sessions()
+            .iter()
+            .any(|session| session.server.destination == DESTINATION));
+        assert!(desktop
+            .omenchat
+            .omenchat_invitation_preview
+            .pending()
+            .is_none());
     }
 }

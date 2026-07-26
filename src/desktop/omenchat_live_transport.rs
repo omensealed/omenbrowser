@@ -75,7 +75,7 @@ impl DesktopApp {
                 target: link.target.clone(),
                 fields: link.fields.clone(),
             })?;
-        self.open_omenchat_link(link)
+        self.preview_or_open_omenchat_link(link)
     }
 
     #[cfg(feature = "chat-client")]
@@ -86,7 +86,7 @@ impl DesktopApp {
         let HitAction::Link(link) = action else {
             return None;
         };
-        self.open_omenchat_link(link.clone())
+        self.preview_or_open_omenchat_link(link.clone())
     }
 
     #[cfg(feature = "chat-client")]

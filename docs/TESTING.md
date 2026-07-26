@@ -4233,8 +4233,7 @@ cargo test --locked --no-default-features --features desktop-dev \
 These tests prove exact destination/session binding, exact numeric catalog
 match, cross-session isolation, mismatch clearing, cancellation, and
 replacement. Native live smoke must still confirm a real authenticated catalog
-and join; enhanced Micron links and QR presentation require separate tests
-before activation.
+and join; QR presentation requires separate tests before activation.
 
 Canonical clipboard generation is covered in the production profile:
 
@@ -4247,7 +4246,22 @@ The tests verify joined-room and bounded-label serialization, omission of an
 unjoined room, fail-closed omission of conflicting identity evidence, missing
 session handling, and no session-state mutation. A packaged display smoke must
 still confirm the share icon writes the canonical URI to the native clipboard.
-QR rendering/import and enhanced Micron links remain outside this test claim.
+QR rendering/import remains outside this test claim.
+
+Enhanced Micron link routing uses the same invitation reducer:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  --lib enhanced_micron_link
+cargo test --locked --no-default-features --features desktop-dev \
+  --lib plain_micron_omenchat_link
+```
+
+The production tests prove valid and malformed enhanced links cannot bypass
+confirmation. The development-profile test proves the compatible plain link
+still reaches the deterministic mock open path. A packaged interaction smoke
+must still cover both keyboard-focused and pointer link activation. QR
+rendering/import remains outside this claim.
 
 The desktop quick-open activation adds focused tests proving parse-only input
 does not create a session or mutate Directory state, a conflicting fingerprint

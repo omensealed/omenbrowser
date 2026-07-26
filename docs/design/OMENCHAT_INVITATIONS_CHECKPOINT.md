@@ -272,4 +272,14 @@ queue, cache, or retry. The existing plain `omenchat://<destination>` form
 remains available for older clients and documentation. Focused tests cover
 canonical field selection, percent encoding, unjoined-room omission,
 conflicting-identity omission, missing-session failure, and zero state
-mutation. Enhanced Micron links and QR rendering/import remain inactive.
+mutation.
+
+Enhanced OMENchat links activated from Micron now enter the same single
+confirmation owner as quick-open text. Valid enhanced links open no session and
+do not save or trust Directory evidence. Malformed enhanced links are handled
+as invitation errors rather than falling through to browser navigation or a
+plain Link open. Link form-forwarding fields are not invitation fields and are
+ignored. Plain `omenchat://<destination>` Micron links preserve their existing
+open behavior. Keyboard-focused and pointer-hit activation share this reducer.
+Focused tests cover valid, malformed, and legacy paths. QR rendering/import
+remains inactive.

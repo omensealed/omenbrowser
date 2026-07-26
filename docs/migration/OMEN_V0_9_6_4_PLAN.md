@@ -1158,6 +1158,16 @@ owner receives the text. Missing sessions fail closed. No QR feature, enhanced
 Micron link, persistence, wire behavior, network action, worker, timer, queue,
 cache, retry, schema, capability, or dependency was added.
 
+The sixth slice routes enhanced OMENchat links from Micron through the existing
+bounded preview/confirmation owner. Valid enhanced links do not connect,
+persist, or change trust before confirmation; malformed enhanced links fail as
+invitation input and cannot fall through to browser navigation or a plain
+session open. Form-forwarding fields are ignored at this boundary. Plain legacy
+Micron links retain their established direct-open behavior. Keyboard-focused
+and pointer activation use the same reducer. QR remains inactive, and this
+slice adds no runtime owner, persistence, wire behavior, worker, timer, queue,
+cache, retry, schema, capability, dependency, or product-feature change.
+
 ### Unit 6E — corrections and delete tombstones
 
 - Append correction and tombstone events rather than rewriting history.

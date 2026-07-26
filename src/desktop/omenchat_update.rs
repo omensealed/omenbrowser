@@ -209,12 +209,8 @@ impl DesktopApp {
     pub(super) fn update_open_omenchat_server_entry(&mut self) -> Task<Message> {
         let entered = self.omenchat.omenchat_server_entry.trim();
         if entered.starts_with("omenchat://") && entered.contains('?') {
-            self.omenchat.omenchat_invitation_room = None;
-            match self
-                .omenchat
-                .omenchat_invitation_preview
-                .replace_from_uri(entered, &self.app.directory_state.entries)
-            {
+            let entered = entered.to_owned();
+            match self.preview_omenchat_invitation(&entered) {
                 Ok(()) => {
                     self.app.status.task =
                         "review the OMENchat invitation; no connection has been opened".into();
