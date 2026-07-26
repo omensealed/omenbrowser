@@ -182,6 +182,68 @@ impl ChatReaction {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatReactionSummary {
+    pub token: ReactionToken,
+    pub actor_count: u32,
+    pub reacted_by_local_user: bool,
+}
+
+impl ChatReactionSummary {
+    pub fn label(&self) -> String {
+        let token = match self.token {
+            ReactionToken::ThumbsUp => "+1",
+            ReactionToken::Heart => "heart",
+            ReactionToken::Laugh => "laugh",
+            ReactionToken::Surprised => "wow",
+            ReactionToken::Sad => "sad",
+            ReactionToken::ThumbsDown => "-1",
+            ReactionToken::Celebrate => "celebrate",
+            ReactionToken::Question => "?",
+        };
+        if self.reacted_by_local_user {
+            format!("{token} {} · you", self.actor_count)
+        } else {
+            format!("{token} {}", self.actor_count)
+        }
+    }
+}
+
+pub fn chat_reaction_summaries<'a>(
+    reactions: impl IntoIterator<Item = &'a ChatReaction>,
+    event: &ChatEvent,
+    local_user_id: Option<UserId>,
+) -> Vec<ChatReactionSummary> {
+    if !chat_event_supports_reactions(event) {
+        return Vec::new();
+    }
+    let mut actors_by_token =
+        std::collections::BTreeMap::<ReactionToken, std::collections::BTreeSet<UserId>>::new();
+    for reaction in reactions {
+        if reaction.server_id == event.server_id
+            && reaction.room_id == event.room_id
+            && reaction.target_event_id == event.event_id
+        {
+            actors_by_token
+                .entry(reaction.token)
+                .or_default()
+                .insert(reaction.actor_user_id);
+        }
+    }
+    ReactionToken::ALL
+        .into_iter()
+        .filter_map(|token| {
+            let actors = actors_by_token.get(&token)?;
+            Some(ChatReactionSummary {
+                token,
+                actor_count: u32::try_from(actors.len()).unwrap_or(u32::MAX),
+                reacted_by_local_user: local_user_id
+                    .is_some_and(|user_id| actors.contains(&user_id)),
+            })
+        })
+        .collect()
+}
+
 pub fn chat_reactions_fit_bounds<'a>(
     reactions: impl IntoIterator<Item = &'a ChatReaction>,
 ) -> bool {
@@ -389,6 +451,60 @@ mod tests {
             .display_label(),
             "Alice [admin] (banned)"
         );
+    }
+
+    #[test]
+    fn reaction_summaries_are_deduplicated_ordered_and_identity_scoped() {
+        let event = message_event(10, "hello");
+        let reaction = |server_id: &str,
+                        room_id: RoomId,
+                        target_event_id: EventId,
+                        actor_user_id: UserId,
+                        token: ReactionToken| ChatReaction {
+            server_id: server_id.into(),
+            room_id,
+            target_event_id,
+            actor_user_id,
+            token,
+            created_at_unix: 1,
+        };
+        let heart = reaction("server", 1, 10, 7, ReactionToken::Heart);
+        let reactions = vec![
+            reaction("server", 1, 10, 8, ReactionToken::ThumbsUp),
+            heart.clone(),
+            heart,
+            reaction("server", 1, 10, 9, ReactionToken::Heart),
+            reaction("other", 1, 10, 7, ReactionToken::Sad),
+            reaction("server", 2, 10, 7, ReactionToken::Sad),
+            reaction("server", 1, 11, 7, ReactionToken::Sad),
+        ];
+
+        let summaries = chat_reaction_summaries(&reactions, &event, Some(7));
+        assert_eq!(
+            summaries,
+            vec![
+                ChatReactionSummary {
+                    token: ReactionToken::ThumbsUp,
+                    actor_count: 1,
+                    reacted_by_local_user: false,
+                },
+                ChatReactionSummary {
+                    token: ReactionToken::Heart,
+                    actor_count: 2,
+                    reacted_by_local_user: true,
+                },
+            ]
+        );
+        assert_eq!(summaries[0].label(), "+1 1");
+        assert_eq!(summaries[1].label(), "heart 2 · you");
+
+        let system = ChatEvent {
+            kind: ChatEventKind::System {
+                body: "status".into(),
+            },
+            ..event
+        };
+        assert!(chat_reaction_summaries(&reactions, &system, Some(7)).is_empty());
     }
 
     fn message_event(event_id: EventId, body: &str) -> ChatEvent {

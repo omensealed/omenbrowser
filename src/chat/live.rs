@@ -664,6 +664,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     local_display_name: Option<&str>,
 ) -> Vec<ChatClientEvent> {
     let mut events = Vec::new();
+    client.mark_reactions_stale(session_id);
     let [session_open_seq, join_seq] = match state.reserve_seq_pair(session_id) {
         Ok(sequences) => sequences,
         Err(_) => return vec![sequence_space_exhausted_event(session_id)],
@@ -4047,6 +4048,7 @@ mod tests {
             client.reactions_for_targets(session_id, 1, &[10])[0].token,
             crate::chat::protocol::ReactionToken::Heart
         );
+        assert!(!client.reaction_snapshot_complete(session_id, 1, 10));
 
         events.clear();
         apply_frame_with_state(
@@ -4096,6 +4098,10 @@ mod tests {
             retained[0].token,
             crate::chat::protocol::ReactionToken::Celebrate
         );
+        assert!(client.reaction_snapshot_complete(session_id, 1, 10));
+        client.mark_reactions_stale(session_id);
+        assert!(!client.reaction_snapshot_complete(session_id, 1, 10));
+        assert_eq!(client.reactions_for_targets(session_id, 1, &[10]), retained);
     }
 
     #[test]

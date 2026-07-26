@@ -992,6 +992,25 @@ excluded them. The client model, persistence, and restore paths now all exclude
 those non-server IDs from reaction eligibility; the focused regression and the
 complete suite pass after the correction.
 
+The fifth dormant slice adds one project-owned read-only reaction presentation
+model. It deduplicates actor rows, preserves the fixed protocol token order,
+counts exact distinct actors, and highlights `you` only from the negotiated
+numeric local-user binding. The Iced OMENchat timeline renders non-interactive
+summary chips and limits its lookup to the active server/room range rather than
+scanning the global reaction ceiling on every view construction. The bounded
+room result is indexed once by target rather than rescanned for every timeline
+event. Counts are
+visible only for targets with non-persistent completion evidence from a
+validated live snapshot. Restart restore and reconnect keep bounded cache rows
+but clear that evidence, and the next snapshot prunes rows/evidence that no
+longer have a retained history target before becoming visible. The production
+capability remains disabled and no mutation action, retry, worker, timer, or
+polling path was added. The legacy Ratatui workspace does not currently contain
+OMENchat sessions (its Messages section is LXMF), while omenchatd's TUI is an
+administrative server view with no client-local identity. Therefore this slice
+does not fabricate a TUI reaction panel; that portion of checkpoint step 5
+remains unavailable until a separately justified OMENchat TUI exists.
+
 ### Unit 6C — bounded local search
 
 - Search existing LXMF and OMENchat history by text, sender, room, date,

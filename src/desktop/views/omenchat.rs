@@ -98,6 +98,25 @@ fn omenchat_reply_line<'a>(
     }
 }
 
+fn omenchat_reaction_summary_row(
+    summaries: &[crate::chat::ChatReactionSummary],
+) -> Element<'static, Message> {
+    let mut summaries_row = row![].spacing(4);
+    for summary in summaries {
+        let style = if summary.reacted_by_local_user {
+            selected_message_container_style
+        } else {
+            status_container_style
+        };
+        summaries_row = summaries_row.push(
+            container(text(summary.label()).size(ui_size(11)))
+                .padding([2, 6])
+                .style(style),
+        );
+    }
+    summaries_row.wrap().into()
+}
+
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn recovered_mutation_notice(count: usize, connection: crate::chat::ChatConnectionState) -> String {
     let noun = if count == 1 { "send" } else { "sends" };
@@ -207,7 +226,27 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         .omenchat
         .chat_client
         .local_user_id(session.session_id);
-    for group in chat_timeline_groups_for_local_user(session, local_user_id) {
+    let authoritative_reaction_targets = desktop
+        .omenchat
+        .chat_client
+        .authoritative_reaction_targets(session.session_id, session.active_room.room_id);
+    let reaction_target_ids = session
+        .events
+        .iter()
+        .filter(|event| {
+            event.room_id == session.active_room.room_id
+                && authoritative_reaction_targets.contains(&event.event_id)
+        })
+        .map(|event| event.event_id)
+        .collect::<Vec<_>>();
+    let reactions = desktop.omenchat.chat_client.reactions_for_targets(
+        session.session_id,
+        session.active_room.room_id,
+        &reaction_target_ids,
+    );
+    for group in
+        chat_timeline_groups_for_local_user_and_reactions(session, local_user_id, &reactions)
+    {
         let header = row![
             text(group.actor).size(ui_size(12)),
             text(chat_event_time_label(group.at_unix)).size(ui_size(11)),
@@ -275,6 +314,9 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 );
             } else {
                 group_content = group_content.push(line);
+            }
+            if !body.reactions.is_empty() {
+                group_content = group_content.push(omenchat_reaction_summary_row(&body.reactions));
             }
             for hint in media_hints {
                 if let Some(row) = omenchat_media_hint_row(hint.clone()) {

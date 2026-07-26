@@ -419,7 +419,20 @@ open the maintainer's real browser or omenchatd data.
    snapshots use the existing bounded transport. Restart restore queries only
    retained eligible targets in protocol-sized pages. No controls exist and
    the production client still does not request `reactions-v1`.
-5. Add read-only GUI/TUI counts and current-user highlighting.
+5. **Partially complete by existing frontend scope.** A shared presentation
+   reducer deduplicates actors, orders the fixed token catalog, produces exact
+   counts, and marks only the negotiated local numeric user as `you`. The Iced
+   OMENchat timeline renders those summaries as read-only chips, with a distinct
+   non-interactive style for the local user's rows. Its render lookup is bounded
+   to the active server/room range and indexes those rows once by target instead
+   of rescanning the room for each event. Non-persistent, target-scoped completion
+   evidence is set only by a validated live snapshot; restart restore and
+   reconnect retain cached rows but hide their counts until a new snapshot.
+   Evidence and retained rows are pruned against bounded resident history
+   before accepting another snapshot. The legacy Ratatui workspace currently has
+   LXMF conversations but no OMENchat session or timeline; omenchatd's
+   administrative TUI has no client-local user. This unit does not invent a
+   second OMENchat frontend or misrepresent either TUI as supporting reactions.
 6. Add the durable composer action and recovered-intent presentation while the
    production capability remains disabled.
 7. Run deterministic duplicate/restart/mixed-version/resource/retention gates

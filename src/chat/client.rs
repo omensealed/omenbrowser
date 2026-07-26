@@ -435,6 +435,7 @@ pub struct ChatClient {
         ),
         ChatReaction,
     >,
+    authoritative_reaction_targets: BTreeMap<ServerId, BTreeSet<(RoomId, EventId)>>,
 }
 
 impl ChatClient {
@@ -445,6 +446,7 @@ impl ChatClient {
             local_user_ids: std::collections::BTreeMap::new(),
             mute_except_mentions: BTreeMap::new(),
             reactions: BTreeMap::new(),
+            authoritative_reaction_targets: BTreeMap::new(),
         }
     }
 
@@ -519,15 +521,68 @@ impl ChatClient {
             return Vec::new();
         };
         let targets = target_event_ids.iter().copied().collect::<BTreeSet<_>>();
+        let range_start = (
+            server_id.to_owned(),
+            room_id,
+            EventId::MIN,
+            super::protocol::UserId::MIN,
+            ReactionToken::ThumbsUp,
+        );
+        let range_end = (
+            server_id.to_owned(),
+            room_id,
+            EventId::MAX,
+            super::protocol::UserId::MAX,
+            ReactionToken::Question,
+        );
         self.reactions
-            .values()
-            .filter(|reaction| {
-                reaction.server_id == server_id
-                    && reaction.room_id == room_id
-                    && targets.contains(&reaction.target_event_id)
-            })
+            .range(range_start..=range_end)
+            .map(|(_, reaction)| reaction)
+            .filter(|reaction| targets.contains(&reaction.target_event_id))
             .cloned()
             .collect()
+    }
+
+    pub fn reaction_snapshot_complete(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> bool {
+        self.session(session_id).is_some_and(|session| {
+            self.authoritative_reaction_targets
+                .get(&session.server.server_id)
+                .is_some_and(|targets| targets.contains(&(room_id, target_event_id)))
+        })
+    }
+
+    pub fn authoritative_reaction_targets(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) -> BTreeSet<EventId> {
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.as_str())
+        else {
+            return BTreeSet::new();
+        };
+        self.authoritative_reaction_targets
+            .get(server_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|(stored_room, target)| (*stored_room == room_id).then_some(*target))
+            .collect()
+    }
+
+    pub(crate) fn mark_reactions_stale(&mut self, session_id: ChatSessionId) {
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.clone())
+        else {
+            return;
+        };
+        self.authoritative_reaction_targets.remove(&server_id);
     }
 
     pub(crate) fn apply_reaction_event(
@@ -588,6 +643,16 @@ impl ChatClient {
         room_id: RoomId,
         snapshot: &ReactionSnapshot,
     ) -> Result<(), &'static str> {
+        self.replace_reaction_snapshot_with_authority(session_id, room_id, snapshot, true)
+    }
+
+    fn replace_reaction_snapshot_with_authority(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        snapshot: &ReactionSnapshot,
+        authoritative: bool,
+    ) -> Result<(), &'static str> {
         snapshot
             .clone()
             .into_frame_body()
@@ -639,6 +704,18 @@ impl ChatClient {
             return Err("reaction snapshot exceeds client retention limits");
         }
         self.reactions = next;
+        if authoritative {
+            self.prune_reaction_state_for_server(&server_id);
+            self.authoritative_reaction_targets
+                .entry(server_id)
+                .or_default()
+                .extend(
+                    snapshot
+                        .target_event_ids
+                        .iter()
+                        .map(|target| (room_id, *target)),
+                );
+        }
         Ok(())
     }
 
@@ -742,8 +819,34 @@ impl ChatClient {
             self.mute_except_mentions.remove(&removed.server.server_id);
             self.reactions
                 .retain(|(server_id, ..), _| server_id != &removed.server.server_id);
+            self.authoritative_reaction_targets
+                .remove(&removed.server.server_id);
         }
         Some(removed)
+    }
+
+    fn prune_reaction_state_for_server(&mut self, server_id: &ServerId) {
+        let retained = self
+            .sessions
+            .iter()
+            .filter(|session| session.server.server_id == *server_id)
+            .flat_map(|session| {
+                session
+                    .events
+                    .iter()
+                    .map(|event| (event.room_id, event.event_id))
+            })
+            .collect::<BTreeSet<_>>();
+        self.reactions
+            .retain(|(stored_server, room_id, target, ..), _| {
+                stored_server != server_id || retained.contains(&(*room_id, *target))
+            });
+        if let Some(targets) = self.authoritative_reaction_targets.get_mut(server_id) {
+            targets.retain(|target| retained.contains(target));
+            if targets.is_empty() {
+                self.authoritative_reaction_targets.remove(server_id);
+            }
+        }
     }
 
     pub fn persist_session<S: ChatStore>(
@@ -1031,8 +1134,10 @@ impl ChatClient {
                             })
                             .collect(),
                     };
-                    self.replace_reaction_snapshot(session_id, room_id, &snapshot)
-                        .map_err(anyhow::Error::msg)?;
+                    self.replace_reaction_snapshot_with_authority(
+                        session_id, room_id, &snapshot, false,
+                    )
+                    .map_err(anyhow::Error::msg)?;
                 }
             }
             restored += 1;
@@ -1683,6 +1788,7 @@ mod tests {
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].actor_user_id, 8);
         assert_eq!(retained[0].token, ReactionToken::Celebrate);
+        assert!(client.reaction_snapshot_complete(session_id, 1, 1));
 
         client
             .persist_session(&mut store, session_id)
@@ -1699,10 +1805,57 @@ mod tests {
             restored.reactions_for_targets(restored_session, 1, &[1]),
             retained
         );
+        assert!(!restored.reaction_snapshot_complete(restored_session, 1, 1));
         restored.remove_session(restored_session);
         assert!(restored
             .reactions_for_targets(restored_session, 1, &[1])
             .is_empty());
+    }
+
+    #[test]
+    fn reaction_snapshot_evidence_and_rows_follow_retained_history() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(bounded_history_session(
+            session_id,
+            vec![bounded_history_event(1, 5)]
+        )));
+        client
+            .replace_reaction_snapshot(
+                session_id,
+                1,
+                &ReactionSnapshot {
+                    target_event_ids: vec![1],
+                    entries: vec![ReactionSnapshotEntry {
+                        target_event_id: 1,
+                        actor_user_id: 7,
+                        token: ReactionToken::Heart,
+                        created_at_unix: 1,
+                    }],
+                },
+            )
+            .expect("first snapshot");
+        assert_eq!(
+            client.authoritative_reaction_targets(session_id, 1),
+            BTreeSet::from([1])
+        );
+
+        client.session_mut(session_id).expect("session").events = vec![bounded_history_event(2, 5)];
+        client
+            .replace_reaction_snapshot(
+                session_id,
+                1,
+                &ReactionSnapshot {
+                    target_event_ids: vec![2],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("replacement target snapshot");
+        assert_eq!(
+            client.authoritative_reaction_targets(session_id, 1),
+            BTreeSet::from([2])
+        );
+        assert!(client.reactions_for_targets(session_id, 1, &[1]).is_empty());
     }
 
     #[test]

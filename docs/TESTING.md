@@ -4039,8 +4039,13 @@ These isolated regressions exercise the shared GUI/TUI model, identity-scoped
 SQLite cache, negotiated live parser, and bounded inline/Resource snapshot
 transport. They prove duplicate deltas are idempotent, explicit-target
 snapshots are authoritative only for their page, overload rolls back prior
-state, and restart restores eligible retained targets. They do not expose
-reaction controls or request/accept `reactions-v1`.
+state, and restart restores eligible retained targets. Presentation tests prove
+actor deduplication, fixed token ordering, identity/room/target scoping, exact
+counts, and local-user highlighting in the non-interactive Iced timeline model.
+They also prove restart/reconnect clears non-persistent snapshot evidence while
+retaining bounded cache rows and that the next snapshot prunes targets no
+longer present in resident history. They do not expose reaction controls or
+request/accept `reactions-v1`.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-dev reaction --lib
@@ -4052,4 +4057,15 @@ cargo test --locked --no-default-features --features desktop-dev \
   client_transport_decodes_reaction_inline_and_resource_snapshots --lib
 cargo test --locked --no-default-features --features desktop-dev \
   reaction_snapshot_overload_rolls_back_prior_page_state --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_summaries_are_deduplicated_ordered_and_identity_scoped --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  omenchat_timeline_uses_shared_read_only_reaction_presentation --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_snapshot_evidence_and_rows_follow_retained_history --lib
 ```
+
+The Ratatui Messages workspace currently covers LXMF conversations and has no
+OMENchat session/timeline model. The omenchatd TUI is server administration and
+has no client-local user identity. These commands therefore do not claim a TUI
+reaction rendering path.

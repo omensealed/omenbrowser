@@ -1,9 +1,10 @@
 use crate::app::current_epoch_ms;
 use crate::chat::protocol::RoomId;
 use crate::chat::{
-    chat_message_presentation, ChatEvent, ChatEventKind, ChatReplyPresentation, ChatSessionId,
-    ChatSessionView,
+    chat_message_presentation, chat_reaction_summaries, ChatEvent, ChatEventKind, ChatReaction,
+    ChatReactionSummary, ChatReplyPresentation, ChatSessionId, ChatSessionView,
 };
+use std::collections::BTreeMap;
 
 use super::super::{
     format_epoch_secs, OMENCHAT_LOCAL_ECHO_RESEND_SECS, OMENCHAT_MESSAGE_GROUP_GAP_SECS,
@@ -23,6 +24,7 @@ pub(in crate::desktop) struct ChatTimelineBody {
     pub(in crate::desktop) is_action: bool,
     pub(in crate::desktop) pending_acceptance: bool,
     pub(in crate::desktop) mentions_local_user: bool,
+    pub(in crate::desktop) reactions: Vec<ChatReactionSummary>,
     pub(in crate::desktop) reply: Option<ChatTimelineReply>,
     pub(in crate::desktop) reply_target: Option<u64>,
     pub(in crate::desktop) upload: Option<ChatTimelineUpload>,
@@ -70,12 +72,14 @@ pub(in crate::desktop) fn chat_event_actor_key(
         .unwrap_or_else(|| format!("{prefix}:label:{}", chat_event_actor_label(session, event)))
 }
 
-pub(in crate::desktop) fn chat_event_body(
+pub(in crate::desktop) fn chat_event_body<'a>(
     session: &ChatSessionView,
     event: &ChatEvent,
     local_user_id: Option<u32>,
+    reactions: impl IntoIterator<Item = &'a ChatReaction>,
 ) -> ChatTimelineBody {
     let presentation = chat_message_presentation(&session.events, event, local_user_id);
+    let reactions = chat_reaction_summaries(reactions, event, local_user_id);
     let reply_target = matches!(
         event.kind,
         ChatEventKind::Message { .. } | ChatEventKind::RichMessage { .. }
@@ -105,6 +109,7 @@ pub(in crate::desktop) fn chat_event_body(
             is_action: true,
             pending_acceptance: is_omenchat_local_echo_event(event),
             mentions_local_user: presentation.mentions_local_user,
+            reactions,
             reply,
             reply_target: None,
             upload: None,
@@ -118,6 +123,7 @@ pub(in crate::desktop) fn chat_event_body(
             is_action: false,
             pending_acceptance: is_omenchat_local_echo_event(event),
             mentions_local_user: presentation.mentions_local_user,
+            reactions,
             reply,
             reply_target,
             upload: None,
@@ -135,6 +141,7 @@ pub(in crate::desktop) fn chat_event_body(
             is_action: false,
             pending_acceptance: false,
             mentions_local_user: presentation.mentions_local_user,
+            reactions,
             reply,
             reply_target: None,
             upload: Some(ChatTimelineUpload {
@@ -199,14 +206,38 @@ pub(in crate::desktop) fn chat_timeline_groups_for_local_user(
     session: &ChatSessionView,
     local_user_id: Option<u32>,
 ) -> Vec<ChatTimelineGroup> {
+    chat_timeline_groups_for_local_user_and_reactions(session, local_user_id, &[])
+}
+
+pub(in crate::desktop) fn chat_timeline_groups_for_local_user_and_reactions(
+    session: &ChatSessionView,
+    local_user_id: Option<u32>,
+    reactions: &[ChatReaction],
+) -> Vec<ChatTimelineGroup> {
     let mut groups: Vec<ChatTimelineGroup> = Vec::new();
+    let mut reactions_by_target = BTreeMap::<u64, Vec<&ChatReaction>>::new();
+    for reaction in reactions {
+        reactions_by_target
+            .entry(reaction.target_event_id)
+            .or_default()
+            .push(reaction);
+    }
     for event in session
         .events
         .iter()
         .filter(|event| event.room_id == session.active_room.room_id)
     {
         let actor_key = chat_event_actor_key(session, event);
-        let body = chat_event_body(session, event, local_user_id);
+        let body = chat_event_body(
+            session,
+            event,
+            local_user_id,
+            reactions_by_target
+                .get(&event.event_id)
+                .into_iter()
+                .flatten()
+                .copied(),
+        );
         if let Some(last) = groups.last_mut() {
             if last.actor_key == actor_key
                 && chat_events_fit_same_group(last.last_at_unix, event.at_unix)
@@ -240,7 +271,9 @@ pub(in crate::desktop) fn chat_events_fit_same_group(
 #[cfg(all(test, feature = "chat-client"))]
 mod tests {
     use super::*;
-    use crate::chat::{ChatMessageMetadata, ChatRoomSummary, ChatServerSummary, ChatUserSummary};
+    use crate::chat::{
+        ChatMessageMetadata, ChatRoomSummary, ChatServerSummary, ChatUserSummary, ReactionToken,
+    };
 
     fn timeline_session(active_room_id: RoomId, events: Vec<ChatEvent>) -> ChatSessionView {
         ChatSessionView {
@@ -384,6 +417,41 @@ mod tests {
         let groups = chat_timeline_groups(&session);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].bodies[0].text, "help visible");
+    }
+
+    #[test]
+    fn omenchat_timeline_uses_shared_read_only_reaction_presentation() {
+        let session = timeline_session(1, vec![message(1, 10, 1, "hello")]);
+        let reactions = vec![
+            ChatReaction {
+                server_id: "server-a".into(),
+                room_id: 1,
+                target_event_id: 10,
+                actor_user_id: 7,
+                token: ReactionToken::Heart,
+                created_at_unix: 2,
+            },
+            ChatReaction {
+                server_id: "server-a".into(),
+                room_id: 1,
+                target_event_id: 10,
+                actor_user_id: 8,
+                token: ReactionToken::Heart,
+                created_at_unix: 3,
+            },
+        ];
+
+        let groups =
+            chat_timeline_groups_for_local_user_and_reactions(&session, Some(7), &reactions);
+        assert_eq!(
+            groups[0].bodies[0].reactions,
+            vec![ChatReactionSummary {
+                token: ReactionToken::Heart,
+                actor_count: 2,
+                reacted_by_local_user: true,
+            }]
+        );
+        assert_eq!(groups[0].bodies[0].reactions[0].label(), "heart 2 · you");
     }
 
     #[test]

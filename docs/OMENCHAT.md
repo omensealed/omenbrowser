@@ -81,6 +81,17 @@ whose eligible target events remain in the bounded resident history. There are
 no reaction controls and production session-open frames still do not request
 `reactions-v1`, so mixed-version and current user-visible behavior are
 unchanged.
+The shared presentation reducer can summarize retained rows by fixed token and
+distinct actor count. When retained reaction state is available, the
+Iced timeline displays those summaries as read-only chips and marks `you` only
+when the negotiated numeric local-user ID is among the actors. The chips are
+not buttons and cannot transmit a mutation. Counts are visible only after a
+validated live snapshot marks that explicit target complete. Cache restore and
+reconnect clear this non-persistent evidence without deleting bounded rows, so
+stale counts are not presented as current while reconciliation is pending. The
+legacy Ratatui Messages
+workspace currently represents LXMF conversations, not OMENchat sessions, so
+it does not display OMENchat reaction state.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
 `omenchat.sqlite.pre-v5-from-v<old>.bak`. It never overwrites an existing backup;
