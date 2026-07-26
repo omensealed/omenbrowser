@@ -187,6 +187,14 @@ complete; the client may correct the request and retry `SessionOpen` on that
 Link. Handshake completion requires an actual `SessionAccept`, not merely an
 inbound frame carrying the `SessionOpen` operation number.
 
+The shared contract also reserves operations 35–39 and the dependent
+`message-revisions-v1` capability for the reviewed correction/tombstone design.
+Its request, acknowledgement, event, and explicit-target snapshot codecs are
+bounded and byte-fixture tested, but the production client does not request the
+capability and omenchatd does not accept it. These known operation numbers are
+a dormant compatibility reservation, not available message-edit behavior.
+Ordinary protocol-v1 history and messages remain unchanged.
+
 The browser persists the client-instance value under its active identity-scoped
 application storage and retains it in live client state. Invalid, unsafe, or
 overly permissive stored state disables durable negotiation instead of

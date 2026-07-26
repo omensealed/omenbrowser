@@ -4469,6 +4469,17 @@ mod tests {
         ));
         let session_open = decode_frame(&transport.sent_frames[0]).expect("session open");
         assert_eq!(session_open.op, ChatOp::SessionOpen);
+        let negotiation = crate::chat::protocol::parse_session_open_negotiation(&session_open.body)
+            .expect("valid negotiation")
+            .expect("explicit negotiation");
+        assert!(
+            !negotiation
+                .requested_capabilities
+                .iter()
+                .any(|capability| capability
+                    == crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY),
+            "dormant message revisions must not be requested"
+        );
         assert_eq!(
             crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
             Ok(Some(SessionOpenNegotiation {

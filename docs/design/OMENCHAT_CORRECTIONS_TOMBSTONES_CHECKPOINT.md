@@ -427,13 +427,20 @@ omenchatd state.
 
 ## Implementation sequence
 
-1. **This checkpoint.** Review and approve exact capability, operations,
+1. **Complete.** Review and approve exact capability, operations,
    request/result/event/snapshot shapes, authorization, state/audit schema,
    retention, mixed-version behavior, and the dependency on room-history
    retention. No production code or schema changes.
-2. Add shared bounded codecs, negotiation dependency validation, canonical
-   hash vectors, and byte-exact client/server fixtures. Keep the capability
-   unrequested and unaccepted.
+2. **Complete and dormant.** The shared crate reserves operations 35–39 and
+   owns bounded correction/tombstone request, acknowledgement, event, and
+   explicit-target snapshot codecs. It enforces exact action/replacement
+   agreement, nonzero identifiers, revision numbers 1–9, 256-target/entry
+   snapshots, canonical ordering, a 256 KiB replacement ceiling, and bounded
+   display metadata. Negotiation rejects `message-revisions-v1` without the
+   durable base. A stable canonical hash vector covers room, target, action,
+   and replacement; both independent frame codecs preserve the same byte-exact
+   correction fixture. The production client does not request the capability
+   and omenchatd deliberately omits it from acceptance.
 3. Add schema 6 migration, injected rollback tests, recovery allowlist updates,
    and the separate schema-5 downgrade-copy command. Keep the capability
    dormant.
@@ -454,24 +461,29 @@ reversible. No step may introduce automatic retry.
 
 ## Checkpoint validation
 
-On 2026-07-26 the unchanged shared protocol contract passed independently from
-both Cargo roots:
+On 2026-07-26 the shared protocol contract passed from the root, and focused
+client/server codec and dormancy tests passed from their independent products:
 
 ```bash
 cargo fmt --all -- --check
 cargo test --locked -p omenchat-protocol
+cargo test --locked --no-default-features --features desktop-product \
+  message_revision --lib
+cargo test --locked --no-default-features --features desktop-product \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity --lib
 (
   cd src/server
-  cargo test --locked -p omenchat-protocol
+  cargo test --locked --no-default-features --features server-headless \
+    message_revision --lib
 )
 git diff --check
 ```
 
-Each protocol invocation passed 28 tests. These results validate only the
-existing durable, negotiation, reply/mention, reaction, and compatibility
-foundation. No correction/tombstone codec, schema, migration, executor, client
-reducer, native package, mixed-version process, or live Reticulum test exists
-yet, and this checkpoint does not claim otherwise.
+The shared crate now passes 34 tests, including six focused revision/negotiation
+tests. The root fixture and server fixture/dormancy tests pass. These results
+validate only the dormant shared contract. No schema, migration, executor,
+client reducer, native package, mixed-version process, or live Reticulum
+revision test exists yet, and this checkpoint does not claim otherwise.
 
 ## Completion gate
 

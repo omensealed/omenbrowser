@@ -1201,6 +1201,15 @@ revision, reaction, and reply projection atomically. No capability, operation,
 schema, persistence, worker, timer, retry, or UI action is activated by this
 checkpoint.
 
+The next dormant slice reserves operations 35–39 in the shared protocol crate
+and adds exact bounded request, acknowledgement, event, and explicit-target
+snapshot codecs. Negotiation requires the durable base, canonical hashing
+covers every mutation field, and both independent frame codecs share one
+byte-exact correction fixture. Production request and acceptance lists remain
+unchanged and have direct regressions. There is still no schema, storage,
+executor, client state, UI action, worker, timer, retry, or capability
+activation.
+
 ### Unit 6F — pins and moderation audit history
 
 - Append bounded pin/unpin and moderation-audit events.

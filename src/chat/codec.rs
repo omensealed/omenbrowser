@@ -179,9 +179,12 @@ mod tests {
     use crate::chat::protocol::batch::{resource_offer_body, ResourceOffer};
     use crate::chat::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
-    use omenchat_protocol::fixtures::{reactions_v1, reply_mentions_v1, v0_6_0_1, v0_9_6_3};
+    use omenchat_protocol::fixtures::{
+        message_revisions_v1, reactions_v1, reply_mentions_v1, v0_6_0_1, v0_9_6_3,
+    };
     use omenchat_protocol::{
-        ReactionAction, ReactionRequest, ReactionToken, ReplyReference, RichMessageBody,
+        MessageRevisionAction, MessageRevisionRequest, ReactionAction, ReactionRequest,
+        ReactionToken, ReplyReference, RichMessageBody,
     };
 
     #[test]
@@ -328,6 +331,31 @@ mod tests {
         );
         assert_eq!(
             decode_frame(reactions_v1::ROOM_REACTION_ADD).expect("decode reaction"),
+            frame
+        );
+    }
+
+    #[test]
+    fn message_revisions_v1_fixture_is_bidirectionally_exact_and_dormant() {
+        let frame = Frame::new(
+            ChatOp::RoomMessageRevision,
+            9,
+            Some(7),
+            MessageRevisionRequest {
+                target_event_id: 42,
+                action: MessageRevisionAction::Correct,
+                replacement: Some("edited".into()),
+            }
+            .into_frame_body()
+            .expect("bounded correction"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode correction"),
+            message_revisions_v1::ROOM_MESSAGE_CORRECTION
+        );
+        assert_eq!(
+            decode_frame(message_revisions_v1::ROOM_MESSAGE_CORRECTION).expect("decode correction"),
             frame
         );
     }

@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    ClientInstanceId, FrameBody, FrameValue, DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
-    REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
+    ClientInstanceId, FrameBody, FrameValue, DURABLE_MUTATION_CAPABILITY,
+    MESSAGE_REVISIONS_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 
 pub const SESSION_CAPABILITY_MAX_ITEMS: usize = 64;
@@ -202,6 +202,11 @@ fn validate_capability_list(capabilities: &[String]) -> Result<(), SessionNegoti
     if unique.contains(REACTIONS_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
         return Err(SessionNegotiationError::MissingReactionsDependency);
     }
+    if unique.contains(MESSAGE_REVISIONS_CAPABILITY)
+        && !unique.contains(DURABLE_MUTATION_CAPABILITY)
+    {
+        return Err(SessionNegotiationError::MissingMessageRevisionsDependency);
+    }
     Ok(())
 }
 
@@ -243,6 +248,8 @@ pub enum SessionNegotiationError {
     MissingCapabilityDependency,
     #[error("{REACTIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
     MissingReactionsDependency,
+    #[error("{MESSAGE_REVISIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
+    MissingMessageRevisionsDependency,
     #[error(transparent)]
     Durable(#[from] crate::DurableMutationError),
 }
@@ -410,6 +417,27 @@ mod tests {
             accepted_capabilities: vec![
                 DURABLE_MUTATION_CAPABILITY.into(),
                 REACTIONS_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("dependent capability set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn message_revisions_capability_requires_durable_mutations() {
+        let missing_base = SessionAcceptNegotiation {
+            accepted_capabilities: vec![MESSAGE_REVISIONS_CAPABILITY.into()],
+        };
+        assert_eq!(
+            with_session_accept_negotiation(current_session_accept(), &missing_base),
+            Err(SessionNegotiationError::MissingMessageRevisionsDependency)
+        );
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                MESSAGE_REVISIONS_CAPABILITY.into(),
             ],
         };
         let body = with_session_accept_negotiation(current_session_accept(), &complete)

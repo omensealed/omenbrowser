@@ -4,11 +4,13 @@
 //! or server policy.
 
 mod durable;
+mod message_revisions;
 mod negotiation;
 mod reactions;
 mod rich_message;
 
 pub use durable::*;
+pub use message_revisions::*;
 pub use negotiation::*;
 pub use reactions::*;
 pub use rich_message::*;
@@ -56,6 +58,11 @@ pub enum ChatOp {
     UserDelta = 32,
     RoomDelta = 33,
     RoleDelta = 34,
+    RoomMessageRevision = 35,
+    MessageRevisionAck = 36,
+    MessageRevisionEvent = 37,
+    MessageRevisionSnapshotInline = 38,
+    MessageRevisionSnapshotResource = 39,
     HistoryBefore = 40,
     HistoryInline = 41,
     HistoryResourceOffer = 42,
@@ -108,6 +115,11 @@ impl TryFrom<u64> for ChatOp {
             32 => Ok(Self::UserDelta),
             33 => Ok(Self::RoomDelta),
             34 => Ok(Self::RoleDelta),
+            35 => Ok(Self::RoomMessageRevision),
+            36 => Ok(Self::MessageRevisionAck),
+            37 => Ok(Self::MessageRevisionEvent),
+            38 => Ok(Self::MessageRevisionSnapshotInline),
+            39 => Ok(Self::MessageRevisionSnapshotResource),
             40 => Ok(Self::HistoryBefore),
             41 => Ok(Self::HistoryInline),
             42 => Ok(Self::HistoryResourceOffer),
@@ -241,6 +253,11 @@ pub mod fixtures {
             b"\x96\x01\x19\x00\x08\x07\x94\xabreaction-v1\x2a\xa5heart\x01";
     }
 
+    pub mod message_revisions_v1 {
+        pub const ROOM_MESSAGE_CORRECTION: &[u8] =
+            b"\x96\x01\x23\x00\x09\x07\x94\xb3message-revision-v1\x2a\x01\xa6edited";
+    }
+
     pub mod reply_mentions_v1 {
         pub const ROOM_MESSAGE: &[u8] =
             b"\x96\x01\x14\x00\x07\x07\x94\xa5hello\xb1reply-mentions-v1\x92\x07\x2a\x92\x02\x09";
@@ -273,11 +290,14 @@ mod tests {
         assert_eq!(ChatOp::RoomMessage as u16, 20);
         assert_eq!(ChatOp::RoomReaction as u16, 25);
         assert_eq!(ChatOp::ReactionSnapshotResource as u16, 29);
+        assert_eq!(ChatOp::RoomMessageRevision as u16, 35);
+        assert_eq!(ChatOp::MessageRevisionSnapshotResource as u16, 39);
         assert_eq!(ChatOp::HistoryResourceOffer as u16, 42);
         assert_eq!(ChatErrorCode::MalformedFrame as u16, 1007);
         assert_eq!(ChatErrorCode::DurableMutationNotNegotiated as u16, 1011);
         assert_eq!(DURABLE_MUTATION_CAPABILITY, "durable-mutations-v1");
         assert_eq!(REACTIONS_CAPABILITY, "reactions-v1");
+        assert_eq!(MESSAGE_REVISIONS_CAPABILITY, "message-revisions-v1");
         assert_eq!(DURABLE_NOTICE_ACK_CAPABILITY, "durable-room-notice-ack-v1");
         assert_eq!(ChatErrorCode::DurableMutationMalformed as u16, 1012);
         assert_eq!(ChatErrorCode::DurableMutationConflict as u16, 1013);

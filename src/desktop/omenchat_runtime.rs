@@ -558,6 +558,15 @@ pub(in crate::desktop) fn omenchat_monitor_frame_label(
         crate::chat::protocol::ChatOp::UserDelta => "user delta",
         crate::chat::protocol::ChatOp::RoomDelta => "room delta",
         crate::chat::protocol::ChatOp::RoleDelta => "role delta",
+        crate::chat::protocol::ChatOp::RoomMessageRevision => "message revision",
+        crate::chat::protocol::ChatOp::MessageRevisionAck => "message revision ack",
+        crate::chat::protocol::ChatOp::MessageRevisionEvent => "message revision event",
+        crate::chat::protocol::ChatOp::MessageRevisionSnapshotInline => {
+            "message revision snapshot inline"
+        }
+        crate::chat::protocol::ChatOp::MessageRevisionSnapshotResource => {
+            "message revision snapshot resource"
+        }
         crate::chat::protocol::ChatOp::HistoryBefore => "history before",
         crate::chat::protocol::ChatOp::HistoryInline => "history inline",
         crate::chat::protocol::ChatOp::HistoryResourceOffer => "history resource",

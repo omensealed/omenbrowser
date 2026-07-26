@@ -4182,6 +4182,32 @@ OMENchat session/timeline model. The omenchatd TUI is server administration and
 has no client-local user identity. These commands therefore do not claim a TUI
 reaction rendering path.
 
+## Dormant OMENchat message-revision contract
+
+The shared correction/tombstone contract reserves operations 35–39 without
+requesting or accepting `message-revisions-v1`:
+
+```bash
+cargo test --locked -p omenchat-protocol
+cargo test --locked --no-default-features --features desktop-product \
+  message_revision --lib
+cargo test --locked --no-default-features --features desktop-product \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity --lib
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    message_revision --lib
+)
+```
+
+The shared tests cover exact request/action/replacement shapes, bounds,
+acknowledgement/event agreement, canonical explicit-target snapshots,
+capability dependency, and a stable durable hash. Both independent frame
+codecs preserve the same correction bytes. Client and server tests prove the
+capability remains absent from production request/accept negotiation. These
+tests do not claim schema, persistence, execution, presentation,
+mixed-version-process, or live Reticulum support.
+
 ## Bounded local-history desktop search
 
 These focused desktop-product tests exercise explicit-submit state, the
