@@ -161,6 +161,15 @@ ordering. Unlike the normal recovery loader, malformed JSON returns an error
 without creating or pruning corrupt-file backups. Search therefore cannot
 mutate message storage merely by reading it.
 
+`search_persisted_local_history` now combines the loaders behind one
+UI-independent operation. A source-specific query receives the full 8,192-item
+scan budget. A combined query reserves 4,096 items for each source so a large
+LXMF thread cannot starve OMENchat, or vice versa. Sources are loaded and
+reduced sequentially, results share the existing 128-item cap and deterministic
+newest-first ordering, and opaque peer/server keys remain typed routing data
+rather than searchable or presented text. A temporary-root test covers both
+stores and proves public labels/text remain separate from routing identifiers.
+
 Next, add the owned one-in-flight store-backed blocking task and a compact
 search surface without persistence or schema changes. UI activation is not
 complete until stale-result, cancellation/supersession, focus, jump, and

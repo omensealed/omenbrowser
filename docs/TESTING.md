@@ -580,12 +580,16 @@ cargo test --locked --no-default-features --features desktop-product \
   history_search_loader
 cargo test --locked --no-default-features --features desktop-product \
   read_only_thread_listing
+cargo test --locked --no-default-features --features desktop-product \
+  persisted_search_combines_bounded_stores
 ```
 
 These tests use unique temporary paths. They verify read access, query-only
 write rejection, non-creation of a missing database and parent directory, and
 newest-first item/byte-bounded event loading. The LXMF fixture additionally
 proves malformed JSON fails without creating recovery backups.
+The combined fixture searches both isolated stores, verifies global ordering,
+and ensures opaque routing keys never become presentation or searchable text.
 
 Current-product NomadNet page request qualification:
 

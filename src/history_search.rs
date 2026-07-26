@@ -1,7 +1,13 @@
 use thiserror::Error;
 
-use crate::messaging::{Conversation, DeliveryState, MessageSummary};
+use crate::messaging::{
+    Conversation, ConversationThread, DeliveryState, MessageStore, MessageSummary,
+};
 
+#[cfg(feature = "chat-client")]
+use crate::chat::store::{
+    SqliteChatStore, StoredChatHistoryEvent, CHAT_HISTORY_SEARCH_READ_MAX_BYTES,
+};
 #[cfg(feature = "chat-client")]
 use crate::chat::{ChatEvent, ChatEventKind, ChatSessionView};
 
@@ -84,6 +90,16 @@ pub enum LocalHistoryResultKey {
         room_id: u32,
         event_id: u64,
     },
+    LxmfStored {
+        peer_key: String,
+        message_index: usize,
+    },
+    #[cfg(feature = "chat-client")]
+    OmenChatStored {
+        server_key: String,
+        room_id: u32,
+        event_id: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,10 +122,12 @@ pub struct LocalHistorySearchPage {
     pub result_limit_reached: bool,
 }
 
-#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum LocalHistorySearchError {
     #[error("local history search query exceeds its bounds")]
     InvalidQuery,
+    #[error("local history search storage failed: {0}")]
+    Storage(String),
 }
 
 pub fn search_local_history<'a>(
@@ -122,6 +140,7 @@ pub fn search_local_history<'a>(
         query,
         terms: &terms,
         page: LocalHistorySearchPage::default(),
+        scan_max_items: LOCAL_HISTORY_SEARCH_SCAN_MAX_ITEMS,
     };
     for input in inputs {
         match input {
@@ -171,15 +190,72 @@ pub fn search_local_history<'a>(
     Ok(search.page)
 }
 
+pub fn search_persisted_local_history(
+    message_store: &MessageStore,
+    #[cfg(feature = "chat-client")] omenchat_store_path: Option<&std::path::Path>,
+    query: &LocalHistorySearchQuery,
+) -> Result<LocalHistorySearchPage, LocalHistorySearchError> {
+    query.validate()?;
+    let terms = query.text.split_whitespace().collect::<Vec<_>>();
+    let per_source_limit = if query.source == LocalHistorySourceFilter::All {
+        LOCAL_HISTORY_SEARCH_SCAN_MAX_ITEMS / 2
+    } else {
+        LOCAL_HISTORY_SEARCH_SCAN_MAX_ITEMS
+    };
+    let mut search = BoundedSearch {
+        query,
+        terms: &terms,
+        page: LocalHistorySearchPage::default(),
+        scan_max_items: per_source_limit,
+    };
+
+    if matches!(
+        query.source,
+        LocalHistorySourceFilter::All | LocalHistorySourceFilter::Lxmf
+    ) {
+        let threads = message_store
+            .list_threads_read_only()
+            .map_err(|error| LocalHistorySearchError::Storage(error.to_string()))?;
+        search.consider_stored_lxmf_threads(&threads);
+    }
+
+    #[cfg(feature = "chat-client")]
+    if matches!(
+        query.source,
+        LocalHistorySourceFilter::All | LocalHistorySourceFilter::OmenChat
+    ) {
+        if let Some(path) = omenchat_store_path {
+            search.scan_max_items = search
+                .page
+                .scanned_items
+                .saturating_add(per_source_limit)
+                .min(LOCAL_HISTORY_SEARCH_SCAN_MAX_ITEMS);
+            let store = SqliteChatStore::open_read_only(path)
+                .map_err(|error| LocalHistorySearchError::Storage(error.to_string()))?;
+            let stored = store
+                .latest_history_search_events(per_source_limit, CHAT_HISTORY_SEARCH_READ_MAX_BYTES)
+                .map_err(|error| LocalHistorySearchError::Storage(error.to_string()))?;
+            search.consider_stored_omenchat_events(&stored);
+            if stored.len() == per_source_limit {
+                search.page.scan_limit_reached = true;
+            }
+        }
+    }
+
+    search.finish();
+    Ok(search.page)
+}
+
 struct BoundedSearch<'a, 'q> {
     query: &'q LocalHistorySearchQuery,
     terms: &'a [&'q str],
     page: LocalHistorySearchPage,
+    scan_max_items: usize,
 }
 
 impl BoundedSearch<'_, '_> {
     fn admit_scan(&mut self) -> bool {
-        if self.page.scanned_items >= LOCAL_HISTORY_SEARCH_SCAN_MAX_ITEMS {
+        if self.page.scanned_items >= self.scan_max_items {
             self.page.scan_limit_reached = true;
             return false;
         }
@@ -187,10 +263,44 @@ impl BoundedSearch<'_, '_> {
         true
     }
 
+    fn consider_stored_lxmf_threads(&mut self, threads: &[ConversationThread]) {
+        for thread in threads {
+            for (message_index, message) in thread.messages.iter().enumerate().rev() {
+                if !self.admit_scan() {
+                    return;
+                }
+                self.consider_lxmf_message(
+                    &thread.peer_label,
+                    LocalHistoryResultKey::LxmfStored {
+                        peer_key: thread.peer_hash.clone(),
+                        message_index,
+                    },
+                    message,
+                );
+            }
+        }
+    }
+
     fn consider_lxmf(
         &mut self,
         conversation: &Conversation,
         message_index: usize,
+        message: &MessageSummary,
+    ) {
+        self.consider_lxmf_message(
+            &conversation.peer_label,
+            LocalHistoryResultKey::Lxmf {
+                conversation_id: conversation.id,
+                message_index,
+            },
+            message,
+        );
+    }
+
+    fn consider_lxmf_message(
+        &mut self,
+        peer_label: &str,
+        key: LocalHistoryResultKey,
         message: &MessageSummary,
     ) {
         let at_unix = finite_timestamp(message.timestamp);
@@ -213,7 +323,7 @@ impl BoundedSearch<'_, '_> {
                 bounded_search_text(&attachment.name, LOCAL_HISTORY_SEARCH_TEXT_MAX_BYTES)
             });
         let searchable = [
-            conversation.peer_label.as_str(),
+            peer_label,
             message.peer_label.as_str(),
             message.title.as_str(),
             message.content.as_str(),
@@ -242,20 +352,33 @@ impl BoundedSearch<'_, '_> {
         };
         self.push(LocalHistorySearchResult {
             source: LocalHistorySource::Lxmf,
-            key: LocalHistoryResultKey::Lxmf {
-                conversation_id: conversation.id,
-                message_index,
-            },
+            key,
             sender: bounded_search_text(sender, LOCAL_HISTORY_SEARCH_TEXT_MAX_BYTES),
-            context: bounded_search_text(
-                &conversation.peer_label,
-                LOCAL_HISTORY_SEARCH_TEXT_MAX_BYTES,
-            ),
+            context: bounded_search_text(peer_label, LOCAL_HISTORY_SEARCH_TEXT_MAX_BYTES),
             excerpt: bounded_search_text(excerpt, LOCAL_HISTORY_SEARCH_TEXT_MAX_BYTES),
             attachment_name,
             at_unix,
             delivery: Some(delivery),
         });
+    }
+
+    #[cfg(feature = "chat-client")]
+    fn consider_stored_omenchat_events(&mut self, stored: &[StoredChatHistoryEvent]) {
+        for stored in stored {
+            if !self.admit_scan() {
+                return;
+            }
+            self.consider_omenchat_event(
+                &stored.server_display_name,
+                &stored.room_name,
+                LocalHistoryResultKey::OmenChatStored {
+                    server_key: stored.event.server_id.clone(),
+                    room_id: stored.event.room_id,
+                    event_id: stored.event.event_id,
+                },
+                &stored.event,
+            );
+        }
     }
 
     #[cfg(feature = "chat-client")]
@@ -265,6 +388,26 @@ impl BoundedSearch<'_, '_> {
             .iter()
             .find(|room| room.room_id == event.room_id)
             .unwrap_or(&session.active_room);
+        self.consider_omenchat_event(
+            &session.server.display_name,
+            &room.name,
+            LocalHistoryResultKey::OmenChat {
+                session_id: session.session_id,
+                room_id: event.room_id,
+                event_id: event.event_id,
+            },
+            event,
+        );
+    }
+
+    #[cfg(feature = "chat-client")]
+    fn consider_omenchat_event(
+        &mut self,
+        server_display_name: &str,
+        room_name: &str,
+        key: LocalHistoryResultKey,
+        event: &ChatEvent,
+    ) {
         let sender = event.actor_display_name.as_deref().unwrap_or("System");
         let (body, attachment) = match &event.kind {
             ChatEventKind::Message { body }
@@ -274,33 +417,24 @@ impl BoundedSearch<'_, '_> {
             | ChatEventKind::System { body } => (body.as_str(), None),
             ChatEventKind::Upload { filename, .. } => (filename.as_str(), Some(filename.as_str())),
         };
-        let searchable = [
-            session.server.display_name.as_str(),
-            room.name.as_str(),
-            sender,
-            body,
-        ];
+        let searchable = [server_display_name, room_name, sender, body];
         let attachment_fields = attachment.into_iter().collect::<Vec<_>>();
         if !self.matches_common(
             event.at_unix,
             &searchable,
             &attachment_fields,
             Some(sender),
-            Some(&room.name),
+            Some(room_name),
             None,
         ) {
             return;
         }
         self.push(LocalHistorySearchResult {
             source: LocalHistorySource::OmenChat,
-            key: LocalHistoryResultKey::OmenChat {
-                session_id: session.session_id,
-                room_id: event.room_id,
-                event_id: event.event_id,
-            },
+            key,
             sender: bounded_search_text(sender, LOCAL_HISTORY_SEARCH_TEXT_MAX_BYTES),
             context: bounded_search_text(
-                &format!("#{} · {}", room.name, session.server.display_name),
+                &format!("#{room_name} · {server_display_name}"),
                 LOCAL_HISTORY_SEARCH_TEXT_MAX_BYTES,
             ),
             excerpt: bounded_search_text(body, LOCAL_HISTORY_SEARCH_TEXT_MAX_BYTES),
@@ -308,6 +442,16 @@ impl BoundedSearch<'_, '_> {
                 .map(|name| bounded_search_text(name, LOCAL_HISTORY_SEARCH_TEXT_MAX_BYTES)),
             at_unix: event.at_unix,
             delivery: None,
+        });
+    }
+
+    fn finish(&mut self) {
+        self.page.results.sort_by(|left, right| {
+            right
+                .at_unix
+                .cmp(&left.at_unix)
+                .then_with(|| left.context.cmp(&right.context))
+                .then_with(|| left.excerpt.cmp(&right.excerpt))
         });
     }
 
@@ -598,6 +742,92 @@ mod tests {
             .expect("opaque search");
             assert!(page.results.is_empty(), "{opaque} must not be searchable");
         }
+    }
+
+    #[cfg(feature = "chat-client")]
+    #[test]
+    fn persisted_search_combines_bounded_stores_with_opaque_routing_keys() {
+        use crate::chat::store::{ChatStore, SqliteChatStore};
+        use crate::chat::{ChatEvent, ChatEventKind, ChatRoomSummary, ChatServerSummary};
+
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-persisted-history-search-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let messages = root.join("messages");
+        let chat_path = root.join("chat.sqlite");
+        let message_store = MessageStore::new(messages).expect("message store");
+        message_store
+            .append(message(10.0, "LXMF", "shared search phrase"))
+            .expect("LXMF message");
+        {
+            let mut chat = SqliteChatStore::open(&chat_path).expect("chat store");
+            chat.save_server(ChatServerSummary {
+                server_id: "opaque-server-key".into(),
+                destination: "opaque-destination".into(),
+                display_name: "Field Server".into(),
+            })
+            .expect("server");
+            chat.save_room(ChatRoomSummary {
+                server_id: "opaque-server-key".into(),
+                room_id: 2,
+                name: "maps".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            })
+            .expect("room");
+            chat.append_events(vec![ChatEvent {
+                server_id: "opaque-server-key".into(),
+                room_id: 2,
+                event_id: 44,
+                actor_user_id: Some(5),
+                actor_display_name: Some("Bob".into()),
+                at_unix: 20,
+                kind: ChatEventKind::Message {
+                    body: "shared search phrase".into(),
+                },
+            }])
+            .expect("event");
+        }
+
+        let page = search_persisted_local_history(
+            &message_store,
+            Some(&chat_path),
+            &LocalHistorySearchQuery {
+                text: "shared phrase".into(),
+                ..LocalHistorySearchQuery::default()
+            },
+        )
+        .expect("persisted search");
+        assert_eq!(page.results.len(), 2);
+        assert_eq!(page.results[0].source, LocalHistorySource::OmenChat);
+        assert!(matches!(
+            &page.results[0].key,
+            LocalHistoryResultKey::OmenChatStored {
+                server_key,
+                room_id: 2,
+                event_id: 44
+            } if server_key == "opaque-server-key"
+        ));
+        assert!(matches!(
+            &page.results[1].key,
+            LocalHistoryResultKey::LxmfStored {
+                peer_key,
+                message_index: 0
+            } if peer_key == "opaque-peer-hash"
+        ));
+        assert!(page.results.iter().all(|result| {
+            !result.context.contains("opaque")
+                && !result.excerpt.contains("opaque")
+                && !result.sender.contains("opaque")
+        }));
+        drop(message_store);
+        std::fs::remove_dir_all(root).expect("remove search root");
     }
 
     #[test]
