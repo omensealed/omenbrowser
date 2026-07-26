@@ -243,9 +243,17 @@ preview and routes the plain destination plus bounded display hint through the
 existing OMENchat Link boundary. Legacy plain links retain their existing
 behavior.
 
-The suggested room is deliberately not joined yet. The card states that it
-must be selected after the authenticated server catalog loads, and confirmation
-does not claim otherwise. A later subunit must correlate the suggestion to the
-opened session, require an exact returned numeric room ID, and clear it on
-failure/cancellation/replacement before automatic selection can be enabled.
-Micron enhanced links and QR generation/import are also not active.
+The deferred-room half of step 3 is now active. Confirmation may own one
+in-memory numeric room suggestion, bound first to the exact normalized
+destination and then to the exact opened session. It is consumed only by that
+session's authenticated bounded `RoomsUpdated` catalog and only when the
+catalog contains the exact numeric room ID; the existing join owner receives
+the returned room name. A different session cannot consume it. A missing room,
+open/handshake error, close, explicit cancellation, or a replacement invitation
+clears it. Existing already-authenticated live sessions may use their retained
+authenticated catalog immediately. Nothing is persisted and no mutation is
+retried.
+
+Focused desktop-dev tests cover the exact match, cross-session isolation,
+catalog mismatch, cancellation, and replacement paths. Micron enhanced links
+and QR generation/import remain inactive.

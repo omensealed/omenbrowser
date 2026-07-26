@@ -159,6 +159,9 @@ impl DesktopApp {
         let opened = match result {
             Ok(opened) => opened,
             Err(error) => {
+                self.clear_omenchat_invitation_room_for_destination(
+                    descriptor.server_destination.as_str(),
+                );
                 let Some(session_id) = self.try_open_omenchat_status_session(
                     descriptor,
                     omenchat_live_open_error_status(&error),
@@ -178,6 +181,7 @@ impl DesktopApp {
                 return Task::none();
             }
         };
+        let server_destination = descriptor.server_destination.clone();
         let mut transport = DesktopOmenChatTransport::new(opened.link_id, current_epoch_ms());
         let events = crate::chat::live::handle_live_request(
             &mut self.omenchat.chat_client,
@@ -190,6 +194,7 @@ impl DesktopApp {
             ChatClientEvent::ServerOpened { session_id, .. } => Some(*session_id),
             _ => None,
         }) else {
+            self.clear_omenchat_invitation_room_for_destination(&server_destination);
             self.app.status.task = "OMENchat live session failed to initialize".into();
             return Task::none();
         };
@@ -231,6 +236,7 @@ impl DesktopApp {
         let opened = match result {
             Ok(opened) => opened,
             Err(error) => {
+                self.clear_omenchat_invitation_room_for_session(session_id);
                 let (attempts, retry_after) =
                     self.schedule_omenchat_reconnect(session_id, current_epoch_ms());
                 let status = if retry_after.is_none() {

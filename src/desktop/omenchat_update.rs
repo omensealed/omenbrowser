@@ -6,6 +6,7 @@ use crate::chat::protocol::{RoomId, RICH_MESSAGE_MAX_MENTIONS};
 use crate::chat::{ChatEventKind, ChatSessionId};
 use crate::micron::LinkAction;
 
+use super::omenchat_desktop_state::PendingOmenChatInvitationRoom;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use super::OmenChatTransportCompletionMessage;
 use super::{
@@ -32,6 +33,7 @@ impl DesktopApp {
             }
             Message::OmenChat(OmenChatMessage::CancelInvitation) => {
                 self.omenchat.omenchat_invitation_preview.cancel();
+                self.omenchat.omenchat_invitation_room = None;
                 self.app.status.task =
                     "OMENchat invitation cancelled; no connection was opened".into();
                 Ok(Task::none())
@@ -204,6 +206,7 @@ impl DesktopApp {
     pub(super) fn update_open_omenchat_server_entry(&mut self) -> Task<Message> {
         let entered = self.omenchat.omenchat_server_entry.trim();
         if entered.starts_with("omenchat://") && entered.contains('?') {
+            self.omenchat.omenchat_invitation_room = None;
             match self
                 .omenchat
                 .omenchat_invitation_preview
@@ -238,6 +241,14 @@ impl DesktopApp {
                 "OMENchat invitation cannot be confirmed; review its identity evidence".into();
             return Task::none();
         };
+        self.omenchat.omenchat_invitation_room =
+            invitation
+                .room_id
+                .map(|room_id| PendingOmenChatInvitationRoom {
+                    server_destination: invitation.server_destination.clone(),
+                    room_id,
+                    session_id: None,
+                });
         self.omenchat.omenchat_server_entry.clear();
         let mut fields = Vec::new();
         if let Some(label) = invitation.display_label {
@@ -245,14 +256,16 @@ impl DesktopApp {
         }
         if invitation.room_id.is_some() {
             self.app.status.task =
-                "opening OMENchat invitation; select the suggested room after its catalog loads"
-                    .into();
+                "opening OMENchat invitation; waiting for its authenticated room catalog".into();
         }
-        self.open_omenchat_link(LinkAction {
+        let task = self.open_omenchat_link(LinkAction {
             target: format!("omenchat://{}", invitation.server_destination),
             fields,
-        })
-        .unwrap_or_else(Task::none)
+        });
+        if task.is_none() {
+            self.omenchat.omenchat_invitation_room = None;
+        }
+        task.unwrap_or_else(Task::none)
     }
 
     pub(super) fn update_toggle_omenchat_rooms(&mut self) {

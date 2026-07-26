@@ -4220,8 +4220,21 @@ percent/UTF-8 data, unsupported or duplicate fields, authority tricks, and
 secret-field omission. They also cover all Directory identity-evidence classes,
 conflicting duplicate precedence, one-item preview replacement, invalid-input
 preservation, explicit cancellation, and conflict-blocked confirmation.
-Live Link completion, deferred room selection, enhanced Micron links, and QR
-presentation require separate tests before activation.
+Desktop preview confirmation and deferred room admission use the development
+profile because their deterministic session tests exercise the mock runtime:
+
+```bash
+cargo test --locked --no-default-features --features desktop-dev \
+  --lib invitation_room
+cargo test --locked --no-default-features --features desktop-dev \
+  --lib cancelling_or_replacing_an_invitation
+```
+
+These tests prove exact destination/session binding, exact numeric catalog
+match, cross-session isolation, mismatch clearing, cancellation, and
+replacement. Native live smoke must still confirm a real authenticated catalog
+and join; enhanced Micron links and QR presentation require separate tests
+before activation.
 
 The desktop quick-open activation adds focused tests proving parse-only input
 does not create a session or mutate Directory state, a conflicting fingerprint

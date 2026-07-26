@@ -108,6 +108,25 @@ impl DesktopApp {
             .find(|session| session.server.destination == descriptor.server_destination)
             .map(|session| session.session_id)
         {
+            self.bind_omenchat_invitation_room(session_id, descriptor.server_destination.as_str());
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            if self
+                .omenchat
+                .omenchat_live_transports
+                .contains_key(&session_id)
+                && matches!(
+                    self.omenchat_connection_state(session_id),
+                    crate::chat::ChatConnectionState::Joined
+                )
+            {
+                let rooms = self
+                    .omenchat
+                    .chat_client
+                    .session(session_id)
+                    .map(|session| session.rooms.clone())
+                    .unwrap_or_default();
+                self.consume_omenchat_invitation_room_catalog(session_id, &rooms);
+            }
             self.omenchat.chat_drafts.entry(session_id).or_default();
             self.ensure_omenchat_bottom_entry(session_id);
             self.place_omenchat_session_preferring_active_blank(session_id);
@@ -159,14 +178,17 @@ impl DesktopApp {
             );
             return Some(self.open_live_omenchat_task(descriptor));
         }
+        let server_destination = descriptor.server_destination.clone();
         let events = self.handle_omenchat_request(ChatClientRequest::OpenServer(descriptor));
         let Some(session_id) = events.iter().find_map(|event| match event {
             ChatClientEvent::ServerOpened { session_id, .. } => Some(*session_id),
             _ => None,
         }) else {
+            self.clear_omenchat_invitation_room_for_destination(&server_destination);
             self.app.status.task = "failed to open OMENchat descriptor".into();
             return Some(Task::none());
         };
+        self.bind_omenchat_invitation_room(session_id, &server_destination);
         self.omenchat.chat_drafts.entry(session_id).or_default();
         self.remember_omenchat_bottom(session_id);
         self.persist_omenchat_session(session_id);

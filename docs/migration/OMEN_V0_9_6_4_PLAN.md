@@ -1135,11 +1135,18 @@ quick-open surface. Parsing an enhanced invitation opens no connection and
 does not mutate Directory/trust state. The card renders bounded public fields
 and exact identity evidence; conflicts allow cancellation only. Explicit Open
 consumes the preview and routes a plain destination through the existing
-OMENchat Link owner. Legacy plain links remain unchanged. Suggested rooms are
-shown but remain manual until a follow-up can validate them against the
-authenticated returned catalog; enhanced Micron links and QR remain inactive.
-No new connection owner, retry, worker, timer, queue, persistence, wire,
-schema, capability, or dependency was added.
+OMENchat Link owner. Legacy plain links remain unchanged.
+
+The fourth slice completes deferred room admission. One ephemeral suggestion
+is bound to the exact destination/session and is consumed only when that
+session's authenticated bounded room catalog contains the exact numeric room
+ID. Cross-session catalogs cannot consume it. Catalog mismatch, open or
+handshake failure, session close, cancellation, and replacement clear it.
+Existing authenticated sessions can use their already-returned catalog. The
+normal join owner remains authoritative, uncertain mutations are not retried,
+and enhanced Micron links and QR remain inactive. No new connection owner,
+retry, worker, timer, queue, persistence, wire, schema, capability, or
+dependency was added.
 
 ### Unit 6E — corrections and delete tombstones
 

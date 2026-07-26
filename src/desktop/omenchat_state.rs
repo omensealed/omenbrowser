@@ -463,6 +463,12 @@ impl DesktopApp {
     ) {
         for event in events {
             match event {
+                ChatClientEvent::ServerOpened { session_id, server } => {
+                    self.bind_omenchat_invitation_room(*session_id, &server.destination);
+                }
+                ChatClientEvent::RoomsUpdated { session_id, rooms } => {
+                    self.consume_omenchat_invitation_room_catalog(*session_id, rooms);
+                }
                 ChatClientEvent::RoomJoined { session_id, .. } => {
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     self.set_omenchat_connection_state(
@@ -735,6 +741,7 @@ impl DesktopApp {
                     session_id: Some(session_id),
                     message,
                 } => {
+                    self.clear_omenchat_invitation_room_for_session(*session_id);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     if matches!(
                         self.omenchat_connection_state(*session_id),
@@ -752,6 +759,88 @@ impl DesktopApp {
                 }
                 _ => {}
             }
+        }
+    }
+
+    pub(in crate::desktop) fn bind_omenchat_invitation_room(
+        &mut self,
+        session_id: ChatSessionId,
+        server_destination: &str,
+    ) {
+        let Some(pending) = self.omenchat.omenchat_invitation_room.as_mut() else {
+            return;
+        };
+        if pending
+            .server_destination
+            .eq_ignore_ascii_case(server_destination)
+            && pending
+                .session_id
+                .is_none_or(|bound_session| bound_session == session_id)
+        {
+            pending.session_id = Some(session_id);
+        }
+    }
+
+    pub(in crate::desktop) fn clear_omenchat_invitation_room_for_destination(
+        &mut self,
+        server_destination: &str,
+    ) {
+        if self
+            .omenchat
+            .omenchat_invitation_room
+            .as_ref()
+            .is_some_and(|pending| {
+                pending
+                    .server_destination
+                    .eq_ignore_ascii_case(server_destination)
+            })
+        {
+            self.omenchat.omenchat_invitation_room = None;
+        }
+    }
+
+    pub(in crate::desktop) fn clear_omenchat_invitation_room_for_session(
+        &mut self,
+        session_id: ChatSessionId,
+    ) {
+        if self
+            .omenchat
+            .omenchat_invitation_room
+            .as_ref()
+            .is_some_and(|pending| pending.session_id == Some(session_id))
+        {
+            self.omenchat.omenchat_invitation_room = None;
+        }
+    }
+
+    pub(in crate::desktop) fn consume_omenchat_invitation_room_catalog(
+        &mut self,
+        session_id: ChatSessionId,
+        rooms: &[crate::chat::ChatRoomSummary],
+    ) {
+        let Some(pending) = self.omenchat.omenchat_invitation_room.as_ref() else {
+            return;
+        };
+        if pending.session_id != Some(session_id) {
+            return;
+        }
+        let room_id = pending.room_id;
+        let room_name = rooms
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .map(|room| room.name.clone());
+        self.omenchat.omenchat_invitation_room = None;
+        if let Some(room_name) = room_name {
+            self.join_omenchat_room(session_id, room_name.clone());
+            self.app.status.task =
+                format!("opened OMENchat invitation room #{room_name} ({room_id})");
+        } else {
+            self.set_omenchat_session_status(
+                session_id,
+                format!("invitation room {room_id} was not present in the authenticated catalog"),
+            );
+            self.app.status.task =
+                format!("OMENchat invitation room {room_id} is unavailable on this server");
         }
     }
 }
