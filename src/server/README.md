@@ -465,8 +465,11 @@ the same durable transaction that inserts the event and replay result. Its
 single event encoder preserves metadata across fan-out, inline history, and
 resource history; restart replay cannot duplicate the event. Version 5 adds
 constrained active-reaction and append-only reaction-audit tables plus their
-target/retention indexes. `reactions-v1` remains unadvertised and no live
-request reads or writes those tables.
+target/retention indexes. A dormant transactionally durable executor now
+implements bounded add/remove state, exact replay/conflict handling,
+incremental audit retention, authoritative inline/resource snapshots, and
+capability-scoped live fan-out. `reactions-v1` remains unadvertised and
+unaccepted, so negotiated production clients cannot reach that executor yet.
 The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental

@@ -6,7 +6,7 @@ use crate::protocol::{
     parse_session_accept_negotiation, parse_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
     DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG, DURABLE_NOTICE_ACK_CAPABILITY,
-    REPLY_MENTIONS_CAPABILITY,
+    REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 use crate::session::{DurableMutationPeerContext, ServerPeer, SessionEngine};
 use crate::transport::{
@@ -152,6 +152,7 @@ struct FrameDispatchOutcome {
     accepted_client_instance_id: Option<ClientInstanceId>,
     durable_notice_ack_accepted: bool,
     reply_mentions_accepted: bool,
+    reactions_accepted: bool,
     part_succeeded: bool,
     moderation_disconnect_succeeded: bool,
 }
@@ -162,6 +163,7 @@ struct DurableSessionBinding {
     client_instance_id: ClientInstanceId,
     durable_notice_ack: bool,
     reply_mentions: bool,
+    reactions: bool,
 }
 
 impl DurableSessionBinding {
@@ -172,6 +174,7 @@ impl DurableSessionBinding {
             client_instance_id,
             durable_notice_ack: false,
             reply_mentions: false,
+            reactions: false,
         }
     }
 
@@ -182,6 +185,7 @@ impl DurableSessionBinding {
             client_instance_id,
             durable_notice_ack: true,
             reply_mentions: false,
+            reactions: false,
         }
     }
 }
@@ -593,6 +597,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                                     client_instance_id,
                                     durable_notice_ack: dispatch.durable_notice_ack_accepted,
                                     reply_mentions: dispatch.reply_mentions_accepted,
+                                    reactions: dispatch.reactions_accepted,
                                 },
                             );
                         }
@@ -779,6 +784,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             session_open_requests_capability(&frame, DURABLE_NOTICE_ACK_CAPABILITY);
         let reply_mentions_requested =
             session_open_requests_capability(&frame, REPLY_MENTIONS_CAPABILITY);
+        let reactions_requested = session_open_requests_capability(&frame, REACTIONS_CAPABILITY);
         let replay_candidate = is_replay_guarded_request(&frame);
         let request_fingerprint = if replay_candidate {
             Some(encode_frame(&frame).map_err(|error| {
@@ -837,6 +843,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 && responses_accept_capability(&responses, DURABLE_NOTICE_ACK_CAPABILITY),
             reply_mentions_accepted: reply_mentions_requested
                 && responses_accept_capability(&responses, REPLY_MENTIONS_CAPABILITY),
+            reactions_accepted: reactions_requested
+                && responses_accept_capability(&responses, REACTIONS_CAPABILITY),
             part_succeeded: request_op == ChatOp::PartRoom
                 && responses.iter().any(is_successful_part_response),
             moderation_disconnect_succeeded: request_op == ChatOp::Command
@@ -936,6 +944,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 active_room_peers,
                 durable_notice_ack: binding.durable_notice_ack,
                 reply_mentions: binding.reply_mentions,
+                reactions: binding.reactions,
             },
             frame.seq,
             frame.room_id,
@@ -951,7 +960,11 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.stats.count_outbound_op(&dispatch.origin);
         self.send_response_frame(link_id, &dispatch.origin)?;
         for broadcast in dispatch.broadcasts {
-            self.broadcast_room_event(link_id, &broadcast)?;
+            if broadcast.op == ChatOp::ReactionEvent {
+                self.broadcast_reaction_event(link_id, &broadcast)?;
+            } else {
+                self.broadcast_room_event(link_id, &broadcast)?;
+            }
         }
         Ok(FrameDispatchOutcome {
             part_succeeded,
@@ -978,6 +991,41 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             return Ok(());
         };
         let link_ids = self.room_link_ids(room_id, origin_link_id);
+        for link_id in link_ids {
+            self.stats.count_outbound_op(response);
+            self.send_response_frame(link_id, response)?;
+        }
+        Ok(())
+    }
+
+    fn broadcast_reaction_event(
+        &mut self,
+        origin_link_id: LinkId,
+        response: &crate::protocol::Frame,
+    ) -> ServerResult<()> {
+        if response.op != ChatOp::ReactionEvent {
+            return Ok(());
+        }
+        let Some(room_id) = response.room_id else {
+            return Ok(());
+        };
+        let link_ids = self
+            .link_rooms
+            .iter()
+            .filter_map(|(link_id, joined_room_id)| {
+                (*link_id != origin_link_id && *joined_room_id == room_id).then_some(*link_id)
+            })
+            .filter(|link_id| {
+                let Some(binding) = self.durable_sessions.get(link_id) else {
+                    return false;
+                };
+                binding.reactions
+                    && self
+                        .peers
+                        .get(link_id)
+                        .is_some_and(|peer| peer.identity_hash == binding.identity_hash)
+            })
+            .collect::<Vec<_>>();
         for link_id in link_ids {
             self.stats.count_outbound_op(response);
             self.send_response_frame(link_id, response)?;
@@ -2941,6 +2989,82 @@ mod tests {
         assert_eq!(
             accepted_durable_client_instance(requested, &[accepted]),
             Some(client_instance_id)
+        );
+    }
+
+    #[test]
+    fn reaction_events_fan_out_only_to_joined_capability_bound_links() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let origin_link = [0x61; 16];
+        let capable_link = [0x62; 16];
+        let legacy_link = [0x63; 16];
+        let wrong_identity_link = [0x64; 16];
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        for link_id in [origin_link, capable_link, legacy_link, wrong_identity_link] {
+            live.link_rooms.insert(link_id, 1);
+        }
+        let capable_peer = ServerPeer {
+            identity_hash: b"capable".to_vec(),
+            display_name: "Capable".into(),
+            lxmf_destination: None,
+        };
+        let legacy_peer = ServerPeer {
+            identity_hash: b"legacy".to_vec(),
+            display_name: "Legacy".into(),
+            lxmf_destination: None,
+        };
+        let mismatched_peer = ServerPeer {
+            identity_hash: b"replacement".to_vec(),
+            display_name: "Replacement".into(),
+            lxmf_destination: None,
+        };
+        live.peers.insert(capable_link, capable_peer.clone());
+        live.peers.insert(legacy_link, legacy_peer.clone());
+        live.peers
+            .insert(wrong_identity_link, mismatched_peer.clone());
+        live.durable_sessions.insert(
+            capable_link,
+            DurableSessionBinding {
+                identity_hash: capable_peer.identity_hash,
+                client_instance_id: ClientInstanceId::new([0x71; 16]),
+                durable_notice_ack: true,
+                reply_mentions: true,
+                reactions: true,
+            },
+        );
+        live.durable_sessions.insert(
+            legacy_link,
+            DurableSessionBinding {
+                identity_hash: legacy_peer.identity_hash,
+                client_instance_id: ClientInstanceId::new([0x72; 16]),
+                durable_notice_ack: true,
+                reply_mentions: true,
+                reactions: false,
+            },
+        );
+        live.durable_sessions.insert(
+            wrong_identity_link,
+            DurableSessionBinding {
+                identity_hash: b"stale".to_vec(),
+                client_instance_id: ClientInstanceId::new([0x73; 16]),
+                durable_notice_ack: true,
+                reply_mentions: true,
+                reactions: true,
+            },
+        );
+
+        live.broadcast_reaction_event(
+            origin_link,
+            &Frame::new(ChatOp::ReactionEvent, 9, Some(1), FrameBody::Empty),
+        )
+        .expect("reaction fanout");
+        assert_eq!(live.transport().frames.len(), 1);
+        assert_eq!(live.transport().frames[0].link_id, capable_link);
+        assert_eq!(
+            decode_frame(&live.transport().frames[0].bytes)
+                .expect("captured reaction")
+                .op,
+            ChatOp::ReactionEvent
         );
     }
 

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,14 +14,16 @@ use crate::protocol::{
     append_rich_message_event_metadata, canonical_mutation_request_hash,
     parse_session_open_negotiation, with_session_accept_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
-    RichMessageBody, RichMessageEventMetadata, RoomId, SessionAcceptNegotiation, UserId,
-    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME,
-    REPLY_MENTIONS_BODY_TAG, REPLY_MENTIONS_CAPABILITY,
+    ReactionAck, ReactionRequest, ReactionSnapshot, RichMessageBody, RichMessageEventMetadata,
+    RoomId, SessionAcceptNegotiation, UserId, DURABLE_MUTATION_CAPABILITY,
+    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_BODY_TAG,
+    REPLY_MENTIONS_CAPABILITY,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
     DurableRoomEventCommit, DurableRoomEventPlan,
 };
+use crate::store::reactions::ReactionMutationResult;
 use crate::store::{
     normalize_room_name, OmenchatStore, ServerRoom, ServerRoomEvent, ServerRoomEventKind,
     ServerUser,
@@ -47,6 +50,7 @@ const PENDING_UPLOAD_TTL_SECONDS: u64 = 6 * 60 * 60;
 const UPLOAD_FILENAME_MAX_BYTES: usize = 255;
 const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
 const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
+const REACTIONS_SERVER_ENABLED: bool = false;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -200,6 +204,7 @@ pub(crate) struct DurableMutationPeerContext<'a> {
     pub active_room_peers: &'a [ServerPeer],
     pub durable_notice_ack: bool,
     pub reply_mentions: bool,
+    pub reactions: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -213,6 +218,11 @@ struct DurableCommandEffect {
     broadcasts: Vec<Frame>,
     admission: Option<RateReservation>,
     disconnect_identity: Option<Vec<u8>>,
+}
+
+struct DurableReactionEffect {
+    broadcast: Option<Frame>,
+    admission: Option<RateReservation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -481,6 +491,35 @@ impl SessionEngine {
         ))
     }
 
+    pub fn reaction_snapshot_frame(
+        &self,
+        seq: u32,
+        room_id: RoomId,
+        target_event_ids: &[u64],
+    ) -> ServerResult<Frame> {
+        let snapshot = self.store.reaction_snapshot(room_id, target_event_ids)?;
+        let fingerprint = reaction_snapshot_fingerprint(&snapshot);
+        let FrameBody::Fields(values) = snapshot.clone().into_frame_body().map_err(|error| {
+            ServerError::Message(format!("reaction snapshot encode failed: {error}"))
+        })?
+        else {
+            return Err(ServerError::Message(
+                "reaction snapshot did not produce a fields body".into(),
+            ));
+        };
+        let purpose = format!("reactions:{seq}:{fingerprint:016x}");
+        Ok(Frame::new(
+            self.batch_op(
+                ChatOp::ReactionSnapshotInline,
+                ChatOp::ReactionSnapshotResource,
+                &values,
+            )?,
+            seq,
+            Some(room_id),
+            self.batch_body(room_id, &purpose, &values)?,
+        ))
+    }
+
     fn handle_session_open(
         &self,
         peer: &ServerPeer,
@@ -544,6 +583,15 @@ impl SessionEngine {
             });
             if reply_mentions_requested && REPLY_MENTIONS_SERVER_ENABLED {
                 accepted_capabilities.push(REPLY_MENTIONS_CAPABILITY.into());
+            }
+            let reactions_requested = negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == REACTIONS_CAPABILITY)
+            });
+            if reactions_requested && REACTIONS_SERVER_ENABLED {
+                accepted_capabilities.push(REACTIONS_CAPABILITY.into());
             }
             response_body = with_session_accept_negotiation(
                 response_body,
@@ -1127,6 +1175,7 @@ impl SessionEngine {
                 active_room_peers: &[],
                 durable_notice_ack: true,
                 reply_mentions: false,
+                reactions: false,
             },
             seq,
             room_id,
@@ -1171,6 +1220,15 @@ impl SessionEngine {
                 envelope,
                 peers.active_room_peers,
             ),
+            ChatOp::RoomReaction if peers.reactions => {
+                self.handle_durable_reaction(peer, seq, room_id, client_instance_id, envelope)
+            }
+            ChatOp::RoomReaction => Ok(self.durable_error_dispatch(
+                seq,
+                room_id,
+                ChatErrorCode::DurableMutationNotNegotiated,
+                "reactions were not negotiated for this link",
+            )),
             _ => Ok(self.durable_error_dispatch(
                 seq,
                 room_id,
@@ -1545,6 +1603,272 @@ impl SessionEngine {
                 "durable mutation id was reused with different content",
             )),
             DurableRoomEventCommit::Expired => Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationResultExpired,
+                "durable client instance has expired replay state",
+            )),
+        }
+    }
+
+    fn handle_durable_reaction(
+        &self,
+        peer: &ServerPeer,
+        seq: u32,
+        room_id: Option<RoomId>,
+        client_instance_id: ClientInstanceId,
+        envelope: DurableMutationEnvelope,
+    ) -> ServerResult<DurableMutationDispatch> {
+        let Some(room_id) = room_id else {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                None,
+                ChatErrorCode::DurableMutationMalformed,
+                "durable reaction has no room id",
+            ));
+        };
+        let canonical_hash = match canonical_mutation_request_hash(
+            ChatOp::RoomReaction,
+            Some(room_id),
+            &envelope.body,
+        ) {
+            Ok(hash) => hash,
+            Err(_) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationMalformed,
+                    "durable reaction body exceeds canonical bounds",
+                ))
+            }
+        };
+        if canonical_hash != envelope.request_hash {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationMalformed,
+                "durable reaction hash does not match its canonical body",
+            ));
+        }
+        let request = match ReactionRequest::from_frame_body(&envelope.body) {
+            Ok(request) if i64::try_from(request.target_event_id).is_ok() => request,
+            _ => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationMalformed,
+                    "durable reaction request is malformed",
+                ))
+            }
+        };
+        let key = DurableMutationKey {
+            identity_hash: &peer.identity_hash,
+            client_instance_id,
+            mutation_id: envelope.mutation_id,
+        };
+        let commit = self.store.commit_durable_mutation_effect_result(
+            key,
+            envelope.request_hash,
+            |transaction| {
+                let Some(user) = OmenchatStore::ensure_durable_room_user(
+                    transaction,
+                    room_id,
+                    &peer.identity_hash,
+                    &peer.display_name,
+                    peer.lxmf_destination.as_deref(),
+                )?
+                else {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::RoomNotFound,
+                            "room not found",
+                        ))?,
+                    });
+                };
+                if user.status_bits & STATUS_BANNED != 0 {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::PermissionDenied,
+                            "user is banned",
+                        ))?,
+                    });
+                }
+                if user.status_bits & STATUS_MUTED != 0 {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::PermissionDenied,
+                            "user is muted",
+                        ))?,
+                    });
+                }
+                if !OmenchatStore::durable_room_has_member(transaction, room_id, user.user_id)? {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::NotJoined,
+                            "join the room before reacting",
+                        ))?,
+                    });
+                }
+                let admission = match self.reserve_rate(peer, RateKind::Command)? {
+                    RateAdmission::Admitted(admission) => admission,
+                    RateAdmission::Rejected => {
+                        return Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::RateLimited,
+                                "reaction rate limit exceeded",
+                            ))?,
+                        })
+                    }
+                };
+                match OmenchatStore::apply_reaction_mutation(
+                    transaction,
+                    room_id,
+                    user.user_id,
+                    request,
+                )? {
+                    ReactionMutationResult::TargetUnavailable => {
+                        Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::HistoryUnavailable,
+                                "reaction target is unavailable in this room",
+                            ))?,
+                        })
+                    }
+                    ReactionMutationResult::Saturated => Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::RateLimited,
+                            "reaction state retention limit reached",
+                        ))?,
+                    }),
+                    ReactionMutationResult::Unchanged => {
+                        let ack = ReactionAck {
+                            target_event_id: request.target_event_id,
+                            actor_user_id: user.user_id,
+                            token: request.token,
+                            action: request.action,
+                            changed: false,
+                            reaction_event_id: None,
+                        };
+                        Ok(DurableMutationEffectPlan::Effect {
+                            result_frame: self.encode_durable_result(Frame::new(
+                                ChatOp::ReactionAck,
+                                seq,
+                                Some(room_id),
+                                ack.into_frame_body().map_err(|error| {
+                                    ServerError::Message(format!(
+                                        "reaction acknowledgement encode failed: {error}"
+                                    ))
+                                })?,
+                            ))?,
+                            effect: DurableReactionEffect {
+                                broadcast: None,
+                                admission,
+                            },
+                        })
+                    }
+                    ReactionMutationResult::Changed(event) => {
+                        let ack = ReactionAck {
+                            target_event_id: event.target_event_id,
+                            actor_user_id: event.actor_user_id,
+                            token: event.token,
+                            action: event.action,
+                            changed: true,
+                            reaction_event_id: Some(event.reaction_event_id),
+                        };
+                        let broadcast = Frame::new(
+                            ChatOp::ReactionEvent,
+                            seq,
+                            Some(room_id),
+                            event.into_frame_body().map_err(|error| {
+                                ServerError::Message(format!(
+                                    "reaction event encode failed: {error}"
+                                ))
+                            })?,
+                        );
+                        Ok(DurableMutationEffectPlan::Effect {
+                            result_frame: self.encode_durable_result(Frame::new(
+                                ChatOp::ReactionAck,
+                                seq,
+                                Some(room_id),
+                                ack.into_frame_body().map_err(|error| {
+                                    ServerError::Message(format!(
+                                        "reaction acknowledgement encode failed: {error}"
+                                    ))
+                                })?,
+                            ))?,
+                            effect: DurableReactionEffect {
+                                broadcast: Some(broadcast),
+                                admission,
+                            },
+                        })
+                    }
+                }
+            },
+        );
+        let commit = match commit {
+            Ok(commit) => commit,
+            Err(ServerError::Sqlite(error)) if sqlite_is_busy(&error) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationStoreBusy,
+                    "durable mutation store is busy",
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        match commit {
+            DurableMutationEffectCommit::Stored {
+                result_frame,
+                effect,
+                pruned,
+            } => {
+                if let Some(admission) = effect.admission {
+                    admission.commit();
+                }
+                Ok(DurableMutationDispatch {
+                    origin: decode_durable_result(&result_frame)?,
+                    broadcasts: effect.broadcast.into_iter().collect(),
+                    disconnect_identity: None,
+                    pruned,
+                })
+            }
+            DurableMutationEffectCommit::StoredResponse {
+                result_frame,
+                pruned,
+            } => Ok(DurableMutationDispatch {
+                origin: decode_durable_result(&result_frame)?,
+                broadcasts: Vec::new(),
+                disconnect_identity: None,
+                pruned,
+            }),
+            DurableMutationEffectCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
+                origin: decode_durable_replay_result(&result_frame, seq)?,
+                broadcasts: Vec::new(),
+                disconnect_identity: None,
+                pruned: 0,
+            }),
+            DurableMutationEffectCommit::Conflict => Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationConflict,
+                "durable mutation id was reused with different content",
+            )),
+            DurableMutationEffectCommit::Expired => Ok(self.durable_error_dispatch(
                 seq,
                 Some(room_id),
                 ChatErrorCode::DurableMutationResultExpired,
@@ -3742,6 +4066,18 @@ fn decode_durable_replay_result(bytes: &[u8], request_seq: u32) -> ServerResult<
     Ok(frame)
 }
 
+fn reaction_snapshot_fingerprint(snapshot: &ReactionSnapshot) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    snapshot.target_event_ids.hash(&mut hasher);
+    for entry in &snapshot.entries {
+        entry.target_event_id.hash(&mut hasher);
+        entry.actor_user_id.hash(&mut hasher);
+        entry.token.as_str().hash(&mut hasher);
+        entry.created_at_unix.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
     matches!(
         error,
@@ -4663,6 +4999,347 @@ mod tests {
     }
 
     #[test]
+    fn reactions_capability_remains_dormant_and_rejects_unnegotiated_mutations() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let user = store
+            .ensure_user(&peer().identity_hash, "Alice", None)
+            .expect("user");
+        store.join_room(room.room_id, user.user_id).expect("join");
+        let target = store
+            .append_event(
+                room.room_id,
+                Some(user.user_id),
+                ServerRoomEventKind::Message {
+                    body: "target".into(),
+                },
+            )
+            .expect("target");
+        let engine = SessionEngine::new(store);
+        let open = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    REACTIONS_CAPABILITY.into(),
+                ],
+                client_instance_id: Some(ClientInstanceId::new([41; 16])),
+            },
+        )
+        .expect("reactions capability request");
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 1, None, open))
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(Some(SessionAcceptNegotiation {
+                accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+            }))
+        );
+
+        let body = crate::protocol::ReactionRequest {
+            target_event_id: target.event_id,
+            token: crate::protocol::ReactionToken::Heart,
+            action: crate::protocol::ReactionAction::Add,
+        }
+        .into_frame_body()
+        .expect("reaction body");
+        let rejected = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: false,
+                },
+                2,
+                Some(room.room_id),
+                ChatOp::RoomReaction,
+                ClientInstanceId::new([41; 16]),
+                durable_envelope_body(ChatOp::RoomReaction, room.room_id, 42, body),
+            )
+            .expect("unnegotiated reaction");
+        assert_eq!(
+            frame_error_code(&rejected.origin),
+            Some(ChatErrorCode::DurableMutationNotNegotiated as u16 as u64)
+        );
+        assert!(rejected.broadcasts.is_empty());
+        assert_eq!(
+            engine.store.reaction_row_counts().expect("reaction counts"),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn durable_reaction_commit_replay_conflict_and_snapshots_survive_restart() {
+        let path = temp_store_path("reaction-replay");
+        let (room_id, target_event_id) = {
+            let store = OmenchatStore::open(&path).expect("store");
+            let room = store.ensure_room("lobby", None).expect("room");
+            let user = store
+                .ensure_user(&peer().identity_hash, "Alice", None)
+                .expect("user");
+            store.join_room(room.room_id, user.user_id).expect("join");
+            let target = store
+                .append_event(
+                    room.room_id,
+                    Some(user.user_id),
+                    ServerRoomEventKind::Message {
+                        body: "target".into(),
+                    },
+                )
+                .expect("target");
+            (room.room_id, target.event_id)
+        };
+        let client_instance_id = ClientInstanceId::new([43; 16]);
+        let request = crate::protocol::ReactionRequest {
+            target_event_id,
+            token: crate::protocol::ReactionToken::Heart,
+            action: crate::protocol::ReactionAction::Add,
+        };
+        let envelope = durable_envelope_body(
+            ChatOp::RoomReaction,
+            room_id,
+            44,
+            request.into_frame_body().expect("reaction body"),
+        );
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("store"));
+        let stored = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: true,
+                },
+                10,
+                Some(room_id),
+                ChatOp::RoomReaction,
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("stored reaction");
+        assert_eq!(stored.origin.op, ChatOp::ReactionAck);
+        assert!(
+            crate::protocol::ReactionAck::from_frame_body(&stored.origin.body)
+                .expect("ack")
+                .changed
+        );
+        assert_eq!(stored.broadcasts.len(), 1);
+        assert_eq!(stored.broadcasts[0].op, ChatOp::ReactionEvent);
+        crate::protocol::ReactionEvent::from_frame_body(&stored.broadcasts[0].body)
+            .expect("reaction event");
+        let inline = engine
+            .reaction_snapshot_frame(10, room_id, &[target_event_id])
+            .expect("inline reaction snapshot");
+        assert_eq!(inline.op, ChatOp::ReactionSnapshotInline);
+        let inline_values =
+            decode_compressed_values_body(&inline.body).expect("inline snapshot values");
+        let inline_snapshot =
+            crate::protocol::ReactionSnapshot::from_frame_body(&FrameBody::Fields(inline_values))
+                .expect("inline reaction snapshot");
+        assert_eq!(inline_snapshot.target_event_ids, vec![target_event_id]);
+        assert_eq!(inline_snapshot.entries.len(), 1);
+        drop(engine);
+
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::open(&path).expect("reopened store"),
+            SessionLimits {
+                large_batch_threshold_bytes: 1,
+                ..SessionLimits::default()
+            },
+        );
+        let replayed = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: true,
+                },
+                11,
+                Some(room_id),
+                ChatOp::RoomReaction,
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("restart replay");
+        assert_replayed_response(&replayed.origin, &stored.origin, 11);
+        assert!(replayed.broadcasts.is_empty());
+
+        let no_change = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: true,
+                },
+                12,
+                Some(room_id),
+                ChatOp::RoomReaction,
+                client_instance_id,
+                durable_envelope_body(
+                    ChatOp::RoomReaction,
+                    room_id,
+                    45,
+                    request.into_frame_body().expect("reaction body"),
+                ),
+            )
+            .expect("idempotent logical add");
+        assert!(
+            !crate::protocol::ReactionAck::from_frame_body(&no_change.origin.body)
+                .expect("no-change ack")
+                .changed
+        );
+        assert!(no_change.broadcasts.is_empty());
+
+        let conflicting = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: true,
+                },
+                13,
+                Some(room_id),
+                ChatOp::RoomReaction,
+                client_instance_id,
+                durable_envelope_body(
+                    ChatOp::RoomReaction,
+                    room_id,
+                    44,
+                    crate::protocol::ReactionRequest {
+                        token: crate::protocol::ReactionToken::Laugh,
+                        ..request
+                    }
+                    .into_frame_body()
+                    .expect("conflicting body"),
+                ),
+            )
+            .expect("conflicting reaction");
+        assert_eq!(
+            frame_error_code(&conflicting.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+
+        let snapshot_frame = engine
+            .reaction_snapshot_frame(14, room_id, &[target_event_id])
+            .expect("reaction snapshot");
+        assert_eq!(snapshot_frame.op, ChatOp::ReactionSnapshotResource);
+        let offer = decode_resource_offer_body(&snapshot_frame.body).expect("resource offer");
+        let payload = engine
+            .resource_payload(&offer.resource_id)
+            .expect("resource lookup")
+            .expect("resource payload");
+        let values = decode_compressed_values_payload(&payload).expect("reaction snapshot payload");
+        let snapshot =
+            crate::protocol::ReactionSnapshot::from_frame_body(&FrameBody::Fields(values))
+                .expect("reaction snapshot");
+        assert_eq!(snapshot.target_event_ids, vec![target_event_id]);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(
+            snapshot.entries[0].token,
+            crate::protocol::ReactionToken::Heart
+        );
+        assert_eq!(
+            engine.store.reaction_row_counts().expect("reaction counts"),
+            (1, 1)
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn durable_reaction_requires_membership_live_target_and_unmuted_actor() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let user = store
+            .ensure_user(&peer().identity_hash, "Alice", None)
+            .expect("user");
+        let target = store
+            .append_event(
+                room.room_id,
+                Some(user.user_id),
+                ServerRoomEventKind::Message {
+                    body: "target".into(),
+                },
+            )
+            .expect("target");
+        let engine = SessionEngine::new(store);
+        let client_instance_id = ClientInstanceId::new([46; 16]);
+        let dispatch = |mutation_marker, target_event_id| {
+            engine
+                .handle_durable_mutation_with_active_peers(
+                    DurableMutationPeerContext {
+                        peer: &peer(),
+                        active_room_peers: &[],
+                        durable_notice_ack: true,
+                        reply_mentions: true,
+                        reactions: true,
+                    },
+                    u32::from(mutation_marker),
+                    Some(room.room_id),
+                    ChatOp::RoomReaction,
+                    client_instance_id,
+                    durable_envelope_body(
+                        ChatOp::RoomReaction,
+                        room.room_id,
+                        mutation_marker,
+                        crate::protocol::ReactionRequest {
+                            target_event_id,
+                            token: crate::protocol::ReactionToken::Heart,
+                            action: crate::protocol::ReactionAction::Add,
+                        }
+                        .into_frame_body()
+                        .expect("reaction body"),
+                    ),
+                )
+                .expect("reaction dispatch")
+        };
+
+        let not_joined = dispatch(47, target.event_id);
+        assert_eq!(
+            frame_error_code(&not_joined.origin),
+            Some(ChatErrorCode::NotJoined as u16 as u64)
+        );
+        engine
+            .store
+            .join_room(room.room_id, user.user_id)
+            .expect("join");
+        let unavailable = dispatch(48, target.event_id + 1);
+        assert_eq!(
+            frame_error_code(&unavailable.origin),
+            Some(ChatErrorCode::HistoryUnavailable as u16 as u64)
+        );
+        engine
+            .store
+            .set_user_status_flag(user.user_id, STATUS_MUTED, true)
+            .expect("mute");
+        let muted = dispatch(49, target.event_id);
+        assert_eq!(
+            frame_error_code(&muted.origin),
+            Some(ChatErrorCode::PermissionDenied as u16 as u64)
+        );
+        assert_eq!(
+            engine.store.reaction_row_counts().expect("reaction counts"),
+            (0, 0)
+        );
+    }
+
+    #[test]
     fn base_durable_capability_preserves_legacy_notice_origin_response() {
         let store = OmenchatStore::in_memory().expect("store");
         let room = store
@@ -4683,6 +5360,7 @@ mod tests {
                     active_room_peers: &[],
                     durable_notice_ack: false,
                     reply_mentions: false,
+                    reactions: false,
                 },
                 3,
                 Some(room.room_id),
@@ -5796,6 +6474,7 @@ mod tests {
                     active_room_peers: &[],
                     durable_notice_ack: true,
                     reply_mentions: true,
+                    reactions: false,
                 },
                 31,
                 Some(room_id),
@@ -5884,6 +6563,7 @@ mod tests {
                     active_room_peers: &[],
                     durable_notice_ack: true,
                     reply_mentions: true,
+                    reactions: false,
                 },
                 33,
                 Some(room_id),
@@ -5945,6 +6625,7 @@ mod tests {
                     active_room_peers: &[],
                     durable_notice_ack: true,
                     reply_mentions: true,
+                    reactions: false,
                 },
                 35,
                 Some(room_id),
@@ -5991,6 +6672,7 @@ mod tests {
             active_room_peers: &[],
             durable_notice_ack: true,
             reply_mentions,
+            reactions: false,
         };
 
         let not_negotiated = engine
@@ -7404,6 +8086,7 @@ mod tests {
                         active_room_peers: &[peer(), target_peer.clone()],
                         durable_notice_ack: true,
                         reply_mentions: false,
+                        reactions: false,
                     },
                     110 + index as u32,
                     Some(room.room_id),
@@ -7472,6 +8155,7 @@ mod tests {
                         active_room_peers: &[],
                         durable_notice_ack: true,
                         reply_mentions: false,
+                        reactions: false,
                     },
                     120 + index as u32,
                     Some(room.room_id),

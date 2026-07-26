@@ -59,8 +59,11 @@ silently downgraded.
 
 Version 5 adds the constrained `room_reactions` active-state table and
 `room_reaction_events` append-only audit table plus target/retention indexes.
-The `reactions-v1` capability remains unadvertised and no live path reads or
-writes these tables.
+The dormant server executor couples add/remove effects to durable replay,
+enforces active/audit bounds, creates authoritative bounded snapshots, and
+limits reaction-event fan-out to capability-bound Links. The
+`reactions-v1` capability remains unadvertised and unaccepted, so this path
+does not change current client behavior.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated

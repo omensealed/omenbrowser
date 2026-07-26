@@ -960,6 +960,20 @@ schema-4-compatible copy through staged atomic publication, refuses overwrite
 or active WAL/SHM state, omits only reaction state, and never modifies the
 active database. `reactions-v1` remains unrequested and unaccepted.
 
+The third dormant slice is complete. omenchatd now has a transactionally
+coupled durable reaction executor, exact replay/conflict behavior, joined-user
+and target eligibility checks, command-rate admission, bounded active state,
+bounded incremental audit retention, and authoritative explicit-target
+snapshots over the existing compressed inline/resource path. A changed
+mutation produces one acknowledgement and one reaction delta; a semantic
+no-op produces an acknowledgement without an audit row or fan-out. Live
+reaction deltas are scoped to same-room Links with authenticated,
+identity-matching reaction bindings. Restart replay, changed-content conflict,
+no-op add, inline/resource snapshot decoding, active/audit bounds, and
+capability-scoped fan-out are covered by isolated tests. The production server
+flag remains off, so `reactions-v1` is still neither accepted nor reachable
+from a negotiated client.
+
 ### Unit 6C — bounded local search
 
 - Search existing LXMF and OMENchat history by text, sender, room, date,

@@ -398,8 +398,18 @@ open the maintainer's real browser or omenchatd data.
    drops only reaction objects, validates integrity/foreign keys, publishes
    atomically without overwrite, and never modifies the active database. The
    capability remains unadvertised.
-3. Add dormant transactional server executor, bounds, replay, snapshots, and
-   Link-scoped fan-out.
+3. **Complete.** The dormant omenchatd executor validates joined, non-banned,
+   non-muted actors and same-room, non-deleted message/action/notice/upload
+   targets inside the durable replay transaction. Exact duplicates replay the
+   original acknowledgement without another rate charge, state change, audit
+   row, or fan-out; changed-content mutation-ID reuse conflicts. Active rows
+   are bounded per actor/target, target, room, and server by both items and
+   retained bytes. The append-only audit is age/item/byte bounded with at most
+   64 incremental deletions per mutation. Authoritative explicit-target
+   snapshots use the existing bounded compressed inline/resource transport.
+   Reaction events fan out only to same-room Links whose authenticated,
+   identity-matching durable binding has reaction support. Production
+   negotiation still does not accept `reactions-v1`.
 4. Add the separate bounded client model/table, snapshot reconciliation, and
    parser with no controls.
 5. Add read-only GUI/TUI counts and current-user highlighting.
