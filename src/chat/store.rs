@@ -89,6 +89,16 @@ pub struct SqliteChatStore {
     connection: rusqlite::Connection,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StoredChatHistoryEvent {
+    pub(crate) server_display_name: String,
+    pub(crate) room_name: String,
+    pub(crate) event: ChatEvent,
+}
+
+pub(crate) const CHAT_HISTORY_SEARCH_READ_MAX_ITEMS: usize = 8_192;
+pub(crate) const CHAT_HISTORY_SEARCH_READ_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 impl SqliteChatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
@@ -123,6 +133,78 @@ impl SqliteChatStore {
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    pub(crate) fn latest_history_search_events(
+        &self,
+        max_items: usize,
+        max_bytes: usize,
+    ) -> anyhow::Result<Vec<StoredChatHistoryEvent>> {
+        if max_items == 0 || max_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let max_items = i64::try_from(max_items.min(CHAT_HISTORY_SEARCH_READ_MAX_ITEMS))
+            .context("history search item limit is too large")?;
+        let max_bytes = i64::try_from(max_bytes.min(CHAT_HISTORY_SEARCH_READ_MAX_BYTES))
+            .context("history search byte limit is too large")?;
+        let mut statement = self.connection.prepare(
+            "WITH bounded_events AS (
+               SELECT e.server_id, e.room_id, e.event_id, e.event_kind,
+                      e.actor_user_id, e.actor_display_name, e.at, e.payload,
+                      e.reply_to_event_id, e.mention_user_ids,
+                      s.display_name AS server_display_name,
+                      r.name AS room_name,
+                      SUM(
+                        64
+                        + length(CAST(e.server_id AS BLOB))
+                        + COALESCE(length(CAST(e.actor_display_name AS BLOB)), 0)
+                        + COALESCE(length(CAST(e.payload AS BLOB)), 0)
+                        + COALESCE(length(CAST(e.mention_user_ids AS BLOB)), 0)
+                        + length(CAST(s.display_name AS BLOB))
+                        + length(CAST(r.name AS BLOB))
+                      ) OVER (
+                        ORDER BY e.at DESC, e.event_id DESC, e.server_id, e.room_id
+                      ) AS cumulative_bytes
+               FROM room_events e
+               JOIN saved_servers s ON s.server_id = e.server_id
+               JOIN rooms r ON r.server_id = e.server_id AND r.room_id = e.room_id
+               WHERE e.deleted = 0
+                 AND e.rowid > (
+                   SELECT COALESCE(MAX(rowid), 0) - ?1 FROM room_events
+                 )
+                 AND length(CAST(e.server_id AS BLOB)) <= ?3
+                 AND length(CAST(s.display_name AS BLOB)) <= ?4
+                 AND length(CAST(r.name AS BLOB)) <= ?5
+                 AND COALESCE(length(CAST(e.actor_display_name AS BLOB)), 0) <= ?6
+                 AND COALESCE(length(CAST(e.payload AS BLOB)), 0) <= ?7
+             )
+             SELECT server_id, room_id, event_id, event_kind, actor_user_id,
+                    actor_display_name, at, payload, reply_to_event_id,
+                    mention_user_ids, server_display_name, room_name
+             FROM bounded_events
+             WHERE cumulative_bytes <= ?2
+             ORDER BY at DESC, event_id DESC, server_id, room_id
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(
+            (
+                max_items,
+                max_bytes,
+                CHAT_SERVER_ID_MAX_BYTES as i64,
+                CHAT_SERVER_DISPLAY_MAX_BYTES as i64,
+                CHAT_ROOM_NAME_MAX_BYTES as i64,
+                super::model::CHAT_ACTOR_DISPLAY_MAX_BYTES as i64,
+                crate::protocol_limits::OMENCHAT_FRAME_MAX_SCALAR_BYTES as i64,
+            ),
+            |row| {
+                Ok(StoredChatHistoryEvent {
+                    event: decode_event_row(row)?,
+                    server_display_name: row.get(10)?,
+                    room_name: row.get(11)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     fn migrate(&self) -> anyhow::Result<()> {
@@ -936,52 +1018,52 @@ impl SqliteChatStore {
         P: rusqlite::Params,
     {
         let mut statement = self.connection.prepare(sql)?;
-        let rows = statement.query_map(params, |row| {
-            let kind: i64 = row.get(3)?;
-            let payload: Option<String> = row.get(7)?;
-            let reply_to_event_id = match row.get::<_, Option<i64>>(8)? {
-                Some(value) => Some(
-                    u64::try_from(value)
-                        .ok()
-                        .filter(|value| *value != 0)
-                        .ok_or_else(|| {
-                            invalid_metadata_column(8, "reply event id must be positive")
-                        })?,
-                ),
-                None => None,
-            };
-            let mention_user_ids = match row.get::<_, Option<Vec<u8>>>(9)? {
-                Some(bytes) => Some(
-                    decode_mention_user_ids(&bytes)
-                        .map_err(|message| invalid_metadata_column(9, message))?,
-                ),
-                None => None,
-            };
-            if reply_to_event_id.is_some() || mention_user_ids.is_some() {
-                omenchat_protocol::RichMessageEventMetadata {
-                    reply_to_event_id,
-                    mentioned_user_ids: mention_user_ids.clone().unwrap_or_default(),
-                }
-                .validate()
-                .map_err(|error| invalid_metadata_column(9, error.to_string()))?;
-            }
-            Ok(ChatEvent {
-                server_id: row.get(0)?,
-                room_id: row.get::<_, i64>(1)? as RoomId,
-                event_id: row.get::<_, i64>(2)? as EventId,
-                actor_user_id: row.get::<_, Option<i64>>(4)?.map(|value| value as u32),
-                actor_display_name: row.get(5)?,
-                at_unix: row.get(6)?,
-                kind: decode_event_kind(
-                    kind,
-                    payload.unwrap_or_default(),
-                    reply_to_event_id,
-                    mention_user_ids,
-                ),
-            })
-        })?;
+        let rows = statement.query_map(params, decode_event_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+}
+
+fn decode_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatEvent> {
+    let kind: i64 = row.get(3)?;
+    let payload: Option<String> = row.get(7)?;
+    let reply_to_event_id = match row.get::<_, Option<i64>>(8)? {
+        Some(value) => Some(
+            u64::try_from(value)
+                .ok()
+                .filter(|value| *value != 0)
+                .ok_or_else(|| invalid_metadata_column(8, "reply event id must be positive"))?,
+        ),
+        None => None,
+    };
+    let mention_user_ids = match row.get::<_, Option<Vec<u8>>>(9)? {
+        Some(bytes) => Some(
+            decode_mention_user_ids(&bytes)
+                .map_err(|message| invalid_metadata_column(9, message))?,
+        ),
+        None => None,
+    };
+    if reply_to_event_id.is_some() || mention_user_ids.is_some() {
+        omenchat_protocol::RichMessageEventMetadata {
+            reply_to_event_id,
+            mentioned_user_ids: mention_user_ids.clone().unwrap_or_default(),
+        }
+        .validate()
+        .map_err(|error| invalid_metadata_column(9, error.to_string()))?;
+    }
+    Ok(ChatEvent {
+        server_id: row.get(0)?,
+        room_id: row.get::<_, i64>(1)? as RoomId,
+        event_id: row.get::<_, i64>(2)? as EventId,
+        actor_user_id: row.get::<_, Option<i64>>(4)?.map(|value| value as u32),
+        actor_display_name: row.get(5)?,
+        at_unix: row.get(6)?,
+        kind: decode_event_kind(
+            kind,
+            payload.unwrap_or_default(),
+            reply_to_event_id,
+            mention_user_ids,
+        ),
+    })
 }
 
 fn encode_event_kind(kind: &ChatEventKind) -> (i64, String, Option<&ChatMessageMetadata>) {
@@ -1177,6 +1259,83 @@ mod tests {
         assert!(SqliteChatStore::open_read_only(&path).is_err());
         assert!(!path.exists());
         assert!(!parent.exists());
+    }
+
+    #[test]
+    fn history_search_loader_is_newest_first_and_bounded_by_items_and_bytes() {
+        let path = isolated_store_path("history-search-loader");
+        {
+            let mut store = SqliteChatStore::open(&path).expect("create store");
+            let server = sample_server();
+            store.save_server(server.clone()).expect("server");
+            store
+                .save_room(ChatRoomSummary {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    name: "lobby".into(),
+                    topic: None,
+                    unread: 0,
+                    joined: true,
+                })
+                .expect("room");
+            store
+                .append_events(
+                    [10_i64, 30, 20]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, at_unix)| ChatEvent {
+                            server_id: server.server_id.clone(),
+                            room_id: 1,
+                            event_id: index as u64 + 1,
+                            actor_user_id: Some(7),
+                            actor_display_name: Some("Alice".into()),
+                            at_unix,
+                            kind: ChatEventKind::Message {
+                                body: format!("event-{index}-{}", "x".repeat(100)),
+                            },
+                        })
+                        .collect(),
+                )
+                .expect("events");
+        }
+
+        let store = SqliteChatStore::open_read_only(&path).expect("read-only store");
+        let item_bounded = store
+            .latest_history_search_events(2, 1024 * 1024)
+            .expect("item-bounded history");
+        assert_eq!(
+            item_bounded
+                .iter()
+                .map(|stored| stored.event.at_unix)
+                .collect::<Vec<_>>(),
+            vec![30, 20]
+        );
+        assert!(item_bounded.iter().all(|stored| {
+            stored.server_display_name == "Server A" && stored.room_name == "lobby"
+        }));
+
+        let byte_bounded = store
+            .latest_history_search_events(10, 250)
+            .expect("byte-bounded history");
+        assert_eq!(byte_bounded.len(), 1);
+        assert_eq!(byte_bounded[0].event.at_unix, 30);
+        assert!(store
+            .latest_history_search_events(0, 1024)
+            .expect("zero items")
+            .is_empty());
+        assert!(store
+            .latest_history_search_events(10, 0)
+            .expect("zero bytes")
+            .is_empty());
+        assert_eq!(
+            store
+                .latest_history_search_events(usize::MAX, usize::MAX)
+                .expect("hard-clamped bounds")
+                .len(),
+            3
+        );
+        drop(store);
+        std::fs::remove_file(path).expect("remove store");
     }
 
     #[cfg(feature = "portable-sqlite")]

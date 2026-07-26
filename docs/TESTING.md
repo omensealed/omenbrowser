@@ -576,10 +576,13 @@ The OMENchat read-only history-store boundary is covered by:
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
   read_only_store
+cargo test --locked --no-default-features --features desktop-product \
+  history_search_loader
 ```
 
 These tests use unique temporary paths. They verify read access, query-only
-write rejection, and non-creation of a missing database and parent directory.
+write rejection, non-creation of a missing database and parent directory, and
+newest-first item/byte-bounded event loading.
 
 Current-product NomadNet page request qualification:
 

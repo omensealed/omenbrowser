@@ -141,6 +141,19 @@ fail-closed second layer. Focused tests prove existing history remains readable,
 mutating store calls fail, and a missing database/path is not created. The
 method does not yet enumerate or search events.
 
+The same read-only handle now provides a newest-first history loader with both
+row and cumulative SQLite byte budgets. Admission first uses the `room_events`
+rowid index to restrict work to the requested number of most recently persisted
+rows; timestamp ordering and byte admission happen only inside that bounded
+window. The SQL byte window accounts for retained payload, identity-routing,
+actor, server-label, room-label, and metadata bytes before Rust materializes
+rows. This prevents the 8,192-item scan ceiling from becoming either an
+unbounded database scan or a multi-gigabyte allocation when legal
+protocol-sized message bodies are present. Opaque server IDs remain routing
+data; only joined display names are intended for the search reducer. The loader
+hard-clamps callers to 8,192 rows and 64 MiB, does not interpret query text, and
+does not change the database.
+
 Next, add the owned one-in-flight store-backed blocking task and a compact
 search surface without persistence or schema changes. UI activation is not
 complete until stale-result, cancellation/supersession, focus, jump, and
