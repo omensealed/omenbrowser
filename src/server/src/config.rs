@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::error::{ServerError, ServerResult};
 use crate::session::SessionLimits;
-use crate::store::{OmenchatStore, RoomHistoryMaintenanceStatus};
+use crate::store::{OmenchatStore, RoomHistoryMaintenanceStatus, RoomHistoryRetentionPolicy};
 use crate::tui_format::human_bytes;
 use crate::{TcpClientOverride, TcpServerOverride};
 
@@ -163,6 +163,17 @@ impl Default for RoomHistoryRetentionConfig {
             max_age_days: DEFAULT_HISTORY_RETENTION_MAX_AGE_DAYS,
             max_events_per_room: DEFAULT_HISTORY_RETENTION_MAX_EVENTS_PER_ROOM,
             max_bytes_per_room: DEFAULT_HISTORY_RETENTION_MAX_BYTES_PER_ROOM,
+        }
+    }
+}
+
+impl From<&RoomHistoryRetentionConfig> for RoomHistoryRetentionPolicy {
+    fn from(config: &RoomHistoryRetentionConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            max_age_days: config.max_age_days,
+            max_events_per_room: config.max_events_per_room,
+            max_bytes_per_room: config.max_bytes_per_room,
         }
     }
 }
@@ -1427,9 +1438,9 @@ fn render_limits_status(limits: &ServerLimitsConfig) -> String {
 
 fn render_history_retention_status(retention: &RoomHistoryRetentionConfig) -> String {
     format!(
-        "history retention: {state} (policy only; automatic compaction inactive)\n  max age: {max_age_days} day(s)\n  max events per room: {max_events_per_room}\n  max bytes per room: {max_bytes_per_room} ({max_bytes_human})\n",
+        "history retention: {state}\n  max age: {max_age_days} day(s)\n  max events per room: {max_events_per_room}\n  max bytes per room: {max_bytes_per_room} ({max_bytes_human})\n  runtime activity observable from status: no\n",
         state = if retention.enabled {
-            "configured, not active"
+            "enabled for live event admission"
         } else {
             "disabled"
         },
@@ -2017,8 +2028,8 @@ mod tests {
         let loaded = ServerConfig::load_or_default(root.clone()).expect("load retention policy");
         assert_eq!(loaded.history_retention, config.history_retention);
         let status = render_status(&loaded);
-        assert!(status.contains("history retention: configured, not active"));
-        assert!(status.contains("automatic compaction inactive"));
+        assert!(status.contains("history retention: enabled for live event admission"));
+        assert!(status.contains("runtime activity observable from status: no"));
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -100,8 +100,15 @@ and 256 MiB per room. Enabled zero limits are rejected, and documented hard
 maxima prevent an unbounded policy. `status` and `status --json` perform a
 read-only inspection of at most 256 room ledgers and report omitted rooms plus
 complete/incomplete/missing accounting. They do not advance accounting or
-delete data. Until admission integration is implemented, status always reports
-automatic compaction inactive even if operator intent is configured enabled.
+delete data. Status reports configured admission behavior but does not claim to
+observe whether a live runtime is currently active.
+When enabled, the policy is attached only to the live server store. Every
+ordinary and durable room-event insertion evaluates age, item, and byte
+ceilings in its existing immediate transaction and removes at most 64 older
+originals with their dependent projections. A single newest event may exceed
+the byte ceiling until the next admission. Incomplete accounting or a ceiling
+that cannot be restored in one batch fails closed and rolls back both insertion
+and attempted compaction.
 The desktop has a matching dormant, rebuildable revision projection outside
 immutable room history. It is bounded per room, server, and identity-scoped
 cache by rows and stable retained bytes; strict deltas and authoritative

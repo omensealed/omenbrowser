@@ -310,8 +310,9 @@ impl OmenchatStore {
         room_id: RoomId,
         actor_user_id: Option<UserId>,
         kind: ServerRoomEventKind,
+        retention: super::RoomHistoryRetentionPolicy,
     ) -> ServerResult<ServerRoomEvent> {
-        append_event_in_transaction(transaction, room_id, actor_user_id, kind)
+        append_event_in_transaction(transaction, room_id, actor_user_id, kind, retention)
     }
 
     pub(crate) fn durable_room_event_exists(
@@ -419,8 +420,13 @@ impl OmenchatStore {
                     kind,
                     admission,
                 } => {
-                    let event =
-                        append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
+                    let event = append_event_in_transaction(
+                        transaction,
+                        room_id,
+                        actor_user_id,
+                        kind,
+                        self.history_retention,
+                    )?;
                     let result_frame = encode_result(&event)?;
                     stored_event = Some(event);
                     stored_admission = Some(admission);
@@ -432,8 +438,13 @@ impl OmenchatStore {
                     admission,
                     result_frame,
                 } => {
-                    let event =
-                        append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
+                    let event = append_event_in_transaction(
+                        transaction,
+                        room_id,
+                        actor_user_id,
+                        kind,
+                        self.history_retention,
+                    )?;
                     stored_event = Some(event);
                     stored_admission = Some(admission);
                     Ok(result_frame)
@@ -450,6 +461,7 @@ impl OmenchatStore {
                         actor_user_id,
                         kind,
                         Some(metadata),
+                        self.history_retention,
                     )?;
                     let result_frame = encode_result(&event)?;
                     stored_event = Some(event);
@@ -1109,6 +1121,87 @@ mod tests {
         assert_eq!(conflict, DurableRoomEventCommit::Conflict);
         assert_eq!(
             store.latest_events(room.room_id, 10).expect("events").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn durable_room_event_and_retention_compaction_commit_once_together() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("durable-retention", None).expect("room");
+        for body in ["old-one", "old-two"] {
+            store
+                .append_event(
+                    room.room_id,
+                    None,
+                    ServerRoomEventKind::Message { body: body.into() },
+                )
+                .expect("seed");
+        }
+        let store = store.with_room_history_retention(crate::store::RoomHistoryRetentionPolicy {
+            enabled: true,
+            max_age_days: 3_650,
+            max_events_per_room: 1,
+            max_bytes_per_room: u64::MAX,
+        });
+        let identity = [31; 16];
+        let stored = store
+            .commit_durable_room_event_result(
+                key(&identity, 1),
+                request_hash(1),
+                room.room_id,
+                |_| {
+                    Ok(DurableRoomEventPlan::Event {
+                        actor_user_id: None,
+                        kind: ServerRoomEventKind::Message {
+                            body: "durable newest".into(),
+                        },
+                        admission: (),
+                    })
+                },
+                |event| room_event_result(41, event),
+            )
+            .expect("durable compacting commit");
+        let result_frame = match stored {
+            DurableRoomEventCommit::Stored {
+                result_frame,
+                event,
+                admission: (),
+                ..
+            } => {
+                assert_eq!(event.event_id, 3);
+                result_frame
+            }
+            other => panic!("unexpected durable retention result: {other:?}"),
+        };
+        assert_eq!(
+            store
+                .latest_events(room.room_id, 10)
+                .expect("compacted history")
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(
+            store
+                .commit_durable_room_event_result(
+                    key(&identity, 1),
+                    request_hash(1),
+                    room.room_id,
+                    |_| -> ServerResult<DurableRoomEventPlan<()>> {
+                        panic!("replay must not append or compact")
+                    },
+                    |_| -> ServerResult<Vec<u8>> { panic!("replay must not encode") },
+                )
+                .expect("durable replay"),
+            DurableRoomEventCommit::Replayed { result_frame }
+        );
+        assert_eq!(
+            store
+                .latest_events(room.room_id, 10)
+                .expect("history")
+                .len(),
             1
         );
     }

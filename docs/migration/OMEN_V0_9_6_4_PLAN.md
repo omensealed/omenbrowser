@@ -1319,9 +1319,20 @@ events, and 256 MiB per room. Enabled zero limits fail closed; excessive values
 clamp to documented maxima of 3,650 days, 1,000,000 events, and 10 GiB.
 Human and JSON status inspect no more than 256 rooms and distinguish complete,
 incomplete, and missing usage ledgers without advancing backfill. JSON
-explicitly reports `automatic_compaction_active = false`. Recording enabled
-operator intent still does not delete history; admission integration remains a
-separate unit.
+reports whether admission compaction is configured and that runtime activity is
+not observable from the status process.
+
+The fifth implementation slice attaches that policy only to the live server
+store and routes ordinary and durable room-event writers through one atomic
+admission boundary. Disabled configuration preserves indefinite history.
+Enabled policy independently evaluates age, item, and byte ceilings after
+insertion, selects no more than 64 older originals, and commits insertion plus
+dependency-aware cleanup together. A sole newest event larger than the byte
+ceiling is retained; a later admission may compact it. Incomplete usage
+accounting, excessive projection work, or a ceiling requiring another batch
+rejects admission and rolls back the new event, sequence advance, cleanup, and
+ledger changes. No timer, polling worker, startup sweep, RPC, or UI compaction
+path is added.
 
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise

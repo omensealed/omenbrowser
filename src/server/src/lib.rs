@@ -1216,7 +1216,8 @@ fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
         },
         "history_retention": {
             "enabled": config.history_retention.enabled,
-            "automatic_compaction_active": false,
+            "admission_compaction_enabled": config.history_retention.enabled,
+            "runtime_activity_observable": false,
             "max_age_days": config.history_retention.max_age_days,
             "max_events_per_room": config.history_retention.max_events_per_room,
             "max_bytes_per_room": config.history_retention.max_bytes_per_room,
@@ -1683,7 +1684,11 @@ mod tests {
         assert_eq!(status_value["runtime"]["mode"], runtime_mode_label());
         assert_eq!(status_value["history_retention"]["enabled"], false);
         assert_eq!(
-            status_value["history_retention"]["automatic_compaction_active"],
+            status_value["history_retention"]["admission_compaction_enabled"],
+            false
+        );
+        assert_eq!(
+            status_value["history_retention"]["runtime_activity_observable"],
             false
         );
         assert_eq!(

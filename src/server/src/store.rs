@@ -10,6 +10,7 @@ pub mod history_retention;
 pub mod message_revisions;
 pub mod reactions;
 
+pub use history_retention::RoomHistoryRetentionPolicy;
 pub use history_retention::{RoomHistoryCompaction, RoomHistoryMaintenanceStatus};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,6 +129,7 @@ pub enum ServerRoomEventKind {
 pub struct OmenchatStore {
     connection: rusqlite::Connection,
     verified_upload_ledgers: std::sync::Mutex<std::collections::BTreeSet<UserId>>,
+    history_retention: RoomHistoryRetentionPolicy,
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -214,7 +216,17 @@ impl OmenchatStore {
         Self {
             connection,
             verified_upload_ledgers: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            history_retention: RoomHistoryRetentionPolicy::default(),
         }
+    }
+
+    pub fn with_room_history_retention(mut self, policy: RoomHistoryRetentionPolicy) -> Self {
+        self.history_retention = policy;
+        self
+    }
+
+    pub(crate) fn room_history_retention(&self) -> RoomHistoryRetentionPolicy {
+        self.history_retention
     }
 
     fn migrate_with_sql(
@@ -621,7 +633,13 @@ impl OmenchatStore {
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let event = append_event_in_transaction(&transaction, room_id, actor_user_id, kind)?;
+        let event = append_event_in_transaction(
+            &transaction,
+            room_id,
+            actor_user_id,
+            kind,
+            self.history_retention,
+        )?;
         transaction.commit()?;
         Ok(event)
     }
@@ -1340,8 +1358,16 @@ fn append_event_in_transaction(
     room_id: RoomId,
     actor_user_id: Option<UserId>,
     kind: ServerRoomEventKind,
+    retention: RoomHistoryRetentionPolicy,
 ) -> ServerResult<ServerRoomEvent> {
-    append_event_with_metadata_in_transaction(transaction, room_id, actor_user_id, kind, None)
+    append_event_with_metadata_in_transaction(
+        transaction,
+        room_id,
+        actor_user_id,
+        kind,
+        None,
+        retention,
+    )
 }
 
 pub(super) fn append_event_with_metadata_in_transaction(
@@ -1350,6 +1376,7 @@ pub(super) fn append_event_with_metadata_in_transaction(
     actor_user_id: Option<UserId>,
     kind: ServerRoomEventKind,
     metadata: Option<RichMessageEventMetadata>,
+    retention: RoomHistoryRetentionPolicy,
 ) -> ServerResult<ServerRoomEvent> {
     if metadata.is_some() && !matches!(kind, ServerRoomEventKind::Message { .. }) {
         return Err(crate::error::ServerError::Message(
@@ -1384,6 +1411,12 @@ pub(super) fn append_event_with_metadata_in_transaction(
     ensure_room_history_usage(transaction, room_id, event_id.saturating_sub(1))?;
     record_new_room_history_event(transaction, room_id, retained_bytes)?;
     advance_room_history_usage_backfill(transaction, room_id, HISTORY_USAGE_BACKFILL_BATCH)?;
+    history_retention::enforce_room_history_policy_in_transaction(
+        transaction,
+        room_id,
+        event_id,
+        retention,
+    )?;
     let actor_display_name = actor_user_id
         .map(|user_id| {
             transaction
@@ -3186,6 +3219,7 @@ mod tests {
                 body: "rich body".into(),
             },
             Some(metadata.clone()),
+            RoomHistoryRetentionPolicy::default(),
         )
         .expect("append rich event");
         transaction.commit().expect("commit rich event");
@@ -3261,6 +3295,7 @@ mod tests {
                 reply_to_event_id: Some(1),
                 mentioned_user_ids: Vec::new(),
             }),
+            RoomHistoryRetentionPolicy::default(),
         )
         .expect_err("notice metadata must fail")
         .to_string();
@@ -3772,6 +3807,7 @@ mod tests {
                 reply_to_event_id: Some(1),
                 mentioned_user_ids: vec![7, 9],
             }),
+            RoomHistoryRetentionPolicy::default(),
         )
         .expect("rich reply");
         transaction.commit().expect("commit");

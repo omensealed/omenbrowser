@@ -12,6 +12,14 @@ pub const MAX_COMPACTION_DEPENDENT_ROWS: usize = 20_000;
 pub const MAX_HISTORY_MAINTENANCE_STATUS_ROOMS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RoomHistoryRetentionPolicy {
+    pub enabled: bool,
+    pub max_age_days: u64,
+    pub max_events_per_room: u64,
+    pub max_bytes_per_room: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RoomHistoryCompaction {
     pub removed_events: usize,
     pub removed_event_bytes: u64,
@@ -37,6 +45,13 @@ pub struct RoomHistoryMaintenanceStatus {
 struct Candidate {
     event_id: i64,
     retained_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdmissionCandidate {
+    event_id: i64,
+    retained_bytes: u64,
+    at_unix: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -183,122 +198,288 @@ impl OmenchatStore {
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        ensure_room_event_sequence(&transaction, room_id)?;
-        let usage = room_history_usage_on(&transaction, room_id)?;
-        if !usage.backfill_complete {
-            return Err(ServerError::Message(format!(
-                "room {room_id} history usage backfill is incomplete"
-            )));
-        }
+        let result = compact_room_history_through_in_transaction(
+            &transaction,
+            room_id,
+            through,
+            limit,
+            &mut hook,
+        )?;
+        hook(CompactionBoundary::Commit)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+}
 
-        let mut candidates = load_candidates(&transaction, room_id, through, limit)?;
-        if candidates.is_empty() {
-            transaction.commit()?;
-            return Ok(RoomHistoryCompaction::default());
-        }
-        let dependencies = loop {
-            let event_ids = candidates
-                .iter()
-                .map(|candidate| candidate.event_id)
-                .collect::<Vec<_>>();
-            let dependencies = dependency_counts(&transaction, room_id, &event_ids)?;
-            if dependencies.total() <= MAX_COMPACTION_DEPENDENT_ROWS {
-                break dependencies;
-            }
-            if candidates.len() == 1 {
-                return Err(ServerError::Message(format!(
-                    "room {room_id} event {} has {} dependent projections; compaction limit is {MAX_COMPACTION_DEPENDENT_ROWS}",
-                    candidates[0].event_id,
-                    dependencies.total()
-                )));
-            }
-            candidates.pop();
-        };
+fn compact_room_history_through_in_transaction<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    through_event_id: i64,
+    limit: usize,
+    hook: &mut H,
+) -> ServerResult<RoomHistoryCompaction>
+where
+    H: FnMut(CompactionBoundary) -> ServerResult<()>,
+{
+    ensure_room_event_sequence(transaction, room_id)?;
+    let usage = room_history_usage_on(transaction, room_id)?;
+    if !usage.backfill_complete {
+        return Err(ServerError::Message(format!(
+            "room {room_id} history usage backfill is incomplete"
+        )));
+    }
+
+    let mut candidates = load_candidates(transaction, room_id, through_event_id, limit)?;
+    if candidates.is_empty() {
+        return Ok(RoomHistoryCompaction::default());
+    }
+    let dependencies = loop {
         let event_ids = candidates
             .iter()
             .map(|candidate| candidate.event_id)
             .collect::<Vec<_>>();
+        let dependencies = dependency_counts(transaction, room_id, &event_ids)?;
+        if dependencies.total() <= MAX_COMPACTION_DEPENDENT_ROWS {
+            break dependencies;
+        }
+        if candidates.len() == 1 {
+            return Err(ServerError::Message(format!(
+                    "room {room_id} event {} has {} dependent projections; compaction limit is {MAX_COMPACTION_DEPENDENT_ROWS}",
+                    candidates[0].event_id,
+                    dependencies.total()
+                )));
+        }
+        candidates.pop();
+    };
+    let event_ids = candidates
+        .iter()
+        .map(|candidate| candidate.event_id)
+        .collect::<Vec<_>>();
 
-        let cleared_reply_references =
-            clear_surviving_reply_references(&transaction, room_id, &event_ids)?;
-        if cleared_reply_references != dependencies.replies {
-            return Err(ServerError::Message(format!(
-                "room {room_id} reply projections changed during compaction"
-            )));
-        }
-        hook(CompactionBoundary::ReplyCleanup)?;
-        let removed_reaction_state =
-            delete_target_rows(&transaction, "room_reactions", room_id, &event_ids)?;
-        let removed_reaction_audit =
-            delete_target_rows(&transaction, "room_reaction_events", room_id, &event_ids)?;
-        if removed_reaction_state != dependencies.reaction_state
-            || removed_reaction_audit != dependencies.reaction_audit
-        {
-            return Err(ServerError::Message(format!(
-                "room {room_id} reaction projections changed during compaction"
-            )));
-        }
-        hook(CompactionBoundary::ReactionCleanup)?;
-        let removed_revision_state = delete_target_rows(
-            &transaction,
-            "room_message_revision_state",
-            room_id,
-            &event_ids,
-        )?;
-        let removed_revision_audit = delete_target_rows(
-            &transaction,
-            "room_message_revision_events",
-            room_id,
-            &event_ids,
-        )?;
-        if removed_revision_state != dependencies.revision_state
-            || removed_revision_audit != dependencies.revision_audit
-        {
-            return Err(ServerError::Message(format!(
-                "room {room_id} revision projections changed during compaction"
-            )));
-        }
-        hook(CompactionBoundary::RevisionCleanup)?;
-        let removed_events = delete_events(&transaction, room_id, &event_ids)?;
-        if removed_events != candidates.len() {
-            return Err(ServerError::Message(format!(
-                "room {room_id} history changed during compaction"
-            )));
-        }
-        hook(CompactionBoundary::EventDelete)?;
-
-        let removed_event_bytes = candidates.iter().try_fold(0u64, |total, candidate| {
-            total.checked_add(candidate.retained_bytes).ok_or_else(|| {
-                ServerError::Message("room history compaction bytes overflowed".into())
-            })
-        })?;
-        let cleared_reply_bytes = u64::try_from(cleared_reply_references)
-            .ok()
-            .and_then(|count| count.checked_mul(HISTORY_REPLY_RETAINED_BYTES))
-            .ok_or_else(|| {
-                ServerError::Message("room history reply-byte accounting overflowed".into())
-            })?;
-        update_usage(
-            &transaction,
-            room_id,
-            removed_events,
-            removed_event_bytes,
-            cleared_reply_bytes,
-        )?;
-        hook(CompactionBoundary::LedgerUpdate)?;
-        hook(CompactionBoundary::Commit)?;
-        transaction.commit()?;
-
-        Ok(RoomHistoryCompaction {
-            removed_events,
-            removed_event_bytes,
-            cleared_reply_references,
-            removed_reaction_state,
-            removed_reaction_audit,
-            removed_revision_state,
-            removed_revision_audit,
-        })
+    let cleared_reply_references =
+        clear_surviving_reply_references(transaction, room_id, &event_ids)?;
+    if cleared_reply_references != dependencies.replies {
+        return Err(ServerError::Message(format!(
+            "room {room_id} reply projections changed during compaction"
+        )));
     }
+    hook(CompactionBoundary::ReplyCleanup)?;
+    let removed_reaction_state =
+        delete_target_rows(transaction, "room_reactions", room_id, &event_ids)?;
+    let removed_reaction_audit =
+        delete_target_rows(transaction, "room_reaction_events", room_id, &event_ids)?;
+    if removed_reaction_state != dependencies.reaction_state
+        || removed_reaction_audit != dependencies.reaction_audit
+    {
+        return Err(ServerError::Message(format!(
+            "room {room_id} reaction projections changed during compaction"
+        )));
+    }
+    hook(CompactionBoundary::ReactionCleanup)?;
+    let removed_revision_state = delete_target_rows(
+        transaction,
+        "room_message_revision_state",
+        room_id,
+        &event_ids,
+    )?;
+    let removed_revision_audit = delete_target_rows(
+        transaction,
+        "room_message_revision_events",
+        room_id,
+        &event_ids,
+    )?;
+    if removed_revision_state != dependencies.revision_state
+        || removed_revision_audit != dependencies.revision_audit
+    {
+        return Err(ServerError::Message(format!(
+            "room {room_id} revision projections changed during compaction"
+        )));
+    }
+    hook(CompactionBoundary::RevisionCleanup)?;
+    let removed_events = delete_events(transaction, room_id, &event_ids)?;
+    if removed_events != candidates.len() {
+        return Err(ServerError::Message(format!(
+            "room {room_id} history changed during compaction"
+        )));
+    }
+    hook(CompactionBoundary::EventDelete)?;
+
+    let removed_event_bytes = candidates.iter().try_fold(0u64, |total, candidate| {
+        total
+            .checked_add(candidate.retained_bytes)
+            .ok_or_else(|| ServerError::Message("room history compaction bytes overflowed".into()))
+    })?;
+    let cleared_reply_bytes = u64::try_from(cleared_reply_references)
+        .ok()
+        .and_then(|count| count.checked_mul(HISTORY_REPLY_RETAINED_BYTES))
+        .ok_or_else(|| {
+            ServerError::Message("room history reply-byte accounting overflowed".into())
+        })?;
+    update_usage(
+        transaction,
+        room_id,
+        removed_events,
+        removed_event_bytes,
+        cleared_reply_bytes,
+    )?;
+    hook(CompactionBoundary::LedgerUpdate)?;
+
+    Ok(RoomHistoryCompaction {
+        removed_events,
+        removed_event_bytes,
+        cleared_reply_references,
+        removed_reaction_state,
+        removed_reaction_audit,
+        removed_revision_state,
+        removed_revision_audit,
+    })
+}
+
+pub(super) fn enforce_room_history_policy_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    newest_event_id: EventId,
+    policy: RoomHistoryRetentionPolicy,
+) -> ServerResult<RoomHistoryCompaction> {
+    if !policy.enabled {
+        return Ok(RoomHistoryCompaction::default());
+    }
+    if policy.max_age_days == 0 || policy.max_events_per_room == 0 || policy.max_bytes_per_room == 0
+    {
+        return Err(ServerError::Message(
+            "enabled room history retention requires positive age, item, and byte limits".into(),
+        ));
+    }
+    let usage = room_history_usage_on(transaction, room_id)?;
+    if !usage.backfill_complete {
+        return Err(ServerError::Message(format!(
+            "room {room_id} history admission is blocked until usage backfill completes"
+        )));
+    }
+    let max_age_seconds = policy
+        .max_age_days
+        .checked_mul(24 * 60 * 60)
+        .and_then(|seconds| i64::try_from(seconds).ok())
+        .ok_or_else(|| ServerError::Message("room history age limit overflowed".into()))?;
+    let cutoff = current_unix_seconds().saturating_sub(max_age_seconds);
+    let newest = i64::try_from(newest_event_id)
+        .map_err(|_| ServerError::Message("newest event ID does not fit SQLite".into()))?;
+    let candidates = load_admission_candidates(
+        transaction,
+        room_id,
+        newest,
+        MAX_COMPACTED_EVENTS_PER_TRANSACTION,
+    )?;
+    let mut projected_events = usage.event_count;
+    let mut projected_bytes = usage.retained_bytes;
+    let mut selected = Vec::new();
+    for candidate in candidates {
+        let age_expired = candidate.at_unix <= cutoff;
+        let over_items = projected_events > policy.max_events_per_room;
+        let over_bytes = projected_bytes > policy.max_bytes_per_room && projected_events > 1;
+        if !age_expired && !over_items && !over_bytes {
+            break;
+        }
+        selected.push(candidate);
+        projected_events = projected_events.saturating_sub(1);
+        projected_bytes = projected_bytes.saturating_sub(candidate.retained_bytes);
+    }
+
+    if selected.is_empty() {
+        return Ok(RoomHistoryCompaction::default());
+    }
+    let through = selected
+        .last()
+        .map(|candidate| candidate.event_id)
+        .ok_or_else(|| ServerError::Message("room history selection was empty".into()))?;
+    let mut no_hook = |_| Ok(());
+    let compacted = compact_room_history_through_in_transaction(
+        transaction,
+        room_id,
+        through,
+        selected.len(),
+        &mut no_hook,
+    )?;
+    verify_room_history_policy_after_compaction(transaction, room_id, newest, cutoff, policy)?;
+    Ok(compacted)
+}
+
+fn load_admission_candidates(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    newest_event_id: i64,
+    limit: usize,
+) -> ServerResult<Vec<AdmissionCandidate>> {
+    let mut statement = transaction.prepare(
+        "SELECT event_id, COALESCE(length(payload), 0),
+                reply_to_event_id IS NOT NULL,
+                COALESCE(length(mention_user_ids), 0), at
+         FROM room_events
+         WHERE room_id = ?1 AND event_id <> ?2
+         ORDER BY event_id
+         LIMIT ?3",
+    )?;
+    let rows = statement
+        .query_map((room_id, newest_event_id, limit as i64), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(
+            |(event_id, payload_bytes, has_reply, mention_bytes, at_unix)| {
+                let payload_bytes = usize::try_from(payload_bytes).map_err(|_| {
+                    ServerError::Message("stored room event payload length is invalid".into())
+                })?;
+                let mention_bytes = usize::try_from(mention_bytes).map_err(|_| {
+                    ServerError::Message("stored room event mention length is invalid".into())
+                })?;
+                Ok(AdmissionCandidate {
+                    event_id,
+                    retained_bytes: room_event_retained_bytes(
+                        payload_bytes,
+                        has_reply,
+                        mention_bytes,
+                    )?,
+                    at_unix,
+                })
+            },
+        )
+        .collect()
+}
+
+fn verify_room_history_policy_after_compaction(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    newest_event_id: i64,
+    cutoff: i64,
+    policy: RoomHistoryRetentionPolicy,
+) -> ServerResult<()> {
+    let usage = room_history_usage_on(transaction, room_id)?;
+    let oversized_single =
+        usage.event_count == 1 && usage.retained_bytes > policy.max_bytes_per_room;
+    let expired_remain: bool = transaction.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM room_events
+           WHERE room_id = ?1 AND event_id <> ?2 AND at <= ?3
+         )",
+        (room_id, newest_event_id, cutoff),
+        |row| row.get(0),
+    )?;
+    if usage.event_count > policy.max_events_per_room
+        || (usage.retained_bytes > policy.max_bytes_per_room && !oversized_single)
+        || expired_remain
+    {
+        return Err(ServerError::Message(format!(
+            "room {room_id} history retention requires more than one bounded compaction batch"
+        )));
+    }
+    Ok(())
 }
 
 fn load_candidates(
@@ -532,6 +713,18 @@ mod tests {
         ServerRoomEventKind::Message { body: body.into() }
     }
 
+    fn active_policy(
+        max_events_per_room: u64,
+        max_bytes_per_room: u64,
+    ) -> RoomHistoryRetentionPolicy {
+        RoomHistoryRetentionPolicy {
+            enabled: true,
+            max_age_days: 3_650,
+            max_events_per_room,
+            max_bytes_per_room,
+        }
+    }
+
     fn seeded_store() -> (OmenchatStore, RoomId) {
         let store = OmenchatStore::in_memory().expect("store");
         let room = store.ensure_room("retention", None).expect("room");
@@ -551,6 +744,7 @@ mod tests {
                 reply_to_event_id: Some(1),
                 mentioned_user_ids: vec![7],
             }),
+            RoomHistoryRetentionPolicy::default(),
         )
         .expect("reply");
         transaction.commit().expect("commit");
@@ -607,6 +801,173 @@ mod tests {
             MAX_HISTORY_MAINTENANCE_STATUS_ROOMS
         );
         assert!(hard_bounded.more_rooms);
+    }
+
+    #[test]
+    fn disabled_policy_preserves_history_and_item_policy_compacts_on_admission() {
+        let store = OmenchatStore::in_memory().expect("store");
+        for body in ["one", "two", "three"] {
+            store.append_event(1, None, message(body)).expect("append");
+        }
+        assert_eq!(
+            store.latest_events(1, 10).expect("disabled history").len(),
+            3
+        );
+
+        let store = store.with_room_history_retention(active_policy(3, u64::MAX));
+        let appended = store
+            .append_event(1, None, message("four"))
+            .expect("bounded append");
+        assert_eq!(appended.event_id, 4);
+        assert_eq!(
+            store
+                .latest_events(1, 10)
+                .expect("retained history")
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        let usage = store
+            .room_history_usage(1)
+            .expect("usage")
+            .expect("usage row");
+        assert_eq!(usage.event_count, 3);
+    }
+
+    #[test]
+    fn byte_age_and_oversized_single_policies_are_independent() {
+        let store = OmenchatStore::in_memory()
+            .expect("store")
+            .with_room_history_retention(active_policy(10, 140));
+        store
+            .append_event(1, None, message(&"a".repeat(60)))
+            .expect("first");
+        store
+            .append_event(1, None, message(&"b".repeat(60)))
+            .expect("byte-triggered append");
+        assert_eq!(store.latest_events(1, 10).expect("byte history").len(), 1);
+        assert_eq!(
+            store.latest_events(1, 10).expect("byte history")[0].event_id,
+            2
+        );
+
+        store
+            .connection
+            .execute("UPDATE room_events SET at = 1 WHERE room_id = 1", [])
+            .expect("age first event");
+        let aged_policy = RoomHistoryRetentionPolicy {
+            max_age_days: 1,
+            max_bytes_per_room: u64::MAX,
+            ..active_policy(10, u64::MAX)
+        };
+        let store = store.with_room_history_retention(aged_policy);
+        store
+            .append_event(1, None, message("fresh"))
+            .expect("age-triggered append");
+        assert_eq!(
+            store
+                .latest_events(1, 10)
+                .expect("age history")
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+
+        let store = OmenchatStore::in_memory()
+            .expect("oversized store")
+            .with_room_history_retention(active_policy(10, 1));
+        store
+            .append_event(1, None, message("oversized"))
+            .expect("single oversized event is retained");
+        store
+            .append_event(1, None, message("replacement"))
+            .expect("next oversized event replaces oldest");
+        assert_eq!(
+            store.latest_events(1, 10).expect("oversized history")[0].event_id,
+            2
+        );
+    }
+
+    #[test]
+    fn incomplete_accounting_and_multi_batch_saturation_roll_back_admission() {
+        let store = OmenchatStore::in_memory().expect("store");
+        store
+            .append_event(1, None, message("existing"))
+            .expect("seed");
+        let transaction = store
+            .connection
+            .unchecked_transaction()
+            .expect("legacy rows");
+        for event_id in 2..=300 {
+            transaction
+                .execute(
+                    "INSERT INTO room_events(
+                       room_id, event_id, event_kind, at, payload
+                     ) VALUES (1, ?1, 1, 1, X'78')",
+                    [event_id],
+                )
+                .expect("legacy event");
+        }
+        transaction
+            .execute(
+                "UPDATE room_event_sequences SET last_event_id = 300 WHERE room_id = 1",
+                [],
+            )
+            .expect("legacy sequence");
+        transaction
+            .execute(
+                "UPDATE room_history_usage
+                 SET event_count = 0, retained_bytes = 0,
+                     backfill_through_event_id = 0,
+                     backfill_target_event_id = 300,
+                     backfill_complete = 0
+                 WHERE room_id = 1",
+                [],
+            )
+            .expect("mark incomplete");
+        transaction.commit().expect("commit legacy fixture");
+        let store = store.with_room_history_retention(active_policy(1, u64::MAX));
+        let before = store.latest_events(1, 400).expect("before incomplete");
+        let error = store
+            .append_event(1, None, message("blocked"))
+            .expect_err("incomplete accounting must block")
+            .to_string();
+        assert!(error.contains("backfill completes"));
+        assert_eq!(
+            store.latest_events(1, 400).expect("after incomplete"),
+            before
+        );
+
+        let store = OmenchatStore::in_memory().expect("saturation store");
+        for index in 0..66 {
+            store
+                .append_event(1, None, message(&format!("event-{index}")))
+                .expect("seed saturation");
+        }
+        let before = store.latest_events(1, 100).expect("before saturation");
+        let before_usage = store
+            .room_history_usage(1)
+            .expect("usage")
+            .expect("usage row");
+        let store = store.with_room_history_retention(active_policy(1, u64::MAX));
+        let error = store
+            .append_event(1, None, message("must-roll-back"))
+            .expect_err("more than one compaction batch must fail")
+            .to_string();
+        assert!(error.contains("more than one bounded compaction batch"));
+        assert_eq!(
+            store.latest_events(1, 100).expect("after saturation"),
+            before
+        );
+        assert_eq!(
+            store
+                .room_history_usage(1)
+                .expect("usage after")
+                .expect("usage row after"),
+            before_usage
+        );
     }
 
     fn insert_dependencies(store: &OmenchatStore, room_id: RoomId) {

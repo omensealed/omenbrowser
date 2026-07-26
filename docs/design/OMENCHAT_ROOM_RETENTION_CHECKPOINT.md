@@ -1,8 +1,8 @@
 # OMENchat room-history retention checkpoint
 
-Status: implementation checkpoint; the bounded transactional compaction
-primitive exists, but no retention policy, admission hook, capability, CLI, or
-UI control is active.
+Status: implementation checkpoint; bounded retention is available only through
+explicitly enabled live event admission. The compatibility default is disabled,
+and no protocol capability, maintenance CLI, or GUI/TUI control is active.
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`  
 Protocol baseline: `omenchat-v0.1`, numeric protocol version 1
 
@@ -52,8 +52,9 @@ client caches may already hold an event.
   and fails closed when one original has excessive projection fan-out.
 - The primitive requires a complete schema-8 usage ledger, preserves the
   persistent event-ID high-water mark, clears only surviving reply references,
-  and updates dependency tables and usage accounting atomically. It is not
-  called by event admission, startup, a timer, configuration, RPC, or the UI.
+  and updates dependency tables and usage accounting atomically. It is called
+  only from live event admission when the typed policy is enabled; startup,
+  timers, RPC, status, and UI inspection do not compact history.
 - Typed configuration persists the policy under `[history_retention]`.
   Defaults remain disabled with 365 days, 100,000 events, and 256 MiB per room.
   Enabled zero limits fail closed; excessive values clamp to 3,650 days,
@@ -61,7 +62,8 @@ client caches may already hold an event.
 - Human and machine-readable status inspect at most 256 rooms through a
   read-only connection. They distinguish complete, incomplete, and missing
   ledgers, report omitted rooms, and never advance backfill or compact history.
-  Status explicitly reports automatic compaction as inactive.
+  Status reports whether admission compaction is configured and explicitly
+  states that live runtime activity is not observable from the status process.
 - The client already bounds resident history to 1,024 events / 8 MiB and
   incrementally removes orphaned reaction and revision projections. Server
   compaction does not remotely erase older client copies.
@@ -272,12 +274,17 @@ Required before enabling retention:
    and durable-replay records, never reuses event IDs, and rolls back cleanup
    and ledger changes together at every injected boundary. No production path
    calls it.
-4. **Complete but inactive.** Add disabled-by-default validated configuration
+4. **Complete.** Add disabled-by-default validated configuration
    and explicit maintenance status. The policy round-trips through typed TOML,
    retains conservative hard maxima, and rejects enabled zero limits. Status is
-   read-only and bounded to 256 rooms. Setting `enabled = true` records operator
-   intent but does not call compaction until admission integration is complete.
-5. Integrate bounded compaction with event admission.
+   read-only and bounded to 256 rooms.
+5. **Complete.** Integrate bounded compaction with event admission. The live
+   store alone receives the configured policy; test, status, and maintenance
+   stores default disabled. Ordinary and durable writers share one insert
+   boundary. Independent age/item/byte triggers remove at most 64 originals in
+   the insertion transaction. An oversized sole newest event is retained; the
+   next admission can replace it. Incomplete accounting or a ceiling requiring
+   another batch rejects and rolls back the new event and all attempted cleanup.
 6. Run server/client restart, Resource, mixed-version, and live isolated smoke
    gates.
 7. Reassess `message-revisions-v1` activation. Do not activate it merely

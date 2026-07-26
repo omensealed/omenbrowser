@@ -2546,6 +2546,7 @@ impl SessionEngine {
             client_instance_id,
             mutation_id: envelope.mutation_id,
         };
+        let history_retention = self.store.room_history_retention();
         let commit = self.store.commit_durable_mutation_effect_result(
             key,
             envelope.request_hash,
@@ -2732,6 +2733,7 @@ impl SessionEngine {
                                     changed_user.display_name
                                 ),
                             },
+                            history_retention,
                         )?;
                         let broadcasts = vec![
                             user_delta_frame(seq, room_id, &changed_user),
@@ -2817,6 +2819,7 @@ impl SessionEngine {
                                 active_room_id,
                                 Some(user.user_id),
                                 ServerRoomEventKind::System { body: event_body },
+                                history_retention,
                             )?;
                             broadcasts.push(Frame::new(
                                 ChatOp::RoomEvent,

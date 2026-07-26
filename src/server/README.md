@@ -560,9 +560,15 @@ Enabled zero limits are rejected. Values above 3,650 days, 1,000,000 events,
 or 10 GiB are clamped to those documented maxima. `status` and `status --json`
 inspect at most 256 room usage ledgers through a read-only connection and
 report truncation plus complete/incomplete/missing accounting. They never
-advance backfill or compact history. In this checkpoint, even
-`enabled = true` only records operator intent; status reports automatic
-compaction inactive and normal event admission remains unchanged.
+advance backfill or compact history. Status reports configured admission
+behavior and explicitly says that it cannot observe live runtime activity.
+With `enabled = true`, only the live server store applies the policy. Ordinary
+and durable event insertions independently enforce age, item, and byte ceilings
+inside their existing transaction, deleting at most 64 older originals plus
+dependent projections. A sole newest event may exceed the byte ceiling.
+Incomplete accounting or saturation requiring another batch rejects the event
+and rolls back insertion and cleanup together. There is no startup sweep,
+timer, polling worker, RPC compactor, or TUI deletion action.
 The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental

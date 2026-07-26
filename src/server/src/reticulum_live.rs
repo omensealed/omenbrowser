@@ -1124,7 +1124,8 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
     crate::config::ensure_nomadnet_portal(config, &destination_hash.to_hex_string())?;
     announce_destinations(&transport, &destination, &nomadnet_destination, config).await?;
 
-    let store = OmenchatStore::open(&config.database_path)?;
+    let store = OmenchatStore::open(&config.database_path)?
+        .with_room_history_retention((&config.history_retention).into());
     let engine =
         SessionEngine::with_limits_and_motd(store, config.into(), Some(config.motd.clone()));
 

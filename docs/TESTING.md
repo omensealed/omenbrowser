@@ -4381,8 +4381,8 @@ It covers the 64-original transaction ceiling, exact usage-ledger accounting,
 projection-aware batch reduction, excessive single-event fan-out refusal,
 surviving versus selected replies, upload/durable-replay preservation,
 monotonic event IDs, and rollback at every cleanup/ledger/commit boundary.
-This test does not imply that retention is enabled: no production path invokes
-the primitive.
+The explicit primitive remains inert under the default configuration. The live
+production store invokes it only when `[history_retention].enabled = true`.
 
 Typed policy and redacted maintenance-status coverage uses:
 
@@ -4397,4 +4397,13 @@ Typed policy and redacted maintenance-status coverage uses:
 The tests prove disabled defaults, exact round-trip, enabled zero-limit
 rejection, hard-maximum clamping, a 256-room read ceiling, truncation evidence,
 complete/incomplete/missing ledger classification, read-only behavior, and
-machine-output redaction. Automatic compaction remains inactive.
+machine-output redaction.
+
+The same focused `history_retention` gate covers admission integration:
+disabled compatibility; independent age, item, and byte triggers; retention of
+one oversized newest event; ordinary insert compaction; incomplete-ledger
+refusal; and rollback of the insertion, sequence, dependency cleanup, and usage
+ledger when restoring a ceiling would require more than the 64-event batch.
+The full server suite additionally exercises durable writers through the shared
+store boundary. Live mixed-version and restart/Resource smoke remain separate
+release gates.
