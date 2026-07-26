@@ -128,7 +128,7 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
     };
     let frame = decode_frame(&bytes)?;
     match frame.op {
-        ChatOp::HistoryInline | ChatOp::UserListSnapshotInline => {
+        ChatOp::HistoryInline | ChatOp::UserListSnapshotInline | ChatOp::ReactionSnapshotInline => {
             let values = decode_compressed_values_body(&frame.body)?;
             Ok(Some(ChatLinkEvent::InlineBatch {
                 op: frame.op,
@@ -136,7 +136,9 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
                 values,
             }))
         }
-        ChatOp::HistoryResourceOffer | ChatOp::UserListSnapshotResource => {
+        ChatOp::HistoryResourceOffer
+        | ChatOp::UserListSnapshotResource
+        | ChatOp::ReactionSnapshotResource => {
             let offer = decode_resource_offer_body(&frame.body)?;
             validate_resource_offer(&offer, frame.op)?;
             let Some(payload) = transport.fetch_resource(&offer.resource_id)? else {
@@ -177,13 +179,14 @@ fn validate_resource_offer(offer: &ResourceOffer, op: ChatOp) -> anyhow::Result<
     if offer.resource_id.is_empty() || offer.resource_id.len() > CHAT_RESOURCE_ID_MAX_BYTES {
         anyhow::bail!("OMENchat resource offer id is empty or exceeds client limits");
     }
-    let expected_purpose = match op {
-        ChatOp::HistoryResourceOffer => "history",
-        ChatOp::UserListSnapshotResource => "userlist",
+    let purpose_matches = match op {
+        ChatOp::HistoryResourceOffer => offer.purpose == "history",
+        ChatOp::UserListSnapshotResource => offer.purpose == "userlist",
+        ChatOp::ReactionSnapshotResource => offer.purpose.starts_with("reactions:"),
         _ => anyhow::bail!("OMENchat operation is not a batch resource offer"),
     };
-    if offer.purpose != expected_purpose {
-        anyhow::bail!("OMENchat resource offer purpose mismatch: expected {expected_purpose}");
+    if !purpose_matches {
+        anyhow::bail!("OMENchat resource offer purpose mismatch for its operation");
     }
     Ok(())
 }
@@ -446,6 +449,68 @@ mod tests {
         assert!(matches!(
             recv_chat_event(&mut transport).expect("event"),
             Some(ChatLinkEvent::ResourceBatch { values: decoded, .. }) if decoded == values
+        ));
+    }
+
+    #[test]
+    fn client_transport_decodes_reaction_inline_and_resource_snapshots() {
+        let snapshot = crate::chat::protocol::ReactionSnapshot {
+            target_event_ids: vec![10],
+            entries: vec![crate::chat::protocol::ReactionSnapshotEntry {
+                target_event_id: 10,
+                actor_user_id: 7,
+                token: crate::chat::protocol::ReactionToken::Heart,
+                created_at_unix: 2,
+            }],
+        };
+        let FrameBody::Fields(values) = snapshot.into_frame_body().expect("snapshot") else {
+            panic!("snapshot fields");
+        };
+        let batch = compressed_values_batch(&values).expect("batch");
+        let resource_id = "reactions:1:test".to_owned();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ReactionSnapshotInline,
+                1,
+                Some(1),
+                compressed_values_body(&values).expect("inline body"),
+            ))
+            .expect("push inline");
+        transport.insert_resource(
+            resource_id.clone(),
+            compressed_values_payload(&values).expect("payload"),
+        );
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ReactionSnapshotResource,
+                2,
+                Some(1),
+                resource_offer_body(&ResourceOffer {
+                    resource_id,
+                    compression: super::super::protocol::Compression::Bzip2,
+                    uncompressed_len: batch.uncompressed_len,
+                    compressed_len: batch.bytes.len() as u64,
+                    purpose: "reactions:2:fixture".into(),
+                }),
+            ))
+            .expect("push resource");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("inline"),
+            Some(ChatLinkEvent::InlineBatch {
+                op: ChatOp::ReactionSnapshotInline,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("resource"),
+            Some(ChatLinkEvent::ResourceBatch {
+                op: ChatOp::ReactionSnapshotResource,
+                values: decoded,
+                ..
+            }) if decoded == values
         ));
     }
 

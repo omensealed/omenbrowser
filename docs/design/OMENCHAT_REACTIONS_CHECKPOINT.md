@@ -410,8 +410,15 @@ open the maintainer's real browser or omenchatd data.
    Reaction events fan out only to same-room Links whose authenticated,
    identity-matching durable binding has reaction support. Production
    negotiation still does not accept `reactions-v1`.
-4. Add the separate bounded client model/table, snapshot reconciliation, and
-   parser with no controls.
+4. **Complete.** The identity-scoped desktop client database adds a constrained
+   active-reaction cache in an immediate additive migration transaction. The
+   shared GUI/TUI client model retains reaction rows separately from timeline
+   events under actor/target, target, room, server, and global item/byte
+   ceilings. Strict negotiated delta and explicit-target snapshot parsers
+   reconcile that model and persist the result; compressed inline and Resource
+   snapshots use the existing bounded transport. Restart restore queries only
+   retained eligible targets in protocol-sized pages. No controls exist and
+   the production client still does not request `reactions-v1`.
 5. Add read-only GUI/TUI counts and current-user highlighting.
 6. Add the durable composer action and recovered-intent presentation while the
    production capability remains disabled.

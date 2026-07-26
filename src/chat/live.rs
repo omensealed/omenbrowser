@@ -19,9 +19,9 @@ use super::protocol::{
     canonical_mutation_request_hash, parse_rich_message_event_metadata,
     parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MutationId,
-    RichMessageBody, RoomId, SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS,
-    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME,
-    REPLY_MENTIONS_CAPABILITY,
+    ReactionEvent, ReactionSnapshot, RichMessageBody, RoomId, SessionOpenNegotiation,
+    DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY,
+    PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -66,6 +66,8 @@ pub struct LiveChatClientState {
     durable_notice_ack_sessions: BTreeSet<ChatSessionId>,
     reply_mentions_requests: BTreeSet<ChatSessionId>,
     reply_mentions_sessions: BTreeSet<ChatSessionId>,
+    reaction_requests: BTreeSet<ChatSessionId>,
+    reaction_sessions: BTreeSet<ChatSessionId>,
     local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
@@ -173,6 +175,10 @@ impl LiveChatClientState {
         self.reply_mentions_sessions.contains(&session_id)
     }
 
+    pub fn reactions_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.reaction_sessions.contains(&session_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn set_reply_mentions_negotiated_for_test(
         &mut self,
@@ -183,6 +189,19 @@ impl LiveChatClientState {
             self.reply_mentions_sessions.insert(session_id);
         } else {
             self.reply_mentions_sessions.remove(&session_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_reactions_negotiated_for_test(
+        &mut self,
+        session_id: ChatSessionId,
+        negotiated: bool,
+    ) {
+        if negotiated {
+            self.reaction_sessions.insert(session_id);
+        } else {
+            self.reaction_sessions.remove(&session_id);
         }
     }
 
@@ -311,6 +330,8 @@ impl LiveChatClientState {
         self.durable_notice_ack_sessions.remove(&session_id);
         self.reply_mentions_requests.remove(&session_id);
         self.reply_mentions_sessions.remove(&session_id);
+        self.reaction_requests.remove(&session_id);
+        self.reaction_sessions.remove(&session_id);
         self.local_user_ids.remove(&session_id);
         retired_echoes
     }
@@ -652,6 +673,8 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.durable_requests.remove(&session_id);
     state.reply_mentions_requests.remove(&session_id);
     state.reply_mentions_sessions.remove(&session_id);
+    state.reaction_requests.remove(&session_id);
+    state.reaction_sessions.remove(&session_id);
     state.local_user_ids.remove(&session_id);
     let mut durable_requested = false;
     let mut session_open_body = local_display_name
@@ -1946,7 +1969,22 @@ fn apply_live_link_event(
             room_id,
             values,
             ..
-        } => apply_batch(client, preferred_session_id, op, room_id, values, events),
+        } => {
+            let reactions_negotiated = preferred_session_id.is_some_and(|session_id| {
+                state
+                    .as_deref()
+                    .is_some_and(|state| state.reactions_negotiated(session_id))
+            });
+            apply_batch(
+                client,
+                preferred_session_id,
+                op,
+                room_id,
+                values,
+                reactions_negotiated,
+                events,
+            );
+        }
         ChatLinkEvent::UploadResource {
             resource_id,
             filename,
@@ -2032,9 +2070,13 @@ fn apply_frame_with_state(
             let reply_mentions_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == REPLY_MENTIONS_CAPABILITY);
+            let reactions_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == REACTIONS_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
                 let request_pending = state.durable_requests.remove(&session_id);
                 let reply_mentions_requested = state.reply_mentions_requests.remove(&session_id);
+                let reactions_requested = state.reaction_requests.remove(&session_id);
                 let already_accepted = state.durable_sessions.contains(&session_id);
                 if durable_accepted
                     && state.client_instance_id.is_some()
@@ -2052,10 +2094,16 @@ fn apply_frame_with_state(
                         state.reply_mentions_sessions.remove(&session_id);
                         state.local_user_ids.remove(&session_id);
                     }
+                    if reactions_requested && reactions_accepted {
+                        state.reaction_sessions.insert(session_id);
+                    } else {
+                        state.reaction_sessions.remove(&session_id);
+                    }
                 } else {
                     state.durable_sessions.remove(&session_id);
                     state.durable_notice_ack_sessions.remove(&session_id);
                     state.reply_mentions_sessions.remove(&session_id);
+                    state.reaction_sessions.remove(&session_id);
                     state.local_user_ids.remove(&session_id);
                 }
             }
@@ -2244,6 +2292,51 @@ fn apply_frame_with_state(
                     session_id,
                     room_id: frame.room_id.unwrap_or(1),
                 });
+            }
+        }
+        ChatOp::ReactionEvent => {
+            let Some(session_id) = preferred_session_id else {
+                return;
+            };
+            let negotiated = state
+                .as_deref()
+                .is_some_and(|state| state.reactions_negotiated(session_id));
+            if !negotiated {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "ignored OMENchat reaction event without reactions-v1 negotiation"
+                        .into(),
+                });
+                return;
+            }
+            let Some(room_id) = frame.room_id else {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "OMENchat reaction event did not identify a room".into(),
+                });
+                return;
+            };
+            let event = match ReactionEvent::from_frame_body(&frame.body) {
+                Ok(event) => event,
+                Err(error) => {
+                    events.push(ChatClientEvent::Error {
+                        session_id: Some(session_id),
+                        message: format!("invalid OMENchat reaction event: {error}"),
+                    });
+                    return;
+                }
+            };
+            match client.apply_reaction_event(session_id, room_id, event) {
+                Ok(true) => events.push(ChatClientEvent::ReactionDeltaApplied {
+                    session_id,
+                    room_id,
+                    event,
+                }),
+                Ok(false) => {}
+                Err(error) => events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: error.into(),
+                }),
             }
         }
         ChatOp::MessageAck => {
@@ -3307,6 +3400,7 @@ fn apply_batch(
     op: ChatOp,
     room_id: Option<u32>,
     values: Vec<FrameValue>,
+    reactions_negotiated: bool,
     events: &mut Vec<ChatClientEvent>,
 ) {
     let Some(session_id) = preferred_session_id else {
@@ -3397,6 +3491,44 @@ fn apply_batch(
                     session_id,
                     room_id: room_id.unwrap_or(1),
                 });
+            }
+        }
+        ChatOp::ReactionSnapshotInline | ChatOp::ReactionSnapshotResource => {
+            if !reactions_negotiated {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "ignored OMENchat reaction snapshot without reactions-v1 negotiation"
+                        .into(),
+                });
+                return;
+            }
+            let Some(room_id) = room_id else {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "OMENchat reaction snapshot did not identify a room".into(),
+                });
+                return;
+            };
+            let snapshot = match ReactionSnapshot::from_frame_body(&FrameBody::Fields(values)) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    events.push(ChatClientEvent::Error {
+                        session_id: Some(session_id),
+                        message: format!("invalid OMENchat reaction snapshot: {error}"),
+                    });
+                    return;
+                }
+            };
+            match client.replace_reaction_snapshot(session_id, room_id, &snapshot) {
+                Ok(()) => events.push(ChatClientEvent::ReactionSnapshotApplied {
+                    session_id,
+                    room_id,
+                    snapshot,
+                }),
+                Err(error) => events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: error.into(),
+                }),
             }
         }
         _ => {}
@@ -3830,6 +3962,142 @@ mod tests {
     use crate::chat::protocol::batch::compressed_values_body;
     use crate::chat::rns::CapturedChatTransport;
 
+    fn reaction_test_client() -> (ChatClient, ChatSessionId) {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let server_id = "reaction-server".to_string();
+        assert!(client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: server_id.clone(),
+                destination: "reaction-destination".into(),
+                display_name: "Reaction Test".into(),
+            },
+            rooms: vec![room_summary(&server_id, 1, "lobby")],
+            active_room: room_summary(&server_id, 1, "lobby"),
+            users: Vec::new(),
+            events: vec![ChatEvent {
+                server_id,
+                room_id: 1,
+                event_id: 10,
+                actor_user_id: Some(1),
+                actor_display_name: Some("Alice".into()),
+                at_unix: 1,
+                kind: ChatEventKind::Message {
+                    body: "target".into(),
+                },
+            }],
+            status: "joined".into(),
+        }));
+        (client, session_id)
+    }
+
+    #[test]
+    fn reaction_delta_and_snapshot_parsers_are_negotiated_bounded_and_authoritative() {
+        let (mut client, session_id) = reaction_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let reaction = ReactionEvent {
+            reaction_event_id: 1,
+            target_event_id: 10,
+            actor_user_id: 7,
+            token: crate::chat::protocol::ReactionToken::Heart,
+            action: crate::chat::protocol::ReactionAction::Add,
+            at_unix: 2,
+        };
+        let frame = Frame::new(
+            ChatOp::ReactionEvent,
+            1,
+            Some(1),
+            reaction.into_frame_body().expect("reaction body"),
+        );
+        let mut events = Vec::new();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            frame.clone(),
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("without reactions-v1 negotiation")
+        ));
+        assert!(client
+            .reactions_for_targets(session_id, 1, &[10])
+            .is_empty());
+
+        state.set_reactions_negotiated_for_test(session_id, true);
+        events.clear();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            frame.clone(),
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::ReactionDeltaApplied { event, .. }] if *event == reaction
+        ));
+        assert_eq!(
+            client.reactions_for_targets(session_id, 1, &[10])[0].token,
+            crate::chat::protocol::ReactionToken::Heart
+        );
+
+        events.clear();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            frame,
+            &mut events,
+        );
+        assert!(events.is_empty(), "duplicate delta must be idempotent");
+
+        let snapshot = ReactionSnapshot {
+            target_event_ids: vec![10],
+            entries: vec![crate::chat::protocol::ReactionSnapshotEntry {
+                target_event_id: 10,
+                actor_user_id: 8,
+                token: crate::chat::protocol::ReactionToken::Celebrate,
+                created_at_unix: 3,
+            }],
+        };
+        let FrameBody::Fields(values) = snapshot.clone().into_frame_body().expect("snapshot body")
+        else {
+            panic!("snapshot fields");
+        };
+        events.clear();
+        apply_batch(
+            &mut client,
+            Some(session_id),
+            ChatOp::ReactionSnapshotInline,
+            Some(1),
+            values,
+            true,
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::ReactionSnapshotApplied {
+                snapshot: applied,
+                ..
+            }] if applied == &snapshot
+        ));
+        let retained = client.reactions_for_targets(session_id, 1, &[10]);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].actor_user_id, 8);
+        assert_eq!(
+            retained[0].token,
+            crate::chat::protocol::ReactionToken::Celebrate
+        );
+    }
+
     #[test]
     fn session_accept_surfaces_optional_server_motd() {
         let mut client = ChatClient::new();
@@ -4069,7 +4337,10 @@ mod tests {
                 FrameValue::Array(Vec::new()),
             ]),
             &crate::chat::protocol::SessionAcceptNegotiation {
-                accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                accepted_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    REACTIONS_CAPABILITY.into(),
+                ],
             },
         )
         .expect("negotiated accept");
@@ -4085,6 +4356,7 @@ mod tests {
         assert!(state.durable_mutations_negotiated(session_id));
         assert!(!state.durable_notice_ack_negotiated(session_id));
         assert!(!state.reply_mentions_negotiated(session_id));
+        assert!(!state.reactions_negotiated(session_id));
 
         let notice_accepted_body = crate::chat::protocol::with_session_accept_negotiation(
             FrameBody::Fields(vec![
@@ -6837,6 +7109,7 @@ mod tests {
             ChatOp::UserListSnapshotInline,
             Some(1),
             user_values,
+            false,
             &mut events,
         );
 

@@ -1,11 +1,18 @@
 use super::model::{
-    ChatEvent, ChatEventKind, ChatMessageMetadata, ChatRoomSummary, ChatServerSummary,
-    ChatUserSummary, CHAT_CLIENT_MAX_SESSIONS, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES,
-    CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES, CHAT_SERVER_ID_MAX_BYTES,
-    CHAT_SESSION_MAX_ROOMS, CHAT_SESSION_MAX_ROOM_BYTES, CHAT_SESSION_MAX_USERS,
-    CHAT_SESSION_MAX_USER_BYTES, CHAT_USER_DISPLAY_MAX_BYTES,
+    chat_text_fits, ChatEvent, ChatEventKind, ChatMessageMetadata, ChatReaction, ChatRoomSummary,
+    ChatServerSummary, ChatUserSummary, CHAT_CLIENT_MAX_SESSIONS, CHAT_REACTION_MAX_BYTES,
+    CHAT_REACTION_MAX_BYTES_PER_ROOM, CHAT_REACTION_MAX_BYTES_PER_SERVER, CHAT_REACTION_MAX_ROWS,
+    CHAT_REACTION_MAX_ROWS_PER_ROOM, CHAT_REACTION_MAX_ROWS_PER_SERVER,
+    CHAT_REACTION_MAX_ROWS_PER_TARGET, CHAT_REACTION_MAX_TOKENS_PER_ACTOR_TARGET,
+    CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_SERVER_DESTINATION_MAX_BYTES,
+    CHAT_SERVER_DISPLAY_MAX_BYTES, CHAT_SERVER_ID_MAX_BYTES, CHAT_SESSION_MAX_ROOMS,
+    CHAT_SESSION_MAX_ROOM_BYTES, CHAT_SESSION_MAX_USERS, CHAT_SESSION_MAX_USER_BYTES,
+    CHAT_USER_DISPLAY_MAX_BYTES,
 };
-use super::protocol::{EventId, RoomId, ServerId, UserId};
+use super::protocol::{
+    EventId, ReactionAction, ReactionEvent, ReactionSnapshot, ReactionToken, RoomId, ServerId,
+    UserId, REACTION_SNAPSHOT_MAX_ENTRIES,
+};
 use anyhow::Context;
 
 pub trait ChatStore {
@@ -45,6 +52,24 @@ pub trait ChatStore {
         room_id: RoomId,
     ) -> anyhow::Result<Vec<ChatUserSummary>>;
     fn append_events(&mut self, events: Vec<ChatEvent>) -> anyhow::Result<()>;
+    fn apply_reaction_event(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        event: ReactionEvent,
+    ) -> anyhow::Result<bool>;
+    fn replace_reaction_snapshot(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        snapshot: ReactionSnapshot,
+    ) -> anyhow::Result<()>;
+    fn reactions_for_targets(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        target_event_ids: &[EventId],
+    ) -> anyhow::Result<Vec<ChatReaction>>;
     fn latest_events(
         &self,
         server_id: &ServerId,
@@ -114,6 +139,24 @@ impl SqliteChatStore {
             "mute_except_mentions",
             "ALTER TABLE rooms ADD COLUMN mute_except_mentions INTEGER NOT NULL DEFAULT 0",
         )?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS room_reactions(
+               server_id TEXT NOT NULL,
+               room_id INTEGER NOT NULL CHECK(room_id > 0),
+               target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+               actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+               reaction_token TEXT NOT NULL CHECK(length(reaction_token) BETWEEN 1 AND 16),
+               created_at INTEGER NOT NULL CHECK(created_at >= 0),
+               PRIMARY KEY(server_id, room_id, target_event_id, actor_user_id, reaction_token)
+             );
+             CREATE INDEX IF NOT EXISTS idx_client_room_reactions_target
+             ON room_reactions(server_id, room_id, target_event_id, reaction_token, actor_user_id);",
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -180,6 +223,10 @@ impl ChatStore for SqliteChatStore {
 
     fn delete_server(&mut self, server_id: &ServerId) -> anyhow::Result<bool> {
         let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM room_reactions WHERE server_id = ?1",
+            [server_id],
+        )?;
         transaction.execute("DELETE FROM drafts WHERE server_id = ?1", [server_id])?;
         transaction.execute(
             "DELETE FROM history_ranges WHERE server_id = ?1",
@@ -503,6 +550,207 @@ impl ChatStore for SqliteChatStore {
         Ok(())
     }
 
+    fn apply_reaction_event(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        event: ReactionEvent,
+    ) -> anyhow::Result<bool> {
+        event
+            .into_frame_body()
+            .context("invalid OMENchat reaction event")?;
+        anyhow::ensure!(
+            chat_text_fits(server_id, CHAT_SERVER_ID_MAX_BYTES),
+            "reaction server id exceeds client limits"
+        );
+        let target_event_id = i64::try_from(event.target_event_id)
+            .context("reaction target event id does not fit SQLite")?;
+        let transaction = self.connection.transaction()?;
+        ensure_reaction_target(&transaction, server_id, room_id, target_event_id)?;
+        let changed = match event.action {
+            ReactionAction::Add => {
+                let inserted = transaction.execute(
+                    "INSERT OR IGNORE INTO room_reactions(
+                       server_id, room_id, target_event_id, actor_user_id,
+                       reaction_token, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (
+                        server_id,
+                        room_id,
+                        target_event_id,
+                        event.actor_user_id,
+                        event.token.as_str(),
+                        event.at_unix,
+                    ),
+                )?;
+                if inserted > 0
+                    && !reaction_capacity_ok(
+                        &transaction,
+                        server_id,
+                        room_id,
+                        target_event_id,
+                        event.actor_user_id,
+                    )?
+                {
+                    anyhow::bail!("reaction state exceeds client retention limits");
+                }
+                inserted > 0
+            }
+            ReactionAction::Remove => {
+                transaction.execute(
+                    "DELETE FROM room_reactions
+                     WHERE server_id = ?1 AND room_id = ?2 AND target_event_id = ?3
+                       AND actor_user_id = ?4 AND reaction_token = ?5",
+                    (
+                        server_id,
+                        room_id,
+                        target_event_id,
+                        event.actor_user_id,
+                        event.token.as_str(),
+                    ),
+                )? > 0
+            }
+        };
+        transaction.commit()?;
+        Ok(changed)
+    }
+
+    fn replace_reaction_snapshot(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        snapshot: ReactionSnapshot,
+    ) -> anyhow::Result<()> {
+        snapshot
+            .clone()
+            .into_frame_body()
+            .context("invalid OMENchat reaction snapshot")?;
+        anyhow::ensure!(
+            chat_text_fits(server_id, CHAT_SERVER_ID_MAX_BYTES),
+            "reaction server id exceeds client limits"
+        );
+        let target_event_ids = snapshot
+            .target_event_ids
+            .iter()
+            .map(|event_id| {
+                i64::try_from(*event_id).context("reaction target event id does not fit SQLite")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let transaction = self.connection.transaction()?;
+        for target_event_id in &target_event_ids {
+            ensure_reaction_target(&transaction, server_id, room_id, *target_event_id)?;
+        }
+        if !target_event_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", target_event_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "DELETE FROM room_reactions
+                 WHERE server_id = ? AND room_id = ? AND target_event_id IN ({placeholders})"
+            );
+            let mut parameters = Vec::<rusqlite::types::Value>::with_capacity(
+                target_event_ids.len().saturating_add(2),
+            );
+            parameters.push(server_id.clone().into());
+            parameters.push(i64::from(room_id).into());
+            parameters.extend(target_event_ids.iter().copied().map(Into::into));
+            transaction.execute(&sql, rusqlite::params_from_iter(parameters))?;
+        }
+        for entry in &snapshot.entries {
+            transaction.execute(
+                "INSERT INTO room_reactions(
+                   server_id, room_id, target_event_id, actor_user_id,
+                   reaction_token, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    server_id,
+                    room_id,
+                    i64::try_from(entry.target_event_id)
+                        .context("snapshot target event id does not fit SQLite")?,
+                    entry.actor_user_id,
+                    entry.token.as_str(),
+                    entry.created_at_unix,
+                ),
+            )?;
+        }
+        if !reaction_snapshot_capacity_ok(&transaction, server_id, room_id, &target_event_ids)? {
+            anyhow::bail!("reaction snapshot exceeds client retention limits");
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn reactions_for_targets(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        target_event_ids: &[EventId],
+    ) -> anyhow::Result<Vec<ChatReaction>> {
+        ReactionSnapshot {
+            target_event_ids: target_event_ids.to_vec(),
+            entries: Vec::new(),
+        }
+        .into_frame_body()
+        .context("invalid reaction target set")?;
+        if target_event_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let target_event_ids = target_event_ids
+            .iter()
+            .map(|event_id| {
+                i64::try_from(*event_id).context("reaction target event id does not fit SQLite")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let placeholders = std::iter::repeat_n("?", target_event_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT target_event_id, actor_user_id, reaction_token, created_at
+             FROM room_reactions
+             WHERE server_id = ? AND room_id = ? AND target_event_id IN ({placeholders})
+             ORDER BY target_event_id, reaction_token, actor_user_id
+             LIMIT ?"
+        );
+        let mut parameters =
+            Vec::<rusqlite::types::Value>::with_capacity(target_event_ids.len().saturating_add(3));
+        parameters.push(server_id.clone().into());
+        parameters.push(i64::from(room_id).into());
+        parameters.extend(target_event_ids.iter().copied().map(Into::into));
+        parameters.push(((REACTION_SNAPSHOT_MAX_ENTRIES + 1) as i64).into());
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        anyhow::ensure!(
+            rows.len() <= REACTION_SNAPSHOT_MAX_ENTRIES,
+            "stored reaction target set exceeds snapshot limits"
+        );
+        rows.into_iter()
+            .map(|(target_event_id, actor_user_id, token, created_at_unix)| {
+                Ok(ChatReaction {
+                    server_id: server_id.clone(),
+                    room_id,
+                    target_event_id: u64::try_from(target_event_id)
+                        .context("stored reaction target id is invalid")?,
+                    actor_user_id: u32::try_from(actor_user_id)
+                        .ok()
+                        .filter(|user_id| *user_id != 0)
+                        .context("stored reaction actor id is invalid")?,
+                    token: ReactionToken::try_from(token.as_str())
+                        .context("stored reaction token is invalid")?,
+                    created_at_unix,
+                })
+            })
+            .collect()
+    }
+
     fn latest_events(
         &self,
         server_id: &ServerId,
@@ -541,6 +789,128 @@ impl ChatStore for SqliteChatStore {
         events.reverse();
         Ok(events)
     }
+}
+
+fn ensure_reaction_target(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+    room_id: RoomId,
+    target_event_id: i64,
+) -> anyhow::Result<()> {
+    let eligible = transaction.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM room_events
+           WHERE server_id = ?1 AND room_id = ?2 AND event_id = ?3
+             AND deleted = 0 AND event_kind IN (1, 2, 3, 5)
+         )",
+        (server_id, room_id, target_event_id),
+        |row| row.get::<_, bool>(0),
+    )?;
+    anyhow::ensure!(
+        eligible,
+        "reaction target is not retained as an eligible room event"
+    );
+    Ok(())
+}
+
+fn reaction_capacity_ok(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+    room_id: RoomId,
+    target_event_id: i64,
+    actor_user_id: UserId,
+) -> anyhow::Result<bool> {
+    let actor_target_rows = transaction.query_row(
+        "SELECT COUNT(*) FROM room_reactions
+         WHERE server_id = ?1 AND room_id = ?2 AND target_event_id = ?3
+           AND actor_user_id = ?4",
+        (server_id, room_id, target_event_id, actor_user_id),
+        |row| row.get::<_, i64>(0),
+    )?;
+    let target_rows = transaction.query_row(
+        "SELECT COUNT(*) FROM room_reactions
+         WHERE server_id = ?1 AND room_id = ?2 AND target_event_id = ?3",
+        (server_id, room_id, target_event_id),
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(
+        actor_target_rows <= CHAT_REACTION_MAX_TOKENS_PER_ACTOR_TARGET as i64
+            && target_rows <= CHAT_REACTION_MAX_ROWS_PER_TARGET as i64
+            && reaction_scope_capacity_ok(transaction, server_id, room_id)?,
+    )
+}
+
+fn reaction_snapshot_capacity_ok(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+    room_id: RoomId,
+    target_event_ids: &[i64],
+) -> anyhow::Result<bool> {
+    for target_event_id in target_event_ids {
+        let over_actor_limit = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM room_reactions
+               WHERE server_id = ?1 AND room_id = ?2 AND target_event_id = ?3
+               GROUP BY actor_user_id
+               HAVING COUNT(*) > ?4
+             )",
+            (
+                server_id,
+                room_id,
+                target_event_id,
+                CHAT_REACTION_MAX_TOKENS_PER_ACTOR_TARGET as i64,
+            ),
+            |row| row.get::<_, bool>(0),
+        )?;
+        let target_rows = transaction.query_row(
+            "SELECT COUNT(*) FROM room_reactions
+             WHERE server_id = ?1 AND room_id = ?2 AND target_event_id = ?3",
+            (server_id, room_id, target_event_id),
+            |row| row.get::<_, i64>(0),
+        )?;
+        if over_actor_limit || target_rows > CHAT_REACTION_MAX_ROWS_PER_TARGET as i64 {
+            return Ok(false);
+        }
+    }
+    reaction_scope_capacity_ok(transaction, server_id, room_id)
+}
+
+fn reaction_scope_capacity_ok(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+    room_id: RoomId,
+) -> anyhow::Result<bool> {
+    let fixed = std::mem::size_of::<ChatReaction>() as i64;
+    let (room_rows, room_bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(?3 + length(CAST(server_id AS BLOB))
+                                 + length(CAST(reaction_token AS BLOB))), 0)
+         FROM room_reactions WHERE server_id = ?1 AND room_id = ?2",
+        (server_id, room_id, fixed),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (server_rows, server_bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(?2 + length(CAST(server_id AS BLOB))
+                                 + length(CAST(reaction_token AS BLOB))), 0)
+         FROM room_reactions WHERE server_id = ?1",
+        (server_id, fixed),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (global_rows, global_bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(?1 + length(CAST(server_id AS BLOB))
+                                 + length(CAST(reaction_token AS BLOB))), 0)
+         FROM room_reactions",
+        [fixed],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(room_rows <= CHAT_REACTION_MAX_ROWS_PER_ROOM as i64
+        && room_bytes <= CHAT_REACTION_MAX_BYTES_PER_ROOM as i64
+        && server_rows <= CHAT_REACTION_MAX_ROWS_PER_SERVER as i64
+        && server_bytes <= CHAT_REACTION_MAX_BYTES_PER_SERVER as i64
+        && global_rows <= CHAT_REACTION_MAX_ROWS as i64
+        && global_bytes <= CHAT_REACTION_MAX_BYTES as i64)
 }
 
 impl SqliteChatStore {
@@ -703,6 +1073,7 @@ fn is_transient_local_event_id(event_id: EventId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::protocol::ReactionSnapshotEntry;
 
     fn isolated_store_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -827,6 +1198,176 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_id, 10);
         assert_eq!(events[0].actor_display_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn reaction_store_is_additive_restart_safe_and_snapshot_authoritative() {
+        let path = isolated_store_path("reactions");
+        let server = sample_server();
+        {
+            let mut store = SqliteChatStore::open(&path).expect("store");
+            store.save_server(server.clone()).expect("server");
+            store
+                .save_room(ChatRoomSummary {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    name: "lobby".into(),
+                    topic: None,
+                    unread: 0,
+                    joined: true,
+                })
+                .expect("room");
+            store
+                .append_events(vec![ChatEvent {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    event_id: 10,
+                    actor_user_id: Some(1),
+                    actor_display_name: Some("Alice".into()),
+                    at_unix: 1,
+                    kind: ChatEventKind::Message {
+                        body: "target".into(),
+                    },
+                }])
+                .expect("target");
+            let add = ReactionEvent {
+                reaction_event_id: 1,
+                target_event_id: 10,
+                actor_user_id: 7,
+                token: ReactionToken::Heart,
+                action: ReactionAction::Add,
+                at_unix: 2,
+            };
+            assert!(store
+                .apply_reaction_event(&server.server_id, 1, add)
+                .expect("add"));
+            assert!(!store
+                .apply_reaction_event(&server.server_id, 1, add)
+                .expect("duplicate add"));
+        }
+        {
+            let mut store = SqliteChatStore::open(&path).expect("reopen");
+            assert_eq!(
+                store
+                    .reactions_for_targets(&server.server_id, 1, &[10])
+                    .expect("restored reactions"),
+                vec![ChatReaction {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    target_event_id: 10,
+                    actor_user_id: 7,
+                    token: ReactionToken::Heart,
+                    created_at_unix: 2,
+                }]
+            );
+            store
+                .replace_reaction_snapshot(
+                    &server.server_id,
+                    1,
+                    ReactionSnapshot {
+                        target_event_ids: vec![10],
+                        entries: vec![ReactionSnapshotEntry {
+                            target_event_id: 10,
+                            actor_user_id: 8,
+                            token: ReactionToken::Celebrate,
+                            created_at_unix: 3,
+                        }],
+                    },
+                )
+                .expect("replace snapshot");
+            let reactions = store
+                .reactions_for_targets(&server.server_id, 1, &[10])
+                .expect("snapshot reactions");
+            assert_eq!(reactions.len(), 1);
+            assert_eq!(reactions[0].actor_user_id, 8);
+            assert_eq!(reactions[0].token, ReactionToken::Celebrate);
+
+            store
+                .replace_reaction_snapshot(
+                    &server.server_id,
+                    1,
+                    ReactionSnapshot {
+                        target_event_ids: vec![10],
+                        entries: Vec::new(),
+                    },
+                )
+                .expect("empty authoritative snapshot");
+            assert!(store
+                .reactions_for_targets(&server.server_id, 1, &[10])
+                .expect("cleared reactions")
+                .is_empty());
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reaction_snapshot_overload_rolls_back_prior_page_state() {
+        let mut store = SqliteChatStore::in_memory().expect("store");
+        let server = sample_server();
+        store.save_server(server.clone()).expect("server");
+        store
+            .save_room(ChatRoomSummary {
+                server_id: server.server_id.clone(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            })
+            .expect("room");
+        store
+            .append_events(vec![ChatEvent {
+                server_id: server.server_id.clone(),
+                room_id: 1,
+                event_id: 10,
+                actor_user_id: Some(1),
+                actor_display_name: None,
+                at_unix: 1,
+                kind: ChatEventKind::Message {
+                    body: "target".into(),
+                },
+            }])
+            .expect("target");
+        store
+            .apply_reaction_event(
+                &server.server_id,
+                1,
+                ReactionEvent {
+                    reaction_event_id: 1,
+                    target_event_id: 10,
+                    actor_user_id: 7,
+                    token: ReactionToken::Heart,
+                    action: ReactionAction::Add,
+                    at_unix: 2,
+                },
+            )
+            .expect("baseline");
+        let overloaded = ReactionSnapshot {
+            target_event_ids: vec![10],
+            entries: [
+                ReactionToken::ThumbsUp,
+                ReactionToken::Heart,
+                ReactionToken::Laugh,
+                ReactionToken::Celebrate,
+            ]
+            .into_iter()
+            .map(|token| ReactionSnapshotEntry {
+                target_event_id: 10,
+                actor_user_id: 7,
+                token,
+                created_at_unix: 3,
+            })
+            .collect(),
+        };
+        assert!(store
+            .replace_reaction_snapshot(&server.server_id, 1, overloaded)
+            .is_err());
+        let retained = store
+            .reactions_for_targets(&server.server_id, 1, &[10])
+            .expect("retained baseline");
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].token, ReactionToken::Heart);
+        assert_eq!(retained[0].created_at_unix, 2);
     }
 
     #[test]
@@ -1214,6 +1755,21 @@ mod tests {
                 |row| row.get::<_, bool>(0),
             )
             .expect("saved server columns"));
+        for (object_type, name) in [
+            ("table", "room_reactions"),
+            ("index", "idx_client_room_reactions_target"),
+        ] {
+            assert!(store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2
+                     )",
+                    (object_type, name),
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("reaction schema object"));
+        }
         drop(store);
         std::fs::remove_file(path).expect("remove store");
     }

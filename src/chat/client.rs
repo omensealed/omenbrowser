@@ -1,7 +1,8 @@
 use super::descriptor::OmenChatDescriptor;
 use super::model::{
-    bounded_chat_text, chat_text_fits, ChatEvent, ChatRoomSummary, ChatServerSummary,
-    ChatUserSummary, CHAT_ACTOR_DISPLAY_MAX_BYTES, CHAT_MOTD_MAX_BYTES, CHAT_ROOM_NAME_MAX_BYTES,
+    bounded_chat_text, chat_event_supports_reactions, chat_reactions_fit_bounds, chat_text_fits,
+    ChatEvent, ChatReaction, ChatRoomSummary, ChatServerSummary, ChatUserSummary,
+    CHAT_ACTOR_DISPLAY_MAX_BYTES, CHAT_MOTD_MAX_BYTES, CHAT_ROOM_NAME_MAX_BYTES,
     CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES,
     CHAT_SERVER_ID_MAX_BYTES, CHAT_STATUS_MAX_BYTES, CHAT_UPLOAD_FILENAME_MAX_BYTES,
     CHAT_USER_DISPLAY_MAX_BYTES,
@@ -10,7 +11,10 @@ pub use super::model::{
     CHAT_CLIENT_MAX_SESSIONS, CHAT_SESSION_MAX_ROOMS, CHAT_SESSION_MAX_ROOM_BYTES,
     CHAT_SESSION_MAX_USERS, CHAT_SESSION_MAX_USER_BYTES,
 };
-use super::protocol::{EventId, RoomId, ServerId};
+use super::protocol::{
+    EventId, ReactionAction, ReactionEvent, ReactionSnapshot, ReactionSnapshotEntry, ReactionToken,
+    RoomId, ServerId, REACTION_SNAPSHOT_MAX_TARGETS,
+};
 use super::store::ChatStore;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -251,6 +255,16 @@ pub enum ChatClientEvent {
         session_id: ChatSessionId,
         room_id: RoomId,
     },
+    ReactionDeltaApplied {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event: ReactionEvent,
+    },
+    ReactionSnapshotApplied {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        snapshot: ReactionSnapshot,
+    },
     UploadAccepted {
         session_id: ChatSessionId,
         resource_id: String,
@@ -411,6 +425,16 @@ pub struct ChatClient {
     sessions: Vec<ChatSessionView>,
     local_user_ids: std::collections::BTreeMap<ServerId, super::protocol::UserId>,
     mute_except_mentions: BTreeMap<ServerId, BTreeSet<RoomId>>,
+    reactions: BTreeMap<
+        (
+            ServerId,
+            RoomId,
+            EventId,
+            super::protocol::UserId,
+            ReactionToken,
+        ),
+        ChatReaction,
+    >,
 }
 
 impl ChatClient {
@@ -420,6 +444,7 @@ impl ChatClient {
             sessions: Vec::new(),
             local_user_ids: std::collections::BTreeMap::new(),
             mute_except_mentions: BTreeMap::new(),
+            reactions: BTreeMap::new(),
         }
     }
 
@@ -479,6 +504,142 @@ impl ChatClient {
             room_id,
             self.local_user_id(session_id),
         )
+    }
+
+    pub fn reactions_for_targets(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_ids: &[EventId],
+    ) -> Vec<ChatReaction> {
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.as_str())
+        else {
+            return Vec::new();
+        };
+        let targets = target_event_ids.iter().copied().collect::<BTreeSet<_>>();
+        self.reactions
+            .values()
+            .filter(|reaction| {
+                reaction.server_id == server_id
+                    && reaction.room_id == room_id
+                    && targets.contains(&reaction.target_event_id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn apply_reaction_event(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event: ReactionEvent,
+    ) -> Result<bool, &'static str> {
+        event
+            .into_frame_body()
+            .map_err(|_| "reaction event is invalid")?;
+        let Some(session) = self.session(session_id) else {
+            return Err("reaction session is unavailable");
+        };
+        if !session.events.iter().any(|candidate| {
+            candidate.room_id == room_id
+                && candidate.event_id == event.target_event_id
+                && !is_transient_local_event_id(candidate.event_id)
+                && chat_event_supports_reactions(candidate)
+        }) {
+            return Err("reaction target is not retained");
+        }
+        let server_id = session.server.server_id.clone();
+        let key = (
+            server_id.clone(),
+            room_id,
+            event.target_event_id,
+            event.actor_user_id,
+            event.token,
+        );
+        let mut next = self.reactions.clone();
+        let changed = match event.action {
+            ReactionAction::Add => next
+                .insert(
+                    key,
+                    ChatReaction {
+                        server_id,
+                        room_id,
+                        target_event_id: event.target_event_id,
+                        actor_user_id: event.actor_user_id,
+                        token: event.token,
+                        created_at_unix: event.at_unix,
+                    },
+                )
+                .is_none(),
+            ReactionAction::Remove => next.remove(&key).is_some(),
+        };
+        if !chat_reactions_fit_bounds(next.values()) {
+            return Err("reaction state exceeds client retention limits");
+        }
+        self.reactions = next;
+        Ok(changed)
+    }
+
+    pub(crate) fn replace_reaction_snapshot(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        snapshot: &ReactionSnapshot,
+    ) -> Result<(), &'static str> {
+        snapshot
+            .clone()
+            .into_frame_body()
+            .map_err(|_| "reaction snapshot is invalid")?;
+        let Some(session) = self.session(session_id) else {
+            return Err("reaction session is unavailable");
+        };
+        let target_set = snapshot
+            .target_event_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !target_set.iter().all(|target_event_id| {
+            session.events.iter().any(|event| {
+                event.room_id == room_id
+                    && event.event_id == *target_event_id
+                    && !is_transient_local_event_id(event.event_id)
+                    && chat_event_supports_reactions(event)
+            })
+        }) {
+            return Err("reaction snapshot target is not retained");
+        }
+        let server_id = session.server.server_id.clone();
+        let mut next = self.reactions.clone();
+        next.retain(|(stored_server, stored_room, target, ..), _| {
+            stored_server != &server_id || *stored_room != room_id || !target_set.contains(target)
+        });
+        for entry in &snapshot.entries {
+            let reaction = ChatReaction {
+                server_id: server_id.clone(),
+                room_id,
+                target_event_id: entry.target_event_id,
+                actor_user_id: entry.actor_user_id,
+                token: entry.token,
+                created_at_unix: entry.created_at_unix,
+            };
+            next.insert(
+                (
+                    server_id.clone(),
+                    room_id,
+                    entry.target_event_id,
+                    entry.actor_user_id,
+                    entry.token,
+                ),
+                reaction,
+            );
+        }
+        if !chat_reactions_fit_bounds(next.values()) {
+            return Err("reaction snapshot exceeds client retention limits");
+        }
+        self.reactions = next;
+        Ok(())
     }
 
     pub fn room_mute_except_mentions(&self, session_id: ChatSessionId, room_id: RoomId) -> bool {
@@ -579,6 +740,8 @@ impl ChatClient {
         {
             self.local_user_ids.remove(&removed.server.server_id);
             self.mute_except_mentions.remove(&removed.server.server_id);
+            self.reactions
+                .retain(|(server_id, ..), _| server_id != &removed.server.server_id);
         }
         Some(removed)
     }
@@ -621,6 +784,45 @@ impl ChatClient {
                 .cloned()
                 .collect(),
         )?;
+        for room_id in session
+            .events
+            .iter()
+            .map(|event| event.room_id)
+            .collect::<BTreeSet<_>>()
+        {
+            let target_event_ids = session
+                .events
+                .iter()
+                .filter(|event| {
+                    event.room_id == room_id
+                        && !is_transient_local_event_id(event.event_id)
+                        && chat_event_supports_reactions(event)
+                })
+                .map(|event| event.event_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            for targets in target_event_ids.chunks(REACTION_SNAPSHOT_MAX_TARGETS) {
+                let entries = self
+                    .reactions_for_targets(session_id, room_id, targets)
+                    .into_iter()
+                    .map(|reaction| ReactionSnapshotEntry {
+                        target_event_id: reaction.target_event_id,
+                        actor_user_id: reaction.actor_user_id,
+                        token: reaction.token,
+                        created_at_unix: reaction.created_at_unix,
+                    })
+                    .collect();
+                store.replace_reaction_snapshot(
+                    &session.server.server_id,
+                    room_id,
+                    ReactionSnapshot {
+                        target_event_ids: targets.to_vec(),
+                        entries,
+                    },
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -794,6 +996,44 @@ impl ChatClient {
                     .entry(server_id.clone())
                     .or_default()
                     .insert(room_id);
+            }
+            let retained_by_room = self
+                .session(session_id)
+                .map(|session| {
+                    let mut retained = BTreeMap::<RoomId, Vec<EventId>>::new();
+                    for event in &session.events {
+                        if !is_transient_local_event_id(event.event_id)
+                            && chat_event_supports_reactions(event)
+                        {
+                            retained
+                                .entry(event.room_id)
+                                .or_default()
+                                .push(event.event_id);
+                        }
+                    }
+                    retained
+                })
+                .unwrap_or_default();
+            for (room_id, mut target_event_ids) in retained_by_room {
+                target_event_ids.sort_unstable();
+                target_event_ids.dedup();
+                for targets in target_event_ids.chunks(REACTION_SNAPSHOT_MAX_TARGETS) {
+                    let reactions = store.reactions_for_targets(&server_id, room_id, targets)?;
+                    let snapshot = ReactionSnapshot {
+                        target_event_ids: targets.to_vec(),
+                        entries: reactions
+                            .into_iter()
+                            .map(|reaction| ReactionSnapshotEntry {
+                                target_event_id: reaction.target_event_id,
+                                actor_user_id: reaction.actor_user_id,
+                                token: reaction.token,
+                                created_at_unix: reaction.created_at_unix,
+                            })
+                            .collect(),
+                    };
+                    self.replace_reaction_snapshot(session_id, room_id, &snapshot)
+                        .map_err(anyhow::Error::msg)?;
+                }
             }
             restored += 1;
         }
@@ -1391,6 +1631,78 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(1, 1), (2, 1)]
         );
+    }
+
+    #[test]
+    fn client_reactions_are_authoritative_bounded_and_restart_safe() {
+        let mut store = SqliteChatStore::in_memory().expect("store");
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(bounded_history_session(
+            session_id,
+            vec![bounded_history_event(1, 5)]
+        )));
+
+        let add = ReactionEvent {
+            reaction_event_id: 2,
+            target_event_id: 1,
+            actor_user_id: 7,
+            token: ReactionToken::Heart,
+            action: ReactionAction::Add,
+            at_unix: 10,
+        };
+        assert_eq!(client.apply_reaction_event(session_id, 1, add), Ok(true));
+        assert_eq!(client.apply_reaction_event(session_id, 1, add), Ok(false));
+        assert!(client
+            .apply_reaction_event(
+                session_id,
+                1,
+                ReactionEvent {
+                    target_event_id: 99,
+                    ..add
+                }
+            )
+            .is_err());
+
+        client
+            .replace_reaction_snapshot(
+                session_id,
+                1,
+                &ReactionSnapshot {
+                    target_event_ids: vec![1],
+                    entries: vec![ReactionSnapshotEntry {
+                        target_event_id: 1,
+                        actor_user_id: 8,
+                        token: ReactionToken::Celebrate,
+                        created_at_unix: 11,
+                    }],
+                },
+            )
+            .expect("authoritative snapshot");
+        let retained = client.reactions_for_targets(session_id, 1, &[1]);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].actor_user_id, 8);
+        assert_eq!(retained[0].token, ReactionToken::Celebrate);
+
+        client
+            .persist_session(&mut store, session_id)
+            .expect("persist reaction state");
+        let mut restored = ChatClient::new();
+        assert_eq!(
+            restored
+                .restore_from_store(&store, 50)
+                .expect("restore reaction state"),
+            1
+        );
+        let restored_session = restored.sessions()[0].session_id;
+        assert_eq!(
+            restored.reactions_for_targets(restored_session, 1, &[1]),
+            retained
+        );
+        restored.remove_session(restored_session);
+        assert!(restored
+            .reactions_for_targets(restored_session, 1, &[1])
+            .is_empty());
     }
 
     #[test]

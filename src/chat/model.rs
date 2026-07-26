@@ -1,3 +1,4 @@
+pub use super::protocol::ReactionToken;
 use super::protocol::{EventId, RoomId, ServerId, UserId};
 
 pub const CHAT_CLIENT_MAX_SESSIONS: usize = 64;
@@ -18,6 +19,14 @@ pub const CHAT_STATUS_MAX_BYTES: usize = 4 * 1024;
 pub const CHAT_RESOURCE_ID_MAX_BYTES: usize = 4 * 1024;
 pub const CHAT_UPLOAD_FILENAME_MAX_BYTES: usize = 4 * 1024;
 pub const CHAT_CONTENT_TYPE_MAX_BYTES: usize = 1_024;
+pub const CHAT_REACTION_MAX_TOKENS_PER_ACTOR_TARGET: usize = 3;
+pub const CHAT_REACTION_MAX_ROWS_PER_TARGET: usize = 128;
+pub const CHAT_REACTION_MAX_ROWS_PER_ROOM: usize = 4_096;
+pub const CHAT_REACTION_MAX_BYTES_PER_ROOM: usize = 128 * 1024;
+pub const CHAT_REACTION_MAX_ROWS_PER_SERVER: usize = 8_192;
+pub const CHAT_REACTION_MAX_BYTES_PER_SERVER: usize = 512 * 1024;
+pub const CHAT_REACTION_MAX_ROWS: usize = 32_768;
+pub const CHAT_REACTION_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 pub fn bounded_chat_text(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
@@ -155,6 +164,80 @@ pub struct ChatMessageMetadata {
     pub mentioned_user_ids: Vec<UserId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChatReaction {
+    pub server_id: ServerId,
+    pub room_id: RoomId,
+    pub target_event_id: EventId,
+    pub actor_user_id: UserId,
+    pub token: ReactionToken,
+    pub created_at_unix: i64,
+}
+
+impl ChatReaction {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.server_id.len())
+            .saturating_add(self.token.as_str().len())
+    }
+}
+
+pub fn chat_reactions_fit_bounds<'a>(
+    reactions: impl IntoIterator<Item = &'a ChatReaction>,
+) -> bool {
+    use std::collections::BTreeMap;
+
+    let mut total_rows = 0_usize;
+    let mut total_bytes = 0_usize;
+    let mut server_usage = BTreeMap::<&str, (usize, usize)>::new();
+    let mut room_usage = BTreeMap::<(&str, RoomId), (usize, usize)>::new();
+    let mut target_rows = BTreeMap::<(&str, RoomId, EventId), usize>::new();
+    let mut actor_target_rows = BTreeMap::<(&str, RoomId, EventId, UserId), usize>::new();
+    for reaction in reactions {
+        let bytes = reaction.retained_bytes();
+        total_rows = total_rows.saturating_add(1);
+        total_bytes = total_bytes.saturating_add(bytes);
+        let server = server_usage.entry(reaction.server_id.as_str()).or_default();
+        server.0 = server.0.saturating_add(1);
+        server.1 = server.1.saturating_add(bytes);
+        let room = room_usage
+            .entry((reaction.server_id.as_str(), reaction.room_id))
+            .or_default();
+        room.0 = room.0.saturating_add(1);
+        room.1 = room.1.saturating_add(bytes);
+        *target_rows
+            .entry((
+                reaction.server_id.as_str(),
+                reaction.room_id,
+                reaction.target_event_id,
+            ))
+            .or_default() += 1;
+        *actor_target_rows
+            .entry((
+                reaction.server_id.as_str(),
+                reaction.room_id,
+                reaction.target_event_id,
+                reaction.actor_user_id,
+            ))
+            .or_default() += 1;
+    }
+    total_rows <= CHAT_REACTION_MAX_ROWS
+        && total_bytes <= CHAT_REACTION_MAX_BYTES
+        && server_usage.values().all(|(rows, bytes)| {
+            *rows <= CHAT_REACTION_MAX_ROWS_PER_SERVER
+                && *bytes <= CHAT_REACTION_MAX_BYTES_PER_SERVER
+        })
+        && room_usage.values().all(|(rows, bytes)| {
+            *rows <= CHAT_REACTION_MAX_ROWS_PER_ROOM && *bytes <= CHAT_REACTION_MAX_BYTES_PER_ROOM
+        })
+        && target_rows
+            .values()
+            .all(|rows| *rows <= CHAT_REACTION_MAX_ROWS_PER_TARGET)
+        && actor_target_rows
+            .values()
+            .all(|rows| *rows <= CHAT_REACTION_MAX_TOKENS_PER_ACTOR_TARGET)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatMessagePresentation {
     pub reply: Option<ChatReplyPresentation>,
@@ -180,6 +263,17 @@ impl ChatEvent {
             _ => None,
         }
     }
+}
+
+pub fn chat_event_supports_reactions(event: &ChatEvent) -> bool {
+    matches!(
+        event.kind,
+        ChatEventKind::Message { .. }
+            | ChatEventKind::RichMessage { .. }
+            | ChatEventKind::Action { .. }
+            | ChatEventKind::Notice { .. }
+            | ChatEventKind::Upload { .. }
+    )
 }
 
 pub fn chat_message_presentation(

@@ -4032,3 +4032,24 @@ cargo test --locked --no-default-features --features desktop-dev \
 These tests do not activate `reply-mentions-v1`, send a live notification, or
 claim server-authoritative read receipts. They prove local bounded unread
 presentation and persistence only.
+
+## OMENchat dormant reaction client state
+
+These isolated regressions exercise the shared GUI/TUI model, identity-scoped
+SQLite cache, negotiated live parser, and bounded inline/Resource snapshot
+transport. They prove duplicate deltas are idempotent, explicit-target
+snapshots are authoritative only for their page, overload rolls back prior
+state, and restart restores eligible retained targets. They do not expose
+reaction controls or request/accept `reactions-v1`.
+
+```bash
+cargo test --locked --no-default-features --features desktop-dev reaction --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  client_reactions_are_authoritative_bounded_and_restart_safe --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_delta_and_snapshot_parsers_are_negotiated_bounded_and_authoritative --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  client_transport_decodes_reaction_inline_and_resource_snapshots --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_snapshot_overload_rolls_back_prior_page_state --lib
+```

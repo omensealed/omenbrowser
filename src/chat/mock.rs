@@ -6,11 +6,12 @@ use super::client::{
 };
 use super::descriptor::OmenChatDescriptor;
 use super::model::{
-    bounded_chat_text, chat_text_fits, ChatEvent, ChatEventKind, ChatRoomSummary,
-    ChatServerSummary, ChatUserSummary, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES,
-    CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES,
+    bounded_chat_text, chat_event_supports_reactions, chat_reactions_fit_bounds, chat_text_fits,
+    ChatEvent, ChatEventKind, ChatReaction, ChatRoomSummary, ChatServerSummary, ChatUserSummary,
+    CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_SERVER_DESTINATION_MAX_BYTES,
+    CHAT_SERVER_DISPLAY_MAX_BYTES,
 };
-use super::protocol::{RoomId, ServerId};
+use super::protocol::{EventId, ReactionAction, ReactionEvent, ReactionSnapshot, RoomId, ServerId};
 use super::store::ChatStore;
 
 #[derive(Clone, Debug, Default)]
@@ -22,6 +23,16 @@ pub struct MockChatStore {
     rooms: BTreeMap<(ServerId, RoomId), ChatRoomSummary>,
     users: BTreeMap<(ServerId, RoomId), Vec<ChatUserSummary>>,
     events: BTreeMap<(ServerId, RoomId), Vec<ChatEvent>>,
+    reactions: BTreeMap<
+        (
+            ServerId,
+            RoomId,
+            EventId,
+            u32,
+            super::protocol::ReactionToken,
+        ),
+        ChatReaction,
+    >,
 }
 
 impl MockChatStore {
@@ -643,6 +654,8 @@ impl ChatStore for MockChatStore {
             .retain(|(stored_server_id, _), _| stored_server_id != server_id);
         self.events
             .retain(|(stored_server_id, _), _| stored_server_id != server_id);
+        self.reactions
+            .retain(|(stored_server_id, ..), _| stored_server_id != server_id);
         Ok(deleted)
     }
 
@@ -753,6 +766,142 @@ impl ChatStore for MockChatStore {
                 .push(event);
         }
         Ok(())
+    }
+
+    fn apply_reaction_event(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        event: ReactionEvent,
+    ) -> anyhow::Result<bool> {
+        let target_retained =
+            self.events
+                .get(&(server_id.clone(), room_id))
+                .is_some_and(|events| {
+                    events.iter().any(|candidate| {
+                        candidate.event_id == event.target_event_id
+                            && chat_event_supports_reactions(candidate)
+                    })
+                });
+        anyhow::ensure!(target_retained, "reaction target is not retained");
+        let key = (
+            server_id.clone(),
+            room_id,
+            event.target_event_id,
+            event.actor_user_id,
+            event.token,
+        );
+        let mut next = self.reactions.clone();
+        let changed = match event.action {
+            ReactionAction::Add => next
+                .insert(
+                    key,
+                    ChatReaction {
+                        server_id: server_id.clone(),
+                        room_id,
+                        target_event_id: event.target_event_id,
+                        actor_user_id: event.actor_user_id,
+                        token: event.token,
+                        created_at_unix: event.at_unix,
+                    },
+                )
+                .is_none(),
+            ReactionAction::Remove => next.remove(&key).is_some(),
+        };
+        anyhow::ensure!(
+            chat_reactions_fit_bounds(next.values()),
+            "reaction state exceeds client retention limits"
+        );
+        self.reactions = next;
+        Ok(changed)
+    }
+
+    fn replace_reaction_snapshot(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        snapshot: ReactionSnapshot,
+    ) -> anyhow::Result<()> {
+        snapshot
+            .clone()
+            .into_frame_body()
+            .map_err(anyhow::Error::from)?;
+        let target_set = snapshot
+            .target_event_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let retained_events = self
+            .events
+            .get(&(server_id.clone(), room_id))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            target_set.iter().all(|target_event_id| {
+                retained_events.iter().any(|event| {
+                    event.event_id == *target_event_id && chat_event_supports_reactions(event)
+                })
+            }),
+            "reaction snapshot target is not retained"
+        );
+        let mut next = self.reactions.clone();
+        next.retain(|(stored_server, stored_room, target, ..), _| {
+            stored_server != server_id || *stored_room != room_id || !target_set.contains(target)
+        });
+        for entry in snapshot.entries {
+            let reaction = ChatReaction {
+                server_id: server_id.clone(),
+                room_id,
+                target_event_id: entry.target_event_id,
+                actor_user_id: entry.actor_user_id,
+                token: entry.token,
+                created_at_unix: entry.created_at_unix,
+            };
+            next.insert(
+                (
+                    server_id.clone(),
+                    room_id,
+                    entry.target_event_id,
+                    entry.actor_user_id,
+                    entry.token,
+                ),
+                reaction,
+            );
+        }
+        anyhow::ensure!(
+            chat_reactions_fit_bounds(next.values()),
+            "reaction snapshot exceeds client retention limits"
+        );
+        self.reactions = next;
+        Ok(())
+    }
+
+    fn reactions_for_targets(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        target_event_ids: &[EventId],
+    ) -> anyhow::Result<Vec<ChatReaction>> {
+        ReactionSnapshot {
+            target_event_ids: target_event_ids.to_vec(),
+            entries: Vec::new(),
+        }
+        .into_frame_body()
+        .map_err(anyhow::Error::from)?;
+        let targets = target_event_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok(self
+            .reactions
+            .values()
+            .filter(|reaction| {
+                &reaction.server_id == server_id
+                    && reaction.room_id == room_id
+                    && targets.contains(&reaction.target_event_id)
+            })
+            .cloned()
+            .collect())
     }
 
     fn latest_events(

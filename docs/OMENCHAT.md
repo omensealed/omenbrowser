@@ -71,6 +71,16 @@ nonzero local OMENchat user ID is known. When enabled, exact numeric rich
 message metadata for that ID is required to increment the local room unread
 counter; ordinary events remain stored and reconciled normally. This preference
 does not itself request or enable the negotiated reply/mention wire capability.
+The same identity-scoped database now has an additive constrained
+`room_reactions` cache. Reaction rows stay outside message history and are
+bounded per actor/target, target, room, server, and database by both items and
+retained bytes. The shared client state applies only strictly decoded,
+negotiated deltas and authoritative explicit-target snapshots, including the
+existing bounded inline/Resource history paths, and restores only reactions
+whose eligible target events remain in the bounded resident history. There are
+no reaction controls and production session-open frames still do not request
+`reactions-v1`, so mixed-version and current user-visible behavior are
+unchanged.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
 `omenchat.sqlite.pre-v5-from-v<old>.bak`. It never overwrites an existing backup;

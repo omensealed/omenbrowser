@@ -974,6 +974,24 @@ capability-scoped fan-out are covered by isolated tests. The production server
 flag remains off, so `reactions-v1` is still neither accepted nor reachable
 from a negotiated client.
 
+The fourth dormant slice is complete. The desktop client's identity-scoped
+`chat.sqlite` now has an additive active-reaction cache, and the shared
+`ChatClient` model keeps reaction state separate from message history under
+explicit per-actor/target, target, room, server, and global item/byte bounds.
+Negotiated deltas and authoritative explicit-target snapshots reconcile the
+same state for GUI and TUI consumers; inline and Resource snapshots share the
+existing bounded compressed transport. Persistence and restart restore operate
+only on retained eligible targets in protocol-sized pages. Focused tests cover
+strict negotiation, duplicate deltas, authoritative replacement, overload
+rollback, transport decoding, persistence, and restart. There are still no
+reaction controls, the client does not request `reactions-v1`, and the server
+does not advertise or accept it.
+The first full desktop-dev run also caught the snapshot persistence pass
+considering transient high-bit local echo IDs after ordinary history correctly
+excluded them. The client model, persistence, and restore paths now all exclude
+those non-server IDs from reaction eligibility; the focused regression and the
+complete suite pass after the correction.
+
 ### Unit 6C — bounded local search
 
 - Search existing LXMF and OMENchat history by text, sender, room, date,
