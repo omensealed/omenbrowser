@@ -459,6 +459,35 @@ activating the wire capability:
   are never automatically retried; the pending local echo preserves the reply
   and numeric mention metadata for truthful presentation.
 
+Unit 6 completes the deterministic pre-activation evidence gate:
+
+- the v0.9.6-3 legacy fixtures remain byte-exact in both the client and
+  standalone-server codecs, and application/descriptor versions never imply a
+  capability;
+- capability absent, rejected, accepted, retired-Link, and replacement-Link
+  state transitions are covered explicitly;
+- a replacement Link that regains durable mutations without
+  `reply-mentions-v1` cannot resend, downgrade, or create a second local echo
+  for an uncertain rich intent;
+- recovered rich intents require the original identity, persistent client
+  instance, server, room, durable capability, and rich capability before an
+  explicit retry can proceed;
+- client inline-history recovery preserves the same typed reply and numeric
+  mentions that omenchatd already proves across live fan-out, inline history,
+  resource history, restart replay, and changed-content conflict;
+- malformed and oversized rich history/event values still fail before client
+  state mutation, while legacy six-field events retain their original model;
+- the isolated release-mode durable-retention harness passed on 2026-07-26 UTC
+  with 256 fixtures. The server retained 128 results, recorded 256 client
+  instances, retired 128, used 221,184 database bytes, and measured
+  365/110 microseconds for commit/replay p95. The client recovered and pruned
+  all 256 intents in two bounded prune calls, used 106,496 database bytes, and
+  measured 118 microseconds prepare p95 and 9,841 microseconds recovery;
+- raw local measurement evidence is under
+  `/tmp/omen-durable-retention-unit6-391e405`; the reproducible command remains
+  `OMEN_DURABLE_MEASUREMENT_ITEMS=256
+  scripts/measure-durable-mutation-retention.sh <isolated-output>`.
+
 There is still no separate mention history, notification worker, polling
 subscription, sound, timer, or capability activation. Read markers remain the
 existing room counters; this unit adds no server-authoritative read receipt.
@@ -477,8 +506,10 @@ resource-history, conflict, and local-user binding tests cover the boundary.
 No new error numbers were needed: the existing typed protocol-v1 errors retain
 their documented meanings.
 
-The next rollback boundary is the mixed-version, reconnect, crash/resource,
-and measurement gate required before a separate capability-activation decision.
-The production client still does not request `reply-mentions-v1`, the server
-activation constant remains false, and all new composer controls therefore
-remain dormant in ordinary releases.
+The deterministic six-unit implementation sequence is complete. The next
+rollback boundary is a separate capability-activation decision followed by a
+real two-process smoke using isolated identities and state. The production
+client still does not request `reply-mentions-v1`, the server activation
+constant remains false, and all new composer controls therefore remain dormant
+in ordinary releases. Deterministic success alone does not authorize or claim
+live Reticulum interoperability.

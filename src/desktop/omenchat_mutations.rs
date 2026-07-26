@@ -1559,6 +1559,52 @@ mod tests {
                 mentioned_user_ids: vec![7],
             }
         );
+
+        let client_instance_id = ClientInstanceId::new([0x71; 16]);
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_client_instance_id(Some(client_instance_id));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_durable_mutations_negotiated_for_test(session_id, true);
+        desktop.omenchat.omenchat_authenticated_identity_hash = Some(vec![0x72; 16]);
+        desktop.omenchat.omenchat_live_transports.insert(
+            session_id,
+            DesktopOmenChatTransport::new([0x73; 16], current_epoch_ms()),
+        );
+        let recovered = OutboundMutationIntent {
+            server_destination: "destination".into(),
+            authenticated_identity_hash: vec![0x72; 16],
+            client_instance_id,
+            mutation_id: MutationId::new([0x74; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomMessage,
+                Some(1),
+                &rich,
+            )
+            .expect("rich request hash"),
+            op: ChatOp::RoomMessage,
+            room_id: Some(1),
+            body: rich,
+            state: OutboundMutationState::SentUncertain,
+            created_at: 1,
+            expires_at: i64::MAX,
+            correlation_id: None,
+        };
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&recovered),
+            Ok(session_id)
+        );
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_reply_mentions_negotiated_for_test(session_id, false);
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered)
+            .expect_err("capability loss must block recovered rich retry")
+            .contains("did not negotiate reply-mentions-v1"));
     }
 
     #[tokio::test]

@@ -317,7 +317,7 @@ mod tests {
     use crate::protocol::batch::{resource_offer_body, ResourceOffer};
     use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
-    use omenchat_protocol::fixtures::{reply_mentions_v1, v0_6_0_1};
+    use omenchat_protocol::fixtures::{reply_mentions_v1, v0_6_0_1, v0_9_6_3};
     use omenchat_protocol::{ReplyReference, RichMessageBody};
 
     #[test]
@@ -388,6 +388,28 @@ mod tests {
         let decoded = decode_frame(&encoded).expect("decode frame");
 
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn v0_9_6_3_ordinary_message_remains_byte_exact() {
+        let frame = Frame::new(
+            ChatOp::RoomMessage,
+            7,
+            Some(42),
+            FrameBody::Fields(vec![
+                FrameValue::U64(100),
+                FrameValue::String("hello room".into()),
+            ]),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode ordinary message"),
+            v0_9_6_3::ORDINARY_ROOM_MESSAGE
+        );
+        assert_eq!(
+            decode_frame(v0_9_6_3::ORDINARY_ROOM_MESSAGE).expect("decode v0.9.6-3 message"),
+            frame
+        );
     }
 
     #[test]

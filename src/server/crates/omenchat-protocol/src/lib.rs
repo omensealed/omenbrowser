@@ -235,6 +235,13 @@ pub mod fixtures {
             "/../../fixtures/omenchat/v0_6_0_1_wire.rs"
         ));
     }
+
+    pub mod v0_9_6_3 {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/omenchat/v0_9_6_3_wire.rs"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -266,5 +273,9 @@ mod tests {
         assert!(!fixtures::v0_6_0_1::SESSION_OPEN.is_empty());
         assert!(!fixtures::v0_6_0_1::ROOM_MESSAGE.is_empty());
         assert!(!fixtures::v0_6_0_1::HISTORY_RESOURCE_OFFER.is_empty());
+        assert_eq!(fixtures::v0_9_6_3::APPLICATION_VERSION, "0.9.6-3");
+        assert_eq!(fixtures::v0_9_6_3::PROTOCOL_VERSION, PROTOCOL_VERSION);
+        assert_eq!(fixtures::v0_9_6_3::PROTOCOL_NAME, PROTOCOL_NAME);
+        assert!(!fixtures::v0_9_6_3::ORDINARY_ROOM_MESSAGE.is_empty());
     }
 }

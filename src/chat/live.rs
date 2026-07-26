@@ -152,6 +152,19 @@ impl LiveChatClientState {
         self.durable_sessions.contains(&session_id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_durable_mutations_negotiated_for_test(
+        &mut self,
+        session_id: ChatSessionId,
+        negotiated: bool,
+    ) {
+        if negotiated {
+            self.durable_sessions.insert(session_id);
+        } else {
+            self.durable_sessions.remove(&session_id);
+        }
+    }
+
     pub fn durable_notice_ack_negotiated(&self, session_id: ChatSessionId) -> bool {
         self.durable_notice_ack_sessions.contains(&session_id)
     }
@@ -6135,6 +6148,69 @@ mod tests {
     }
 
     #[test]
+    fn live_reconnect_does_not_resend_rich_intent_when_capability_is_lost() {
+        let (mut client, session_id) = live_test_client();
+        let client_instance_id = ClientInstanceId::new([0x56; 16]);
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        state.reply_mentions_sessions.insert(session_id);
+        let intent =
+            durable_rich_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        let mut transport = CapturedChatTransport::default();
+
+        let sent = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert!(matches!(
+            sent.as_slice(),
+            [ChatClientEvent::EventAppended { .. }]
+        ));
+        assert_eq!(transport.sent_frames.len(), 1);
+
+        let reconnect = reconnect_live_server(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            OmenChatDescriptor {
+                server_destination: "abcd".into(),
+                ..OmenChatDescriptor::default()
+            },
+        );
+        assert!(matches!(
+            reconnect.first(),
+            Some(ChatClientEvent::ServerOpened { .. })
+        ));
+        assert!(!state.reply_mentions_negotiated(session_id));
+        assert!(!state.durable_mutation_is_pending(session_id, intent.mutation_id));
+        assert!(state.reply_mentions_requests.is_empty());
+        let reconnect_frame_count = transport.sent_frames.len();
+
+        // A replacement peer may reaccept durable mutations without accepting
+        // the richer extension. The uncertain rich intent remains blocked and
+        // is not converted to a legacy message.
+        state.durable_sessions.insert(session_id);
+        let blocked = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert!(matches!(
+            blocked.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("reply/mention retry requires")
+        ));
+        assert_eq!(transport.sent_frames.len(), reconnect_frame_count);
+    }
+
+    #[test]
     fn live_join_room_switches_active_room_and_retains_other_room_history() {
         let mut client = ChatClient::new();
         let mut state = LiveChatClientState::default();
@@ -6512,6 +6588,60 @@ mod tests {
             client.session(session_id).expect("session").status,
             "synced 2 recent room history event(s)"
         );
+    }
+
+    #[test]
+    fn live_history_recovery_preserves_rich_reply_and_mentions() {
+        let mut client = ChatClient::new();
+        let mut transport = CapturedChatTransport::default();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let rich_event = FrameValue::Array(vec![
+            FrameValue::U64(12),
+            FrameValue::U64(1),
+            FrameValue::U64(7),
+            FrameValue::I64(99),
+            FrameValue::String("recovered reply".into()),
+            FrameValue::String("Alice".into()),
+            FrameValue::U64(11),
+            FrameValue::Array(vec![FrameValue::U64(2), FrameValue::U64(9)]),
+        ]);
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::HistoryInline,
+                7,
+                Some(1),
+                compressed_values_body(&[rich_event]).expect("rich history"),
+            ))
+            .expect("history frame");
+
+        let events = drain_live_events(&mut client, &mut transport, Some(session_id));
+
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::HistoryPrepended { events, .. }]
+                if matches!(
+                    events.as_slice(),
+                    [ChatEvent {
+                        kind: ChatEventKind::RichMessage { body, metadata },
+                        ..
+                    }] if body == "recovered reply"
+                        && metadata.reply_to_event_id == Some(11)
+                        && metadata.mentioned_user_ids == vec![2, 9]
+                )
+        ));
     }
 
     #[test]
