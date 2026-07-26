@@ -1,7 +1,6 @@
 # OMENchat reactions checkpoint
 
-Status: design checkpoint; no production capability, wire operation, schema,
-storage, or UI behavior is activated by this document  
+Status: deterministic activation complete; isolated live smoke pending
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`  
 Protocol baseline: `omenchat-v0.1`, numeric protocol version 1  
 Required base capability: `durable-mutations-v1`
@@ -388,7 +387,7 @@ open the maintainer's real browser or omenchatd data.
    covers room, target, token, and action; negotiation rejects
    `reactions-v1` without `durable-mutations-v1`; and both independent
    client/server codecs preserve the same byte-exact add fixture. The
-   capability remains unrequested and unaccepted in production.
+   capability remained unrequested and unaccepted at this stage.
 2. **Complete.** omenchatd schema 5 adds the two constrained reaction tables
    and indexes in the existing immediate migration transaction. Isolated
    version 0–4 coverage and injected failures before tables, between tables,
@@ -397,7 +396,7 @@ open the maintainer's real browser or omenchatd data.
    `database export-schema4-copy` command stages a separate schema-4 copy,
    drops only reaction objects, validates integrity/foreign keys, publishes
    atomically without overwrite, and never modifies the active database. The
-   capability remains unadvertised.
+   capability remained unadvertised at this stage.
 3. **Complete.** The dormant omenchatd executor validates joined, non-banned,
    non-muted actors and same-room, non-deleted message/action/notice/upload
    targets inside the durable replay transaction. Exact duplicates replay the
@@ -409,7 +408,7 @@ open the maintainer's real browser or omenchatd data.
    snapshots use the existing bounded compressed inline/resource transport.
    Reaction events fan out only to same-room Links whose authenticated,
    identity-matching durable binding has reaction support. Production
-   negotiation still does not accept `reactions-v1`.
+   negotiation did not yet accept `reactions-v1` at this stage.
 4. **Complete.** The identity-scoped desktop client database adds a constrained
    active-reaction cache in an immediate additive migration transaction. The
    shared GUI/TUI client model retains reaction rows separately from timeline
@@ -417,8 +416,8 @@ open the maintainer's real browser or omenchatd data.
    ceilings. Strict negotiated delta and explicit-target snapshot parsers
    reconcile that model and persist the result; compressed inline and Resource
    snapshots use the existing bounded transport. Restart restore queries only
-   retained eligible targets in protocol-sized pages. No controls exist and
-   the production client still does not request `reactions-v1`.
+   retained eligible targets in protocol-sized pages. No controls existed and
+   the production client did not yet request `reactions-v1` at this stage.
 5. **Partially complete by existing frontend scope.** A shared presentation
    reducer deduplicates actors, orders the fixed token catalog, produces exact
    counts, and marks only the negotiated local numeric user as `you`. The Iced
@@ -439,8 +438,8 @@ open the maintainer's real browser or omenchatd data.
    persisted through the existing bounded mutation-intent worker before
    transmission and is never applied optimistically. Only an exact matched
    acknowledgement terminalizes the intent. Restart recovery never resends
-   automatically, and capability loss blocks explicit retry. Production still
-   does not request or accept `reactions-v1`.
+   automatically, and capability loss blocks explicit retry. Production did
+   not request or accept `reactions-v1` during this dormant stage.
 7. **Complete.** Deterministic client/server duplicate, replay, conflict,
    restart, capability-loss, adjacent-fixture, inline/Resource, migration,
    downgrade, fan-out, and retention gates pass. Exact server-global active-row
@@ -449,7 +448,14 @@ open the maintainer's real browser or omenchatd data.
    at their documented defaults; reaction state also passes at the exact
    4,096-row room ceiling. Evidence and host-specific observations are in
    `docs/audits/omenchat-reactions-qualification.md`.
-8. Activate explicit client request/server acceptance in a separate commit.
+8. **Complete.** The production client explicitly requests `reactions-v1`
+   only with its persistent durable-mutation owner, records the request as
+   Link-scoped pending state, and activates controls only after explicit server
+   acceptance. omenchatd accepts the capability only when it accompanies a
+   valid durable request. Unsolicited acceptance, base-only peers, downgrade,
+   identity change, reconnect, and Link retirement remain fail-closed. The
+   activation changes no operation numbers, schema, retention limits, or
+   ordinary protocol-v1 frames.
 9. Run a real isolated two-client add/remove/restart/Resource smoke before
    release qualification.
 

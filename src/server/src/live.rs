@@ -2834,6 +2834,80 @@ mod tests {
     }
 
     #[test]
+    fn negotiated_reaction_binding_is_explicit_and_link_scoped() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let capable_link = [0x48; 16];
+        let base_link = [0x49; 16];
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        for (link_id, capabilities) in [
+            (
+                capable_link,
+                vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    REACTIONS_CAPABILITY.into(),
+                ],
+            ),
+            (base_link, vec![DURABLE_MUTATION_CAPABILITY.into()]),
+        ] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: link_id.to_vec(),
+                    display_name: format!("peer-{}", link_id[0]),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open identified link");
+            let body = crate::protocol::with_session_open_negotiation(
+                FrameBody::Text(format!("Client {}", link_id[0])),
+                &crate::protocol::SessionOpenNegotiation {
+                    requested_capabilities: capabilities,
+                    client_instance_id: Some(ClientInstanceId::new(link_id)),
+                },
+            )
+            .expect("capability request");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(ChatOp::SessionOpen, 1, None, body))
+                    .expect("session frame"),
+            })
+            .expect("session response");
+        }
+
+        assert!(
+            live.durable_sessions
+                .get(&capable_link)
+                .expect("capable durable binding")
+                .reactions
+        );
+        assert!(
+            !live
+                .durable_sessions
+                .get(&base_link)
+                .expect("base durable binding")
+                .reactions
+        );
+        let accepted = live
+            .transport()
+            .frames
+            .iter()
+            .filter(|frame| frame.link_id == capable_link)
+            .filter_map(|captured| decode_frame(&captured.bytes).ok())
+            .find(|frame| frame.op == ChatOp::SessionAccept)
+            .expect("capable session accept");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&accepted.body),
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    REACTIONS_CAPABILITY.into(),
+                ],
+            }))
+        );
+    }
+
+    #[test]
     fn negotiated_reply_binding_exposes_local_user_and_routes_rich_mutation() {
         let path = temp_store_path("rich-binding");
         let store = OmenchatStore::open(&path).expect("store");

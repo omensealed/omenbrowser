@@ -50,7 +50,7 @@ const PENDING_UPLOAD_TTL_SECONDS: u64 = 6 * 60 * 60;
 const UPLOAD_FILENAME_MAX_BYTES: usize = 255;
 const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
 const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
-const REACTIONS_SERVER_ENABLED: bool = false;
+const REACTIONS_SERVER_ENABLED: bool = true;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -4999,7 +4999,7 @@ mod tests {
     }
 
     #[test]
-    fn reactions_capability_remains_dormant_and_rejects_unnegotiated_mutations() {
+    fn reactions_capability_is_accepted_only_when_requested_and_rejects_unbound_mutations() {
         let store = OmenchatStore::in_memory().expect("store");
         let room = store
             .room_by_name("lobby")
@@ -5036,6 +5036,27 @@ mod tests {
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(Some(SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    REACTIONS_CAPABILITY.into(),
+                ],
+            }))
+        );
+
+        let base_only = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
+                client_instance_id: Some(ClientInstanceId::new([40; 16])),
+            },
+        )
+        .expect("base capability request");
+        let base_response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 2, None, base_only))
+            .expect("base session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&base_response[0].body),
+            Ok(Some(SessionAcceptNegotiation {
                 accepted_capabilities: vec![DURABLE_MUTATION_CAPABILITY.into()],
             }))
         );
@@ -5056,7 +5077,7 @@ mod tests {
                     reply_mentions: true,
                     reactions: false,
                 },
-                2,
+                3,
                 Some(room.room_id),
                 ChatOp::RoomReaction,
                 ClientInstanceId::new([41; 16]),

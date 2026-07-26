@@ -958,7 +958,8 @@ prove recoverability. The stopped-server, confirmation-gated
 `database export-schema4-copy` command creates a private, integrity-checked
 schema-4-compatible copy through staged atomic publication, refuses overwrite
 or active WAL/SHM state, omits only reaction state, and never modifies the
-active database. `reactions-v1` remains unrequested and unaccepted.
+active database. At the conclusion of this slice, `reactions-v1` remained
+unrequested and unaccepted.
 
 The third dormant slice is complete. omenchatd now has a transactionally
 coupled durable reaction executor, exact replay/conflict behavior, joined-user
@@ -971,8 +972,8 @@ reaction deltas are scoped to same-room Links with authenticated,
 identity-matching reaction bindings. Restart replay, changed-content conflict,
 no-op add, inline/resource snapshot decoding, active/audit bounds, and
 capability-scoped fan-out are covered by isolated tests. The production server
-flag remains off, so `reactions-v1` is still neither accepted nor reachable
-from a negotiated client.
+flag remained off at this stage, so `reactions-v1` was neither accepted nor
+reachable from a negotiated client.
 
 The fourth dormant slice is complete. The desktop client's identity-scoped
 `chat.sqlite` now has an additive active-reaction cache, and the shared
@@ -983,9 +984,9 @@ same state for GUI and TUI consumers; inline and Resource snapshots share the
 existing bounded compressed transport. Persistence and restart restore operate
 only on retained eligible targets in protocol-sized pages. Focused tests cover
 strict negotiation, duplicate deltas, authoritative replacement, overload
-rollback, transport decoding, persistence, and restart. There are still no
-reaction controls, the client does not request `reactions-v1`, and the server
-does not advertise or accept it.
+rollback, transport decoding, persistence, and restart. At this stage there
+were no reaction controls, the client did not request `reactions-v1`, and the
+server did not advertise or accept it.
 The first full desktop-dev run also caught the snapshot persistence pass
 considering transient high-bit local echo IDs after ordinary history correctly
 excluded them. The client model, persistence, and restore paths now all exclude
@@ -1004,8 +1005,8 @@ visible only for targets with non-persistent completion evidence from a
 validated live snapshot. Restart restore and reconnect keep bounded cache rows
 but clear that evidence, and the next snapshot prunes rows/evidence that no
 longer have a retained history target before becoming visible. The production
-capability remains disabled and no mutation action, retry, worker, timer, or
-polling path was added. The legacy Ratatui workspace does not currently contain
+capability remained disabled at this stage and no mutation action, retry,
+worker, timer, or polling path was added. The legacy Ratatui workspace does not currently contain
 OMENchat sessions (its Messages section is LXMF), while omenchatd's TUI is an
 administrative server view with no client-local identity. Therefore this slice
 does not fabricate a TUI reaction panel; that portion of checkpoint step 5
@@ -1029,6 +1030,15 @@ audit, snapshot, SQLite, and latency observations at 1,024 rows and at the
 4,096-row room ceiling without imposing hardware-specific thresholds. The
 evidence is in `docs/audits/omenchat-reactions-qualification.md`; production
 activation and the real two-client smoke remain separate.
+
+The eighth activation slice enables `reactions-v1` at the existing negotiation
+boundary. The client requests it only when its persistent durable-mutation
+owner is ready and records Link-scoped request state; omenchatd accepts it only
+with a valid durable request. Tests preserve fail-closed behavior for
+unsolicited acceptance, base-only/older peers, downgrade, reconnect, identity
+change, and Link retirement. No wire number, schema, limit, queue, worker,
+timer, or ordinary protocol-v1 frame changed. The isolated current/current
+two-client smoke remains the next release-qualification gate.
 
 ### Unit 6C — bounded local search
 

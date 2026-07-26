@@ -59,11 +59,11 @@ silently downgraded.
 
 Version 5 adds the constrained `room_reactions` active-state table and
 `room_reaction_events` append-only audit table plus target/retention indexes.
-The dormant server executor couples add/remove effects to durable replay,
+The server executor couples add/remove effects to durable replay,
 enforces active/audit bounds, creates authoritative bounded snapshots, and
-limits reaction-event fan-out to capability-bound Links. The
-`reactions-v1` capability remains unadvertised and unaccepted, so this path
-does not change current client behavior.
+limits reaction-event fan-out to capability-bound Links. omenchatd now accepts
+`reactions-v1` only when an identified Link explicitly requests it together
+with `durable-mutations-v1`; base and legacy Links receive no reaction state.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated
@@ -78,12 +78,13 @@ retained bytes. The shared client state applies only strictly decoded,
 negotiated deltas and authoritative explicit-target snapshots, including the
 existing bounded inline/Resource history paths, and restores only reactions
 whose eligible target events remain in the bounded resident history. The Iced
-timeline contains dormant fixed-token controls which additionally require both
+timeline contains fixed-token controls which additionally require both
 negotiated capabilities, a bound local user, a retained target, and current
 authoritative snapshot evidence. They persist through the bounded durable
 mutation owner before sending and never update counts optimistically.
-Production session-open frames still do not request `reactions-v1`, so the
-controls remain hidden and mixed-version/current behavior is unchanged.
+Production session-open frames request `reactions-v1` only when the persistent
+durable-mutation owner is ready. Older or capability-absent servers leave the
+controls hidden and ordinary room behavior unchanged.
 The shared presentation reducer can summarize retained rows by fixed token and
 distinct actor count. When retained reaction state is available, the
 Iced timeline displays those summaries as chips and marks `you` only

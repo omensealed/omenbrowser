@@ -104,8 +104,10 @@ Clippy, and full root/server commands are recorded in `docs/TESTING.md`.
 
 ## Remaining evidence
 
-- Enable client request and server acceptance together in one separately
-  reversible commit.
+- Client request and server acceptance were subsequently enabled together in
+  one separately reversible activation unit. Explicit-request, unsolicited
+  acceptance, base-only peer, downgrade, and live Link-binding regressions
+  pass.
 - Re-run deterministic root and standalone-server matrices after activation.
 - Run an isolated current/current two-client smoke covering add, remove,
   semantic no-op, lost acknowledgement/exact retry, client reconnect, server
@@ -113,4 +115,3 @@ Clippy, and full root/server commands are recorded in `docs/TESTING.md`.
 - Confirm ordinary traffic with a capability-absent client during that smoke.
 - Keep activation out of release artifacts if the live smoke fails; disabling
   negotiation is the rollback and preserves additive reaction state.
-

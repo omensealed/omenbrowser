@@ -4033,7 +4033,7 @@ These tests do not activate `reply-mentions-v1`, send a live notification, or
 claim server-authoritative read receipts. They prove local bounded unread
 presentation and persistence only.
 
-## OMENchat dormant reaction client state
+## OMENchat negotiated reaction client state
 
 These isolated regressions exercise the shared GUI/TUI model, identity-scoped
 SQLite cache, negotiated live parser, and bounded inline/Resource snapshot
@@ -4047,8 +4047,8 @@ retaining bounded cache rows and that the next snapshot prunes targets no
 longer present in resident history. Dormant action tests require both
 capabilities, prohibit optimistic state, match acknowledgement identity and
 request fields, preserve canonical intents over restart, and block recovered
-retry after capability loss. Production does not request/accept
-`reactions-v1`.
+retry after capability loss. Production requests and accepts `reactions-v1`
+only as an explicit extension of a valid durable-mutation negotiation.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-dev reaction --lib

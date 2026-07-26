@@ -698,6 +698,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
                     DURABLE_MUTATION_CAPABILITY.into(),
                     DURABLE_NOTICE_ACK_CAPABILITY.into(),
                     REPLY_MENTIONS_CAPABILITY.into(),
+                    REACTIONS_CAPABILITY.into(),
                 ],
                 client_instance_id: Some(client_instance_id),
             },
@@ -730,6 +731,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     if durable_requested {
         state.durable_requests.insert(session_id);
         state.reply_mentions_requests.insert(session_id);
+        state.reaction_requests.insert(session_id);
     }
 
     let room_name = client
@@ -4443,7 +4445,7 @@ mod tests {
     }
 
     #[test]
-    fn live_open_advertises_durable_mutations_and_rich_messages_with_persistent_client_identity() {
+    fn live_open_requests_supported_durable_extensions_with_persistent_client_identity() {
         let client_instance_id = ClientInstanceId::new([7; 16]);
         let mut client = ChatClient::new();
         let mut state = LiveChatClientState::default();
@@ -4474,14 +4476,17 @@ mod tests {
                     DURABLE_MUTATION_CAPABILITY.into(),
                     DURABLE_NOTICE_ACK_CAPABILITY.into(),
                     REPLY_MENTIONS_CAPABILITY.into(),
+                    REACTIONS_CAPABILITY.into(),
                 ],
                 client_instance_id: Some(client_instance_id),
             }))
         );
         assert!(state.durable_requests.contains(&1));
         assert!(state.reply_mentions_requests.contains(&1));
+        assert!(state.reaction_requests.contains(&1));
         assert!(!state.durable_mutations_negotiated(1));
         assert!(!state.reply_mentions_negotiated(1));
+        assert!(!state.reactions_negotiated(1));
     }
 
     #[test]
@@ -4534,6 +4539,17 @@ mod tests {
         assert!(!state.reply_mentions_negotiated(session_id));
         assert!(!state.reactions_negotiated(session_id));
 
+        state.reaction_requests.insert(session_id);
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 2, None, accepted_body.clone()),
+            &mut events,
+        );
+        assert!(state.reactions_negotiated(session_id));
+
         let notice_accepted_body = crate::chat::protocol::with_session_accept_negotiation(
             FrameBody::Fields(vec![
                 FrameValue::String(PROTOCOL_NAME.into()),
@@ -4552,11 +4568,12 @@ mod tests {
             Some(&mut state),
             &mut transport,
             Some(session_id),
-            Frame::new(ChatOp::SessionAccept, 2, None, notice_accepted_body),
+            Frame::new(ChatOp::SessionAccept, 3, None, notice_accepted_body),
             &mut events,
         );
         assert!(state.durable_mutations_negotiated(session_id));
         assert!(state.durable_notice_ack_negotiated(session_id));
+        assert!(!state.reactions_negotiated(session_id));
 
         apply_frame_with_state(
             &mut client,
@@ -4565,7 +4582,7 @@ mod tests {
             Some(session_id),
             Frame::new(
                 ChatOp::SessionAccept,
-                3,
+                4,
                 None,
                 FrameBody::Fields(vec![
                     FrameValue::String(PROTOCOL_NAME.into()),
@@ -4582,7 +4599,7 @@ mod tests {
             Some(&mut state),
             &mut transport,
             Some(session_id),
-            Frame::new(ChatOp::SessionAccept, 4, None, accepted_body),
+            Frame::new(ChatOp::SessionAccept, 5, None, accepted_body),
             &mut events,
         );
         assert!(!state.durable_mutations_negotiated(session_id));
