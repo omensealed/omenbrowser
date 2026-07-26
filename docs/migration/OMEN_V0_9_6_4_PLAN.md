@@ -1300,6 +1300,18 @@ append-during-backfill is counted once; overflow rolls back the event and
 sequence. A confirmation-gated schema-7 copy removes only usage metadata.
 Retention and message revisions remain inactive.
 
+The third implementation slice adds an explicit, dormant store compaction
+primitive. One immediate transaction removes at most 64 original events and
+preflights no more than 20,000 surviving reply/reaction/revision projection
+rows. It shrinks a multi-event candidate batch when projection work is too
+large and fails closed when a single event exceeds the bound. Surviving
+replies retain their message and mention data but lose the expired target
+reference; selected reaction and revision state/audit disappear with the
+original; usage accounting is decremented exactly. Upload ledgers/files,
+durable mutation replay, and persistent event-ID high-water marks remain
+independent. Injected faults prove atomic rollback. No configuration,
+admission hook, timer, capability, CLI, or UI activates this primitive.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

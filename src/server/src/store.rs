@@ -6,8 +6,11 @@ use crate::error::ServerResult;
 use crate::protocol::{EventId, RichMessageEventMetadata, RoomId, UserId};
 
 pub mod durable_replay;
+pub mod history_retention;
 pub mod message_revisions;
 pub mod reactions;
+
+pub use history_retention::RoomHistoryCompaction;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerRoom {

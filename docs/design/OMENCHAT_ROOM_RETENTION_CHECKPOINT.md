@@ -1,7 +1,8 @@
 # OMENchat room-history retention checkpoint
 
-Status: design checkpoint; no retention policy, compaction, capability, or UI
-control is active  
+Status: implementation checkpoint; the bounded transactional compaction
+primitive exists, but no retention policy, admission hook, capability, CLI, or
+UI control is active.
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`  
 Protocol baseline: `omenchat-v0.1`, numeric protocol version 1
 
@@ -45,6 +46,14 @@ client caches may already hold an event.
 - Upload file quota and eviction are independent of the history event that
   announced an upload. History compaction must not bypass the upload ledger or
   delete files.
+- The explicit store compaction primitive removes at most 64 original events
+  per immediate transaction. It preflights at most 20,000 dependent reply,
+  reaction, and revision rows, shrinks the original-event batch when possible,
+  and fails closed when one original has excessive projection fan-out.
+- The primitive requires a complete schema-8 usage ledger, preserves the
+  persistent event-ID high-water mark, clears only surviving reply references,
+  and updates dependency tables and usage accounting atomically. It is not
+  called by event admission, startup, a timer, configuration, RPC, or the UI.
 - The client already bounds resident history to 1,024 events / 8 MiB and
   incrementally removes orphaned reaction and revision projections. Server
   compaction does not remotely erase older client copies.
@@ -249,7 +258,12 @@ Required before enabling retention:
    append during incomplete backfill is counted exactly once; accounting
    overflow rolls back the event and sequence. A guarded schema-7 copy removes
    only usage metadata. No event is deleted and retention remains disabled.
-3. Add the atomic bounded compaction primitive and fault tests.
+3. **Complete but dormant.** Add the atomic bounded compaction primitive and
+   fault tests. One explicit call removes at most 64 originals and refuses more
+   than 20,000 dependent projection rows per transaction. It preserves upload
+   and durable-replay records, never reuses event IDs, and rolls back cleanup
+   and ledger changes together at every injected boundary. No production path
+   calls it.
 4. Add disabled-by-default validated configuration and explicit maintenance
    status.
 5. Integrate bounded compaction with event admission.

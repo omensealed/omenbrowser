@@ -87,6 +87,13 @@ most 256 per append or explicit maintenance call. Backfill target and cursor
 survive restart, and retention remains unavailable until accounting is
 complete. Accounting failure rolls back event insertion and sequence
 advancement.
+An explicit store-only compaction primitive can remove at most 64 original
+events in one immediate transaction after accounting is complete. It bounds
+dependent reply/reaction/revision work to 20,000 rows, atomically cleans those
+projections and the usage ledger, preserves upload and durable-replay records,
+and leaves the event-ID high-water mark intact. No runtime configuration,
+admission path, timer, protocol capability, command, or UI invokes it yet, so
+upgrading still does not delete room history.
 The desktop has a matching dormant, rebuildable revision projection outside
 immutable room history. It is bounded per room, server, and identity-scoped
 cache by rows and stable retained bytes; strict deltas and authoritative

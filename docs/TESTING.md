@@ -4368,3 +4368,18 @@ cargo test --locked --no-default-features --features desktop-product \
 cargo test --locked --no-default-features --features desktop-product \
   omenchat_domain_messages_have_one_compile_time_route --lib
 ```
+
+The dormant omenchatd history-compaction primitive has a focused isolated
+SQLite gate:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-full history_retention -- --nocapture)
+```
+
+It covers the 64-original transaction ceiling, exact usage-ledger accounting,
+projection-aware batch reduction, excessive single-event fan-out refusal,
+surviving versus selected replies, upload/durable-replay preservation,
+monotonic event IDs, and rollback at every cleanup/ledger/commit boundary.
+This test does not imply that retention is enabled: no production path invokes
+the primitive.
