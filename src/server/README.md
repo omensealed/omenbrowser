@@ -488,9 +488,13 @@ incremental audit retention, authoritative inline/resource snapshots, and
 capability-scoped live fan-out. `reactions-v1` remains unadvertised and
 unaccepted, so negotiated production clients cannot reach that executor yet.
 Version 6 adds constrained message-revision current-state and append-only audit
-tables plus lookup/retention indexes. Migration and rollback/export support is
-active, but `message-revisions-v1` remains unrequested and unaccepted: no
-correction/tombstone executor, client reducer, or UI action exists yet.
+tables plus lookup/retention indexes. A dormant transactional executor now
+enforces author/moderator/mute policy, immutable originals, correction and
+storage ceilings, incremental audit pruning, reaction cleanup, exact durable
+replay, and inline/Resource snapshots. Migration and rollback/export support
+is active, but `message-revisions-v1` remains unrequested and unaccepted:
+normal clients cannot reach the executor, and no client reducer or UI action
+exists yet.
 The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental

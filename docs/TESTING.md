@@ -1328,6 +1328,13 @@ reaction state and inject failure at every revision table/index/version/commit
 boundary. Recovery tests also prove that a schema-5 export preserves reaction
 state while removing every schema-6 revision object, and that a deeper
 schema-4 export removes both feature layers.
+Focused dormant revision-executor tests cover author/moderator/mute policy,
+immutable originals, cross-room/non-message/deleted targets, eight corrections
+plus tombstone, reaction cleanup, soft/hard state saturation, bounded audit
+pruning, revision-ID non-reuse, transaction and result-codec rollback, exact
+restart replay without repeat fan-out, hash conflict, and identical
+inline/Resource snapshot decoding. `message-revisions-v1` remains rejected by
+normal capability negotiation.
 An injected migration executes one schema statement and then fails on the next.
 That test proves the partial schema is transactionally removed, the source
 marker and version 0 survive, and the backup stays readable.

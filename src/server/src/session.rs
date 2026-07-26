@@ -14,15 +14,17 @@ use crate::protocol::{
     append_rich_message_event_metadata, canonical_mutation_request_hash,
     parse_session_open_negotiation, with_session_accept_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
-    ReactionAck, ReactionRequest, ReactionSnapshot, RichMessageBody, RichMessageEventMetadata,
-    RoomId, SessionAcceptNegotiation, UserId, DURABLE_MUTATION_CAPABILITY,
-    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY,
+    MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, ReactionAck,
+    ReactionRequest, ReactionSnapshot, RichMessageBody, RichMessageEventMetadata, RoomId,
+    SessionAcceptNegotiation, UserId, DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY,
+    MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, PROTOCOL_NAME, REACTIONS_CAPABILITY,
     REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG, REPLY_MENTIONS_CAPABILITY,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
     DurableRoomEventCommit, DurableRoomEventPlan,
 };
+use crate::store::message_revisions::{MessageRevisionActorPolicy, MessageRevisionMutationResult};
 use crate::store::reactions::ReactionMutationResult;
 use crate::store::{
     normalize_room_name, OmenchatStore, ServerRoom, ServerRoomEvent, ServerRoomEventKind,
@@ -51,6 +53,7 @@ const UPLOAD_FILENAME_MAX_BYTES: usize = 255;
 const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
 const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
 const REACTIONS_SERVER_ENABLED: bool = true;
+const MESSAGE_REVISIONS_SERVER_ENABLED: bool = false;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -222,6 +225,11 @@ struct DurableCommandEffect {
 
 struct DurableReactionEffect {
     broadcast: Option<Frame>,
+    admission: Option<RateReservation>,
+}
+
+struct DurableMessageRevisionEffect {
+    broadcast: Frame,
     admission: Option<RateReservation>,
 }
 
@@ -544,6 +552,65 @@ impl SessionEngine {
         target_event_ids.sort_unstable();
         target_event_ids.dedup();
         self.reaction_snapshot_frame(seq, room_id, &target_event_ids)
+    }
+
+    pub fn message_revision_snapshot_frame(
+        &self,
+        seq: u32,
+        room_id: RoomId,
+        target_event_ids: &[u64],
+    ) -> ServerResult<Frame> {
+        let snapshot = self
+            .store
+            .message_revision_snapshot(room_id, target_event_ids)?;
+        let fingerprint = message_revision_snapshot_fingerprint(&snapshot);
+        let FrameBody::Fields(values) = snapshot.clone().into_frame_body().map_err(|error| {
+            ServerError::Message(format!("message revision snapshot encode failed: {error}"))
+        })?
+        else {
+            return Err(ServerError::Message(
+                "message revision snapshot did not produce a fields body".into(),
+            ));
+        };
+        let purpose = format!("message-revisions:{seq}:{fingerprint:016x}");
+        Ok(Frame::new(
+            self.batch_op(
+                ChatOp::MessageRevisionSnapshotInline,
+                ChatOp::MessageRevisionSnapshotResource,
+                &values,
+            )?,
+            seq,
+            Some(room_id),
+            self.batch_body(room_id, &purpose, &values)?,
+        ))
+    }
+
+    pub fn latest_message_revision_snapshot_frame(
+        &self,
+        seq: u32,
+        room_id: RoomId,
+        request_op: ChatOp,
+    ) -> ServerResult<Frame> {
+        let limit =
+            match request_op {
+                ChatOp::JoinRoom => self.limits.join_backlog_events,
+                ChatOp::HistoryRecent => self.limits.history_batch_size,
+                _ => return Err(ServerError::Message(
+                    "message revision snapshot request does not identify a recent-history boundary"
+                        .into(),
+                )),
+            };
+        let mut target_event_ids = self
+            .store
+            .latest_events(room_id, limit.min(MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS))?
+            .into_iter()
+            .filter_map(|event| {
+                matches!(event.kind, ServerRoomEventKind::Message { .. }).then_some(event.event_id)
+            })
+            .collect::<Vec<_>>();
+        target_event_ids.sort_unstable();
+        target_event_ids.dedup();
+        self.message_revision_snapshot_frame(seq, room_id, &target_event_ids)
     }
 
     fn handle_session_open(
@@ -1255,6 +1322,14 @@ impl SessionEngine {
                 ChatErrorCode::DurableMutationNotNegotiated,
                 "reactions were not negotiated for this link",
             )),
+            ChatOp::RoomMessageRevision if MESSAGE_REVISIONS_SERVER_ENABLED => self
+                .handle_durable_message_revision(peer, seq, room_id, client_instance_id, envelope),
+            ChatOp::RoomMessageRevision => Ok(self.durable_error_dispatch(
+                seq,
+                room_id,
+                ChatErrorCode::DurableMutationNotNegotiated,
+                "message revisions are not enabled for this server",
+            )),
             _ => Ok(self.durable_error_dispatch(
                 seq,
                 room_id,
@@ -1869,6 +1944,284 @@ impl SessionEngine {
                 Ok(DurableMutationDispatch {
                     origin: decode_durable_result(&result_frame)?,
                     broadcasts: effect.broadcast.into_iter().collect(),
+                    disconnect_identity: None,
+                    pruned,
+                })
+            }
+            DurableMutationEffectCommit::StoredResponse {
+                result_frame,
+                pruned,
+            } => Ok(DurableMutationDispatch {
+                origin: decode_durable_result(&result_frame)?,
+                broadcasts: Vec::new(),
+                disconnect_identity: None,
+                pruned,
+            }),
+            DurableMutationEffectCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
+                origin: decode_durable_replay_result(&result_frame, seq)?,
+                broadcasts: Vec::new(),
+                disconnect_identity: None,
+                pruned: 0,
+            }),
+            DurableMutationEffectCommit::Conflict => Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationConflict,
+                "durable mutation id was reused with different content",
+            )),
+            DurableMutationEffectCommit::Expired => Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationResultExpired,
+                "durable client instance has expired replay state",
+            )),
+        }
+    }
+
+    fn handle_durable_message_revision(
+        &self,
+        peer: &ServerPeer,
+        seq: u32,
+        room_id: Option<RoomId>,
+        client_instance_id: ClientInstanceId,
+        envelope: DurableMutationEnvelope,
+    ) -> ServerResult<DurableMutationDispatch> {
+        let Some(room_id) = room_id else {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                None,
+                ChatErrorCode::DurableMutationMalformed,
+                "durable message revision has no room id",
+            ));
+        };
+        let canonical_hash = match canonical_mutation_request_hash(
+            ChatOp::RoomMessageRevision,
+            Some(room_id),
+            &envelope.body,
+        ) {
+            Ok(hash) => hash,
+            Err(_) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationMalformed,
+                    "durable message revision body exceeds canonical bounds",
+                ))
+            }
+        };
+        if canonical_hash != envelope.request_hash {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationMalformed,
+                "durable message revision hash does not match its canonical body",
+            ));
+        }
+        let request = match MessageRevisionRequest::from_frame_body(&envelope.body) {
+            Ok(request)
+                if i64::try_from(request.target_event_id).is_ok()
+                    && request.replacement.as_ref().is_none_or(|replacement| {
+                        replacement.len() <= self.limits.max_message_bytes
+                    }) =>
+            {
+                request
+            }
+            _ => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationMalformed,
+                    "durable message revision request is malformed or too large",
+                ))
+            }
+        };
+        let key = DurableMutationKey {
+            identity_hash: &peer.identity_hash,
+            client_instance_id,
+            mutation_id: envelope.mutation_id,
+        };
+        let commit = self.store.commit_durable_mutation_effect_result(
+            key,
+            envelope.request_hash,
+            |transaction| {
+                let Some(user) = OmenchatStore::ensure_durable_room_user(
+                    transaction,
+                    room_id,
+                    &peer.identity_hash,
+                    &peer.display_name,
+                    peer.lxmf_destination.as_deref(),
+                )?
+                else {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::RoomNotFound,
+                            "room not found",
+                        ))?,
+                    });
+                };
+                if user.status_bits & STATUS_BANNED != 0 {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::PermissionDenied,
+                            "user is banned",
+                        ))?,
+                    });
+                }
+                if !OmenchatStore::durable_room_has_member(transaction, room_id, user.user_id)? {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::NotJoined,
+                            "join the room before revising a message",
+                        ))?,
+                    });
+                }
+                let admission = match self.reserve_rate(peer, RateKind::Command)? {
+                    RateAdmission::Admitted(admission) => admission,
+                    RateAdmission::Rejected => {
+                        return Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::RateLimited,
+                                "message revision rate limit exceeded",
+                            ))?,
+                        })
+                    }
+                };
+                let policy = MessageRevisionActorPolicy {
+                    is_moderator: user.role_bits & (ROLE_MODERATOR | ROLE_ADMIN) != 0,
+                    is_muted: user.status_bits & STATUS_MUTED != 0,
+                };
+                match OmenchatStore::apply_message_revision_mutation(
+                    transaction,
+                    room_id,
+                    user.user_id,
+                    Some(&user.display_name),
+                    policy,
+                    request.clone(),
+                    self.limits.max_message_bytes,
+                )? {
+                    MessageRevisionMutationResult::Changed(mutation) => {
+                        let event = mutation.event;
+                        let ack = MessageRevisionAck {
+                            target_event_id: event.target_event_id,
+                            action: event.action,
+                            actor_user_id: event.actor_user_id,
+                            changed: true,
+                            revision_event_id: Some(event.revision_event_id),
+                            revision_number: event.revision_number,
+                        };
+                        let broadcast = Frame::new(
+                            ChatOp::MessageRevisionEvent,
+                            seq,
+                            Some(room_id),
+                            event.into_frame_body().map_err(|error| {
+                                ServerError::Message(format!(
+                                    "message revision event encode failed: {error}"
+                                ))
+                            })?,
+                        );
+                        Ok(DurableMutationEffectPlan::Effect {
+                            result_frame: self.encode_durable_result(Frame::new(
+                                ChatOp::MessageRevisionAck,
+                                seq,
+                                Some(room_id),
+                                ack.into_frame_body().map_err(|error| {
+                                    ServerError::Message(format!(
+                                        "message revision acknowledgement encode failed: {error}"
+                                    ))
+                                })?,
+                            ))?,
+                            effect: DurableMessageRevisionEffect {
+                                broadcast,
+                                admission,
+                            },
+                        })
+                    }
+                    MessageRevisionMutationResult::Unchanged => {
+                        Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::DurableMutationConflict,
+                                "message revision does not change effective text",
+                            ))?,
+                        })
+                    }
+                    MessageRevisionMutationResult::TargetUnavailable
+                    | MessageRevisionMutationResult::AlreadyTombstoned => {
+                        Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::HistoryUnavailable,
+                                "message revision target is unavailable in this room",
+                            ))?,
+                        })
+                    }
+                    MessageRevisionMutationResult::PermissionDenied => {
+                        Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::PermissionDenied,
+                                "message revision is not permitted",
+                            ))?,
+                        })
+                    }
+                    MessageRevisionMutationResult::CorrectionLimitReached => {
+                        Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::RateLimited,
+                                "message correction limit reached",
+                            ))?,
+                        })
+                    }
+                    MessageRevisionMutationResult::Saturated => {
+                        Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::RateLimited,
+                                "message revision retention limit reached",
+                            ))?,
+                        })
+                    }
+                }
+            },
+        );
+        let commit = match commit {
+            Ok(commit) => commit,
+            Err(ServerError::Sqlite(error)) if sqlite_is_busy(&error) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationStoreBusy,
+                    "durable mutation store is busy",
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        match commit {
+            DurableMutationEffectCommit::Stored {
+                result_frame,
+                effect,
+                pruned,
+            } => {
+                if let Some(admission) = effect.admission {
+                    admission.commit();
+                }
+                Ok(DurableMutationDispatch {
+                    origin: decode_durable_result(&result_frame)?,
+                    broadcasts: vec![effect.broadcast],
                     disconnect_identity: None,
                     pruned,
                 })
@@ -4104,6 +4457,21 @@ fn reaction_snapshot_fingerprint(snapshot: &ReactionSnapshot) -> u64 {
     hasher.finish()
 }
 
+fn message_revision_snapshot_fingerprint(snapshot: &MessageRevisionSnapshot) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    snapshot.target_event_ids.hash(&mut hasher);
+    for entry in &snapshot.entries {
+        entry.target_event_id.hash(&mut hasher);
+        entry.latest_revision_event_id.hash(&mut hasher);
+        (entry.action as u8).hash(&mut hasher);
+        entry.actor_user_id.hash(&mut hasher);
+        entry.at_unix.hash(&mut hasher);
+        entry.replacement.hash(&mut hasher);
+        entry.revision_number.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
     matches!(
         error,
@@ -4973,6 +5341,215 @@ mod tests {
             Ok(Some(crate::protocol::SessionAcceptNegotiation {
                 accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
             }))
+        );
+    }
+
+    #[test]
+    fn dormant_message_revision_executor_replays_across_restart_without_refanout() {
+        let path = temp_store_path("message-revision-replay");
+        let (room_id, target_event_id) = {
+            let store = OmenchatStore::open(&path).expect("store");
+            let room = store.ensure_room("lobby", None).expect("room");
+            let user = store
+                .ensure_user(&peer().identity_hash, "Alice", None)
+                .expect("user");
+            store.join_room(room.room_id, user.user_id).expect("join");
+            let target = store
+                .append_event(
+                    room.room_id,
+                    Some(user.user_id),
+                    ServerRoomEventKind::Message {
+                        body: "original".into(),
+                    },
+                )
+                .expect("target");
+            (room.room_id, target.event_id)
+        };
+        let client_instance_id = ClientInstanceId::new([71; 16]);
+        let request = crate::protocol::MessageRevisionRequest {
+            target_event_id,
+            action: crate::protocol::MessageRevisionAction::Correct,
+            replacement: Some("corrected".into()),
+        };
+        let envelope = durable_envelope_body(
+            ChatOp::RoomMessageRevision,
+            room_id,
+            72,
+            request.clone().into_frame_body().expect("revision request"),
+        );
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("store"));
+        let stored = engine
+            .handle_durable_message_revision(
+                &peer(),
+                10,
+                Some(room_id),
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("stored revision");
+        assert_eq!(stored.origin.op, ChatOp::MessageRevisionAck);
+        let stored_ack = crate::protocol::MessageRevisionAck::from_frame_body(&stored.origin.body)
+            .expect("revision acknowledgement");
+        assert!(stored_ack.changed);
+        assert_eq!(stored_ack.revision_number, 1);
+        assert_eq!(stored.broadcasts.len(), 1);
+        assert_eq!(stored.broadcasts[0].op, ChatOp::MessageRevisionEvent);
+        crate::protocol::MessageRevisionEvent::from_frame_body(&stored.broadcasts[0].body)
+            .expect("revision event");
+        let inline = engine
+            .message_revision_snapshot_frame(10, room_id, &[target_event_id])
+            .expect("inline revision snapshot");
+        assert_eq!(inline.op, ChatOp::MessageRevisionSnapshotInline);
+        let inline_values =
+            decode_compressed_values_body(&inline.body).expect("inline snapshot values");
+        let inline_snapshot = crate::protocol::MessageRevisionSnapshot::from_frame_body(
+            &FrameBody::Fields(inline_values),
+        )
+        .expect("inline revision snapshot");
+        assert_eq!(inline_snapshot.entries.len(), 1);
+        drop(engine);
+
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::open(&path).expect("reopened store"),
+            SessionLimits {
+                large_batch_threshold_bytes: 1,
+                ..SessionLimits::default()
+            },
+        );
+        let replayed = engine
+            .handle_durable_message_revision(
+                &peer(),
+                11,
+                Some(room_id),
+                client_instance_id,
+                envelope,
+            )
+            .expect("restart replay");
+        assert_replayed_response(&replayed.origin, &stored.origin, 11);
+        assert!(replayed.broadcasts.is_empty());
+        assert_eq!(
+            engine
+                .store
+                .message_revision_row_counts()
+                .expect("revision counts"),
+            (1, 1)
+        );
+
+        let conflict = engine
+            .handle_durable_message_revision(
+                &peer(),
+                12,
+                Some(room_id),
+                client_instance_id,
+                durable_envelope_body(
+                    ChatOp::RoomMessageRevision,
+                    room_id,
+                    72,
+                    crate::protocol::MessageRevisionRequest {
+                        replacement: Some("different".into()),
+                        ..request
+                    }
+                    .into_frame_body()
+                    .expect("conflicting revision"),
+                ),
+            )
+            .expect("revision conflict");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+        assert!(conflict.broadcasts.is_empty());
+
+        let resource = engine
+            .message_revision_snapshot_frame(13, room_id, &[target_event_id])
+            .expect("resource revision snapshot");
+        assert_eq!(resource.op, ChatOp::MessageRevisionSnapshotResource);
+        let mut transport = crate::transport::CapturedTransport::default();
+        crate::transport::send_response_frame(&engine, [0x71; 16], &resource, &mut transport)
+            .expect("dispatch revision snapshot resource");
+        assert_eq!(transport.frames.len(), 1);
+        assert_eq!(transport.resources.len(), 1);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn message_revision_result_encoding_failure_rolls_back_effect_and_replay() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room lookup")
+            .expect("lobby");
+        let user = store
+            .ensure_user(&peer().identity_hash, "Alice", None)
+            .expect("user");
+        store.join_room(room.room_id, user.user_id).expect("join");
+        let target = store
+            .append_event(
+                room.room_id,
+                Some(user.user_id),
+                ServerRoomEventKind::Message {
+                    body: "original".into(),
+                },
+            )
+            .expect("target");
+        let engine = SessionEngine::new(store);
+        let request = crate::protocol::MessageRevisionRequest {
+            target_event_id: target.event_id,
+            action: crate::protocol::MessageRevisionAction::Correct,
+            replacement: Some("corrected".into()),
+        };
+        let envelope = durable_envelope_body(
+            ChatOp::RoomMessageRevision,
+            room.room_id,
+            74,
+            request.into_frame_body().expect("revision body"),
+        );
+        let oversized_display_peer = ServerPeer {
+            display_name: "x".repeat(
+                crate::protocol::MESSAGE_REVISION_MAX_ACTOR_DISPLAY_BYTES.saturating_add(1),
+            ),
+            ..peer()
+        };
+        let error = engine
+            .handle_durable_message_revision(
+                &oversized_display_peer,
+                20,
+                Some(room.room_id),
+                ClientInstanceId::new([73; 16]),
+                envelope.clone(),
+            )
+            .expect_err("event codec failure")
+            .to_string();
+        assert!(error.contains("message revision event encode failed"));
+        assert_eq!(
+            engine
+                .store
+                .message_revision_row_counts()
+                .expect("rolled-back revision counts"),
+            (0, 0)
+        );
+
+        let stored = engine
+            .handle_durable_message_revision(
+                &peer(),
+                21,
+                Some(room.room_id),
+                ClientInstanceId::new([73; 16]),
+                envelope,
+            )
+            .expect("retry after rolled-back codec failure");
+        assert_eq!(stored.origin.op, ChatOp::MessageRevisionAck);
+        assert_eq!(stored.broadcasts.len(), 1);
+        assert_eq!(
+            engine
+                .store
+                .message_revision_row_counts()
+                .expect("committed revision counts"),
+            (1, 1)
         );
     }
 

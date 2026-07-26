@@ -448,9 +448,16 @@ omenchatd state.
    objects, schema-4 exports remove both schema-5 and schema-6 layers, and the
    separate schema-5 downgrade-copy command removes only revisions while
    preserving reactions. The capability remains unrequested and unaccepted.
-4. Add the dormant transactional omenchatd executor, state/audit bounds,
-   exact replay/conflict behavior, reaction cleanup, capability-scoped fan-out,
-   and explicit-target snapshots.
+4. **Executor foundation complete and dormant.** The transactional store and
+   durable session executor enforce author/moderator/mute policy, immutable
+   originals, eight corrections plus a tombstone, soft correction and hard
+   total-state ceilings, bounded audit age/count/bytes/pruning, transactional
+   reaction cleanup, exact replay/conflict behavior, codec-failure rollback,
+   and authoritative inline/Resource snapshots. Revision IDs are allocated
+   across retained audit and current state so pruning cannot cause reuse.
+   Normal negotiation still rejects the capability. Link-scoped binding,
+   capability-filtered live fan-out, and automatic history-following snapshots
+   remain the next dormant sub-slice.
 5. Add the bounded client state/cache, persistent intent kind, reducer,
    snapshots/deltas, restart reconciliation, and dormant GUI controls.
 6. Complete room-history retention/compaction so an original and all dependent
@@ -494,12 +501,31 @@ git diff --check
 The shared crate now passes 34 tests, including six focused revision/negotiation
 tests. The root fixture and server fixture/dormancy tests pass. The schema
 migration, five rollback boundaries, recovery exports, and schema-5 downgrade
-copy also pass isolated server tests. The full server result is 416 passed and
+copy also pass isolated server tests. The schema/storage checkpoint full server
+result was 416 passed and
 9 ignored explicit soak/hardware/upstream cases; strict server Clippy and the
 root desktop-product check pass. These results validate only the dormant
-shared contract and storage foundation. No executor, client reducer, native
-package, mixed-version process, or live Reticulum
-revision test exists yet, and this checkpoint does not claim otherwise.
+shared contract and storage foundation.
+
+The first executor sub-slice subsequently passed:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-full \
+    message_revision
+  cargo test --locked --no-default-features --features server-full
+  cargo clippy --locked --no-default-features --features server-full \
+    --all-targets -- -D warnings
+)
+cargo check --locked --no-default-features --features desktop-product
+```
+
+The focused result is 14 passed. The full standalone result is 425 passed and
+9 ignored explicit soak/hardware/upstream cases. This proves only the dormant
+transactional executor and snapshot boundary; it is not Link-scoped fan-out,
+client reducer, native package, mixed-version process, or live Reticulum
+interoperability evidence.
 
 ## Completion gate
 

@@ -66,8 +66,10 @@ limits reaction-event fan-out to capability-bound Links. omenchatd now accepts
 with `durable-mutations-v1`; base and legacy Links receive no reaction state.
 Version 6 adds constrained dormant current-state and append-only audit tables
 for the reserved `message-revisions-v1` contract. Migration and recovery
-support is present, but the capability is not requested or accepted and no
-correction/tombstone executor or client action is enabled.
+support and a bounded transactional server executor are present. The executor
+enforces authorization, revision/storage ceilings, exact replay, reaction
+cleanup, and explicit-target snapshots. The capability is not requested or
+accepted, so normal clients cannot reach it and no client action is enabled.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated

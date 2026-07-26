@@ -1217,8 +1217,18 @@ version update, and before commit. The confirmation-gated
 `database export-schema5-copy` path stages and atomically publishes a private
 schema-5 copy that omits revisions but preserves reactions. The existing
 schema-4 export now also removes revision objects. Neither command overwrites a
-destination or modifies the active database. There is still no executor,
-client state, UI action, worker, timer, retry, or capability activation.
+destination or modifies the active database.
+
+The third dormant slice adds the transactional store and durable session
+executor. It enforces author/moderator/mute policy, immutable original events,
+eight corrections plus a tombstone, soft correction and hard state ceilings,
+bounded audit pruning, transactional reaction cleanup, exact restart replay
+without repeat fan-out, conflict detection, result-codec rollback, and
+authoritative inline/Resource snapshots. Audit pruning cannot reuse a revision
+ID because allocation considers both audit and current-state maxima. Production
+negotiation still refuses `message-revisions-v1`; there is no Link-scoped live
+binding/fan-out, client state, UI action, worker, timer, retry, or capability
+activation yet.
 
 ### Unit 6F — pins and moderation audit history
 
