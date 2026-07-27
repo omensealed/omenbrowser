@@ -4476,6 +4476,19 @@ and the guarded schema-8 copy use isolated SQLite roots:
   --features server-headless schema_eight_export -- --nocapture)
 ```
 
-The store tests do not advertise `room-pins-v1` or exercise durable replay,
-role authorization, Link fan-out, client projection, or UI. Those remain
-separate dormant slices.
+The store tests do not advertise `room-pins-v1`. Dormant transactional server
+execution, restart replay, conflict handling, role authorization, Link-scoped
+snapshots, and capable-room-only fan-out use:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless dormant_pin -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pin_events_fan_out_only -- --nocapture)
+```
+
+These tests bind the internal Link capability state explicitly. The production
+session negotiation test still proves that omenchatd rejects
+`room-pins-v1`; the desktop does not request it. Client projection, UI,
+mutation controls, mixed-version live behavior, and capability activation
+remain separate slices.

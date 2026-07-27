@@ -411,8 +411,9 @@ The presentation must distinguish:
 2. **Complete (2026-07-26):** add schema-9 pin state/audit, migration fault
    injection, recovery validation, bounded store operations, compaction
    dependencies, and schema-8 copy.
-3. Add transactional durable server execution and Link-scoped dormant
-   fan-out/snapshot plumbing.
+3. **Complete (2026-07-26):** add transactional durable server execution and
+   Link-scoped dormant fan-out/snapshot plumbing. Production negotiation
+   remains disabled.
 4. Add bounded client projection, persistence, authority, and read-only
    presentation without mutation controls.
 5. Add durable pin/unpin controls behind test-only negotiated state.

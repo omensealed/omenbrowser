@@ -1368,6 +1368,14 @@ bounded transaction. A stopped-server, confirmation-gated schema-8 copy
 removes only pin objects and preserves all prior history layers. Capability
 negotiation and live execution remain dormant.
 
+The third dormant pin slice couples role and membership validation, pin
+state/audit mutation, and the exact replay acknowledgement in the existing
+immediate durable transaction. Exact restart replay emits no second audit row
+or fan-out; changed-content mutation-ID reuse conflicts. Internal Link state
+now supports bounded inline pin snapshots and same-room, identity-matched,
+pin-capable event fan-out for tests. Production capability acceptance remains
+hard-disabled, so current and legacy clients observe no new operation.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

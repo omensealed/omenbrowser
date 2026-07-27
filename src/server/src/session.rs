@@ -14,18 +14,20 @@ use crate::protocol::{
     append_rich_message_event_metadata, canonical_mutation_request_hash,
     parse_session_open_negotiation, with_session_accept_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
-    MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, ReactionAck,
-    ReactionRequest, ReactionSnapshot, RichMessageBody, RichMessageEventMetadata, RoomId,
-    SessionAcceptNegotiation, UserId, DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY,
-    MESSAGE_REVISIONS_CAPABILITY, MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, PROTOCOL_NAME,
-    REACTIONS_CAPABILITY, REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG,
-    REPLY_MENTIONS_CAPABILITY,
+    MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, PinAck, PinRequest,
+    ReactionAck, ReactionRequest, ReactionSnapshot, RichMessageBody, RichMessageEventMetadata,
+    RoomId, SessionAcceptNegotiation, UserId, DURABLE_MUTATION_CAPABILITY,
+    DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
+    MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, PROTOCOL_NAME, REACTIONS_CAPABILITY,
+    REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG, REPLY_MENTIONS_CAPABILITY,
+    ROOM_PINS_CAPABILITY, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
     DurableRoomEventCommit, DurableRoomEventPlan,
 };
 use crate::store::message_revisions::{MessageRevisionActorPolicy, MessageRevisionMutationResult};
+use crate::store::pins::PinMutationResult;
 use crate::store::reactions::ReactionMutationResult;
 use crate::store::{
     normalize_room_name, OmenchatStore, ServerRoom, ServerRoomEvent, ServerRoomEventKind,
@@ -55,6 +57,7 @@ const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
 const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
 const REACTIONS_SERVER_ENABLED: bool = true;
 const MESSAGE_REVISIONS_SERVER_ENABLED: bool = true;
+const ROOM_PINS_SERVER_ENABLED: bool = false;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -210,6 +213,7 @@ pub(crate) struct DurableMutationPeerContext<'a> {
     pub reply_mentions: bool,
     pub reactions: bool,
     pub message_revisions: bool,
+    pub pins: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -232,6 +236,11 @@ struct DurableReactionEffect {
 
 struct DurableMessageRevisionEffect {
     broadcast: Frame,
+    admission: Option<RateReservation>,
+}
+
+struct DurablePinEffect {
+    broadcast: Option<Frame>,
     admission: Option<RateReservation>,
 }
 
@@ -338,6 +347,11 @@ impl PendingUploadStore {
 }
 
 impl SessionEngine {
+    #[cfg(test)]
+    pub(crate) fn pin_row_counts(&self) -> ServerResult<(i64, i64)> {
+        self.store.pin_row_counts()
+    }
+
     pub fn new(store: OmenchatStore) -> Self {
         Self {
             store,
@@ -615,6 +629,45 @@ impl SessionEngine {
         self.message_revision_snapshot_frame(seq, room_id, &target_event_ids)
     }
 
+    pub fn pin_snapshot_frame(
+        &self,
+        seq: u32,
+        room_id: RoomId,
+        target_event_ids: &[u64],
+    ) -> ServerResult<Frame> {
+        let snapshot = self.store.pin_snapshot(room_id, target_event_ids)?;
+        let body = snapshot.into_frame_body().map_err(|error| {
+            ServerError::Message(format!("pin snapshot encode failed: {error}"))
+        })?;
+        Ok(Frame::new(ChatOp::PinSnapshot, seq, Some(room_id), body))
+    }
+
+    pub fn latest_pin_snapshot_frame(
+        &self,
+        seq: u32,
+        room_id: RoomId,
+        request_op: ChatOp,
+    ) -> ServerResult<Frame> {
+        let limit = match request_op {
+            ChatOp::JoinRoom => self.limits.join_backlog_events,
+            ChatOp::HistoryRecent => self.limits.history_batch_size,
+            _ => {
+                return Err(ServerError::Message(
+                    "pin snapshot request does not identify a recent-history boundary".into(),
+                ))
+            }
+        };
+        let mut target_event_ids = self
+            .store
+            .latest_events(room_id, limit.min(ROOM_PIN_SNAPSHOT_MAX_TARGETS))?
+            .into_iter()
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>();
+        target_event_ids.sort_unstable();
+        target_event_ids.dedup();
+        self.pin_snapshot_frame(seq, room_id, &target_event_ids)
+    }
+
     fn handle_session_open(
         &self,
         peer: &ServerPeer,
@@ -696,6 +749,15 @@ impl SessionEngine {
             });
             if message_revisions_requested && MESSAGE_REVISIONS_SERVER_ENABLED {
                 accepted_capabilities.push(MESSAGE_REVISIONS_CAPABILITY.into());
+            }
+            let pins_requested = negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == ROOM_PINS_CAPABILITY)
+            });
+            if pins_requested && ROOM_PINS_SERVER_ENABLED {
+                accepted_capabilities.push(ROOM_PINS_CAPABILITY.into());
             }
             response_body = with_session_accept_negotiation(
                 response_body,
@@ -1281,6 +1343,7 @@ impl SessionEngine {
                 reply_mentions: false,
                 reactions: false,
                 message_revisions: false,
+                pins: false,
             },
             seq,
             room_id,
@@ -1341,6 +1404,15 @@ impl SessionEngine {
                 room_id,
                 ChatErrorCode::DurableMutationNotNegotiated,
                 "message revisions were not negotiated for this link",
+            )),
+            ChatOp::RoomPin if peers.pins => {
+                self.handle_durable_pin(peer, seq, room_id, client_instance_id, envelope)
+            }
+            ChatOp::RoomPin => Ok(self.durable_error_dispatch(
+                seq,
+                room_id,
+                ChatErrorCode::DurableMutationNotNegotiated,
+                "room pins were not negotiated for this link",
             )),
             _ => Ok(self.durable_error_dispatch(
                 seq,
@@ -1924,6 +1996,265 @@ impl SessionEngine {
                                 })?,
                             ))?,
                             effect: DurableReactionEffect {
+                                broadcast: Some(broadcast),
+                                admission,
+                            },
+                        })
+                    }
+                }
+            },
+        );
+        let commit = match commit {
+            Ok(commit) => commit,
+            Err(ServerError::Sqlite(error)) if sqlite_is_busy(&error) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationStoreBusy,
+                    "durable mutation store is busy",
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        match commit {
+            DurableMutationEffectCommit::Stored {
+                result_frame,
+                effect,
+                pruned,
+            } => {
+                if let Some(admission) = effect.admission {
+                    admission.commit();
+                }
+                Ok(DurableMutationDispatch {
+                    origin: decode_durable_result(&result_frame)?,
+                    broadcasts: effect.broadcast.into_iter().collect(),
+                    disconnect_identity: None,
+                    pruned,
+                })
+            }
+            DurableMutationEffectCommit::StoredResponse {
+                result_frame,
+                pruned,
+            } => Ok(DurableMutationDispatch {
+                origin: decode_durable_result(&result_frame)?,
+                broadcasts: Vec::new(),
+                disconnect_identity: None,
+                pruned,
+            }),
+            DurableMutationEffectCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
+                origin: decode_durable_replay_result(&result_frame, seq)?,
+                broadcasts: Vec::new(),
+                disconnect_identity: None,
+                pruned: 0,
+            }),
+            DurableMutationEffectCommit::Conflict => Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationConflict,
+                "durable mutation id was reused with different content",
+            )),
+            DurableMutationEffectCommit::Expired => Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationResultExpired,
+                "durable client instance has expired replay state",
+            )),
+        }
+    }
+
+    fn handle_durable_pin(
+        &self,
+        peer: &ServerPeer,
+        seq: u32,
+        room_id: Option<RoomId>,
+        client_instance_id: ClientInstanceId,
+        envelope: DurableMutationEnvelope,
+    ) -> ServerResult<DurableMutationDispatch> {
+        let Some(room_id) = room_id else {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                None,
+                ChatErrorCode::DurableMutationMalformed,
+                "durable pin mutation has no room id",
+            ));
+        };
+        let canonical_hash =
+            match canonical_mutation_request_hash(ChatOp::RoomPin, Some(room_id), &envelope.body) {
+                Ok(hash) => hash,
+                Err(_) => {
+                    return Ok(self.durable_error_dispatch(
+                        seq,
+                        Some(room_id),
+                        ChatErrorCode::DurableMutationMalformed,
+                        "durable pin body exceeds canonical bounds",
+                    ))
+                }
+            };
+        if canonical_hash != envelope.request_hash {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                Some(room_id),
+                ChatErrorCode::DurableMutationMalformed,
+                "durable pin hash does not match its canonical body",
+            ));
+        }
+        let request = match PinRequest::from_frame_body(&envelope.body) {
+            Ok(request) if i64::try_from(request.target_event_id).is_ok() => request,
+            _ => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::DurableMutationMalformed,
+                    "durable pin request is malformed",
+                ))
+            }
+        };
+        let key = DurableMutationKey {
+            identity_hash: &peer.identity_hash,
+            client_instance_id,
+            mutation_id: envelope.mutation_id,
+        };
+        let commit = self.store.commit_durable_mutation_effect_result(
+            key,
+            envelope.request_hash,
+            |transaction| {
+                let Some(user) = OmenchatStore::ensure_durable_room_user(
+                    transaction,
+                    room_id,
+                    &peer.identity_hash,
+                    &peer.display_name,
+                    peer.lxmf_destination.as_deref(),
+                )?
+                else {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::RoomNotFound,
+                            "room not found",
+                        ))?,
+                    });
+                };
+                if user.status_bits & STATUS_BANNED != 0 {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::PermissionDenied,
+                            "user is banned",
+                        ))?,
+                    });
+                }
+                if !OmenchatStore::durable_room_has_member(transaction, room_id, user.user_id)? {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::NotJoined,
+                            "join the room before changing pins",
+                        ))?,
+                    });
+                }
+                if user.role_bits & (ROLE_MODERATOR | ROLE_ADMIN) == 0 {
+                    return Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::PermissionDenied,
+                            "moderator or administrator role is required to change pins",
+                        ))?,
+                    });
+                }
+                let admission = match self.reserve_rate(peer, RateKind::Command)? {
+                    RateAdmission::Admitted(admission) => admission,
+                    RateAdmission::Rejected => {
+                        return Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::RateLimited,
+                                "pin mutation rate limit exceeded",
+                            ))?,
+                        })
+                    }
+                };
+                match OmenchatStore::apply_pin_mutation(
+                    transaction,
+                    room_id,
+                    user.user_id,
+                    request,
+                )? {
+                    PinMutationResult::TargetUnavailable => {
+                        Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::HistoryUnavailable,
+                                "pin target is unavailable in this room",
+                            ))?,
+                        })
+                    }
+                    PinMutationResult::Saturated => Ok(DurableMutationEffectPlan::Response {
+                        result_frame: self.encode_durable_result(self.error_frame(
+                            seq,
+                            Some(room_id),
+                            ChatErrorCode::RateLimited,
+                            "pin state retention limit reached",
+                        ))?,
+                    }),
+                    PinMutationResult::Unchanged => {
+                        let ack = PinAck {
+                            target_event_id: request.target_event_id,
+                            action: request.action,
+                            actor_user_id: user.user_id,
+                            changed: false,
+                            pin_event_id: None,
+                        };
+                        Ok(DurableMutationEffectPlan::Effect {
+                            result_frame: self.encode_durable_result(Frame::new(
+                                ChatOp::PinAck,
+                                seq,
+                                Some(room_id),
+                                ack.into_frame_body().map_err(|error| {
+                                    ServerError::Message(format!(
+                                        "pin acknowledgement encode failed: {error}"
+                                    ))
+                                })?,
+                            ))?,
+                            effect: DurablePinEffect {
+                                broadcast: None,
+                                admission,
+                            },
+                        })
+                    }
+                    PinMutationResult::Changed(event) => {
+                        let ack = PinAck {
+                            target_event_id: event.target_event_id,
+                            action: event.action,
+                            actor_user_id: event.actor_user_id,
+                            changed: true,
+                            pin_event_id: Some(event.pin_event_id),
+                        };
+                        let broadcast = Frame::new(
+                            ChatOp::PinEvent,
+                            seq,
+                            Some(room_id),
+                            event.into_frame_body().map_err(|error| {
+                                ServerError::Message(format!("pin event encode failed: {error}"))
+                            })?,
+                        );
+                        Ok(DurableMutationEffectPlan::Effect {
+                            result_frame: self.encode_durable_result(Frame::new(
+                                ChatOp::PinAck,
+                                seq,
+                                Some(room_id),
+                                ack.into_frame_body().map_err(|error| {
+                                    ServerError::Message(format!(
+                                        "pin acknowledgement encode failed: {error}"
+                                    ))
+                                })?,
+                            ))?,
+                            effect: DurablePinEffect {
                                 broadcast: Some(broadcast),
                                 admission,
                             },
@@ -5389,6 +5720,228 @@ mod tests {
     }
 
     #[test]
+    fn dormant_pin_executor_is_transactional_role_scoped_and_replays_after_restart() {
+        let path = temp_store_path("pin-replay");
+        let (room_id, target_event_id, actor_user_id) = {
+            let store = OmenchatStore::open(&path).expect("store");
+            let room = store.ensure_room("lobby", None).expect("room");
+            let user = store
+                .ensure_user(&peer().identity_hash, "Alice", None)
+                .expect("user");
+            store.join_room(room.room_id, user.user_id).expect("join");
+            store
+                .set_user_role_bits(user.user_id, ROLE_MODERATOR)
+                .expect("moderator role");
+            let target = store
+                .append_event(
+                    room.room_id,
+                    Some(user.user_id),
+                    ServerRoomEventKind::Message {
+                        body: "pin target".into(),
+                    },
+                )
+                .expect("target");
+            (room.room_id, target.event_id, user.user_id)
+        };
+        let request = PinRequest {
+            target_event_id,
+            action: crate::protocol::PinAction::Pin,
+        };
+        let envelope = durable_envelope_body(
+            ChatOp::RoomPin,
+            room_id,
+            75,
+            request.into_frame_body().expect("pin request"),
+        );
+        let client_instance_id = ClientInstanceId::new([74; 16]);
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("store"));
+        let rejected = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: true,
+                    message_revisions: true,
+                    pins: false,
+                },
+                9,
+                Some(room_id),
+                ChatOp::RoomPin,
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("unbound pin");
+        assert_eq!(
+            frame_error_code(&rejected.origin),
+            Some(ChatErrorCode::DurableMutationNotNegotiated as u16 as u64)
+        );
+        assert_eq!(
+            engine.store.pin_row_counts().expect("empty pin rows"),
+            (0, 0)
+        );
+
+        let stored = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: true,
+                    message_revisions: true,
+                    pins: true,
+                },
+                10,
+                Some(room_id),
+                ChatOp::RoomPin,
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("stored pin");
+        assert_eq!(stored.origin.op, ChatOp::PinAck);
+        let stored_ack = PinAck::from_frame_body(&stored.origin.body).expect("pin ack");
+        assert_eq!(stored_ack.actor_user_id, actor_user_id);
+        assert!(stored_ack.changed);
+        assert_eq!(stored.broadcasts.len(), 1);
+        assert_eq!(stored.broadcasts[0].op, ChatOp::PinEvent);
+        crate::protocol::PinEvent::from_frame_body(&stored.broadcasts[0].body).expect("pin event");
+        let snapshot = engine
+            .pin_snapshot_frame(10, room_id, &[target_event_id])
+            .expect("pin snapshot");
+        assert_eq!(snapshot.op, ChatOp::PinSnapshot);
+        let snapshot =
+            crate::protocol::PinSnapshot::from_frame_body(&snapshot.body).expect("snapshot body");
+        assert_eq!(snapshot.target_event_ids, vec![target_event_id]);
+        assert_eq!(snapshot.entries.len(), 1);
+        drop(engine);
+
+        let engine = SessionEngine::new(OmenchatStore::open(&path).expect("reopened store"));
+        let replayed = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: true,
+                    message_revisions: true,
+                    pins: true,
+                },
+                11,
+                Some(room_id),
+                ChatOp::RoomPin,
+                client_instance_id,
+                envelope,
+            )
+            .expect("restart replay");
+        assert_replayed_response(&replayed.origin, &stored.origin, 11);
+        assert!(replayed.broadcasts.is_empty());
+        assert_eq!(engine.store.pin_row_counts().expect("pin rows"), (1, 1));
+
+        let conflict = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: true,
+                    message_revisions: true,
+                    pins: true,
+                },
+                12,
+                Some(room_id),
+                ChatOp::RoomPin,
+                client_instance_id,
+                durable_envelope_body(
+                    ChatOp::RoomPin,
+                    room_id,
+                    75,
+                    PinRequest {
+                        action: crate::protocol::PinAction::Unpin,
+                        ..request
+                    }
+                    .into_frame_body()
+                    .expect("conflicting pin request"),
+                ),
+            )
+            .expect("pin conflict");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+        assert!(conflict.broadcasts.is_empty());
+        assert_eq!(engine.store.pin_row_counts().expect("pin rows"), (1, 1));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn dormant_pin_executor_denies_joined_non_moderator_without_state() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room lookup")
+            .expect("room");
+        let user = store
+            .ensure_user(&peer().identity_hash, "Alice", None)
+            .expect("user");
+        store.join_room(room.room_id, user.user_id).expect("join");
+        let target = store
+            .append_event(
+                room.room_id,
+                Some(user.user_id),
+                ServerRoomEventKind::Message {
+                    body: "pin target".into(),
+                },
+            )
+            .expect("target");
+        let engine = SessionEngine::new(store);
+        let dispatch = engine
+            .handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer: &peer(),
+                    active_room_peers: &[],
+                    durable_notice_ack: true,
+                    reply_mentions: true,
+                    reactions: true,
+                    message_revisions: true,
+                    pins: true,
+                },
+                20,
+                Some(room.room_id),
+                ChatOp::RoomPin,
+                ClientInstanceId::new([76; 16]),
+                durable_envelope_body(
+                    ChatOp::RoomPin,
+                    room.room_id,
+                    77,
+                    PinRequest {
+                        target_event_id: target.event_id,
+                        action: crate::protocol::PinAction::Pin,
+                    }
+                    .into_frame_body()
+                    .expect("pin request"),
+                ),
+            )
+            .expect("denied pin");
+        assert_eq!(
+            frame_error_code(&dispatch.origin),
+            Some(ChatErrorCode::PermissionDenied as u16 as u64)
+        );
+        assert!(dispatch.broadcasts.is_empty());
+        assert_eq!(
+            engine.store.pin_row_counts().expect("empty pin rows"),
+            (0, 0)
+        );
+    }
+
+    #[test]
     fn dormant_message_revision_executor_replays_across_restart_without_refanout() {
         let path = temp_store_path("message-revision-replay");
         let (room_id, target_event_id) = {
@@ -5750,6 +6303,7 @@ mod tests {
                     reply_mentions: true,
                     reactions: false,
                     message_revisions: false,
+                    pins: false,
                 },
                 3,
                 Some(room.room_id),
@@ -5812,6 +6366,7 @@ mod tests {
                     reply_mentions: true,
                     reactions: true,
                     message_revisions: false,
+                    pins: false,
                 },
                 10,
                 Some(room_id),
@@ -5859,6 +6414,7 @@ mod tests {
                     reply_mentions: true,
                     reactions: true,
                     message_revisions: false,
+                    pins: false,
                 },
                 11,
                 Some(room_id),
@@ -5879,6 +6435,7 @@ mod tests {
                     reply_mentions: true,
                     reactions: true,
                     message_revisions: false,
+                    pins: false,
                 },
                 12,
                 Some(room_id),
@@ -5908,6 +6465,7 @@ mod tests {
                     reply_mentions: true,
                     reactions: true,
                     message_revisions: false,
+                    pins: false,
                 },
                 13,
                 Some(room_id),
@@ -5995,6 +6553,7 @@ mod tests {
                         reply_mentions: true,
                         reactions: true,
                         message_revisions: false,
+                        pins: false,
                     },
                     u32::from(mutation_marker),
                     Some(room.room_id),
@@ -6068,6 +6627,7 @@ mod tests {
                     reply_mentions: false,
                     reactions: false,
                     message_revisions: false,
+                    pins: false,
                 },
                 3,
                 Some(room.room_id),
@@ -7183,6 +7743,7 @@ mod tests {
                     reply_mentions: true,
                     reactions: false,
                     message_revisions: false,
+                    pins: false,
                 },
                 31,
                 Some(room_id),
@@ -7273,6 +7834,7 @@ mod tests {
                     reply_mentions: true,
                     reactions: false,
                     message_revisions: false,
+                    pins: false,
                 },
                 33,
                 Some(room_id),
@@ -7336,6 +7898,7 @@ mod tests {
                     reply_mentions: true,
                     reactions: false,
                     message_revisions: false,
+                    pins: false,
                 },
                 35,
                 Some(room_id),
@@ -7384,6 +7947,7 @@ mod tests {
             reply_mentions,
             reactions: false,
             message_revisions: false,
+            pins: false,
         };
 
         let not_negotiated = engine
@@ -8799,6 +9363,7 @@ mod tests {
                         reply_mentions: false,
                         reactions: false,
                         message_revisions: false,
+                        pins: false,
                     },
                     110 + index as u32,
                     Some(room.room_id),
@@ -8869,6 +9434,7 @@ mod tests {
                         reply_mentions: false,
                         reactions: false,
                         message_revisions: false,
+                        pins: false,
                     },
                     120 + index as u32,
                     Some(room.room_id),

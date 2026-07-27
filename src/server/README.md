@@ -214,6 +214,10 @@ The destination must not exist. The command removes only schema-9 pin state
 and audit objects from a staged copy and preserves history usage, event
 sequences, message revisions, reactions, and ordinary history.
 
+Schema-9 pin storage and its durable execution path are dormant in this
+release-development state. omenchatd does not accept `room-pins-v1`, so no
+production client can invoke pin mutations or receive pin snapshots/events.
+
 To prepare a separate schema-7-compatible rollback copy while retaining the
 active schema-9 database, stop the server cleanly and run:
 
