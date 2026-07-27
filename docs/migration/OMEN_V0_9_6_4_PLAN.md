@@ -1491,6 +1491,18 @@ healthy chat Link to hide the limitation.
 - Per-room upload and media policy.
 - Clear client evidence when policy rejects an operation.
 
+The announcement-room checkpoint is recorded in
+`docs/design/OMENCHAT_ANNOUNCEMENT_ROOMS_CHECKPOINT.md`. It keeps existing rooms
+ordinary by default and proposes one capability-negotiated room policy bit
+without changing protocol version 1 or unnegotiated four-field room values.
+Server authorization applies regardless of negotiation: members may
+discover/join/read, while only current moderators or administrators may publish
+or mutate room content. The proposed schema-11 column defaults to zero without
+a history scan and requires a confirmation-gated schema-10 copy export.
+Implementation is deliberately split into dormant wire, storage/recovery,
+atomic authorization, administration, bounded presentation, qualification, and
+activation units. No behavior changes in the checkpoint slice.
+
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is
 indefinite and its event allocator derives the next identifier from retained
