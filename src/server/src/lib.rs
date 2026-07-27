@@ -53,6 +53,8 @@ pub enum CliCommand {
     RoomsSetTopic(ServerOptions, RoomTopicOptions),
     RoomsSetPolicy(ServerOptions, RoomPolicyOptions),
     RoomsArchive(ServerOptions, RoomSelectOptions),
+    UsersListJson(ServerOptions),
+    UsersSetRole(ServerOptions, UserRoleOptions),
     InterfacesList(ServerOptions),
     InterfacesTcpServer(ServerOptions, TcpServerOverride),
     InterfacesTcpClient(ServerOptions, TcpClientOverride),
@@ -124,6 +126,40 @@ pub struct RoomSelectOptions {
     pub room_id: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdministrativeUserRole {
+    Standard,
+    Trusted,
+    Moderator,
+    Administrator,
+}
+
+impl AdministrativeUserRole {
+    fn bits(self) -> u64 {
+        match self {
+            Self::Standard => 0,
+            Self::Trusted => 1,
+            Self::Moderator => 1 | (1 << 1),
+            Self::Administrator => 1 | (1 << 1) | (1 << 2),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Trusted => "trusted",
+            Self::Moderator => "moderator",
+            Self::Administrator => "administrator",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserRoleOptions {
+    pub user_id: i64,
+    pub role: AdministrativeUserRole,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TcpServerOverride {
     pub listen_ip: String,
@@ -186,6 +222,7 @@ impl CliCommand {
             "database" => parse_database_command(args),
             "config" => parse_config_command(args),
             "rooms" => parse_rooms_command(args),
+            "users" => parse_users_command(args),
             "interfaces" => parse_interfaces_command(args),
             "-h" | "--help" | "help" => Self::Help,
             "-V" | "--version" | "version" => Self::Version,
@@ -601,6 +638,63 @@ impl Omenchatd {
                 println!("room archived: id={}", room.room_id);
                 Ok(())
             }
+            CliCommand::UsersListJson(options) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "user listing refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database = admin_db::AdminDatabase::open_read_only(&config.database_path)?;
+                let users = database
+                    .list_users()?
+                    .into_iter()
+                    .map(|user| {
+                        serde_json::json!({
+                            "user_id": user.user.user_id,
+                            "display_name": user.user.display_name,
+                            "role_bits": user.user.role_bits,
+                            "status_bits": user.user.status_bits,
+                            "first_seen_at": user.first_seen_at,
+                            "last_seen_at": user.last_seen_at,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema_version": 1,
+                        "users": users,
+                    }))
+                    .map_err(|error| {
+                        crate::error::ServerError::Message(format!(
+                            "user status JSON encoding failed: {error}"
+                        ))
+                    })?
+                );
+                Ok(())
+            }
+            CliCommand::UsersSetRole(options, user) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "user role update refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let user_id = u32::try_from(user.user_id)
+                    .map_err(|_| error::ServerError::Message("user was not found".into()))?;
+                let updated = database.set_user_role_bits(user_id, user.role.bits())?;
+                println!(
+                    "user role updated: id={} role={}",
+                    updated.user_id,
+                    user.role.label()
+                );
+                Ok(())
+            }
             CliCommand::InterfacesTcpServer(options, tcp_server) => {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
@@ -874,6 +968,34 @@ fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
             match room {
                 Some(room) => CliCommand::RoomsArchive(options, room),
                 None => CliCommand::Help,
+            }
+        }
+        _ => CliCommand::Help,
+    }
+}
+
+fn parse_users_command(args: impl IntoIterator<Item = String>) -> CliCommand {
+    let mut args = args.into_iter();
+    let Some(command) = args.next() else {
+        return CliCommand::Help;
+    };
+    match command.as_str() {
+        "list" => {
+            let (options, json) = parse_machine_output_options(args);
+            if json {
+                CliCommand::UsersListJson(options)
+            } else {
+                CliCommand::Invalid("user listing requires --json".into())
+            }
+        }
+        "role" => {
+            let (options, user) = parse_user_role_options(args);
+            match user {
+                Some(user) => CliCommand::UsersSetRole(options, user),
+                None => CliCommand::Invalid(
+                    "user role requires <user_id> standard|trusted|moderator|administrator --confirm and must be run while omenchatd is stopped"
+                        .into(),
+                ),
             }
         }
         _ => CliCommand::Help,
@@ -1173,6 +1295,38 @@ fn parse_room_policy_options(
     )
 }
 
+fn parse_user_role_options(
+    args: impl IntoIterator<Item = String>,
+) -> (ServerOptions, Option<UserRoleOptions>) {
+    let mut options = ServerOptions::default();
+    let mut user_id = None;
+    let mut role = None;
+    let mut confirmed = false;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => options.home = args.next().map(PathBuf::from),
+            "--confirm" => confirmed = true,
+            "standard" if role.is_none() => role = Some(AdministrativeUserRole::Standard),
+            "trusted" if role.is_none() => role = Some(AdministrativeUserRole::Trusted),
+            "moderator" if role.is_none() => role = Some(AdministrativeUserRole::Moderator),
+            "administrator" if role.is_none() => role = Some(AdministrativeUserRole::Administrator),
+            value if user_id.is_none() => {
+                user_id = value.parse::<i64>().ok().filter(|value| *value > 0)
+            }
+            _ => return (options, None),
+        }
+    }
+    (
+        options,
+        confirmed
+            .then_some(())
+            .and(user_id)
+            .zip(role)
+            .map(|(user_id, role)| UserRoleOptions { user_id, role }),
+    )
+}
+
 fn parse_tcp_server_override(value: &str) -> Option<TcpServerOverride> {
     let (listen_ip, port) = value.rsplit_once(':')?;
     let listen_port = port.parse::<u16>().ok()?;
@@ -1333,6 +1487,8 @@ fn print_help() {
     println!("  rooms topic <room_id> [--topic <topic>] [--home <path>]");
     println!("  rooms policy <room_id> ordinary|announcement --confirm [--home <path>]  # server must be stopped");
     println!("  rooms archive <room_id> [--home <path>]");
+    println!("  users list --json [--home <path>]");
+    println!("  users role <user_id> standard|trusted|moderator|administrator --confirm [--home <path>]  # server must be stopped");
     println!("  interfaces list [--home <path>]");
     println!("  interfaces tcp-server <listen_ip:port> [--home <path>]");
     println!("  interfaces tcp-client <host:port> [--home <path>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]  # add without replacing existing clients");
@@ -2298,6 +2454,51 @@ mod tests {
                 }
             )
         );
+        assert_eq!(
+            CliCommand::parse([
+                "users".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::UsersListJson(ServerOptions {
+                home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                tcp_server: None,
+                tcp_client: None,
+            })
+        );
+        assert_eq!(
+            CliCommand::parse([
+                "users".to_string(),
+                "role".to_string(),
+                "12".to_string(),
+                "moderator".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::UsersSetRole(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                UserRoleOptions {
+                    user_id: 12,
+                    role: AdministrativeUserRole::Moderator,
+                }
+            )
+        );
+        assert!(matches!(
+            CliCommand::parse([
+                "users".to_string(),
+                "role".to_string(),
+                "12".to_string(),
+                "moderator".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
     }
 
     #[test]
@@ -3163,6 +3364,57 @@ mod tests {
             .iter()
             .any(|(_, name, _)| name == "ops"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn headless_user_role_maintenance_uses_the_selected_existing_database() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-user-role-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let store =
+            crate::store::OmenchatStore::open(&config.database_path).expect("initialize database");
+        let user = store
+            .ensure_user(&[9; 16], "Moderator fixture", None)
+            .expect("seed user");
+        drop(store);
+        let options = ServerOptions {
+            home: Some(root.clone()),
+            ..ServerOptions::default()
+        };
+
+        Omenchatd
+            .run(CliCommand::UsersListJson(options.clone()))
+            .expect("headless user listing");
+        Omenchatd
+            .run(CliCommand::UsersSetRole(
+                options,
+                UserRoleOptions {
+                    user_id: i64::from(user.user_id),
+                    role: AdministrativeUserRole::Moderator,
+                },
+            ))
+            .expect("headless role update");
+
+        let store =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("inspect role update");
+        assert_eq!(
+            store
+                .user_by_identity(&[9; 16])
+                .expect("user lookup")
+                .expect("updated user")
+                .role_bits,
+            AdministrativeUserRole::Moderator.bits()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).expect("remove isolated user role home");
     }
 
     #[test]

@@ -4,8 +4,8 @@ Date: 2026-07-27
 
 Baseline: `release/v0.9.6-4` at `e7a9257`, plus this process-smoke unit
 
-Verdict: current/current legacy-client server authorization and restart
-persistence pass over real isolated Reticulum Links; negotiated
+Verdict: current/current member rejection plus moderator message/Resource
+publication and restart persistence pass over real isolated Reticulum Links; negotiated
 `announcement-rooms-v1` remains dormant
 
 ## Scope and invariant
@@ -30,9 +30,19 @@ combined only with `--restart-server`. This keeps one authorization risk class
 per run and prevents an expected rejection from being mistaken for a normal
 message-echo success.
 
-The wait owner now exits promptly on a decoded client error. It remains bounded
-by the existing response deadline and does not add a worker, channel, timer,
-retry, cache, or retained history.
+The wait owner now exits promptly only on the typed announcement-policy error.
+Other operation errors remain observable without incorrectly terminating an
+unrelated message wait. The wait remains bounded by the existing response
+deadline and does not add a worker, channel, timer, retry, cache, or retained
+history.
+
+The companion `--announcement-moderator-smoke` case registers exactly one
+isolated client while the lobby is ordinary, stops omenchatd, uses the
+headless-safe redacted user listing and confirmation-gated role command,
+applies moderator role and announcement policy, then restarts. It deliberately
+uses the unchanged normal smoke expectation: the message must be committed and
+echoed, and an optional upload must complete and be fetched through a
+Reticulum Resource.
 
 ## Process result
 
@@ -67,6 +77,48 @@ The first attempted run correctly failed before networking because the harness
 tried stopped-server maintenance against schema version 0. The final harness
 preserves that fail-closed rule by performing a bounded initialization
 start/stop before policy maintenance.
+
+The moderator/resource case also passed locally:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out /tmp/omenbrowser-announcement-moderator \
+  --message 'announcement moderator qualification' \
+  --announcement-moderator-smoke \
+  --upload-file fixtures/omenchat/v0_6_0_1_wire.rs \
+  --restart-server
+```
+
+The initial report passed with a committed message, `upload_completed`, and
+`upload_resource_available`; the post-restart report passed with another
+committed message. The stop was orderly, destination stable, and both
+moderator role and announcement policy survived. The canonical
+`server-headless` binary was used.
+
+The first moderator attempt exposed that the older pin-smoke setup depended on
+the optional TUI. The final headless administration adds only:
+
+```text
+omenchatd users list --json --home <root>
+omenchatd users role <id> standard|trusted|moderator|administrator \
+  --confirm --home <root>
+```
+
+Listing is read-only and omits identity hashes/LXMF destinations. Role changes
+require an existing current database and its exclusive stopped-server
+maintenance lock. No dependency or product feature changed.
+
+The shared harness refactor also exposed an overly broad early-stop condition
+from the preceding rejection-smoke unit: any decoded error could stop a later
+message wait. A real pin smoke produced an unrelated snapshot-ordering error
+before its message echo and demonstrated the regression. The wait now
+short-circuits only for the exact typed announcement restriction. The canonical
+headless pin smoke then passed, and the member announcement-rejection smoke
+was rerun successfully.
 
 ## Deterministic and adjacent evidence
 
@@ -117,9 +169,8 @@ alter the already-qualified schema-11 policy or server authorization.
 
 - negotiated current/current five-field room catalog and delta process traffic;
 - same-process live client replacement-Link capability loss/recovery;
-- moderator publication over a real process Link;
 - native GUI member/moderator observation;
-- upload/resource rejection and allowed-moderator process qualification;
+- standard-member upload/resource rejection before allocation;
 - a documented restart-only policy contract or a separately reviewed live
   policy reload/fanout design;
 - joint review before production request/acceptance activation.

@@ -785,8 +785,11 @@ async fn wait_for_omenchat_condition(
     } = options;
     let deadline = tokio::time::Instant::now() + wait;
     let mut events = Vec::new();
-    let mut terminal_client_error = false;
-    while tokio::time::Instant::now() < deadline && !condition(client) && !terminal_client_error {
+    let mut announcement_policy_rejected = false;
+    while tokio::time::Instant::now() < deadline
+        && !condition(client)
+        && !announcement_policy_rejected
+    {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let received = tokio::time::timeout(remaining, runtime_events.recv()).await;
         let event = match received {
@@ -817,9 +820,8 @@ async fn wait_for_omenchat_condition(
                     transport,
                     Some(session_id),
                 );
-                terminal_client_error = decoded.iter().any(|event| {
-                    matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. })
-                });
+                announcement_policy_rejected =
+                    decoded.iter().any(is_announcement_policy_rejection_event);
                 events.push(serde_json::json!({
                     "event": "link_data",
                     "bytes": bytes,
@@ -844,9 +846,8 @@ async fn wait_for_omenchat_condition(
                     transport,
                     Some(session_id),
                 );
-                terminal_client_error = decoded.iter().any(|event| {
-                    matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. })
-                });
+                announcement_policy_rejected =
+                    decoded.iter().any(is_announcement_policy_rejection_event);
                 events.push(serde_json::json!({
                     "event": "resource_data",
                     "bytes": bytes,
@@ -2668,14 +2669,25 @@ fn omenchat_smoke_events_contain_announcement_policy_rejection(
                         && event
                             .get("message")
                             .and_then(serde_json::Value::as_str)
-                            .is_some_and(|message| {
-                                message.starts_with("room is read-only for members:")
-                                    && message
-                                        .contains("restricted to moderators and administrators")
-                            })
+                            .is_some_and(is_announcement_policy_rejection_message)
                 })
             })
     })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn is_announcement_policy_rejection_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> bool {
+    matches!(
+        event,
+        omenbrowser_rs::chat::ChatClientEvent::Error { message, .. }
+            if is_announcement_policy_rejection_message(message)
+    )
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn is_announcement_policy_rejection_message(message: &str) -> bool {
+    message.starts_with("room is read-only for members:")
+        && message.contains("restricted to moderators and administrators")
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]

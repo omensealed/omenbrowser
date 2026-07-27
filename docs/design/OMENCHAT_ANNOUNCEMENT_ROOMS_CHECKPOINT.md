@@ -288,7 +288,13 @@ Production negotiation remains disabled until all applicable gates pass.
    traffic is inapplicable while older peers cannot advertise the capability.
    Evidence is in
    `docs/audits/omenchat-announcement-rooms-process-qualification.md`.
-6. Next: negotiated current/current catalog/delta traffic, same-process
-   replacement-Link recovery, moderator and resource process cases, native GUI
+6. **Partial (2026-07-27):** a canonical headless omenchatd now qualifies
+   confirmation-gated moderator promotion without requiring the optional TUI.
+   Real-Link moderator message and upload/Resource publication pass in an
+   announcement room and again after an orderly restart. No capability vector
+   changed. Evidence is in
+   `docs/audits/omenchat-announcement-rooms-process-qualification.md`.
+7. Next: negotiated current/current catalog/delta traffic, same-process
+   replacement-Link recovery, standard-member upload rejection, native GUI
    observation, and a restart-only versus live reload/fanout decision. Do not
    activate production negotiation before that joint review.

@@ -22,6 +22,7 @@ multi_client=0
 restart_server=0
 continuous_client_reconnect=0
 announcement_rejection_smoke=0
+announcement_moderator_smoke=0
 reaction_smoke=0
 revision_smoke=0
 pin_smoke=0
@@ -59,6 +60,8 @@ Options:
                        Keep one browser smoke process alive while omenchatd restarts
   --announcement-rejection-smoke
                        Configure lobby read-only and prove a member message is rejected without commit
+  --announcement-moderator-smoke
+                       Promote the isolated client, configure lobby read-only, and prove moderator publication
   --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
   --revision-smoke     Exercise negotiated durable corrections, tombstones, replay, and Resource recovery
   --pin-smoke          Exercise moderator-only durable pin replay, snapshots, no-op, and unpin
@@ -149,6 +152,10 @@ while [[ $# -gt 0 ]]; do
       announcement_rejection_smoke=1
       shift
       ;;
+    --announcement-moderator-smoke)
+      announcement_moderator_smoke=1
+      shift
+      ;;
     --reaction-smoke)
       reaction_smoke=1
       shift
@@ -232,6 +239,13 @@ if [[ "$announcement_rejection_smoke" -eq 1 ]] \
     || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
     || -n "$upload_file" ]]; then
   echo "--announcement-rejection-smoke is an isolated authorization case; combine it only with --restart-server" >&2
+  exit 2
+fi
+if [[ "$announcement_moderator_smoke" -eq 1 ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 || "$continuous_client_reconnect" -eq 1 \
+    || "$multi_client" -eq 1 || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 \
+    || "$pin_smoke" -eq 1 ]]; then
+  echo "--announcement-moderator-smoke is an isolated authorization case; combine it only with --upload-file and/or --restart-server" >&2
   exit 2
 fi
 if [[ ( "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 ) \
@@ -400,20 +414,25 @@ echo "== Creating isolated browser identity =="
   > "$run_dir/browser-identity.json" \
   2> "$run_dir/browser-identity.stderr"
 
-if [[ "$pin_smoke" -eq 1 ]]; then
-  echo "== Registering isolated pin-smoke moderator identity =="
+if [[ "$pin_smoke" -eq 1 || "$announcement_moderator_smoke" -eq 1 ]]; then
+  if [[ "$pin_smoke" -eq 1 ]]; then
+    moderator_mode="pin"
+  else
+    moderator_mode="announcement"
+  fi
+  echo "== Registering isolated ${moderator_mode}-smoke moderator identity =="
   "$browser_bin" \
     --omenchat-smoke "$destination" \
     "${client_interface_args[@]}" \
     --path-wait "$path_wait" \
     --app-root "$browser_root" \
     --omenchat-message "${message} (moderator registration)" \
-    --output "$run_dir/omenchat-pin-registration.json" \
-    > "$run_dir/omenchat-pin-registration.stdout" \
-    2> "$run_dir/omenchat-pin-registration.stderr"
-  if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-pin-registration.json"; then
-    echo "OMENchat pin moderator registration did not report pass" >&2
-    cat "$run_dir/omenchat-pin-registration.stderr" >&2
+    --output "$run_dir/omenchat-${moderator_mode}-registration.json" \
+    > "$run_dir/omenchat-${moderator_mode}-registration.stdout" \
+    2> "$run_dir/omenchat-${moderator_mode}-registration.stderr"
+  if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-${moderator_mode}-registration.json"; then
+    echo "OMENchat ${moderator_mode} moderator registration did not report pass" >&2
+    cat "$run_dir/omenchat-${moderator_mode}-registration.stderr" >&2
     exit 1
   fi
 
@@ -425,44 +444,49 @@ if [[ "$pin_smoke" -eq 1 ]]; then
     sleep 0.25
   done
   if kill -0 "$server_pid" 2>/dev/null; then
-    echo "omenchatd did not stop before pin role assignment" >&2
+    echo "omenchatd did not stop before ${moderator_mode} role assignment" >&2
     exit 1
   fi
   wait "$server_pid" || true
   server_pid=""
 
-  printf 'users\nquit\n' | "$server_bin" tui --home "$server_home" \
-    > "$run_dir/omenchatd-pin-users.txt"
-  pin_user_id="$(sed -n 's/^  id= *\([0-9][0-9]*\).*/\1/p' "$run_dir/omenchatd-pin-users.txt" | head -n 1)"
-  if [[ -z "$pin_user_id" ]]; then
-    echo "could not identify isolated pin-smoke user" >&2
-    cat "$run_dir/omenchatd-pin-users.txt" >&2
+  "$server_bin" users list --json --home "$server_home" \
+    > "$run_dir/omenchatd-${moderator_mode}-users.json"
+  moderator_user_id="$(python3 -c \
+    'import json,sys; users=json.load(open(sys.argv[1], encoding="utf-8"))["users"]; print(users[0]["user_id"] if len(users) == 1 else "")' \
+    "$run_dir/omenchatd-${moderator_mode}-users.json")"
+  if [[ -z "$moderator_user_id" ]]; then
+    echo "could not identify isolated ${moderator_mode}-smoke user" >&2
+    cat "$run_dir/omenchatd-${moderator_mode}-users.json" >&2
     exit 1
   fi
-  printf 'set-user-role %s mod\nquit\n' "$pin_user_id" \
-    | "$server_bin" tui --home "$server_home" \
-      > "$run_dir/omenchatd-pin-role.txt"
-  if ! grep -q "user role updated: id=$pin_user_id role=mod" "$run_dir/omenchatd-pin-role.txt"; then
-    echo "isolated pin-smoke moderator assignment failed" >&2
-    cat "$run_dir/omenchatd-pin-role.txt" >&2
+  "$server_bin" users role "$moderator_user_id" moderator --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-${moderator_mode}-role.txt"
+  if ! grep -q "user role updated: id=$moderator_user_id role=moderator" "$run_dir/omenchatd-${moderator_mode}-role.txt"; then
+    echo "isolated ${moderator_mode}-smoke moderator assignment failed" >&2
+    cat "$run_dir/omenchatd-${moderator_mode}-role.txt" >&2
     exit 1
+  fi
+  if [[ "$announcement_moderator_smoke" -eq 1 ]]; then
+    "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+      > "$run_dir/omenchatd-announcement-room-policy.txt"
   fi
 
   "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
-    > "$run_dir/omenchatd-run-pin-role-restart.log" 2>&1 &
+    > "$run_dir/omenchatd-run-${moderator_mode}-role-restart.log" 2>&1 &
   server_pid="$!"
   for _ in {1..80}; do
-    if grep -q 'live server ready' "$run_dir/omenchatd-run-pin-role-restart.log" 2>/dev/null; then
+    if grep -q 'live server ready' "$run_dir/omenchatd-run-${moderator_mode}-role-restart.log" 2>/dev/null; then
       break
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then
-      echo "omenchatd exited after pin role assignment" >&2
+      echo "omenchatd exited after ${moderator_mode} role assignment" >&2
       exit 1
     fi
     sleep 0.25
   done
-  if ! grep -q 'live server ready' "$run_dir/omenchatd-run-pin-role-restart.log" 2>/dev/null; then
-    echo "omenchatd did not restart after pin role assignment" >&2
+  if ! grep -q 'live server ready' "$run_dir/omenchatd-run-${moderator_mode}-role-restart.log" 2>/dev/null; then
+    echo "omenchatd did not restart after ${moderator_mode} role assignment" >&2
     exit 1
   fi
 fi
@@ -844,6 +868,7 @@ multi_client: $multi_client
 restart_server: $restart_server
 continuous_client_reconnect: $continuous_client_reconnect
 announcement_rejection_smoke: $announcement_rejection_smoke
+announcement_moderator_smoke: $announcement_moderator_smoke
 reaction_smoke: $reaction_smoke
 revision_smoke: $revision_smoke
 pin_smoke: $pin_smoke

@@ -214,7 +214,19 @@ omenchatd rooms list --json --home ~/.omenchatd
 Only `ordinary` and `announcement` are accepted. The policy and room revision
 change in one immediate transaction. Announcement rooms remain readable by
 members, while content publication is enforced server-side for moderators and
-administrators regardless of client capability negotiation. To prepare a
+administrators regardless of client capability negotiation. Headless
+installations can inspect the bounded administrative user projection and make
+an explicit stopped-server role change without enabling the optional TUI:
+
+```bash
+omenchatd users list --json --home ~/.omenchatd
+omenchatd users role 7 moderator --confirm --home ~/.omenchatd
+```
+
+Role vocabulary is exactly `standard`, `trusted`, `moderator`, or
+`administrator`. The JSON listing omits identity hashes and LXMF destinations.
+Role changes use the same exclusive maintenance-open boundary as room-policy
+changes and fail while omenchatd owns the database. To prepare a
 separate schema-10-compatible rollback copy while retaining the active
 schema-11 database, stop the server cleanly and run:
 

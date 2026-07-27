@@ -1543,6 +1543,12 @@ traffic is not claimed for peers that cannot advertise it. Evidence is in
 `docs/audits/omenchat-announcement-rooms-client-projection-qualification.md`
 and
 `docs/audits/omenchat-announcement-rooms-process-qualification.md`.
+The same process gate now registers one isolated user through ordinary traffic,
+promotes it through a confirmation-gated headless command, applies announcement
+policy, and proves moderator message plus upload/Resource publication before
+and after orderly restart. The user listing is redacted and role maintenance
+uses the existing exclusive stopped-server database boundary; no TUI
+dependency or capability activation is required.
 
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is

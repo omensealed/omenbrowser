@@ -4561,7 +4561,8 @@ Exact deterministic, activation, and live-process evidence is in
 `docs/audits/omenchat-pins-qualification.md`.
 
 Activated current/current pins are qualified with isolated roots and a
-moderator role assigned through omenchatd's local admin console:
+moderator role assigned through omenchatd's confirmation-gated headless admin
+CLI:
 
 ```bash
 bash scripts/release-omenchat-smoke.sh \
@@ -4687,7 +4688,7 @@ bash scripts/release-omenchat-smoke.sh \
   --restart-server
 ```
 
-The mode performs one normal server start before stopped-server policy
+The member-rejection mode performs one normal server start before stopped-server policy
 maintenance, then requires typed policy error `1016` and no committed message
 both before and after an orderly restart. The browser reuses its isolated
 identity root and opens a new Link; each attempted message is explicit and no
@@ -4697,6 +4698,35 @@ same-process capability recovery, moderator/resource process traffic, native
 GUI observation, or adjacent-binary support for a capability older peers
 cannot advertise. Evidence is in
 `docs/audits/omenchat-announcement-rooms-process-qualification.md`.
+
+Authorized moderator message and Resource publication, including role/policy
+persistence across restart, are covered by:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out <isolated-output-root> \
+  --message "announcement moderator qualification" \
+  --announcement-moderator-smoke \
+  --upload-file fixtures/omenchat/v0_6_0_1_wire.rs \
+  --restart-server
+```
+
+The harness registers exactly one isolated standard user while the room is
+ordinary, stops omenchatd, identifies that user through the redacted headless
+JSON command, applies confirmation-gated moderator role plus announcement
+policy, and restarts. The unchanged client must observe its message echo,
+upload completion, and fetched Resource, then publish another message after an
+orderly restart. This still does not activate or claim negotiated room-policy
+projection.
+
+The expected-rejection wait short-circuits only for the typed announcement
+restriction. It must continue collecting after unrelated operation errors; the
+normal headless `--pin-smoke` process case is the regression gate for that
+shared wait behavior.
 
 The first moderation-audit slice reserves a read-only operation range and
 bounded shared types without requesting or accepting
