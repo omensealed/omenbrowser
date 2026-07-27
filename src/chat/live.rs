@@ -69,6 +69,7 @@ pub struct LiveChatClientState {
     reply_mentions_sessions: BTreeSet<ChatSessionId>,
     reaction_requests: BTreeSet<ChatSessionId>,
     reaction_sessions: BTreeSet<ChatSessionId>,
+    message_revision_requests: BTreeSet<ChatSessionId>,
     message_revision_sessions: BTreeSet<ChatSessionId>,
     local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
@@ -353,6 +354,8 @@ impl LiveChatClientState {
         self.reply_mentions_sessions.remove(&session_id);
         self.reaction_requests.remove(&session_id);
         self.reaction_sessions.remove(&session_id);
+        self.message_revision_requests.remove(&session_id);
+        self.message_revision_sessions.remove(&session_id);
         self.local_user_ids.remove(&session_id);
         retired_echoes
     }
@@ -698,6 +701,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.reply_mentions_sessions.remove(&session_id);
     state.reaction_requests.remove(&session_id);
     state.reaction_sessions.remove(&session_id);
+    state.message_revision_requests.remove(&session_id);
     state.message_revision_sessions.remove(&session_id);
     state.local_user_ids.remove(&session_id);
     let mut durable_requested = false;
@@ -721,6 +725,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
                     DURABLE_NOTICE_ACK_CAPABILITY.into(),
                     REPLY_MENTIONS_CAPABILITY.into(),
                     REACTIONS_CAPABILITY.into(),
+                    super::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
                 ],
                 client_instance_id: Some(client_instance_id),
             },
@@ -754,6 +759,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         state.durable_requests.insert(session_id);
         state.reply_mentions_requests.insert(session_id);
         state.reaction_requests.insert(session_id);
+        state.message_revision_requests.insert(session_id);
     }
 
     let room_name = client
@@ -2315,13 +2321,15 @@ fn apply_frame_with_state(
             let reactions_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == REACTIONS_CAPABILITY);
+            let message_revisions_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == super::protocol::MESSAGE_REVISIONS_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
-                // The desktop does not request message-revisions-v1 yet. An
-                // unsolicited acceptance must never activate dormant state.
-                state.message_revision_sessions.remove(&session_id);
                 let request_pending = state.durable_requests.remove(&session_id);
                 let reply_mentions_requested = state.reply_mentions_requests.remove(&session_id);
                 let reactions_requested = state.reaction_requests.remove(&session_id);
+                let message_revisions_requested =
+                    state.message_revision_requests.remove(&session_id);
                 let already_accepted = state.durable_sessions.contains(&session_id);
                 if durable_accepted
                     && state.client_instance_id.is_some()
@@ -2344,11 +2352,17 @@ fn apply_frame_with_state(
                     } else {
                         state.reaction_sessions.remove(&session_id);
                     }
+                    if message_revisions_requested && message_revisions_accepted {
+                        state.message_revision_sessions.insert(session_id);
+                    } else {
+                        state.message_revision_sessions.remove(&session_id);
+                    }
                 } else {
                     state.durable_sessions.remove(&session_id);
                     state.durable_notice_ack_sessions.remove(&session_id);
                     state.reply_mentions_sessions.remove(&session_id);
                     state.reaction_sessions.remove(&session_id);
+                    state.message_revision_sessions.remove(&session_id);
                     state.local_user_ids.remove(&session_id);
                 }
             }
@@ -4954,14 +4968,10 @@ mod tests {
         let negotiation = crate::chat::protocol::parse_session_open_negotiation(&session_open.body)
             .expect("valid negotiation")
             .expect("explicit negotiation");
-        assert!(
-            !negotiation
-                .requested_capabilities
-                .iter()
-                .any(|capability| capability
-                    == crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY),
-            "dormant message revisions must not be requested"
-        );
+        assert!(negotiation
+            .requested_capabilities
+            .iter()
+            .any(|capability| capability == crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY));
         assert_eq!(
             crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
             Ok(Some(SessionOpenNegotiation {
@@ -4970,6 +4980,7 @@ mod tests {
                     DURABLE_NOTICE_ACK_CAPABILITY.into(),
                     REPLY_MENTIONS_CAPABILITY.into(),
                     REACTIONS_CAPABILITY.into(),
+                    crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
                 ],
                 client_instance_id: Some(client_instance_id),
             }))
@@ -4977,6 +4988,7 @@ mod tests {
         assert!(state.durable_requests.contains(&1));
         assert!(state.reply_mentions_requests.contains(&1));
         assert!(state.reaction_requests.contains(&1));
+        assert!(state.message_revision_requests.contains(&1));
         assert!(!state.durable_mutations_negotiated(1));
         assert!(!state.reply_mentions_negotiated(1));
         assert!(!state.reactions_negotiated(1));
@@ -5047,6 +5059,18 @@ mod tests {
         assert!(state.reactions_negotiated(session_id));
         assert!(!state.message_revisions_negotiated(session_id));
 
+        state.message_revision_requests.insert(session_id);
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 3, None, accepted_body.clone()),
+            &mut events,
+        );
+        assert!(!state.reactions_negotiated(session_id));
+        assert!(state.message_revisions_negotiated(session_id));
+
         let notice_accepted_body = crate::chat::protocol::with_session_accept_negotiation(
             FrameBody::Fields(vec![
                 FrameValue::String(PROTOCOL_NAME.into()),
@@ -5065,12 +5089,13 @@ mod tests {
             Some(&mut state),
             &mut transport,
             Some(session_id),
-            Frame::new(ChatOp::SessionAccept, 3, None, notice_accepted_body),
+            Frame::new(ChatOp::SessionAccept, 4, None, notice_accepted_body),
             &mut events,
         );
         assert!(state.durable_mutations_negotiated(session_id));
         assert!(state.durable_notice_ack_negotiated(session_id));
         assert!(!state.reactions_negotiated(session_id));
+        assert!(!state.message_revisions_negotiated(session_id));
 
         apply_frame_with_state(
             &mut client,
@@ -5079,7 +5104,7 @@ mod tests {
             Some(session_id),
             Frame::new(
                 ChatOp::SessionAccept,
-                4,
+                5,
                 None,
                 FrameBody::Fields(vec![
                     FrameValue::String(PROTOCOL_NAME.into()),
@@ -5096,7 +5121,7 @@ mod tests {
             Some(&mut state),
             &mut transport,
             Some(session_id),
-            Frame::new(ChatOp::SessionAccept, 5, None, accepted_body),
+            Frame::new(ChatOp::SessionAccept, 6, None, accepted_body),
             &mut events,
         );
         assert!(!state.durable_mutations_negotiated(session_id));

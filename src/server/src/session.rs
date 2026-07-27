@@ -54,7 +54,7 @@ const UPLOAD_FILENAME_MAX_BYTES: usize = 255;
 const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
 const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
 const REACTIONS_SERVER_ENABLED: bool = true;
-const MESSAGE_REVISIONS_SERVER_ENABLED: bool = false;
+const MESSAGE_REVISIONS_SERVER_ENABLED: bool = true;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -5334,7 +5334,7 @@ mod tests {
     }
 
     #[test]
-    fn message_revisions_capability_remains_dormant() {
+    fn message_revisions_capability_requires_explicit_durable_request() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(
             FrameBody::Text("Alice".into()),
@@ -5354,7 +5354,10 @@ mod tests {
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(Some(crate::protocol::SessionAcceptNegotiation {
-                accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
+                accepted_capabilities: vec![
+                    crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                    crate::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
+                ],
             }))
         );
     }

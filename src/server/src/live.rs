@@ -3368,7 +3368,7 @@ mod tests {
     }
 
     #[test]
-    fn message_revision_binding_stays_dormant_and_history_snapshot_is_link_scoped() {
+    fn negotiated_message_revision_binding_and_history_snapshot_are_link_scoped() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let capable_link = [0x78; 16];
         let base_link = [0x79; 16];
@@ -3426,17 +3426,18 @@ mod tests {
         .expect("base session response");
 
         assert!(
-            !live
-                .durable_sessions
+            live.durable_sessions
                 .get(&capable_link)
                 .expect("candidate binding")
-                .message_revisions,
-            "production negotiation must remain dormant"
+                .message_revisions
         );
-        live.durable_sessions
-            .get_mut(&capable_link)
-            .expect("test candidate binding")
-            .message_revisions = true;
+        assert!(
+            !live
+                .durable_sessions
+                .get(&base_link)
+                .expect("base binding")
+                .message_revisions
+        );
 
         for (link_id, seq) in [(capable_link, 2), (base_link, 3)] {
             let peer = live.peers.get(&link_id).expect("peer").clone();
