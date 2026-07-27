@@ -4489,6 +4489,26 @@ snapshots, and capable-room-only fan-out use:
 
 These tests bind the internal Link capability state explicitly. The production
 session negotiation test still proves that omenchatd rejects
-`room-pins-v1`; the desktop does not request it. Client projection, UI,
-mutation controls, mixed-version live behavior, and capability activation
-remain separate slices.
+`room-pins-v1`; the desktop does not request it.
+
+The dormant desktop projection, identity-scoped SQLite cache, restart-stale
+authority, inline snapshot decoding, and read-only timeline labels use:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product --lib \
+  client_pins_are_bounded_authoritative_and_restart_stale
+cargo test --locked --no-default-features --features desktop-product --lib \
+  pin_store_is_restart_safe_ordered_and_snapshot_authoritative
+cargo test --locked --no-default-features --features desktop-product --lib \
+  pin_delta_and_snapshot_reducers_remain_dormant_and_authoritative
+cargo test --locked --no-default-features --features desktop-product --lib \
+  omenchat_timeline_distinguishes_authoritative_and_cached_pins
+cargo test --locked --no-default-features --features desktop-product --lib \
+  client_transport_decodes_dormant_pin_snapshot_inline
+```
+
+Restart preserves bounded cached pin rows but deliberately clears authority.
+The timeline renders authoritative state as `📌 pinned` and unreconciled
+restart state as `📌 pinned · cached`. No pin action is rendered. Production
+negotiation remains unchanged, and mutation controls, mixed-version live
+qualification, and capability activation remain separate slices.

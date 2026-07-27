@@ -3,10 +3,10 @@ use crate::chat::protocol::RoomId;
 use crate::chat::{
     chat_event_supports_reactions, chat_message_presentation, chat_message_revision_presentation,
     chat_reaction_summaries, ChatEvent, ChatEventKind, ChatMessageRevision,
-    ChatMessageRevisionPresentation, ChatReaction, ChatReactionSummary, ChatReplyPresentation,
-    ChatSessionId, ChatSessionView,
+    ChatMessageRevisionPresentation, ChatPin, ChatReaction, ChatReactionSummary,
+    ChatReplyPresentation, ChatSessionId, ChatSessionView,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{
     format_epoch_secs, OMENCHAT_LOCAL_ECHO_RESEND_SECS, OMENCHAT_MESSAGE_GROUP_GAP_SECS,
@@ -33,12 +33,19 @@ pub(in crate::desktop) struct ChatTimelineBody {
     pub(in crate::desktop) upload: Option<ChatTimelineUpload>,
     pub(in crate::desktop) resend: Option<ChatTimelineResend>,
     pub(in crate::desktop) revision: Option<ChatTimelineRevision>,
+    pub(in crate::desktop) pin: Option<ChatTimelinePin>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::desktop) enum ChatTimelineRevision {
     Edited { revision_number: u64 },
     Deleted { revision_number: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) enum ChatTimelinePin {
+    Authoritative,
+    Cached,
 }
 
 pub(in crate::desktop) enum ChatTimelineReply {
@@ -88,6 +95,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
     local_user_id: Option<u32>,
     reactions: impl IntoIterator<Item = &'a ChatReaction>,
     revision: Option<&ChatMessageRevision>,
+    pin: Option<ChatTimelinePin>,
 ) -> ChatTimelineBody {
     let presentation = chat_message_presentation(&session.events, event, local_user_id);
     let revision = chat_message_revision_presentation(event, revision);
@@ -145,6 +153,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             upload: None,
             resend: local_echo_resend(session, event, body, true),
             revision: None,
+            pin,
         },
         ChatEventKind::Message { body } | ChatEventKind::RichMessage { body, .. } => {
             let (text, revision) = match revision {
@@ -185,6 +194,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
                     })
                     .flatten(),
                 revision,
+                pin,
             }
         }
         ChatEventKind::Notice { body } | ChatEventKind::System { body } => ChatTimelineBody {
@@ -199,6 +209,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             upload: None,
             resend: None,
             revision: None,
+            pin,
         },
         ChatEventKind::Upload {
             resource_id,
@@ -219,6 +230,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             }),
             resend: None,
             revision: None,
+            pin,
         },
     }
 }
@@ -238,6 +250,11 @@ pub(in crate::desktop) fn chat_timeline_body_text(body: &ChatTimelineBody) -> St
         Some(ChatTimelineRevision::Deleted { revision_number }) => {
             text.push_str(&format!("  [deleted · revision {revision_number}]"));
         }
+        None => {}
+    }
+    match body.pin {
+        Some(ChatTimelinePin::Authoritative) => text.push_str("  [📌 pinned]"),
+        Some(ChatTimelinePin::Cached) => text.push_str("  [📌 pinned · cached]"),
         None => {}
     }
     text
@@ -307,6 +324,24 @@ pub(in crate::desktop) fn chat_timeline_groups_for_local_user_reactions_and_revi
     reactions: &[ChatReaction],
     revisions: impl IntoIterator<Item = &'a ChatMessageRevision>,
 ) -> Vec<ChatTimelineGroup> {
+    chat_timeline_groups_for_local_user_reactions_revisions_and_pins(
+        session,
+        local_user_id,
+        reactions,
+        revisions,
+        &[],
+        &BTreeSet::new(),
+    )
+}
+
+pub(in crate::desktop) fn chat_timeline_groups_for_local_user_reactions_revisions_and_pins<'a>(
+    session: &ChatSessionView,
+    local_user_id: Option<u32>,
+    reactions: &[ChatReaction],
+    revisions: impl IntoIterator<Item = &'a ChatMessageRevision>,
+    pins: &[ChatPin],
+    authoritative_pin_targets: &BTreeSet<u64>,
+) -> Vec<ChatTimelineGroup> {
     let mut groups: Vec<ChatTimelineGroup> = Vec::new();
     let mut reactions_by_target = BTreeMap::<u64, Vec<&ChatReaction>>::new();
     for reaction in reactions {
@@ -318,6 +353,10 @@ pub(in crate::desktop) fn chat_timeline_groups_for_local_user_reactions_and_revi
     let revisions_by_target = revisions
         .into_iter()
         .map(|revision| (revision.target_event_id, revision))
+        .collect::<BTreeMap<_, _>>();
+    let pins_by_target = pins
+        .iter()
+        .map(|pin| (pin.target_event_id, pin))
         .collect::<BTreeMap<_, _>>();
     for event in session
         .events
@@ -335,6 +374,13 @@ pub(in crate::desktop) fn chat_timeline_groups_for_local_user_reactions_and_revi
                 .flatten()
                 .copied(),
             revisions_by_target.get(&event.event_id).copied(),
+            pins_by_target.get(&event.event_id).map(|_| {
+                if authoritative_pin_targets.contains(&event.event_id) {
+                    ChatTimelinePin::Authoritative
+                } else {
+                    ChatTimelinePin::Cached
+                }
+            }),
         );
         if let Some(last) = groups.last_mut() {
             if last.actor_key == actor_key
@@ -569,6 +615,54 @@ mod tests {
             }]
         );
         assert_eq!(groups[0].bodies[0].reactions[0].label(), "heart 2 · you");
+    }
+
+    #[test]
+    fn omenchat_timeline_distinguishes_authoritative_and_cached_pins() {
+        let session = timeline_session(
+            1,
+            vec![message(1, 10, 1, "live"), message(1, 11, 2, "cached")],
+        );
+        let pins = vec![
+            ChatPin {
+                server_id: "server-a".into(),
+                room_id: 1,
+                target_event_id: 10,
+                pin_event_id: 20,
+                actor_user_id: 7,
+                pinned_at_unix: 3,
+            },
+            ChatPin {
+                server_id: "server-a".into(),
+                room_id: 1,
+                target_event_id: 11,
+                pin_event_id: 21,
+                actor_user_id: 8,
+                pinned_at_unix: 4,
+            },
+        ];
+        let groups = chat_timeline_groups_for_local_user_reactions_revisions_and_pins(
+            &session,
+            Some(7),
+            &[],
+            std::iter::empty(),
+            &pins,
+            &BTreeSet::from([10]),
+        );
+
+        assert_eq!(
+            groups[0].bodies[0].pin,
+            Some(ChatTimelinePin::Authoritative)
+        );
+        assert_eq!(
+            chat_timeline_body_text(&groups[0].bodies[0]),
+            "live  [📌 pinned]"
+        );
+        assert_eq!(groups[0].bodies[1].pin, Some(ChatTimelinePin::Cached));
+        assert_eq!(
+            chat_timeline_body_text(&groups[0].bodies[1]),
+            "cached  [📌 pinned · cached]"
+        );
     }
 
     #[test]

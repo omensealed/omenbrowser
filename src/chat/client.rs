@@ -1,9 +1,10 @@
 use super::descriptor::OmenChatDescriptor;
 use super::model::{
-    bounded_chat_text, chat_event_supports_message_revisions, chat_event_supports_reactions,
-    chat_message_revisions_fit_bounds, chat_reactions_fit_bounds, chat_text_fits, ChatEvent,
-    ChatMessageRevision, ChatReaction, ChatRoomSummary, ChatServerSummary, ChatUserSummary,
-    CHAT_ACTOR_DISPLAY_MAX_BYTES, CHAT_MOTD_MAX_BYTES, CHAT_ROOM_NAME_MAX_BYTES,
+    bounded_chat_text, chat_event_supports_message_revisions, chat_event_supports_pins,
+    chat_event_supports_reactions, chat_message_revisions_fit_bounds, chat_pins_fit_bounds,
+    chat_reactions_fit_bounds, chat_text_fits, ChatEvent, ChatMessageRevision, ChatPin,
+    ChatReaction, ChatRoomSummary, ChatServerSummary, ChatUserSummary,
+    CHAT_ACTOR_DISPLAY_MAX_BYTES, CHAT_MOTD_MAX_BYTES, CHAT_PIN_MAX_ROWS, CHAT_ROOM_NAME_MAX_BYTES,
     CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES,
     CHAT_SERVER_ID_MAX_BYTES, CHAT_STATUS_MAX_BYTES, CHAT_UPLOAD_FILENAME_MAX_BYTES,
     CHAT_USER_DISPLAY_MAX_BYTES,
@@ -14,9 +15,10 @@ pub use super::model::{
 };
 use super::protocol::{
     EventId, MessageRevisionAction, MessageRevisionEvent, MessageRevisionSnapshot,
-    MessageRevisionSnapshotEntry, ReactionAction, ReactionEvent, ReactionSnapshot,
-    ReactionSnapshotEntry, ReactionToken, RoomId, ServerId, MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS,
-    REACTION_SNAPSHOT_MAX_TARGETS,
+    MessageRevisionSnapshotEntry, PinAction, PinEvent, PinSnapshot, PinSnapshotEntry,
+    ReactionAction, ReactionEvent, ReactionSnapshot, ReactionSnapshotEntry, ReactionToken, RoomId,
+    ServerId, MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, REACTION_SNAPSHOT_MAX_TARGETS,
+    ROOM_PIN_SNAPSHOT_MAX_TARGETS,
 };
 use super::store::ChatStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -278,6 +280,16 @@ pub enum ChatClientEvent {
         room_id: RoomId,
         snapshot: MessageRevisionSnapshot,
     },
+    PinDeltaApplied {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event: PinEvent,
+    },
+    PinSnapshotApplied {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        snapshot: PinSnapshot,
+    },
     UploadAccepted {
         session_id: ChatSessionId,
         resource_id: String,
@@ -451,6 +463,9 @@ pub struct ChatClient {
     authoritative_reaction_targets: BTreeMap<ServerId, BTreeSet<(RoomId, EventId)>>,
     message_revisions: BTreeMap<(ServerId, RoomId, EventId), ChatMessageRevision>,
     authoritative_message_revision_targets: BTreeMap<ServerId, BTreeSet<(RoomId, EventId)>>,
+    pins: BTreeMap<(ServerId, RoomId, EventId), ChatPin>,
+    pin_event_cursors: BTreeMap<(ServerId, RoomId, EventId), EventId>,
+    authoritative_pin_targets: BTreeMap<ServerId, BTreeSet<(RoomId, EventId)>>,
 }
 
 impl ChatClient {
@@ -464,6 +479,9 @@ impl ChatClient {
             authoritative_reaction_targets: BTreeMap::new(),
             message_revisions: BTreeMap::new(),
             authoritative_message_revision_targets: BTreeMap::new(),
+            pins: BTreeMap::new(),
+            pin_event_cursors: BTreeMap::new(),
+            authoritative_pin_targets: BTreeMap::new(),
         }
     }
 
@@ -934,6 +952,277 @@ impl ChatClient {
         Ok(())
     }
 
+    pub fn pin_for_target(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> Option<&ChatPin> {
+        let server_id = self.session(session_id)?.server.server_id.as_str();
+        self.pins
+            .get(&(server_id.to_owned(), room_id, target_event_id))
+    }
+
+    pub fn pin_target_authoritative(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> bool {
+        self.session(session_id).is_some_and(|session| {
+            self.authoritative_pin_targets
+                .get(&session.server.server_id)
+                .is_some_and(|targets| targets.contains(&(room_id, target_event_id)))
+        })
+    }
+
+    pub(crate) fn mark_pins_stale(&mut self, session_id: ChatSessionId) {
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.clone())
+        else {
+            return;
+        };
+        self.authoritative_pin_targets.remove(&server_id);
+        self.pin_event_cursors
+            .retain(|(stored_server, ..), _| stored_server != &server_id);
+    }
+
+    pub(crate) fn mark_pin_room_stale(&mut self, session_id: ChatSessionId, room_id: RoomId) {
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.clone())
+        else {
+            return;
+        };
+        if let Some(targets) = self.authoritative_pin_targets.get_mut(&server_id) {
+            targets.retain(|(stored_room, _)| *stored_room != room_id);
+            if targets.is_empty() {
+                self.authoritative_pin_targets.remove(&server_id);
+            }
+        }
+        self.pin_event_cursors
+            .retain(|(stored_server, stored_room, _), _| {
+                stored_server != &server_id || *stored_room != room_id
+            });
+    }
+
+    pub(crate) fn apply_pin_event(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event: PinEvent,
+    ) -> Result<bool, &'static str> {
+        event
+            .into_frame_body()
+            .map_err(|_| "pin event is invalid")?;
+        let Some(session) = self.session(session_id) else {
+            return Err("pin session is unavailable");
+        };
+        if !session.events.iter().any(|candidate| {
+            candidate.room_id == room_id
+                && candidate.event_id == event.target_event_id
+                && !is_transient_local_event_id(candidate.event_id)
+                && chat_event_supports_pins(candidate)
+        }) {
+            return Err("pin target is not retained");
+        }
+        let server_id = session.server.server_id.clone();
+        let key = (server_id.clone(), room_id, event.target_event_id);
+        if let Some(current_event_id) = self.pin_event_cursors.get(&key) {
+            if event.pin_event_id < *current_event_id {
+                return Err("pin event is stale");
+            }
+            if event.pin_event_id == *current_event_id {
+                let matches_current = match event.action {
+                    PinAction::Pin => self.pins.get(&key).is_some_and(|pin| {
+                        pin.pin_event_id == event.pin_event_id
+                            && pin.actor_user_id == event.actor_user_id
+                            && pin.pinned_at_unix == event.at_unix
+                    }),
+                    PinAction::Unpin => !self.pins.contains_key(&key),
+                };
+                if !matches_current {
+                    return Err("pin event conflicts with retained state");
+                }
+                self.mark_pin_target_authoritative(server_id, room_id, event.target_event_id)?;
+                return Ok(false);
+            }
+        }
+        let mut next = self.pins.clone();
+        let changed = match event.action {
+            PinAction::Pin => {
+                next.insert(
+                    key.clone(),
+                    ChatPin {
+                        server_id: server_id.clone(),
+                        room_id,
+                        target_event_id: event.target_event_id,
+                        pin_event_id: event.pin_event_id,
+                        actor_user_id: event.actor_user_id,
+                        pinned_at_unix: event.at_unix,
+                    },
+                );
+                true
+            }
+            PinAction::Unpin => next.remove(&key).is_some(),
+        };
+        if !chat_pins_fit_bounds(next.values()) {
+            return Err("pin state exceeds client retention limits");
+        }
+        let mut next_cursors = self.pin_event_cursors.clone();
+        next_cursors.insert(key, event.pin_event_id);
+        self.ensure_pin_authority_capacity(&server_id, room_id, event.target_event_id)?;
+        self.pins = next;
+        self.pin_event_cursors = next_cursors;
+        self.authoritative_pin_targets
+            .entry(server_id)
+            .or_default()
+            .insert((room_id, event.target_event_id));
+        Ok(changed)
+    }
+
+    pub(crate) fn replace_pin_snapshot(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        snapshot: &PinSnapshot,
+    ) -> Result<(), &'static str> {
+        let result = self.replace_pin_snapshot_with_authority(session_id, room_id, snapshot, true);
+        if result.is_err() {
+            self.mark_pins_stale(session_id);
+        }
+        result
+    }
+
+    fn replace_pin_snapshot_with_authority(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        snapshot: &PinSnapshot,
+        authoritative: bool,
+    ) -> Result<(), &'static str> {
+        snapshot
+            .clone()
+            .into_frame_body()
+            .map_err(|_| "pin snapshot is invalid")?;
+        let Some(session) = self.session(session_id) else {
+            return Err("pin session is unavailable");
+        };
+        let target_set = snapshot
+            .target_event_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !target_set.iter().all(|target_event_id| {
+            session.events.iter().any(|event| {
+                event.room_id == room_id
+                    && event.event_id == *target_event_id
+                    && !is_transient_local_event_id(event.event_id)
+                    && chat_event_supports_pins(event)
+            })
+        }) {
+            return Err("pin snapshot target is not retained");
+        }
+        let server_id = session.server.server_id.clone();
+        let mut next = self.pins.clone();
+        next.retain(|(stored_server, stored_room, target), _| {
+            stored_server != &server_id || *stored_room != room_id || !target_set.contains(target)
+        });
+        for entry in &snapshot.entries {
+            next.insert(
+                (server_id.clone(), room_id, entry.target_event_id),
+                ChatPin {
+                    server_id: server_id.clone(),
+                    room_id,
+                    target_event_id: entry.target_event_id,
+                    pin_event_id: entry.pin_event_id,
+                    actor_user_id: entry.actor_user_id,
+                    pinned_at_unix: entry.pinned_at_unix,
+                },
+            );
+        }
+        if !chat_pins_fit_bounds(next.values()) {
+            return Err("pin snapshot exceeds client retention limits");
+        }
+        if authoritative {
+            let existing_without_targets = self
+                .authoritative_pin_targets
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
+                .saturating_sub(
+                    self.authoritative_pin_targets
+                        .get(&server_id)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(stored_room, target)| {
+                            *stored_room == room_id && target_set.contains(target)
+                        })
+                        .count(),
+                );
+            if existing_without_targets.saturating_add(target_set.len()) > CHAT_PIN_MAX_ROWS {
+                return Err("pin authority exceeds client retention limits");
+            }
+        }
+        let mut next_cursors = self.pin_event_cursors.clone();
+        next_cursors.retain(|(stored_server, stored_room, target), _| {
+            stored_server != &server_id || *stored_room != room_id || !target_set.contains(target)
+        });
+        for entry in &snapshot.entries {
+            next_cursors.insert(
+                (server_id.clone(), room_id, entry.target_event_id),
+                entry.pin_event_id,
+            );
+        }
+        self.pins = next;
+        self.pin_event_cursors = next_cursors;
+        if authoritative {
+            self.prune_pin_state_for_server(&server_id);
+            let targets = self.authoritative_pin_targets.entry(server_id).or_default();
+            targets.retain(|(stored_room, target)| {
+                *stored_room != room_id || !target_set.contains(target)
+            });
+            targets.extend(target_set.into_iter().map(|target| (room_id, target)));
+        }
+        Ok(())
+    }
+
+    fn ensure_pin_authority_capacity(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> Result<(), &'static str> {
+        let already_present = self
+            .authoritative_pin_targets
+            .get(server_id)
+            .is_some_and(|targets| targets.contains(&(room_id, target_event_id)));
+        let total = self
+            .authoritative_pin_targets
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>();
+        if !already_present && total >= CHAT_PIN_MAX_ROWS {
+            return Err("pin authority exceeds client retention limits");
+        }
+        Ok(())
+    }
+
+    fn mark_pin_target_authoritative(
+        &mut self,
+        server_id: ServerId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> Result<bool, &'static str> {
+        self.ensure_pin_authority_capacity(&server_id, room_id, target_event_id)?;
+        Ok(self
+            .authoritative_pin_targets
+            .entry(server_id)
+            .or_default()
+            .insert((room_id, target_event_id)))
+    }
+
     pub fn room_mute_except_mentions(&self, session_id: ChatSessionId, room_id: RoomId) -> bool {
         self.session(session_id).is_some_and(|session| {
             self.mute_except_mentions
@@ -1040,8 +1329,15 @@ impl ChatClient {
                 .retain(|(server_id, ..), _| server_id != &removed.server.server_id);
             self.authoritative_message_revision_targets
                 .remove(&removed.server.server_id);
+            self.pins
+                .retain(|(server_id, ..), _| server_id != &removed.server.server_id);
+            self.pin_event_cursors
+                .retain(|(server_id, ..), _| server_id != &removed.server.server_id);
+            self.authoritative_pin_targets
+                .remove(&removed.server.server_id);
         } else {
             self.prune_message_revision_state_for_server(&removed.server.server_id);
+            self.prune_pin_state_for_server(&removed.server.server_id);
         }
         Some(removed)
     }
@@ -1100,6 +1396,40 @@ impl ChatClient {
             if targets.is_empty() {
                 self.authoritative_message_revision_targets
                     .remove(server_id);
+            }
+        }
+    }
+
+    fn prune_pin_state_for_server(&mut self, server_id: &ServerId) {
+        if self.pins.is_empty()
+            && self.pin_event_cursors.is_empty()
+            && self.authoritative_pin_targets.is_empty()
+        {
+            return;
+        }
+        let retained = self
+            .sessions
+            .iter()
+            .filter(|session| session.server.server_id == *server_id)
+            .flat_map(|session| {
+                session
+                    .events
+                    .iter()
+                    .filter(|event| chat_event_supports_pins(event))
+                    .map(|event| (event.room_id, event.event_id))
+            })
+            .collect::<BTreeSet<_>>();
+        self.pins.retain(|(stored_server, room_id, target), _| {
+            stored_server != server_id || retained.contains(&(*room_id, *target))
+        });
+        self.pin_event_cursors
+            .retain(|(stored_server, room_id, target), _| {
+                stored_server != server_id || retained.contains(&(*room_id, *target))
+            });
+        if let Some(targets) = self.authoritative_pin_targets.get_mut(server_id) {
+            targets.retain(|target| retained.contains(target));
+            if targets.is_empty() {
+                self.authoritative_pin_targets.remove(server_id);
             }
         }
     }
@@ -1225,6 +1555,47 @@ impl ChatClient {
                 )?;
             }
         }
+        for room_id in session
+            .events
+            .iter()
+            .map(|event| event.room_id)
+            .collect::<BTreeSet<_>>()
+        {
+            let target_event_ids = session
+                .events
+                .iter()
+                .filter(|event| {
+                    event.room_id == room_id
+                        && !is_transient_local_event_id(event.event_id)
+                        && chat_event_supports_pins(event)
+                })
+                .map(|event| event.event_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            for targets in target_event_ids.chunks(
+                ROOM_PIN_SNAPSHOT_MAX_TARGETS.min(super::protocol::ROOM_PIN_SNAPSHOT_MAX_ENTRIES),
+            ) {
+                let entries = targets
+                    .iter()
+                    .filter_map(|target| self.pin_for_target(session_id, room_id, *target))
+                    .map(|pin| PinSnapshotEntry {
+                        target_event_id: pin.target_event_id,
+                        pin_event_id: pin.pin_event_id,
+                        actor_user_id: pin.actor_user_id,
+                        pinned_at_unix: pin.pinned_at_unix,
+                    })
+                    .collect();
+                store.replace_pin_snapshot(
+                    &session.server.server_id,
+                    room_id,
+                    PinSnapshot {
+                        target_event_ids: targets.to_vec(),
+                        entries,
+                    },
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -1271,6 +1642,7 @@ impl ChatClient {
         }
         let server_id = session.server.server_id.clone();
         self.prune_message_revision_state_for_server(&server_id);
+        self.prune_pin_state_for_server(&server_id);
         added
     }
 
@@ -1305,6 +1677,7 @@ impl ChatClient {
             .any(|event| (event.room_id, event.event_id) == key);
         let server_id = session.server.server_id.clone();
         self.prune_message_revision_state_for_server(&server_id);
+        self.prune_pin_state_for_server(&server_id);
         retained
     }
 
@@ -1486,6 +1859,47 @@ impl ChatClient {
                         session_id, room_id, &snapshot, false,
                     )
                     .map_err(anyhow::Error::msg)?;
+                }
+            }
+            let retained_pin_targets = self
+                .session(session_id)
+                .map(|session| {
+                    let mut retained = BTreeMap::<RoomId, Vec<EventId>>::new();
+                    for event in &session.events {
+                        if !is_transient_local_event_id(event.event_id)
+                            && chat_event_supports_pins(event)
+                        {
+                            retained
+                                .entry(event.room_id)
+                                .or_default()
+                                .push(event.event_id);
+                        }
+                    }
+                    retained
+                })
+                .unwrap_or_default();
+            for (room_id, mut target_event_ids) in retained_pin_targets {
+                target_event_ids.sort_unstable();
+                target_event_ids.dedup();
+                for targets in target_event_ids.chunks(
+                    ROOM_PIN_SNAPSHOT_MAX_TARGETS
+                        .min(super::protocol::ROOM_PIN_SNAPSHOT_MAX_ENTRIES),
+                ) {
+                    let pins = store.pins_for_targets(&server_id, room_id, targets)?;
+                    let snapshot = PinSnapshot {
+                        target_event_ids: targets.to_vec(),
+                        entries: pins
+                            .into_iter()
+                            .map(|pin| PinSnapshotEntry {
+                                target_event_id: pin.target_event_id,
+                                pin_event_id: pin.pin_event_id,
+                                actor_user_id: pin.actor_user_id,
+                                pinned_at_unix: pin.pinned_at_unix,
+                            })
+                            .collect(),
+                    };
+                    self.replace_pin_snapshot_with_authority(session_id, room_id, &snapshot, false)
+                        .map_err(anyhow::Error::msg)?;
                 }
             }
             restored += 1;
@@ -2285,6 +2699,111 @@ mod tests {
         assert!(restored
             .message_revision_for_target(restored_session, 1, 1)
             .is_none());
+    }
+
+    #[test]
+    fn client_pins_are_bounded_authoritative_and_restart_stale() {
+        let mut store = SqliteChatStore::in_memory().expect("store");
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(bounded_history_session(
+            session_id,
+            vec![bounded_history_event(1, 5), bounded_history_event(2, 5)]
+        )));
+        let pin = PinEvent {
+            pin_event_id: 10,
+            target_event_id: 1,
+            action: PinAction::Pin,
+            actor_user_id: 7,
+            at_unix: 10,
+        };
+        assert_eq!(client.apply_pin_event(session_id, 1, pin), Ok(true));
+        assert!(client.pin_target_authoritative(session_id, 1, 1));
+        assert_eq!(
+            client
+                .pin_for_target(session_id, 1, 1)
+                .expect("retained pin")
+                .pin_event_id,
+            10
+        );
+        assert_eq!(client.apply_pin_event(session_id, 1, pin), Ok(false));
+        assert!(client
+            .apply_pin_event(
+                session_id,
+                1,
+                PinEvent {
+                    actor_user_id: 8,
+                    ..pin
+                },
+            )
+            .is_err());
+        assert_eq!(
+            client.apply_pin_event(
+                session_id,
+                1,
+                PinEvent {
+                    pin_event_id: 11,
+                    actor_user_id: 8,
+                    at_unix: 11,
+                    ..pin
+                },
+            ),
+            Ok(true)
+        );
+
+        client.mark_pins_stale(session_id);
+        assert!(!client.pin_target_authoritative(session_id, 1, 1));
+        assert!(client.pin_for_target(session_id, 1, 1).is_some());
+        client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![1, 2],
+                    entries: vec![PinSnapshotEntry {
+                        target_event_id: 2,
+                        pin_event_id: 12,
+                        actor_user_id: 8,
+                        pinned_at_unix: 12,
+                    }],
+                },
+            )
+            .expect("authoritative pin snapshot");
+        assert!(client.pin_for_target(session_id, 1, 1).is_none());
+        assert!(client.pin_for_target(session_id, 1, 2).is_some());
+        assert!(client.pin_target_authoritative(session_id, 1, 1));
+        assert!(client.pin_target_authoritative(session_id, 1, 2));
+        client.mark_pin_room_stale(session_id, 1);
+        assert!(!client.pin_target_authoritative(session_id, 1, 1));
+        assert!(!client.pin_target_authoritative(session_id, 1, 2));
+        assert!(client.pin_for_target(session_id, 1, 2).is_some());
+
+        assert!(client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![99],
+                    entries: Vec::new(),
+                },
+            )
+            .is_err());
+        assert!(!client.pin_target_authoritative(session_id, 1, 2));
+        assert!(client.pin_for_target(session_id, 1, 2).is_some());
+
+        client
+            .persist_session(&mut store, session_id)
+            .expect("persist pins");
+        let mut restored = ChatClient::new();
+        assert_eq!(
+            restored
+                .restore_from_store(&store, 50)
+                .expect("restore pins"),
+            1
+        );
+        let restored_session = restored.sessions()[0].session_id;
+        assert!(restored.pin_for_target(restored_session, 1, 2).is_some());
+        assert!(!restored.pin_target_authoritative(restored_session, 1, 2));
     }
 
     #[test]

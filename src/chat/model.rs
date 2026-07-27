@@ -33,7 +33,11 @@ pub const CHAT_MESSAGE_REVISION_MAX_ROWS_PER_SERVER: usize = 8_192;
 pub const CHAT_MESSAGE_REVISION_MAX_BYTES_PER_SERVER: usize = 32 * 1024 * 1024;
 pub const CHAT_MESSAGE_REVISION_MAX_ROWS: usize = 32_768;
 pub const CHAT_MESSAGE_REVISION_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub const CHAT_PIN_MAX_ROWS_PER_SERVER: usize = 1_024;
+pub const CHAT_PIN_MAX_ROWS: usize = 4_096;
+pub const CHAT_PIN_MAX_BYTES: usize = 1024 * 1024;
 const CHAT_MESSAGE_REVISION_FIXED_RETAINED_BYTES: usize = 96;
+const CHAT_PIN_FIXED_RETAINED_BYTES: usize = 64;
 
 pub fn bounded_chat_text(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
@@ -208,6 +212,38 @@ impl ChatMessageRevision {
             .saturating_add(self.server_id.len())
             .saturating_add(self.replacement_body.as_ref().map_or(0, String::len))
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatPin {
+    pub server_id: ServerId,
+    pub room_id: RoomId,
+    pub target_event_id: EventId,
+    pub pin_event_id: EventId,
+    pub actor_user_id: UserId,
+    pub pinned_at_unix: i64,
+}
+
+impl ChatPin {
+    pub fn retained_bytes(&self) -> usize {
+        CHAT_PIN_FIXED_RETAINED_BYTES.saturating_add(self.server_id.len())
+    }
+}
+
+pub fn chat_pins_fit_bounds<'a>(pins: impl IntoIterator<Item = &'a ChatPin>) -> bool {
+    let mut total_rows = 0_usize;
+    let mut total_bytes = 0_usize;
+    let mut server_rows = std::collections::BTreeMap::<&str, usize>::new();
+    for pin in pins {
+        total_rows = total_rows.saturating_add(1);
+        total_bytes = total_bytes.saturating_add(pin.retained_bytes());
+        *server_rows.entry(pin.server_id.as_str()).or_default() += 1;
+    }
+    total_rows <= CHAT_PIN_MAX_ROWS
+        && total_bytes <= CHAT_PIN_MAX_BYTES
+        && server_rows
+            .values()
+            .all(|rows| *rows <= CHAT_PIN_MAX_ROWS_PER_SERVER)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -431,6 +467,10 @@ pub fn chat_event_supports_reactions(event: &ChatEvent) -> bool {
             | ChatEventKind::Notice { .. }
             | ChatEventKind::Upload { .. }
     )
+}
+
+pub fn chat_event_supports_pins(event: &ChatEvent) -> bool {
+    chat_event_supports_reactions(event)
 }
 
 pub fn chat_event_supports_message_revisions(event: &ChatEvent) -> bool {

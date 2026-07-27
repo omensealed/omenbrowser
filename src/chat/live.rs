@@ -19,9 +19,9 @@ use super::protocol::{
     canonical_mutation_request_hash, parse_rich_message_event_metadata,
     parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MessageRevisionAck,
-    MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot, MutationId, ReactionAck,
-    ReactionEvent, ReactionRequest, ReactionSnapshot, RichMessageBody, RoomId,
-    SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
+    MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot, MutationId, PinEvent,
+    PinSnapshot, ReactionAck, ReactionEvent, ReactionRequest, ReactionSnapshot, RichMessageBody,
+    RoomId, SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
     DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
@@ -71,6 +71,7 @@ pub struct LiveChatClientState {
     reaction_sessions: BTreeSet<ChatSessionId>,
     message_revision_requests: BTreeSet<ChatSessionId>,
     message_revision_sessions: BTreeSet<ChatSessionId>,
+    pin_sessions: BTreeSet<ChatSessionId>,
     local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
@@ -188,6 +189,10 @@ impl LiveChatClientState {
         self.message_revision_sessions.contains(&session_id)
     }
 
+    pub fn pins_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.pin_sessions.contains(&session_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn set_reply_mentions_negotiated_for_test(
         &mut self,
@@ -224,6 +229,19 @@ impl LiveChatClientState {
             self.message_revision_sessions.insert(session_id);
         } else {
             self.message_revision_sessions.remove(&session_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pins_negotiated_for_test(
+        &mut self,
+        session_id: ChatSessionId,
+        negotiated: bool,
+    ) {
+        if negotiated {
+            self.pin_sessions.insert(session_id);
+        } else {
+            self.pin_sessions.remove(&session_id);
         }
     }
 
@@ -356,6 +374,7 @@ impl LiveChatClientState {
         self.reaction_sessions.remove(&session_id);
         self.message_revision_requests.remove(&session_id);
         self.message_revision_sessions.remove(&session_id);
+        self.pin_sessions.remove(&session_id);
         self.local_user_ids.remove(&session_id);
         retired_echoes
     }
@@ -690,6 +709,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     let mut events = Vec::new();
     client.mark_reactions_stale(session_id);
     client.mark_message_revisions_stale(session_id);
+    client.mark_pins_stale(session_id);
     let [session_open_seq, join_seq] = match state.reserve_seq_pair(session_id) {
         Ok(sequences) => sequences,
         Err(_) => return vec![sequence_space_exhausted_event(session_id)],
@@ -703,6 +723,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.reaction_sessions.remove(&session_id);
     state.message_revision_requests.remove(&session_id);
     state.message_revision_sessions.remove(&session_id);
+    state.pin_sessions.remove(&session_id);
     state.local_user_ids.remove(&session_id);
     let mut durable_requested = false;
     let mut session_open_body = local_display_name
@@ -2220,6 +2241,11 @@ fn apply_live_link_event(
                     .as_deref()
                     .is_some_and(|state| state.message_revisions_negotiated(session_id))
             });
+            let pins_negotiated = preferred_session_id.is_some_and(|session_id| {
+                state
+                    .as_deref()
+                    .is_some_and(|state| state.pins_negotiated(session_id))
+            });
             apply_batch(
                 client,
                 preferred_session_id,
@@ -2229,6 +2255,7 @@ fn apply_live_link_event(
                 BatchCapabilities {
                     reactions: reactions_negotiated,
                     message_revisions: message_revisions_negotiated,
+                    pins: pins_negotiated,
                 },
                 events,
             );
@@ -2325,6 +2352,8 @@ fn apply_frame_with_state(
                 .iter()
                 .any(|capability| capability == super::protocol::MESSAGE_REVISIONS_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
+                state.pin_sessions.remove(&session_id);
+                client.mark_pins_stale(session_id);
                 let request_pending = state.durable_requests.remove(&session_id);
                 let reply_mentions_requested = state.reply_mentions_requests.remove(&session_id);
                 let reactions_requested = state.reaction_requests.remove(&session_id);
@@ -2487,6 +2516,13 @@ fn apply_frame_with_state(
                     state.local_user_ids.remove(&session_id);
                 }
             }
+            if let Some(previous_room_id) = client
+                .session(session_id)
+                .map(|session| session.active_room.room_id)
+                .filter(|previous_room_id| *previous_room_id != room.room_id)
+            {
+                client.mark_pin_room_stale(session_id, previous_room_id);
+            }
             if let Some(session) = client.session_mut(session_id) {
                 session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
                 for current in &mut session.rooms {
@@ -2633,6 +2669,50 @@ fn apply_frame_with_state(
             };
             match client.apply_message_revision_event(session_id, room_id, event.clone()) {
                 Ok(true) => events.push(ChatClientEvent::MessageRevisionDeltaApplied {
+                    session_id,
+                    room_id,
+                    event,
+                }),
+                Ok(false) => {}
+                Err(error) => events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: error.into(),
+                }),
+            }
+        }
+        ChatOp::PinEvent => {
+            let Some(session_id) = preferred_session_id else {
+                return;
+            };
+            let negotiated = state
+                .as_deref()
+                .is_some_and(|state| state.pins_negotiated(session_id));
+            if !negotiated {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "ignored OMENchat pin event without room-pins-v1 negotiation".into(),
+                });
+                return;
+            }
+            let Some(room_id) = frame.room_id else {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "OMENchat pin event did not identify a room".into(),
+                });
+                return;
+            };
+            let event = match PinEvent::from_frame_body(&frame.body) {
+                Ok(event) => event,
+                Err(error) => {
+                    events.push(ChatClientEvent::Error {
+                        session_id: Some(session_id),
+                        message: format!("invalid OMENchat pin event: {error}"),
+                    });
+                    return;
+                }
+            };
+            match client.apply_pin_event(session_id, room_id, event) {
+                Ok(true) => events.push(ChatClientEvent::PinDeltaApplied {
                     session_id,
                     room_id,
                     event,
@@ -3730,6 +3810,7 @@ fn apply_command_result(
                 }
                 return;
             };
+            client.mark_pin_room_stale(session_id, room.room_id);
             if let Some(session) = client.session_mut(session_id) {
                 let active = session.active_room.room_id == room.room_id;
                 session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
@@ -3839,6 +3920,7 @@ fn merge_rooms(
 struct BatchCapabilities {
     reactions: bool,
     message_revisions: bool,
+    pins: bool,
 }
 
 fn apply_batch(
@@ -4008,6 +4090,44 @@ fn apply_batch(
                 };
             match client.replace_message_revision_snapshot(session_id, room_id, &snapshot) {
                 Ok(()) => events.push(ChatClientEvent::MessageRevisionSnapshotApplied {
+                    session_id,
+                    room_id,
+                    snapshot,
+                }),
+                Err(error) => events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: error.into(),
+                }),
+            }
+        }
+        ChatOp::PinSnapshot => {
+            if !capabilities.pins {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "ignored OMENchat pin snapshot without room-pins-v1 negotiation"
+                        .into(),
+                });
+                return;
+            }
+            let Some(room_id) = room_id else {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "OMENchat pin snapshot did not identify a room".into(),
+                });
+                return;
+            };
+            let snapshot = match PinSnapshot::from_frame_body(&FrameBody::Fields(values)) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    events.push(ChatClientEvent::Error {
+                        session_id: Some(session_id),
+                        message: format!("invalid OMENchat pin snapshot: {error}"),
+                    });
+                    return;
+                }
+            };
+            match client.replace_pin_snapshot(session_id, room_id, &snapshot) {
+                Ok(()) => events.push(ChatClientEvent::PinSnapshotApplied {
                     session_id,
                     room_id,
                     snapshot,
@@ -4570,6 +4690,7 @@ mod tests {
             BatchCapabilities {
                 reactions: true,
                 message_revisions: false,
+                pins: false,
             },
             &mut events,
         );
@@ -4705,6 +4826,7 @@ mod tests {
             BatchCapabilities {
                 reactions: false,
                 message_revisions: true,
+                pins: false,
             },
             &mut events,
         );
@@ -4770,6 +4892,89 @@ mod tests {
         .expect("decode durable revision frame");
         assert_eq!(frame.op, ChatOp::RoomMessageRevision);
         assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+    }
+
+    #[test]
+    fn pin_delta_and_snapshot_reducers_remain_dormant_and_authoritative() {
+        let (mut client, session_id) = reaction_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let pin = PinEvent {
+            pin_event_id: 20,
+            target_event_id: 10,
+            action: crate::chat::protocol::PinAction::Pin,
+            actor_user_id: 7,
+            at_unix: 2,
+        };
+        let frame = Frame::new(
+            ChatOp::PinEvent,
+            1,
+            Some(1),
+            pin.into_frame_body().expect("pin body"),
+        );
+        let mut events = Vec::new();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            frame.clone(),
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("without room-pins-v1 negotiation")
+        ));
+        assert!(client.pin_for_target(session_id, 1, 10).is_none());
+
+        state.set_pins_negotiated_for_test(session_id, true);
+        events.clear();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            frame,
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::PinDeltaApplied { event, .. }] if event == &pin
+        ));
+        assert!(client.pin_target_authoritative(session_id, 1, 10));
+
+        let snapshot = PinSnapshot {
+            target_event_ids: vec![10],
+            entries: Vec::new(),
+        };
+        let FrameBody::Fields(values) = snapshot.clone().into_frame_body().expect("snapshot body")
+        else {
+            panic!("snapshot fields");
+        };
+        events.clear();
+        apply_batch(
+            &mut client,
+            Some(session_id),
+            ChatOp::PinSnapshot,
+            Some(1),
+            values,
+            BatchCapabilities {
+                reactions: false,
+                message_revisions: false,
+                pins: true,
+            },
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::PinSnapshotApplied {
+                snapshot: applied,
+                ..
+            }] if applied == &snapshot
+        ));
+        assert!(client.pin_for_target(session_id, 1, 10).is_none());
+        assert!(client.pin_target_authoritative(session_id, 1, 10));
     }
 
     #[test]
@@ -4972,6 +5177,10 @@ mod tests {
             .requested_capabilities
             .iter()
             .any(|capability| capability == crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY));
+        assert!(!negotiation
+            .requested_capabilities
+            .iter()
+            .any(|capability| capability == crate::chat::protocol::ROOM_PINS_CAPABILITY));
         assert_eq!(
             crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
             Ok(Some(SessionOpenNegotiation {
@@ -4993,6 +5202,7 @@ mod tests {
         assert!(!state.reply_mentions_negotiated(1));
         assert!(!state.reactions_negotiated(1));
         assert!(!state.message_revisions_negotiated(1));
+        assert!(!state.pins_negotiated(1));
     }
 
     #[test]

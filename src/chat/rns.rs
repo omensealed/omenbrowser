@@ -131,7 +131,8 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
         ChatOp::HistoryInline
         | ChatOp::UserListSnapshotInline
         | ChatOp::ReactionSnapshotInline
-        | ChatOp::MessageRevisionSnapshotInline => {
+        | ChatOp::MessageRevisionSnapshotInline
+        | ChatOp::PinSnapshot => {
             let values = decode_compressed_values_body(&frame.body)?;
             Ok(Some(ChatLinkEvent::InlineBatch {
                 op: frame.op,
@@ -578,6 +579,40 @@ mod tests {
             recv_chat_event(&mut transport).expect("resource"),
             Some(ChatLinkEvent::ResourceBatch {
                 op: ChatOp::MessageRevisionSnapshotResource,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+    }
+
+    #[test]
+    fn client_transport_decodes_dormant_pin_snapshot_inline() {
+        let snapshot = crate::chat::protocol::PinSnapshot {
+            target_event_ids: vec![10],
+            entries: vec![crate::chat::protocol::PinSnapshotEntry {
+                target_event_id: 10,
+                pin_event_id: 20,
+                actor_user_id: 7,
+                pinned_at_unix: 2,
+            }],
+        };
+        let FrameBody::Fields(values) = snapshot.into_frame_body().expect("snapshot") else {
+            panic!("snapshot fields");
+        };
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::PinSnapshot,
+                1,
+                Some(1),
+                compressed_values_body(&values).expect("inline body"),
+            ))
+            .expect("push inline");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("inline"),
+            Some(ChatLinkEvent::InlineBatch {
+                op: ChatOp::PinSnapshot,
                 values: decoded,
                 ..
             }) if decoded == values

@@ -1,7 +1,8 @@
 # OMENchat pins and moderation-audit checkpoint
 
-Status: pre-implementation; no capability, operation, schema, storage, or UI
-activation
+Status: dormant pin protocol, server storage/execution, and desktop read-only
+projection implemented; production capability request/acceptance and mutation
+controls remain disabled; moderation-audit work remains design-only
 
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`
 
@@ -414,8 +415,11 @@ The presentation must distinguish:
 3. **Complete (2026-07-26):** add transactional durable server execution and
    Link-scoped dormant fan-out/snapshot plumbing. Production negotiation
    remains disabled.
-4. Add bounded client projection, persistence, authority, and read-only
-   presentation without mutation controls.
+4. **Complete (2026-07-26):** add bounded identity-scoped client projection,
+   additive SQLite persistence, exact-target authority, restart-stale recovery,
+   dormant delta/snapshot reducers, and read-only current/cached presentation.
+   The desktop still does not request `room-pins-v1`; no mutation control is
+   present.
 5. Add durable pin/unpin controls behind test-only negotiated state.
 6. Qualify replay, restart, retention, frame-size, mixed-version, overload, and
    resource measurements; then separately review activation.

@@ -416,14 +416,43 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             )
         })
         .collect::<Vec<_>>();
+    let pins = session
+        .events
+        .iter()
+        .filter(|event| event.room_id == session.active_room.room_id)
+        .filter_map(|event| {
+            desktop
+                .omenchat
+                .chat_client
+                .pin_for_target(
+                    session.session_id,
+                    session.active_room.room_id,
+                    event.event_id,
+                )
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    let authoritative_pin_targets = pins
+        .iter()
+        .filter(|pin| {
+            desktop.omenchat.chat_client.pin_target_authoritative(
+                session.session_id,
+                session.active_room.room_id,
+                pin.target_event_id,
+            )
+        })
+        .map(|pin| pin.target_event_id)
+        .collect::<std::collections::BTreeSet<_>>();
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     let (revision_correction_targets, revision_deletion_targets) = desktop
         .omenchat_message_revision_action_targets(session.session_id, session.active_room.room_id);
-    for group in chat_timeline_groups_for_local_user_reactions_and_revisions(
+    for group in chat_timeline_groups_for_local_user_reactions_revisions_and_pins(
         session,
         local_user_id,
         &reactions,
         revisions,
+        &pins,
+        &authoritative_pin_targets,
     ) {
         let header = row![
             text(group.actor).size(ui_size(12)),

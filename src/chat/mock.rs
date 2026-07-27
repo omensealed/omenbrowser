@@ -6,15 +6,16 @@ use super::client::{
 };
 use super::descriptor::OmenChatDescriptor;
 use super::model::{
-    bounded_chat_text, chat_event_supports_message_revisions, chat_event_supports_reactions,
-    chat_message_revisions_fit_bounds, chat_reactions_fit_bounds, chat_text_fits, ChatEvent,
-    ChatEventKind, ChatMessageRevision, ChatReaction, ChatRoomSummary, ChatServerSummary,
-    ChatUserSummary, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES,
-    CHAT_SERVER_DESTINATION_MAX_BYTES, CHAT_SERVER_DISPLAY_MAX_BYTES,
+    bounded_chat_text, chat_event_supports_message_revisions, chat_event_supports_pins,
+    chat_event_supports_reactions, chat_message_revisions_fit_bounds, chat_pins_fit_bounds,
+    chat_reactions_fit_bounds, chat_text_fits, ChatEvent, ChatEventKind, ChatMessageRevision,
+    ChatPin, ChatReaction, ChatRoomSummary, ChatServerSummary, ChatUserSummary,
+    CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES, CHAT_SERVER_DESTINATION_MAX_BYTES,
+    CHAT_SERVER_DISPLAY_MAX_BYTES,
 };
 use super::protocol::{
-    EventId, MessageRevisionAction, MessageRevisionEvent, MessageRevisionSnapshot, ReactionAction,
-    ReactionEvent, ReactionSnapshot, RoomId, ServerId,
+    EventId, MessageRevisionAction, MessageRevisionEvent, MessageRevisionSnapshot, PinAction,
+    PinEvent, PinSnapshot, ReactionAction, ReactionEvent, ReactionSnapshot, RoomId, ServerId,
 };
 use super::store::ChatStore;
 
@@ -38,6 +39,7 @@ pub struct MockChatStore {
         ChatReaction,
     >,
     message_revisions: BTreeMap<(ServerId, RoomId, EventId), ChatMessageRevision>,
+    pins: BTreeMap<(ServerId, RoomId, EventId), ChatPin>,
 }
 
 impl MockChatStore {
@@ -663,6 +665,8 @@ impl ChatStore for MockChatStore {
             .retain(|(stored_server_id, ..), _| stored_server_id != server_id);
         self.message_revisions
             .retain(|(stored_server_id, ..), _| stored_server_id != server_id);
+        self.pins
+            .retain(|(stored_server_id, ..), _| stored_server_id != server_id);
         Ok(deleted)
     }
 
@@ -1044,6 +1048,151 @@ impl ChatStore for MockChatStore {
                 &revision.server_id == server_id
                     && revision.room_id == room_id
                     && targets.contains(&revision.target_event_id)
+            })
+            .cloned()
+            .collect())
+    }
+
+    fn apply_pin_event(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        event: PinEvent,
+    ) -> anyhow::Result<bool> {
+        event
+            .clone()
+            .into_frame_body()
+            .map_err(anyhow::Error::from)?;
+        let target_retained =
+            self.events
+                .get(&(server_id.clone(), room_id))
+                .is_some_and(|events| {
+                    events.iter().any(|candidate| {
+                        candidate.event_id == event.target_event_id
+                            && chat_event_supports_pins(candidate)
+                    })
+                });
+        anyhow::ensure!(target_retained, "pin target is not retained");
+        let key = (server_id.clone(), room_id, event.target_event_id);
+        let changed = match event.action {
+            PinAction::Pin => {
+                let pin = ChatPin {
+                    server_id: server_id.clone(),
+                    room_id,
+                    target_event_id: event.target_event_id,
+                    pin_event_id: event.pin_event_id,
+                    actor_user_id: event.actor_user_id,
+                    pinned_at_unix: event.at_unix,
+                };
+                if let Some(current) = self.pins.get(&key) {
+                    if current == &pin {
+                        return Ok(false);
+                    }
+                    anyhow::ensure!(
+                        pin.pin_event_id > current.pin_event_id,
+                        "pin event is stale or conflicts with retained state"
+                    );
+                }
+                let mut next = self.pins.clone();
+                next.insert(key, pin);
+                anyhow::ensure!(
+                    chat_pins_fit_bounds(next.values()),
+                    "pin state exceeds client retention limits"
+                );
+                self.pins = next;
+                true
+            }
+            PinAction::Unpin => {
+                if let Some(current) = self.pins.get(&key) {
+                    anyhow::ensure!(
+                        event.pin_event_id > current.pin_event_id,
+                        "pin event is stale or conflicts with retained state"
+                    );
+                } else {
+                    return Ok(false);
+                }
+                self.pins.remove(&key).is_some()
+            }
+        };
+        Ok(changed)
+    }
+
+    fn replace_pin_snapshot(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        snapshot: PinSnapshot,
+    ) -> anyhow::Result<()> {
+        snapshot
+            .clone()
+            .into_frame_body()
+            .map_err(anyhow::Error::from)?;
+        let target_set = snapshot
+            .target_event_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let retained_events = self
+            .events
+            .get(&(server_id.clone(), room_id))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            target_set.iter().all(|target_event_id| {
+                retained_events.iter().any(|event| {
+                    event.event_id == *target_event_id && chat_event_supports_pins(event)
+                })
+            }),
+            "pin snapshot target is not retained"
+        );
+        let mut next = self.pins.clone();
+        next.retain(|(stored_server, stored_room, target), _| {
+            stored_server != server_id || *stored_room != room_id || !target_set.contains(target)
+        });
+        for entry in snapshot.entries {
+            next.insert(
+                (server_id.clone(), room_id, entry.target_event_id),
+                ChatPin {
+                    server_id: server_id.clone(),
+                    room_id,
+                    target_event_id: entry.target_event_id,
+                    pin_event_id: entry.pin_event_id,
+                    actor_user_id: entry.actor_user_id,
+                    pinned_at_unix: entry.pinned_at_unix,
+                },
+            );
+        }
+        anyhow::ensure!(
+            chat_pins_fit_bounds(next.values()),
+            "pin snapshot exceeds client retention limits"
+        );
+        self.pins = next;
+        Ok(())
+    }
+
+    fn pins_for_targets(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        target_event_ids: &[EventId],
+    ) -> anyhow::Result<Vec<ChatPin>> {
+        PinSnapshot {
+            target_event_ids: target_event_ids.to_vec(),
+            entries: Vec::new(),
+        }
+        .into_frame_body()
+        .map_err(anyhow::Error::from)?;
+        let targets = target_event_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok(self
+            .pins
+            .values()
+            .filter(|pin| {
+                &pin.server_id == server_id
+                    && pin.room_id == room_id
+                    && targets.contains(&pin.target_event_id)
             })
             .cloned()
             .collect())

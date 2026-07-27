@@ -658,6 +658,48 @@ impl DesktopApp {
                         }
                     }
                 }
+                ChatClientEvent::PinDeltaApplied {
+                    session_id,
+                    room_id,
+                    event,
+                } => {
+                    let server_id = self
+                        .omenchat
+                        .chat_client
+                        .session(*session_id)
+                        .map(|session| session.server.server_id.clone());
+                    if let (Some(store), Some(server_id)) =
+                        (self.omenchat.chat_store.as_mut(), server_id)
+                    {
+                        if let Err(error) = store.apply_pin_event(&server_id, *room_id, *event) {
+                            tracing::warn!(
+                                "failed to persist received OMENchat pin delta for session {session_id}: {error}"
+                            );
+                        }
+                    }
+                }
+                ChatClientEvent::PinSnapshotApplied {
+                    session_id,
+                    room_id,
+                    snapshot,
+                } => {
+                    let server_id = self
+                        .omenchat
+                        .chat_client
+                        .session(*session_id)
+                        .map(|session| session.server.server_id.clone());
+                    if let (Some(store), Some(server_id)) =
+                        (self.omenchat.chat_store.as_mut(), server_id)
+                    {
+                        if let Err(error) =
+                            store.replace_pin_snapshot(&server_id, *room_id, snapshot.clone())
+                        {
+                            tracing::warn!(
+                                "failed to persist received OMENchat pin snapshot for session {session_id}: {error}"
+                            );
+                        }
+                    }
+                }
                 ChatClientEvent::HistorySynced { session_id, .. } => {
                     #[cfg(not(any(
                         feature = "chat-client-rns",

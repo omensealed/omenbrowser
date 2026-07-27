@@ -1,7 +1,8 @@
 use super::model::{
-    chat_message_revisions_fit_bounds, chat_text_fits, ChatEvent, ChatEventKind,
-    ChatMessageMetadata, ChatMessageRevision, ChatReaction, ChatRoomSummary, ChatServerSummary,
-    ChatUserSummary, CHAT_CLIENT_MAX_SESSIONS, CHAT_REACTION_MAX_BYTES,
+    chat_message_revisions_fit_bounds, chat_pins_fit_bounds, chat_text_fits, ChatEvent,
+    ChatEventKind, ChatMessageMetadata, ChatMessageRevision, ChatPin, ChatReaction,
+    ChatRoomSummary, ChatServerSummary, ChatUserSummary, CHAT_CLIENT_MAX_SESSIONS,
+    CHAT_PIN_MAX_BYTES, CHAT_PIN_MAX_ROWS, CHAT_PIN_MAX_ROWS_PER_SERVER, CHAT_REACTION_MAX_BYTES,
     CHAT_REACTION_MAX_BYTES_PER_ROOM, CHAT_REACTION_MAX_BYTES_PER_SERVER, CHAT_REACTION_MAX_ROWS,
     CHAT_REACTION_MAX_ROWS_PER_ROOM, CHAT_REACTION_MAX_ROWS_PER_SERVER,
     CHAT_REACTION_MAX_ROWS_PER_TARGET, CHAT_REACTION_MAX_TOKENS_PER_ACTOR_TARGET,
@@ -12,8 +13,10 @@ use super::model::{
 };
 use super::protocol::{
     EventId, MessageRevisionAction, MessageRevisionEvent, MessageRevisionSnapshot,
-    MessageRevisionSnapshotEntry, ReactionAction, ReactionEvent, ReactionSnapshot, ReactionToken,
-    RoomId, ServerId, UserId, MESSAGE_REVISION_SNAPSHOT_MAX_ENTRIES, REACTION_SNAPSHOT_MAX_ENTRIES,
+    MessageRevisionSnapshotEntry, PinAction, PinEvent, PinSnapshot, ReactionAction, ReactionEvent,
+    ReactionSnapshot, ReactionToken, RoomId, ServerId, UserId,
+    MESSAGE_REVISION_SNAPSHOT_MAX_ENTRIES, REACTION_SNAPSHOT_MAX_ENTRIES,
+    ROOM_PIN_SNAPSHOT_MAX_ENTRIES,
 };
 use anyhow::Context;
 use rusqlite::OptionalExtension;
@@ -91,6 +94,24 @@ pub trait ChatStore {
         room_id: RoomId,
         target_event_ids: &[EventId],
     ) -> anyhow::Result<Vec<ChatMessageRevision>>;
+    fn apply_pin_event(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        event: PinEvent,
+    ) -> anyhow::Result<bool>;
+    fn replace_pin_snapshot(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        snapshot: PinSnapshot,
+    ) -> anyhow::Result<()>;
+    fn pins_for_targets(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        target_event_ids: &[EventId],
+    ) -> anyhow::Result<Vec<ChatPin>>;
     fn latest_events(
         &self,
         server_id: &ServerId,
@@ -291,6 +312,20 @@ impl SqliteChatStore {
              CREATE INDEX IF NOT EXISTS idx_client_room_message_revisions_target
              ON room_message_revision_state(
                server_id, room_id, target_event_id, latest_revision_event_id
+             );
+             CREATE TABLE IF NOT EXISTS room_pins(
+               server_id TEXT NOT NULL,
+               room_id INTEGER NOT NULL CHECK(room_id > 0),
+               target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+               pin_event_id INTEGER NOT NULL CHECK(pin_event_id > 0),
+               actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+               pinned_at INTEGER NOT NULL CHECK(pinned_at >= 0),
+               retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+               PRIMARY KEY(server_id, room_id, target_event_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_client_room_pins_target
+             ON room_pins(
+               server_id, room_id, target_event_id, pin_event_id
              );",
         )?;
         transaction.commit()?;
@@ -364,6 +399,7 @@ impl ChatStore for SqliteChatStore {
             "DELETE FROM room_message_revision_state WHERE server_id = ?1",
             [server_id],
         )?;
+        transaction.execute("DELETE FROM room_pins WHERE server_id = ?1", [server_id])?;
         transaction.execute(
             "DELETE FROM room_reactions WHERE server_id = ?1",
             [server_id],
@@ -1066,6 +1102,188 @@ impl ChatStore for SqliteChatStore {
         Ok(revisions)
     }
 
+    fn apply_pin_event(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        event: PinEvent,
+    ) -> anyhow::Result<bool> {
+        event
+            .into_frame_body()
+            .context("invalid OMENchat pin event")?;
+        anyhow::ensure!(
+            chat_text_fits(server_id, CHAT_SERVER_ID_MAX_BYTES),
+            "pin server id exceeds client limits"
+        );
+        let target_event_id =
+            i64::try_from(event.target_event_id).context("pin target id does not fit SQLite")?;
+        let transaction = self.connection.transaction()?;
+        ensure_pin_target(&transaction, server_id, room_id, target_event_id)?;
+        let current = load_pin(&transaction, server_id, room_id, target_event_id)?;
+        let changed = match event.action {
+            PinAction::Pin => {
+                if let Some(current) = current.as_ref() {
+                    if current.pin_event_id == event.pin_event_id
+                        && current.actor_user_id == event.actor_user_id
+                        && current.pinned_at_unix == event.at_unix
+                    {
+                        transaction.commit()?;
+                        return Ok(false);
+                    }
+                    anyhow::ensure!(
+                        event.pin_event_id > current.pin_event_id,
+                        "pin event is stale or conflicts with retained state"
+                    );
+                }
+                upsert_pin(
+                    &transaction,
+                    &ChatPin {
+                        server_id: server_id.clone(),
+                        room_id,
+                        target_event_id: event.target_event_id,
+                        pin_event_id: event.pin_event_id,
+                        actor_user_id: event.actor_user_id,
+                        pinned_at_unix: event.at_unix,
+                    },
+                )?;
+                true
+            }
+            PinAction::Unpin => {
+                if let Some(current) = current {
+                    anyhow::ensure!(
+                        event.pin_event_id > current.pin_event_id,
+                        "pin event is stale or conflicts with retained state"
+                    );
+                    transaction.execute(
+                        "DELETE FROM room_pins
+                         WHERE server_id = ?1 AND room_id = ?2 AND target_event_id = ?3",
+                        (server_id, room_id, target_event_id),
+                    )? > 0
+                } else {
+                    false
+                }
+            }
+        };
+        anyhow::ensure!(
+            pin_scope_capacity_ok(&transaction, server_id)?,
+            "pin state exceeds client retention limits"
+        );
+        transaction.commit()?;
+        Ok(changed)
+    }
+
+    fn replace_pin_snapshot(
+        &mut self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        snapshot: PinSnapshot,
+    ) -> anyhow::Result<()> {
+        snapshot
+            .clone()
+            .into_frame_body()
+            .context("invalid OMENchat pin snapshot")?;
+        anyhow::ensure!(
+            chat_text_fits(server_id, CHAT_SERVER_ID_MAX_BYTES),
+            "pin server id exceeds client limits"
+        );
+        let target_event_ids = snapshot
+            .target_event_ids
+            .iter()
+            .map(|event_id| i64::try_from(*event_id).context("pin target id does not fit SQLite"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let transaction = self.connection.transaction()?;
+        for target_event_id in &target_event_ids {
+            ensure_pin_target(&transaction, server_id, room_id, *target_event_id)?;
+        }
+        if !target_event_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", target_event_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "DELETE FROM room_pins
+                 WHERE server_id = ? AND room_id = ? AND target_event_id IN ({placeholders})"
+            );
+            let mut parameters = Vec::<rusqlite::types::Value>::with_capacity(
+                target_event_ids.len().saturating_add(2),
+            );
+            parameters.push(server_id.clone().into());
+            parameters.push(i64::from(room_id).into());
+            parameters.extend(target_event_ids.iter().copied().map(Into::into));
+            transaction.execute(&sql, rusqlite::params_from_iter(parameters))?;
+        }
+        for entry in snapshot.entries {
+            upsert_pin(
+                &transaction,
+                &ChatPin {
+                    server_id: server_id.clone(),
+                    room_id,
+                    target_event_id: entry.target_event_id,
+                    pin_event_id: entry.pin_event_id,
+                    actor_user_id: entry.actor_user_id,
+                    pinned_at_unix: entry.pinned_at_unix,
+                },
+            )?;
+        }
+        anyhow::ensure!(
+            pin_scope_capacity_ok(&transaction, server_id)?,
+            "pin snapshot exceeds client retention limits"
+        );
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn pins_for_targets(
+        &self,
+        server_id: &ServerId,
+        room_id: RoomId,
+        target_event_ids: &[EventId],
+    ) -> anyhow::Result<Vec<ChatPin>> {
+        PinSnapshot {
+            target_event_ids: target_event_ids.to_vec(),
+            entries: Vec::new(),
+        }
+        .into_frame_body()
+        .context("invalid pin target set")?;
+        if target_event_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let target_event_ids = target_event_ids
+            .iter()
+            .map(|event_id| i64::try_from(*event_id).context("pin target id does not fit SQLite"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let placeholders = std::iter::repeat_n("?", target_event_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT target_event_id, pin_event_id, actor_user_id, pinned_at, retained_bytes
+             FROM room_pins
+             WHERE server_id = ? AND room_id = ? AND target_event_id IN ({placeholders})
+             ORDER BY target_event_id
+             LIMIT ?"
+        );
+        let mut parameters =
+            Vec::<rusqlite::types::Value>::with_capacity(target_event_ids.len().saturating_add(3));
+        parameters.push(server_id.clone().into());
+        parameters.push(i64::from(room_id).into());
+        parameters.extend(target_event_ids.iter().copied().map(Into::into));
+        parameters.push(((ROOM_PIN_SNAPSHOT_MAX_ENTRIES + 1) as i64).into());
+        let mut statement = self.connection.prepare(&sql)?;
+        let pins = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                decode_pin_row(server_id, room_id, row)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        anyhow::ensure!(
+            pins.len() <= ROOM_PIN_SNAPSHOT_MAX_ENTRIES,
+            "stored pin target set exceeds snapshot limits"
+        );
+        anyhow::ensure!(
+            chat_pins_fit_bounds(&pins),
+            "stored pin state exceeds client retention limits"
+        );
+        Ok(pins)
+    }
+
     fn latest_events(
         &self,
         server_id: &ServerId,
@@ -1104,6 +1322,145 @@ impl ChatStore for SqliteChatStore {
         events.reverse();
         Ok(events)
     }
+}
+
+fn ensure_pin_target(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+    room_id: RoomId,
+    target_event_id: i64,
+) -> anyhow::Result<()> {
+    let eligible = transaction.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM room_events
+           WHERE server_id = ?1 AND room_id = ?2 AND event_id = ?3
+             AND deleted = 0 AND event_kind IN (1, 2, 3, 5)
+         )",
+        (server_id, room_id, target_event_id),
+        |row| row.get::<_, bool>(0),
+    )?;
+    anyhow::ensure!(
+        eligible,
+        "pin target is not retained as an eligible room event"
+    );
+    Ok(())
+}
+
+fn load_pin(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+    room_id: RoomId,
+    target_event_id: i64,
+) -> anyhow::Result<Option<ChatPin>> {
+    transaction
+        .query_row(
+            "SELECT target_event_id, pin_event_id, actor_user_id, pinned_at, retained_bytes
+             FROM room_pins
+             WHERE server_id = ?1 AND room_id = ?2 AND target_event_id = ?3",
+            (server_id, room_id, target_event_id),
+            |row| decode_pin_row(server_id, room_id, row),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn upsert_pin(transaction: &rusqlite::Transaction<'_>, pin: &ChatPin) -> anyhow::Result<()> {
+    PinSnapshot {
+        target_event_ids: vec![pin.target_event_id],
+        entries: vec![super::protocol::PinSnapshotEntry {
+            target_event_id: pin.target_event_id,
+            pin_event_id: pin.pin_event_id,
+            actor_user_id: pin.actor_user_id,
+            pinned_at_unix: pin.pinned_at_unix,
+        }],
+    }
+    .into_frame_body()
+    .context("invalid retained pin")?;
+    let retained_bytes =
+        i64::try_from(pin.retained_bytes()).context("pin retained bytes do not fit SQLite")?;
+    transaction.execute(
+        "INSERT INTO room_pins(
+           server_id, room_id, target_event_id, pin_event_id,
+           actor_user_id, pinned_at, retained_bytes
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(server_id, room_id, target_event_id) DO UPDATE SET
+           pin_event_id = excluded.pin_event_id,
+           actor_user_id = excluded.actor_user_id,
+           pinned_at = excluded.pinned_at,
+           retained_bytes = excluded.retained_bytes",
+        rusqlite::params![
+            &pin.server_id,
+            i64::from(pin.room_id),
+            i64::try_from(pin.target_event_id).context("pin target id does not fit SQLite")?,
+            i64::try_from(pin.pin_event_id).context("pin event id does not fit SQLite")?,
+            pin.actor_user_id,
+            pin.pinned_at_unix,
+            retained_bytes,
+        ],
+    )?;
+    Ok(())
+}
+
+fn decode_pin_row(
+    server_id: &ServerId,
+    room_id: RoomId,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ChatPin> {
+    let pin = ChatPin {
+        server_id: server_id.clone(),
+        room_id,
+        target_event_id: positive_u64_column(row, 0, "pin target id")?,
+        pin_event_id: positive_u64_column(row, 1, "pin event id")?,
+        actor_user_id: row
+            .get::<_, i64>(2)
+            .ok()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value != 0)
+            .ok_or_else(|| invalid_stored_column(2, "pin actor id is invalid"))?,
+        pinned_at_unix: row.get(3)?,
+    };
+    let retained_bytes = row.get::<_, i64>(4)?;
+    let expected = i64::try_from(pin.retained_bytes())
+        .map_err(|_| invalid_stored_column(4, "pin retained bytes overflow"))?;
+    if retained_bytes != expected {
+        return Err(invalid_stored_column(
+            4,
+            "pin retained-byte accounting is invalid",
+        ));
+    }
+    PinSnapshot {
+        target_event_ids: vec![pin.target_event_id],
+        entries: vec![super::protocol::PinSnapshotEntry {
+            target_event_id: pin.target_event_id,
+            pin_event_id: pin.pin_event_id,
+            actor_user_id: pin.actor_user_id,
+            pinned_at_unix: pin.pinned_at_unix,
+        }],
+    }
+    .into_frame_body()
+    .map_err(|error| invalid_stored_column(3, error.to_string()))?;
+    Ok(pin)
+}
+
+fn pin_scope_capacity_ok(
+    transaction: &rusqlite::Transaction<'_>,
+    server_id: &ServerId,
+) -> anyhow::Result<bool> {
+    let (server_rows, server_bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(retained_bytes), 0)
+         FROM room_pins WHERE server_id = ?1",
+        [server_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (global_rows, global_bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(retained_bytes), 0) FROM room_pins",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(server_rows <= CHAT_PIN_MAX_ROWS_PER_SERVER as i64
+        && server_bytes <= CHAT_PIN_MAX_BYTES as i64
+        && global_rows <= CHAT_PIN_MAX_ROWS as i64
+        && global_bytes <= CHAT_PIN_MAX_BYTES as i64)
 }
 
 fn ensure_message_revision_target(
@@ -1591,7 +1948,7 @@ fn is_transient_local_event_id(event_id: EventId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::protocol::ReactionSnapshotEntry;
+    use crate::chat::protocol::{PinSnapshotEntry, ReactionSnapshotEntry};
 
     fn isolated_store_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -2115,6 +2472,122 @@ mod tests {
                 .message_revisions_for_targets(&server.server_id, 1, &[10])
                 .expect("cleared")
                 .is_empty());
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pin_store_is_restart_safe_ordered_and_snapshot_authoritative() {
+        let path = isolated_store_path("pins");
+        let server = sample_server();
+        {
+            let mut store = SqliteChatStore::open(&path).expect("store");
+            store.save_server(server.clone()).expect("server");
+            store
+                .save_room(ChatRoomSummary {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    name: "lobby".into(),
+                    topic: None,
+                    unread: 0,
+                    joined: true,
+                })
+                .expect("room");
+            store
+                .append_events(vec![ChatEvent {
+                    server_id: server.server_id.clone(),
+                    room_id: 1,
+                    event_id: 10,
+                    actor_user_id: Some(1),
+                    actor_display_name: Some("Alice".into()),
+                    at_unix: 1,
+                    kind: ChatEventKind::Message {
+                        body: "target".into(),
+                    },
+                }])
+                .expect("target");
+            let pin = PinEvent {
+                pin_event_id: 20,
+                target_event_id: 10,
+                action: PinAction::Pin,
+                actor_user_id: 7,
+                at_unix: 2,
+            };
+            assert!(store
+                .apply_pin_event(&server.server_id, 1, pin)
+                .expect("pin"));
+            assert!(!store
+                .apply_pin_event(&server.server_id, 1, pin)
+                .expect("exact duplicate"));
+            assert!(store
+                .apply_pin_event(
+                    &server.server_id,
+                    1,
+                    PinEvent {
+                        pin_event_id: 19,
+                        ..pin
+                    },
+                )
+                .is_err());
+        }
+        {
+            let mut store = SqliteChatStore::open(&path).expect("reopen");
+            assert_eq!(
+                store
+                    .pins_for_targets(&server.server_id, 1, &[10])
+                    .expect("restored pin")[0]
+                    .pin_event_id,
+                20
+            );
+            store
+                .replace_pin_snapshot(
+                    &server.server_id,
+                    1,
+                    PinSnapshot {
+                        target_event_ids: vec![10],
+                        entries: vec![PinSnapshotEntry {
+                            target_event_id: 10,
+                            pin_event_id: 21,
+                            actor_user_id: 8,
+                            pinned_at_unix: 3,
+                        }],
+                    },
+                )
+                .expect("authoritative replacement");
+            assert_eq!(
+                store
+                    .pins_for_targets(&server.server_id, 1, &[10])
+                    .expect("replacement")[0]
+                    .actor_user_id,
+                8
+            );
+            store
+                .replace_pin_snapshot(
+                    &server.server_id,
+                    1,
+                    PinSnapshot {
+                        target_event_ids: vec![10],
+                        entries: Vec::new(),
+                    },
+                )
+                .expect("authoritative clear");
+            assert!(store
+                .pins_for_targets(&server.server_id, 1, &[10])
+                .expect("cleared")
+                .is_empty());
+            assert!(store
+                .apply_pin_event(
+                    &server.server_id,
+                    2,
+                    PinEvent {
+                        pin_event_id: 22,
+                        target_event_id: 10,
+                        action: PinAction::Pin,
+                        actor_user_id: 8,
+                        at_unix: 4,
+                    },
+                )
+                .is_err());
         }
         let _ = std::fs::remove_file(path);
     }

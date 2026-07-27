@@ -212,6 +212,13 @@ An offline non-destructive schema-8 downgrade artifact can be created with
 <path>`. It removes only dormant schema-9 pin state/audit objects and preserves
 history usage, event sequences, history, reactions, and dormant revisions.
 
+The desktop maintains a separate bounded pin projection in its
+identity-scoped `chat.sqlite`. It may retain pin rows across restart, but those
+rows are explicitly stale until a negotiated exact-target snapshot or delta
+restores authority. The timeline labels this distinction as `📌 pinned` versus
+`📌 pinned · cached`. This is read-only dormant plumbing: the production
+desktop does not request `room-pins-v1`, and it exposes no pin/unpin control.
+
 An offline non-destructive schema-7 downgrade artifact can be created with
 `omenchatd database export-schema7-copy --to <new-path> --confirm --home
 <path>`. It removes only schema-8 usage metadata and preserves event sequences,

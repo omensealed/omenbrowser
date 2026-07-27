@@ -1376,6 +1376,15 @@ now supports bounded inline pin snapshots and same-room, identity-matched,
 pin-capable event fan-out for tests. Production capability acceptance remains
 hard-disabled, so current and legacy clients observe no new operation.
 
+The fourth dormant pin slice adds the desktop's bounded identity-scoped
+projection and additive `chat.sqlite` cache. Snapshot authority is exact to
+its explicit target set; deltas restore authority only for their target.
+Restart, Link replacement, capability loss, and invalid snapshots retain
+bounded cached rows but clear authority. The timeline is read-only and
+distinguishes `📌 pinned` from `📌 pinned · cached`. The desktop still does not
+request `room-pins-v1`, and no pin/unpin control, queue, timer, worker, or
+automatic retry was added.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.
