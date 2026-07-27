@@ -5464,6 +5464,7 @@ mod tests {
         ));
         assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
 
+        state.set_message_revisions_negotiated_for_test(session_id, false);
         transport
             .push_incoming_frame(&Frame::new(
                 ChatOp::MessageRevisionAck,
@@ -5481,6 +5482,32 @@ mod tests {
                 .expect("matching ack"),
             ))
             .expect("queue matching ack");
+        let capability_lost =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(matches!(
+            capability_lost.as_slice(),
+            [ChatClientEvent::Error { message, .. }] if message.contains("outside its negotiated room")
+        ));
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+
+        state.set_message_revisions_negotiated_for_test(session_id, true);
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::MessageRevisionAck,
+                sent.seq,
+                Some(1),
+                MessageRevisionAck {
+                    target_event_id: 10,
+                    action: super::super::protocol::MessageRevisionAction::Correct,
+                    actor_user_id: 7,
+                    changed: true,
+                    revision_event_id: Some(11),
+                    revision_number: 1,
+                }
+                .into_frame_body()
+                .expect("matching ack after capability restore"),
+            ))
+            .expect("queue matching ack after capability restore");
         let acknowledged =
             drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
         assert!(acknowledged.iter().any(|event| matches!(

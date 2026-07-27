@@ -994,6 +994,18 @@ mod tests {
             9,
             MessageRevisionAction::Tombstone,
         ));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_message_revisions_negotiated_for_test(session_id, false);
+        let (correction_targets, deletion_targets) =
+            desktop.omenchat_message_revision_action_targets(session_id, 1);
+        assert!(correction_targets.is_empty());
+        assert!(deletion_targets.is_empty());
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_message_revisions_negotiated_for_test(session_id, true);
 
         desktop
             .omenchat

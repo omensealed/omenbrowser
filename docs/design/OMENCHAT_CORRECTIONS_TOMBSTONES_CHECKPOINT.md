@@ -666,6 +666,17 @@ explicit confirmation action.
 Production negotiation remains disabled, so no release user sees or can invoke
 these actions yet.
 
+The pre-activation deterministic qualification then closed the explicit
+capability-loss edge. Action-target derivation becomes empty as soon as
+negotiation is absent, and a late matching acknowledgement cannot resolve the
+pending durable intent until test-scoped capability restoration. Shared,
+client, server, restart, Resource, retention, migration, recovery, and fault
+filters pass. Adjacent peers retain byte-exact ordinary protocol-v1 behavior;
+revision traffic is not sent because they cannot negotiate the new optional
+capability. Exact commands, results, and the remaining live current/current
+gate are recorded in
+`docs/audits/omenchat-message-revisions-qualification.md`.
+
 ## Completion gate
 
 Do not advertise `message-revisions-v1` until:

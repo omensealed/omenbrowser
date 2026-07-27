@@ -4257,6 +4257,15 @@ Production request lists remain unchanged and unsolicited acceptance cannot
 activate the dormant reducer. These tests do not claim GUI controls,
 mixed-version-process, native package, or live Reticulum support.
 
+The deterministic pre-activation qualification additionally runs the bounded
+retention cleanup/fault and database-recovery filters documented in
+`docs/audits/omenchat-message-revisions-qualification.md`. Capability-loss
+regressions prove that action targets disappear and a late acknowledgement
+cannot resolve pending intent outside the negotiated session. Mixed-version
+evidence means unchanged ordinary protocol-v1 traffic and no optional revision
+operation; it does not claim that an adjacent peer implements this capability.
+The current/current process smoke remains a separate post-activation gate.
+
 ## Bounded local-history desktop search
 
 These focused desktop-product tests exercise explicit-submit state, the
