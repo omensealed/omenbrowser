@@ -4281,6 +4281,14 @@ It covers deliberately lost acknowledgement, exact replay, correction and
 tombstone Resource snapshots, two isolated client roots, and one continuous
 client across an orderly server restart and replacement Link.
 
+The binary-only implementation for these OMENchat process gates lives in
+`src/omenchat_smoke.rs`. The root CLI module retains argument parsing and shared
+runtime-configuration helpers; the child module owns the bounded live-smoke
+transport, waits, reconnect flow, mutation qualification, and report
+formatting. This is an ownership boundary only: CLI flags and report fields are
+unchanged. The extraction record and rollback are documented in
+`docs/audits/omenchat-smoke-module-extraction.md`.
+
 ## Bounded local-history desktop search
 
 These focused desktop-product tests exercise explicit-submit state, the
