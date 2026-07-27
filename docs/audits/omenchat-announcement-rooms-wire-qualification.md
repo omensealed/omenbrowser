@@ -32,6 +32,20 @@ the initial room catalog uses the shared five-field encoder with authoritative
 policy. The normal constructor keeps the boundary disabled, so production
 omenchatd still omits acceptance and sends legacy four-field catalogs.
 
+The following dormant Link-scoping unit binds accepted policy projection to
+the authenticated Link identity. JoinAccept, room-list results, and RoomDelta
+are shaped at the final destination boundary: a negotiated test Link receives
+five fields while a simultaneous legacy Link receives the unchanged four.
+Identity replacement, session replacement, disconnect, retirement, and close
+remove the binding. The binding map is owned by the live server and bounded by
+the existing 256 active-Link ceiling. It adds no worker, queue, retry, timer,
+or retained payload.
+
+Only negotiated room-bearing frames perform the authoritative room lookup and
+bounded clone. Because the production server still cannot accept the
+capability, its empty binding map takes the original borrowed-frame fast path
+with no added lookup or clone.
+
 ## Wire invariants
 
 - Legacy room values remain exactly
@@ -64,6 +78,10 @@ cargo test --locked --no-default-features --features desktop-product \
   live_open_requests_supported_durable_extensions_with_persistent_client_identity --lib
 (cd src/server && cargo test --locked --no-default-features \
   --features server-headless announcement_rooms --lib -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless \
+  test_enabled_announcement_rooms_shape_join_and_delta_per_authenticated_link \
+  --lib -- --nocapture)
 ```
 
 Focused results:
@@ -76,6 +94,7 @@ Focused results:
   `announcement-rooms-v1`.
 - test-enabled server catalog negotiation plus normal server dormancy: 2
   passed;
+- mixed legacy/negotiated authenticated Link shaping: 1 passed;
 - standalone server-headless all-target strict Clippy: passed with
   `-D warnings`.
 
@@ -105,7 +124,6 @@ history, and destination names are unchanged.
 
 ## Not claimed
 
-- policy-aware join/delta dispatch;
 - current/current or adjacent-version process traffic;
 - native package behavior;
 - production activation.

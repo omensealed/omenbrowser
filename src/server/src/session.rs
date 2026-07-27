@@ -411,7 +411,7 @@ impl SessionEngine {
     }
 
     #[cfg(test)]
-    fn with_test_announcement_rooms(store: OmenchatStore) -> Self {
+    pub(crate) fn with_test_announcement_rooms(store: OmenchatStore) -> Self {
         let mut engine = Self::new(store);
         engine.announcement_rooms_enabled = true;
         engine
@@ -423,6 +423,86 @@ impl SessionEngine {
 
     pub(crate) fn local_user_id(&self, peer: &ServerPeer) -> ServerResult<UserId> {
         self.ensure_peer(peer).map(|user| user.user_id)
+    }
+
+    pub(crate) fn shape_room_frame_for_capability(
+        &self,
+        frame: &Frame,
+        announcement_rooms_negotiated: bool,
+    ) -> ServerResult<Frame> {
+        let mut shaped = frame.clone();
+        match shaped.op {
+            ChatOp::JoinAccept | ChatOp::RoomDelta => {
+                let FrameBody::Fields(fields) = &mut shaped.body else {
+                    return Err(ServerError::Message(format!(
+                        "{:?} response did not contain fields",
+                        shaped.op
+                    )));
+                };
+                let room = fields.first_mut().ok_or_else(|| {
+                    ServerError::Message(format!("{:?} response omitted its room", shaped.op))
+                })?;
+                *room = self.authoritative_room_value(room, announcement_rooms_negotiated)?;
+            }
+            ChatOp::CommandResult => {
+                let FrameBody::Fields(fields) = &mut shaped.body else {
+                    return Ok(shaped);
+                };
+                let Some(FrameValue::String(command)) = fields.first() else {
+                    return Ok(shaped);
+                };
+                let command = command.clone();
+                match command.as_str() {
+                    "rooms" => {
+                        let Some(FrameValue::Array(rooms)) = fields.get_mut(1) else {
+                            return Err(ServerError::Message(
+                                "rooms command result omitted its catalog".into(),
+                            ));
+                        };
+                        for room in rooms {
+                            *room =
+                                self.authoritative_room_value(room, announcement_rooms_negotiated)?;
+                        }
+                    }
+                    "create" | "topic" | "part" => {
+                        let room = fields.get_mut(1).ok_or_else(|| {
+                            ServerError::Message(format!(
+                                "{command} command result omitted its room"
+                            ))
+                        })?;
+                        *room =
+                            self.authoritative_room_value(room, announcement_rooms_negotiated)?;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(shaped)
+    }
+
+    fn authoritative_room_value(
+        &self,
+        value: &FrameValue,
+        announcement_rooms_negotiated: bool,
+    ) -> ServerResult<FrameValue> {
+        let FrameValue::Array(fields) = value else {
+            return Err(ServerError::Message(
+                "server-generated room value was not an array".into(),
+            ));
+        };
+        let Some(FrameValue::U64(room_id)) = fields.first() else {
+            return Err(ServerError::Message(
+                "server-generated room value omitted its id".into(),
+            ));
+        };
+        let room_id = u32::try_from(*room_id)
+            .map_err(|_| ServerError::Message("server-generated room id exceeded u32".into()))?;
+        let room = self
+            .store
+            .room_by_id(room_id)?
+            .ok_or_else(|| ServerError::Message(format!("room {room_id} disappeared")))?;
+        room_to_value_with_policy(&room, announcement_rooms_negotiated)
     }
 
     pub fn handle_frame_with_active_peers(

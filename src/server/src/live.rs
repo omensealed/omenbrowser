@@ -5,9 +5,9 @@ use crate::protocol::codec::{decode_frame, encode_frame};
 use crate::protocol::{
     parse_session_accept_negotiation, parse_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
-    DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG, DURABLE_NOTICE_ACK_CAPABILITY,
-    MESSAGE_REVISIONS_CAPABILITY, MODERATION_AUDIT_CAPABILITY, REACTIONS_CAPABILITY,
-    REPLY_MENTIONS_CAPABILITY, ROOM_PINS_CAPABILITY,
+    ANNOUNCEMENT_ROOMS_CAPABILITY, DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG,
+    DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY, MODERATION_AUDIT_CAPABILITY,
+    REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY, ROOM_PINS_CAPABILITY,
 };
 use crate::session::{DurableMutationPeerContext, ServerPeer, SessionEngine};
 use crate::transport::{
@@ -157,6 +157,7 @@ struct FrameDispatchOutcome {
     message_revisions_accepted: bool,
     pins_accepted: bool,
     moderation_audit_accepted: bool,
+    announcement_rooms_accepted: bool,
     part_succeeded: bool,
     moderation_disconnect_succeeded: bool,
 }
@@ -444,6 +445,7 @@ pub struct OmenchatLiveServer<T> {
     session_open_links: BTreeSet<LinkId>,
     durable_sessions: BTreeMap<LinkId, DurableSessionBinding>,
     moderation_audit_links: BTreeMap<LinkId, Vec<u8>>,
+    announcement_room_links: BTreeMap<LinkId, Vec<u8>>,
     recent_closed_links: VecDeque<ClosedLinkSummary>,
     replay_cache: LinkReplayCache,
     stats: LiveServerStats,
@@ -463,6 +465,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             session_open_links: BTreeSet::new(),
             durable_sessions: BTreeMap::new(),
             moderation_audit_links: BTreeMap::new(),
+            announcement_room_links: BTreeMap::new(),
             recent_closed_links: VecDeque::new(),
             replay_cache: LinkReplayCache::default(),
             stats: LiveServerStats::default(),
@@ -505,6 +508,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 identified.identity_hash = identity_hash.to_vec();
                 self.durable_sessions.remove(&link_id);
                 self.moderation_audit_links.remove(&link_id);
+                self.announcement_room_links.remove(&link_id);
                 self.identified_links.insert(link_id);
                 self.replace_duplicate_peer_links(link_id, &identified);
                 self.peers.insert(link_id, identified);
@@ -602,6 +606,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                     self.session_open_links.insert(link_id);
                     self.durable_sessions.remove(&link_id);
                     self.moderation_audit_links.remove(&link_id);
+                    self.announcement_room_links.remove(&link_id);
                     if self.identified_links.contains(&link_id) {
                         if let Some(client_instance_id) = dispatch.accepted_client_instance_id {
                             self.durable_sessions.insert(
@@ -619,6 +624,10 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                         }
                         if dispatch.moderation_audit_accepted {
                             self.moderation_audit_links
+                                .insert(link_id, candidate_peer.identity_hash.clone());
+                        }
+                        if dispatch.announcement_rooms_accepted {
+                            self.announcement_room_links
                                 .insert(link_id, candidate_peer.identity_hash.clone());
                         }
                     }
@@ -774,6 +783,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 self.session_open_links.remove(&link_id);
                 self.durable_sessions.remove(&link_id);
                 self.moderation_audit_links.remove(&link_id);
+                self.announcement_room_links.remove(&link_id);
                 if let Some(room_id) = room_id {
                     self.broadcast_userlist_for_room(room_id)?;
                 }
@@ -811,6 +821,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         let pins_requested = session_open_requests_capability(&frame, ROOM_PINS_CAPABILITY);
         let moderation_audit_requested =
             session_open_requests_capability(&frame, MODERATION_AUDIT_CAPABILITY);
+        let announcement_rooms_requested =
+            session_open_requests_capability(&frame, ANNOUNCEMENT_ROOMS_CAPABILITY);
         let replay_candidate = is_replay_guarded_request(&frame);
         let request_fingerprint = if replay_candidate {
             Some(encode_frame(&frame).map_err(|error| {
@@ -961,6 +973,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 && responses_accept_capability(&responses, ROOM_PINS_CAPABILITY),
             moderation_audit_accepted: moderation_audit_requested
                 && responses_accept_capability(&responses, MODERATION_AUDIT_CAPABILITY),
+            announcement_rooms_accepted: announcement_rooms_requested
+                && responses_accept_capability(&responses, ANNOUNCEMENT_ROOMS_CAPABILITY),
             part_succeeded: request_op == ChatOp::PartRoom
                 && responses.iter().any(is_successful_part_response),
             moderation_disconnect_succeeded: request_op == ChatOp::Command
@@ -1260,12 +1274,41 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         link_id: LinkId,
         frame: &crate::protocol::Frame,
     ) -> ServerResult<()> {
+        let announcement_rooms_negotiated = self
+            .announcement_room_links
+            .get(&link_id)
+            .zip(self.peers.get(&link_id))
+            .is_some_and(|(identity_hash, peer)| identity_hash == &peer.identity_hash);
         let context = self
             .link_response_contexts
             .get(&link_id)
             .copied()
             .unwrap_or(OMENCHAT_LINK_CONTEXT);
-        send_response_frame_with_context(&self.engine, link_id, frame, &mut self.transport, context)
+        if announcement_rooms_negotiated
+            && matches!(
+                frame.op,
+                ChatOp::JoinAccept | ChatOp::RoomDelta | ChatOp::CommandResult
+            )
+        {
+            let shaped = self
+                .engine
+                .shape_room_frame_for_capability(frame, announcement_rooms_negotiated)?;
+            send_response_frame_with_context(
+                &self.engine,
+                link_id,
+                &shaped,
+                &mut self.transport,
+                context,
+            )
+        } else {
+            send_response_frame_with_context(
+                &self.engine,
+                link_id,
+                frame,
+                &mut self.transport,
+                context,
+            )
+        }
     }
 
     fn room_link_ids_including(&self, room_id: RoomId) -> Vec<LinkId> {
@@ -1380,6 +1423,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             self.session_open_links.remove(link_id);
             self.durable_sessions.remove(link_id);
             self.moderation_audit_links.remove(link_id);
+            self.announcement_room_links.remove(link_id);
         }
         self.stats.links_closed = self.stats.links_closed.saturating_add(links.len() as u64);
         for room_id in unique_room_ids(affected_rooms) {
@@ -1559,6 +1603,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.session_open_links.remove(&link_id);
         self.durable_sessions.remove(&link_id);
         self.moderation_audit_links.remove(&link_id);
+        self.announcement_room_links.remove(&link_id);
     }
 
     fn retire_link(&mut self, link_id: LinkId, reason: &str) {
@@ -1586,6 +1631,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.session_open_links.remove(&link_id);
         self.durable_sessions.remove(&link_id);
         self.moderation_audit_links.remove(&link_id);
+        self.announcement_room_links.remove(&link_id);
     }
 
     fn discard_pending_uploads_for_identity(&mut self, identity_hash: &[u8]) -> usize {
@@ -6082,6 +6128,183 @@ mod tests {
             });
 
         assert!(observer_delta.is_some());
+    }
+
+    #[test]
+    fn test_enabled_announcement_rooms_shape_join_and_delta_per_authenticated_link() {
+        let store = OmenchatStore::in_memory().expect("store");
+        store
+            .set_room_announcement_policy(1, true)
+            .expect("announcement policy");
+        let admin = store
+            .ensure_user(b"admin-id", "Admin", None)
+            .expect("admin user");
+        store
+            .set_user_role_bits(admin.user_id, 1 << 2)
+            .expect("admin role");
+        let engine = SessionEngine::with_test_announcement_rooms(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let legacy_link = [33u8; 16];
+        let negotiated_link = [34u8; 16];
+
+        for (link_id, identity, name) in [
+            (legacy_link, b"admin-id".as_slice(), "Admin"),
+            (negotiated_link, b"observer-id".as_slice(), "Observer"),
+        ] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: identity.to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+        }
+
+        let negotiated_open = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Observer".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![ANNOUNCEMENT_ROOMS_CAPABILITY.into()],
+                client_instance_id: None,
+            },
+        )
+        .expect("negotiated open");
+        for (link_id, seq, body) in [
+            (legacy_link, 1, FrameBody::Text("Admin".into())),
+            (negotiated_link, 1, negotiated_open),
+        ] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(ChatOp::SessionOpen, seq, None, body))
+                    .expect("session open"),
+            })
+            .expect("open session");
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::JoinRoom,
+                    seq + 1,
+                    None,
+                    FrameBody::Text("lobby".into()),
+                ))
+                .expect("join room"),
+            })
+            .expect("join room");
+        }
+
+        let joined_room = |link_id, policy_negotiated| {
+            let frame = live
+                .transport()
+                .frames
+                .iter()
+                .rev()
+                .filter(|captured| captured.link_id == link_id)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .find(|frame| frame.op == ChatOp::JoinAccept)
+                .expect("join acceptance");
+            let FrameBody::Fields(fields) = frame.body else {
+                panic!("join acceptance fields");
+            };
+            crate::protocol::RoomCatalogEntry::from_frame_value(
+                fields.first().expect("joined room"),
+                policy_negotiated,
+            )
+            .expect("joined room shape")
+        };
+        assert_eq!(joined_room(legacy_link, false).policy_bits, 0);
+        assert_eq!(
+            joined_room(negotiated_link, true).policy_bits,
+            crate::protocol::ROOM_POLICY_ANNOUNCEMENT
+        );
+
+        let frames_before_rooms = live.transport().frames.len();
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: negotiated_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::Command,
+                3,
+                Some(1),
+                FrameBody::Text("rooms".into()),
+            ))
+            .expect("rooms command"),
+        })
+        .expect("rooms command");
+        let rooms_result = live
+            .transport()
+            .frames
+            .iter()
+            .skip(frames_before_rooms)
+            .filter(|captured| captured.link_id == negotiated_link)
+            .filter_map(|captured| decode_frame(&captured.bytes).ok())
+            .find(|frame| frame.op == ChatOp::CommandResult)
+            .expect("rooms result");
+        let FrameBody::Fields(fields) = rooms_result.body else {
+            panic!("rooms result fields");
+        };
+        let Some(FrameValue::Array(rooms)) = fields.get(1) else {
+            panic!("rooms result catalog");
+        };
+        assert_eq!(
+            crate::protocol::RoomCatalogEntry::from_frame_value(
+                rooms.first().expect("lobby"),
+                true,
+            )
+            .expect("negotiated rooms result")
+            .policy_bits,
+            crate::protocol::ROOM_POLICY_ANNOUNCEMENT
+        );
+
+        let frames_before_create = live.transport().frames.len();
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id: legacy_link,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::Command,
+                3,
+                None,
+                FrameBody::Text("create #ops Operations".into()),
+            ))
+            .expect("create room"),
+        })
+        .expect("create room");
+
+        let delta_room = |link_id, policy_negotiated| {
+            let frame = live
+                .transport()
+                .frames
+                .iter()
+                .skip(frames_before_create)
+                .filter(|captured| captured.link_id == link_id)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .find(|frame| frame.op == ChatOp::RoomDelta)
+                .expect("room delta");
+            let FrameBody::Fields(fields) = frame.body else {
+                panic!("room delta fields");
+            };
+            crate::protocol::RoomCatalogEntry::from_frame_value(
+                fields.first().expect("delta room"),
+                policy_negotiated,
+            )
+            .expect("delta room shape")
+        };
+        assert_eq!(delta_room(legacy_link, false).name, "ops");
+        assert_eq!(delta_room(negotiated_link, true).name, "ops");
+
+        assert_eq!(
+            live.announcement_room_links.get(&negotiated_link),
+            Some(&b"observer-id".to_vec())
+        );
+        assert!(!live.announcement_room_links.contains_key(&legacy_link));
+        live.handle_event(OmenchatLinkEvent::PeerIdentified {
+            link_id: negotiated_link,
+            identity_hash: [35; 16],
+        })
+        .expect("replace identity");
+        assert!(!live.announcement_room_links.contains_key(&negotiated_link));
     }
 
     #[test]

@@ -4757,8 +4757,22 @@ cargo test --locked --manifest-path src/server/Cargo.toml \
 
 The normal engine must continue omitting acceptance. The test-enabled engine
 must accept only an explicit request and encode authoritative policy through
-the five-field shared room value. This does not cover join/delta fanout or
-activate the production server.
+the five-field shared room value. That focused engine case does not itself
+cover join/delta fanout or activate the production server.
+
+Per-Link mixed-format shaping is covered separately:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  test_enabled_announcement_rooms_shape_join_and_delta_per_authenticated_link \
+  --lib -- --nocapture
+```
+
+One authenticated test Link negotiates policy while a simultaneous legacy Link
+does not. The test requires five-field JoinAccept/RoomDelta values only on the
+negotiated Link, four-field values on the legacy Link, and binding removal on
+identity replacement. Production acceptance remains disabled.
 
 Standard-member upload rejection before server acceptance or allocation is
 covered by:

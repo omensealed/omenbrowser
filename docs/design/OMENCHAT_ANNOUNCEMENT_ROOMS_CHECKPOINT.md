@@ -309,11 +309,13 @@ Production negotiation remains disabled until all applicable gates pass.
    replacement session, does not inherit policy from a non-accepting peer, and
    restores policy only after fresh explicit negotiation. Real negotiated
    current/current catalog/delta and replacement-Link process traffic remains.
-10. **Partial (2026-07-27):** a test-enabled server-engine boundary accepts
+10. **Complete (2026-07-27):** a test-enabled server-engine boundary accepts
     only an explicit policy capability request and emits the authoritative
-    five-field initial catalog through the shared encoder. The normal server
-    constructor remains dormant. Link-scoped join/delta shaping and mixed-peer
-    process traffic remain.
-11. Next: Link-scoped negotiated join/delta shaping, current/current and mixed
-    replacement-Link process traffic, plus native GUI observation. Do not
-    activate production negotiation before that joint review.
+    five-field initial catalog through the shared encoder. Authenticated
+    per-Link shaping sends five-field JoinAccept/RoomDelta values to a
+    negotiated test peer and unchanged four-field values to a simultaneous
+    legacy peer; identity/link retirement clears the bounded binding. The
+    normal server constructor remains dormant.
+11. Next: current/current and mixed replacement-Link process traffic plus
+    native GUI observation. Do not activate production negotiation before that
+    joint review.
