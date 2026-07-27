@@ -1554,6 +1554,11 @@ and after orderly restart: upload offers receive typed policy rejection with
 no acceptance, completion, committed event, ledger entry, or server file.
 Machine-readable doctor redaction remains unchanged; the isolated harness
 checks the existing human ledger detail.
+v0.9.6-4 adopts a restart-only room-policy administration contract. Every
+announcement process mode proves the confirmation-gated command fails closed
+while omenchatd owns the database, then uses the existing orderly
+stop-maintain-restart path. Live reload and cross-process policy-delta fanout
+remain outside this release; they are not activation prerequisites.
 
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is

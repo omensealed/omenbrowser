@@ -299,7 +299,11 @@ Production negotiation remains disabled until all applicable gates pass.
    event, ledger row, or server file. The same assertions pass after orderly
    restart, with the server ledger remaining at zero files/bytes. Evidence is
    in `docs/audits/omenchat-announcement-rooms-process-qualification.md`.
-8. Next: negotiated current/current catalog/delta traffic, same-process
-   replacement-Link recovery, native GUI observation, and a restart-only versus
-   live reload/fanout decision. Do not activate production negotiation before
-   that joint review.
+8. **Complete (2026-07-27):** v0.9.6-4 adopts a restart-only policy-
+   administration contract. Every real-process policy mode proves that the
+   command fails closed while omenchatd owns the database, then succeeds only
+   after orderly stop and takes effect after restart. Live reload and
+   cross-process policy-delta fanout are outside this version's contract.
+9. Next: negotiated current/current catalog/delta traffic, same-process
+   replacement-Link recovery, and native GUI observation. Do not activate
+   production negotiation before that joint review.

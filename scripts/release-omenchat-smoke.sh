@@ -24,6 +24,7 @@ continuous_client_reconnect=0
 announcement_rejection_smoke=0
 announcement_upload_rejection_smoke=0
 announcement_moderator_smoke=0
+live_policy_maintenance_refused="not-run"
 reaction_smoke=0
 revision_smoke=0
 pin_smoke=0
@@ -388,6 +389,30 @@ if ! grep -q 'live server ready' "$run_dir/omenchatd-run.log" 2>/dev/null; then
   echo "omenchatd did not become ready in time" >&2
   tail -n 80 "$run_dir/omenchatd-run.log" >&2 || true
   exit 1
+fi
+
+if [[ "$announcement_rejection_smoke" -eq 1 \
+  || "$announcement_upload_rejection_smoke" -eq 1 \
+  || "$announcement_moderator_smoke" -eq 1 ]]; then
+  echo "== Proving live room policy maintenance is refused =="
+  set +e
+  "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-live-room-policy.stdout" \
+    2> "$run_dir/omenchatd-live-room-policy.stderr"
+  live_policy_status=$?
+  set -e
+  if [[ "$live_policy_status" -eq 0 ]]; then
+    echo "room policy maintenance unexpectedly succeeded while omenchatd was live" >&2
+    exit 1
+  fi
+  if ! grep -Fq \
+    'database maintenance could not obtain exclusive access; ensure omenchatd is stopped' \
+    "$run_dir/omenchatd-live-room-policy.stderr"; then
+    echo "live room policy maintenance failed for an unexpected reason" >&2
+    cat "$run_dir/omenchatd-live-room-policy.stderr" >&2
+    exit 1
+  fi
+  live_policy_maintenance_refused=1
 fi
 
 if [[ "$announcement_rejection_smoke" -eq 1 || "$announcement_upload_rejection_smoke" -eq 1 ]]; then
@@ -919,6 +944,7 @@ continuous_client_reconnect: $continuous_client_reconnect
 announcement_rejection_smoke: $announcement_rejection_smoke
 announcement_upload_rejection_smoke: $announcement_upload_rejection_smoke
 announcement_moderator_smoke: $announcement_moderator_smoke
+live_policy_maintenance_refused: $live_policy_maintenance_refused
 reaction_smoke: $reaction_smoke
 revision_smoke: $revision_smoke
 pin_smoke: $pin_smoke

@@ -4689,8 +4689,10 @@ bash scripts/release-omenchat-smoke.sh \
 ```
 
 The member-rejection mode performs one normal server start before stopped-server policy
-maintenance, then requires typed policy error `1016` and no committed message
-both before and after an orderly restart. The browser reuses its isolated
+maintenance. While that server is live, the harness first requires the policy
+command to fail with the exclusive-maintenance refusal. It then stops the
+server, applies policy, restarts, and requires typed policy error `1016` and no
+committed message both before and after an orderly restart. The browser reuses its isolated
 identity root and opens a new Link; each attempted message is explicit and no
 uncertain mutation is resent automatically. Production capability negotiation
 remains dormant, so this gate does not claim five-field catalog/delta traffic,
@@ -4716,7 +4718,8 @@ bash scripts/release-omenchat-smoke.sh \
 ```
 
 The harness registers exactly one isolated standard user while the room is
-ordinary, stops omenchatd, identifies that user through the redacted headless
+ordinary and proves live policy maintenance is refused, stops omenchatd,
+identifies that user through the redacted headless
 JSON command, applies confirmation-gated moderator role plus announcement
 policy, and restarts. The unchanged client must observe its message echo,
 upload completion, and fetched Resource, then publish another message after an

@@ -2,8 +2,8 @@
 
 Date: 2026-07-27
 
-Baseline: `release/v0.9.6-4` through `b7f959f`, plus this standard-member
-upload-rejection process unit
+Baseline: `release/v0.9.6-4` through `c400dec`, plus this restart-only policy
+administration qualification unit
 
 Verdict: current/current member rejection plus moderator message/Resource
 publication and restart persistence pass over real isolated Reticulum Links; negotiated
@@ -44,6 +44,13 @@ applies moderator role and announcement policy, then restarts. It deliberately
 uses the unchanged normal smoke expectation: the message must be committed and
 echoed, and an optional upload must complete and be fetched through a
 Reticulum Resource.
+
+Every announcement-policy process mode first attempts the same confirmation-
+gated policy command while omenchatd is live. The harness requires nonzero
+status and the exact exclusive-maintenance refusal before it permits the
+existing orderly stop, maintenance, and restart sequence. This proves that the
+operator contract is restart-only; it does not add live reload, an IPC
+maintenance path, or policy-delta fanout.
 
 ## Process result
 
@@ -151,6 +158,32 @@ machine-readable doctor intentionally omits private detail, so this local
 isolated harness reads the existing human detail rather than weakening
 redaction.
 
+All three process modes also record:
+
+```text
+live_policy_maintenance_refused: 1
+```
+
+The rejected live command leaves policy unchanged. The stopped-server command
+then commits policy plus room revision atomically, and only the subsequent
+server process observes that state. v0.9.6-4 intentionally has no live policy
+reload or cross-process delta-fanout contract.
+
+The restart-only assertion was rerun locally in both distinct harness setup
+paths. The standard-member case included an orderly restart; the moderator
+case included a message plus the deterministic 873-byte Resource:
+
+```text
+member/restart: outcome pass, live_policy_maintenance_refused 1,
+                restart_destination_stable 1, restart_stop orderly
+moderator:      outcome pass, live_policy_maintenance_refused 1
+```
+
+In both runs stderr contained the expected stopped-server guidance and the
+subsequent offline policy command succeeded. The upload-rejection mode shares
+the standard-member policy setup branch; its publication and restart
+boundaries were already qualified above.
+
 ## Deterministic and adjacent evidence
 
 Focused tests passed:
@@ -201,6 +234,4 @@ alter the already-qualified schema-11 policy or server authorization.
 - negotiated current/current five-field room catalog and delta process traffic;
 - same-process live client replacement-Link capability loss/recovery;
 - native GUI member/moderator observation;
-- a documented restart-only policy contract or a separately reviewed live
-  policy reload/fanout design;
 - joint review before production request/acceptance activation.

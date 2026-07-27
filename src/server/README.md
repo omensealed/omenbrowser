@@ -202,13 +202,17 @@ The previous active database is retained as a unique owner-only
 files are modified. Run `doctor` before restarting. Restore is deliberately an
 offline, explicit `--confirm` operation.
 
-Schema 11 stores an explicit ordinary/announcement policy per room. Policy
-changes are intentionally stopped-server operations until live reload and
-policy-delta fanout are separately qualified:
+Schema 11 stores an explicit ordinary/announcement policy per room. The
+v0.9.6-4 policy-administration contract is deliberately restart-only: stop
+omenchatd, run the maintenance command, then restart omenchatd. The command
+fails closed while the live server owns the database. This release does not
+reload policy or fan out policy deltas from an offline maintenance process:
 
 ```bash
+# Stop the running omenchatd process or service first.
 omenchatd rooms policy 1 announcement --confirm --home ~/.omenchatd
 omenchatd rooms list --json --home ~/.omenchatd
+# Restart omenchatd using the same service or run configuration.
 ```
 
 Only `ordinary` and `announcement` are accepted. The policy and room revision
