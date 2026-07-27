@@ -4582,3 +4582,26 @@ replacement-Link recovery. It does not weaken role checks or automatically
 resend uncertain mutations. The server's small large-batch threshold still
 forces Resource transport for eligible history/reaction/revision batches;
 `PinSnapshot` is intentionally a separately bounded compressed inline frame.
+
+## Dormant OMENchat moderation-audit contract
+
+The first moderation-audit slice reserves a read-only operation range and
+bounded shared types without requesting or accepting
+`moderation-audit-v1`:
+
+```bash
+cargo test --locked -p omenchat-protocol moderation_audit -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  moderation_audit --lib
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless moderation_audit --lib)
+```
+
+These gates cover exact request/cursor/limit shape, the fixed action/result
+vocabulary, forbidden extra fields, identifier/timestamp/display-name bounds,
+known role/status bits, newest-first unique paging, item/owned-byte ceilings,
+room scoping, independent byte-exact codecs, and explicit refusal to accept
+the dormant capability. They do not claim schema-10 storage, transactional
+mutation coupling, authorization, inline/Resource equality, client
+presentation, live interoperability, or activation. Exact evidence is in
+`docs/audits/omenchat-moderation-audit-qualification.md`.

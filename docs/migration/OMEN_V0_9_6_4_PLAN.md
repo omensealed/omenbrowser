@@ -1426,6 +1426,16 @@ client decoder. Focused tests and the independent-process smoke guard that
 boundary. Pin snapshots remain bounded inline frames rather than being
 misclassified as Resource batches.
 
+The first moderation-audit slice reserves the separate read-only operations
+52–55 and adds the bounded shared `moderation-audit-v1` request, record, and
+page types. The independent desktop/server codecs agree on one byte-exact
+request fixture. Page count, retained bytes, display names, identifiers,
+timestamps, action/result combinations, role/status bits, ordering, and room
+scope fail closed. Production capability request/acceptance, schema, mutation
+execution, Resource dispatch, client projection, and UI remain unchanged.
+Evidence is in
+`docs/audits/omenchat-moderation-audit-qualification.md`.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

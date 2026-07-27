@@ -2,8 +2,9 @@
 
 Status: pin protocol, bounded storage/execution, desktop projection, durable
 controls, deterministic qualification, reversible production negotiation, and
-isolated current/current restart/replay qualification implemented;
-moderation-audit work remains design-only
+isolated current/current restart/replay qualification implemented; dormant
+moderation-audit wire contract implemented; moderation-audit storage,
+execution, negotiation, and presentation remain design-only
 
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`
 
@@ -192,6 +193,17 @@ and a hard maximum of 256. Inline and Resource forms use the existing bounded
 compression, decompression, pending-offer, purpose, and cancellation owners
 with a distinct purpose such as `moderation-audit:<room-id>:<cursor>`.
 
+The exact request body is:
+
+```text
+["moderation-audit-v1", exclusive_before_audit_id_or_nil, requested_count]
+```
+
+`requested_count` is 1–256. A nil cursor requests the newest page. Returned
+records are encoded as newest-first arrays inside the existing compressed
+inline/Resource batch envelope. `ModerationAuditEnd` has no record payload and
+marks that an explicit page request reached the oldest retained boundary.
+
 Each returned record contains only:
 
 ```text
@@ -206,6 +218,17 @@ committed_at_unix
 result_role_bits_or_nil
 result_status_bits_or_nil
 ```
+
+The fixed ten-field wire array uses that order exactly. Actor and target
+display names are nonempty and limited to 256 UTF-8 bytes. Every currently
+admitted action has a target; both target fields are therefore required for
+the initial action vocabulary even though the schema keeps them nullable for
+a separately reviewed future server-scoped action. Role results admit only
+the current hierarchical trusted/moderator/administrator values. Status
+results admit only the current banned/muted bits and must agree with the
+action's committed post-state. Records are strictly newest-first by unique
+positive audit ID, limited to 256 rows and 512 KiB of retained owned data, and
+must all match the frame's room.
 
 The fixed action vocabulary initially covers the already-supported committed
 room moderation effects:
@@ -445,8 +468,12 @@ The presentation must distinguish:
    semantic no-op, authoritative snapshot reconciliation, unpin, and clean
    durable-intent completion on both Links. It also corrected and now guards
    the live server/client compressed-inline `PinSnapshot` encoding boundary.
-9. Add shared dormant moderation-audit types and operations 52–55. Keep
-   negotiation unchanged.
+9. **Complete (2026-07-27):** add shared dormant moderation-audit types,
+   operations 52–55, fixed action/result vocabulary, cursor/page/display/byte
+   bounds, and an independent byte-exact desktop/server request fixture.
+   Production negotiation, storage, execution, Resource dispatch, and
+   presentation remain unchanged; omenchatd explicitly refuses to accept the
+   dormant capability.
 10. Add schema-10 constrained audit storage and transactionally couple only
    proven moderation paths; provide schema-9/schema-8 copies.
 11. Add authorized bounded inline/Resource paging and ephemeral client

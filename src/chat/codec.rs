@@ -180,11 +180,13 @@ mod tests {
     use crate::chat::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
     use omenchat_protocol::fixtures::{
-        message_revisions_v1, pins_v1, reactions_v1, reply_mentions_v1, v0_6_0_1, v0_9_6_3,
+        message_revisions_v1, moderation_audit_v1, pins_v1, reactions_v1, reply_mentions_v1,
+        v0_6_0_1, v0_9_6_3,
     };
     use omenchat_protocol::{
-        MessageRevisionAction, MessageRevisionRequest, PinAction, PinRequest, ReactionAction,
-        ReactionRequest, ReactionToken, ReplyReference, RichMessageBody,
+        MessageRevisionAction, MessageRevisionRequest, ModerationAuditRequest, PinAction,
+        PinRequest, ReactionAction, ReactionRequest, ReactionToken, ReplyReference,
+        RichMessageBody,
     };
 
     #[test]
@@ -380,6 +382,31 @@ mod tests {
         );
         assert_eq!(
             decode_frame(pins_v1::ROOM_PIN_ADD).expect("decode pin"),
+            frame
+        );
+    }
+
+    #[test]
+    fn moderation_audit_v1_fixture_is_bidirectionally_exact_and_dormant() {
+        let frame = Frame::new(
+            ChatOp::ModerationAuditBefore,
+            11,
+            Some(7),
+            ModerationAuditRequest {
+                before_audit_id: Some(42),
+                limit: 50,
+            }
+            .into_frame_body()
+            .expect("bounded moderation audit request"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode moderation audit request"),
+            moderation_audit_v1::AUDIT_BEFORE
+        );
+        assert_eq!(
+            decode_frame(moderation_audit_v1::AUDIT_BEFORE)
+                .expect("decode moderation audit request"),
             frame
         );
     }

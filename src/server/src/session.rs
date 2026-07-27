@@ -5747,6 +5747,51 @@ mod tests {
     }
 
     #[test]
+    fn moderation_audit_capability_remains_dormant() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![
+                    crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                    crate::protocol::MODERATION_AUDIT_CAPABILITY.into(),
+                ],
+                client_instance_id: Some(crate::protocol::ClientInstanceId::new([17; 16])),
+            },
+        )
+        .expect("dormant moderation audit capability request");
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 4, None, request))
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
+            }))
+        );
+
+        let audit_only = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![crate::protocol::MODERATION_AUDIT_CAPABILITY.into()],
+                client_instance_id: None,
+            },
+        )
+        .expect("audit-only capability request");
+        let response = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(ChatOp::SessionOpen, 5, None, audit_only),
+            )
+            .expect("audit-only session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(None)
+        );
+    }
+
+    #[test]
     fn dormant_pin_executor_is_transactional_role_scoped_and_replays_after_restart() {
         let path = temp_store_path("pin-replay");
         let (room_id, target_event_id, actor_user_id) = {
