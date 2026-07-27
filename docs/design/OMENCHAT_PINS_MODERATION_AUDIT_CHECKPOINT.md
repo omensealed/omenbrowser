@@ -24,7 +24,8 @@ They have different authorization, mutation, retention, and privacy contracts:
 - each remains disabled until its independent deterministic, mixed-version,
   migration, resource, and activation review passes. Pins have now passed that
   deterministic review and are enabled for the still-required live process
-  gate; moderation audit remains dormant.
+  gate; moderation-audit storage is implemented but capability negotiation,
+  paging, and presentation remain dormant.
 
 This checkpoint authorizes design and staged implementation only. It does not
 authorize production capability negotiation.
@@ -64,7 +65,7 @@ Source evidence:
   `DurableMutationEnvelope` and `canonical_mutation_request_hash`;
 - `src/server/src/session.rs`: `ROLE_MODERATOR`, `ROLE_ADMIN`, durable command
   execution, and one-use moderation effects;
-- `src/server/src/store.rs`: `SCHEMA_VERSION`, schema-9 migration hooks, and
+- `src/server/src/store.rs`: `SCHEMA_VERSION`, schema-10 migration hooks, and
   current room-event/reaction/revision/pin storage;
 - `src/server/src/store/history_retention.rs`: bounded dependency preflight and
   transactional target cleanup;
@@ -223,8 +224,8 @@ The fixed ten-field wire array uses that order exactly. Actor and target
 display names are nonempty and limited to 256 UTF-8 bytes. Every currently
 admitted action has a target; both target fields are therefore required for
 the initial action vocabulary even though the schema keeps them nullable for
-a separately reviewed future server-scoped action. Role results admit only
-the current hierarchical trusted/moderator/administrator values. Status
+a separately reviewed future server-scoped action. Role results admit the
+current standard/trusted/moderator/administrator values. Status
 results admit only the current banned/muted bits and must agree with the
 action's committed post-state. Records are strictly newest-first by unique
 positive audit ID, limited to 256 rows and 512 KiB of retained owned data, and
@@ -474,8 +475,14 @@ The presentation must distinguish:
    Production negotiation, storage, execution, Resource dispatch, and
    presentation remain unchanged; omenchatd explicitly refuses to accept the
    dormant capability.
-10. Add schema-10 constrained audit storage and transactionally couple only
-   proven moderation paths; provide schema-9/schema-8 copies.
+10. **Complete (2026-07-27):** add empty-on-migration schema-10 constrained
+    audit storage, bounded age/item/byte pruning, newest-first cursor reads,
+    fault rollback, and confirmation-gated schema-9/schema-8 copies. Durable
+    in-room kick/ban/mute/unmute/role/unban now commit their user mutation,
+    audit row, and replay result in one immediate transaction. Legacy
+    non-durable client commands, roomless role/unban, and local administrative
+    paths remain absent because their current boundaries cannot provide that
+    atomic guarantee.
 11. Add authorized bounded inline/Resource paging and ephemeral client
    presentation behind test-only negotiated state.
 12. Qualify role loss, pagination, replay, restart, malformed/oversized,

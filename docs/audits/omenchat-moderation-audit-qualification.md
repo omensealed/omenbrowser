@@ -97,8 +97,8 @@ Rollback is code-only for this dormant slice.
 
 ## Next gate
 
-The next separately reviewed unit is schema-10 constrained storage and
-transactional coupling to only those existing moderation paths that can
-commit the user mutation, audit row, and durable replay result atomically.
-It must include schema-9 and schema-8 guarded downgrade copies and must leave
-the legacy operator `audit_log` and text runtime log unexposed.
+Schema-10 constrained storage, durable transactional coupling, and guarded
+schema-9/schema-8 copies are now qualified separately in
+`omenchat-moderation-audit-storage-qualification.md`. The remaining gate is
+authorized bounded paging and ephemeral client projection behind test-only
+negotiation; the legacy `audit_log` and text runtime log remain unexposed.

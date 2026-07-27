@@ -41,6 +41,12 @@ pub struct DatabaseSchemaEightExportReport {
     pub destination: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseSchemaNineExportReport {
+    pub source_version: i64,
+    pub destination: PathBuf,
+}
+
 pub fn restore_migration_backup(
     database: &Path,
     backup: &Path,
@@ -227,6 +233,28 @@ where
     })
 }
 
+pub fn export_schema_nine_copy(
+    database: &Path,
+    destination: &Path,
+) -> ServerResult<DatabaseSchemaNineExportReport> {
+    export_schema_nine_copy_with_publish(database, destination, atomic_replace)
+}
+
+fn export_schema_nine_copy_with_publish<F>(
+    database: &Path,
+    destination: &Path,
+    mut publish: F,
+) -> ServerResult<DatabaseSchemaNineExportReport>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    export_downgrade_copy_with_publish(database, destination, 9, &mut publish)?;
+    Ok(DatabaseSchemaNineExportReport {
+        source_version: SCHEMA_VERSION,
+        destination: destination.to_path_buf(),
+    })
+}
+
 fn export_downgrade_copy_with_publish<F>(
     database: &Path,
     destination: &Path,
@@ -236,7 +264,7 @@ fn export_downgrade_copy_with_publish<F>(
 where
     F: FnMut(&Path, &Path) -> std::io::Result<()>,
 {
-    debug_assert!(matches!(target_version, 4..=8));
+    debug_assert!(matches!(target_version, 4..=9));
     let schema_label = format!("schema-{target_version}");
     validate_regular_file(database, "active database")?;
     if database == destination {
@@ -307,11 +335,18 @@ where
             rusqlite::TransactionBehavior::Immediate,
         )?;
         transaction.execute_batch(
-            "DROP INDEX IF EXISTS idx_room_pin_events_retention;
-             DROP INDEX IF EXISTS idx_room_pin_events_target;
-             DROP TABLE IF EXISTS room_pin_events;
-             DROP TABLE IF EXISTS room_pins;",
+            "DROP INDEX IF EXISTS idx_moderation_audit_retention;
+             DROP INDEX IF EXISTS idx_moderation_audit_room_page;
+             DROP TABLE IF EXISTS moderation_audit_events;",
         )?;
+        if target_version <= 8 {
+            transaction.execute_batch(
+                "DROP INDEX IF EXISTS idx_room_pin_events_retention;
+                 DROP INDEX IF EXISTS idx_room_pin_events_target;
+                 DROP TABLE IF EXISTS room_pin_events;
+                 DROP TABLE IF EXISTS room_pins;",
+            )?;
+        }
         if target_version <= 7 {
             transaction.execute_batch("DROP TABLE IF EXISTS room_history_usage;")?;
         } else {
@@ -483,11 +518,26 @@ fn validate_current_database(path: &Path) -> ServerResult<()> {
             "restored database is missing schema-9 pin storage; found {pin_objects} of 4 objects"
         )));
     }
+    let moderation_audit_objects: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE name IN (
+           'moderation_audit_events',
+           'idx_moderation_audit_room_page',
+           'idx_moderation_audit_retention'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if moderation_audit_objects != 3 {
+        return Err(ServerError::Message(format!(
+            "restored database is missing schema-10 moderation-audit storage; found {moderation_audit_objects} of 3 objects"
+        )));
+    }
     Ok(())
 }
 
 fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()> {
-    debug_assert!(matches!(target_version, 4..=8));
+    debug_assert!(matches!(target_version, 4..=9));
     let schema_label = format!("schema-{target_version}");
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -581,7 +631,7 @@ fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()>
             "{schema_label} export retained schema-8 room history usage objects"
         )));
     }
-    if target_version == 8 && usage_objects != 1 {
+    if target_version >= 8 && usage_objects != 1 {
         return Err(ServerError::Message(
             "schema-8 export did not retain room history usage storage".into(),
         ));
@@ -597,9 +647,29 @@ fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()>
         [],
         |row| row.get(0),
     )?;
-    if pin_objects != 0 {
+    if target_version <= 8 && pin_objects != 0 {
         return Err(ServerError::Message(format!(
             "{schema_label} export retained schema-9 pin objects"
+        )));
+    }
+    if target_version == 9 && pin_objects != 4 {
+        return Err(ServerError::Message(format!(
+            "{schema_label} export did not retain complete schema-9 pin storage; found {pin_objects} of 4 objects"
+        )));
+    }
+    let moderation_audit_objects: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE name IN (
+           'moderation_audit_events',
+           'idx_moderation_audit_room_page',
+           'idx_moderation_audit_retention'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if moderation_audit_objects != 0 {
+        return Err(ServerError::Message(format!(
+            "{schema_label} export retained schema-10 moderation-audit objects"
         )));
     }
     Ok(())
@@ -1373,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_eight_export_preserves_history_layers_and_omits_only_pins() {
+    fn schema_eight_export_preserves_history_layers_and_omits_newer_layers() {
         let (root, database, _) = setup_current_for_schema_four_export("schema8-success");
         {
             let connection = rusqlite::Connection::open(&database).expect("active database");
@@ -1395,6 +1465,16 @@ mod tests {
                     [pin_event_id],
                 )
                 .expect("pin state");
+            connection
+                .execute(
+                    "INSERT INTO moderation_audit_events(
+                       room_id, actor_user_id, actor_display_name,
+                       target_user_id, target_display_name, action_kind,
+                       result_role_bits, result_status_bits, committed_at, retained_bytes
+                     ) VALUES (1, 1, 'Actor', 2, 'Target', 1, NULL, NULL, 1, 75)",
+                    [],
+                )
+                .expect("moderation audit");
         }
         let destination = root.join("omenchat-schema8.sqlite");
         let report =
@@ -1440,6 +1520,9 @@ mod tests {
             "room_pin_events",
             "idx_room_pin_events_target",
             "idx_room_pin_events_retention",
+            "moderation_audit_events",
+            "idx_moderation_audit_room_page",
+            "idx_moderation_audit_retention",
         ] {
             assert_eq!(
                 exported
@@ -1460,6 +1543,85 @@ mod tests {
 
         drop(exported);
         std::fs::remove_dir_all(root).expect("remove schema-eight export root");
+    }
+
+    #[test]
+    fn schema_nine_export_preserves_pins_and_omits_only_moderation_audit() {
+        let (root, database, _) = setup_current_for_schema_four_export("schema9-success");
+        {
+            let connection = rusqlite::Connection::open(&database).expect("active database");
+            connection
+                .execute(
+                    "INSERT INTO room_pin_events(
+                       room_id, target_event_id, actor_user_id, pin_action, at, retained_bytes
+                     ) VALUES (1, 1, 1, 1, 1, 41)",
+                    [],
+                )
+                .expect("pin event");
+            let pin_event_id = connection.last_insert_rowid();
+            connection
+                .execute(
+                    "INSERT INTO room_pins(
+                       room_id, target_event_id, pin_event_id, actor_user_id,
+                       pinned_at, retained_bytes
+                     ) VALUES (1, 1, ?1, 1, 1, 32)",
+                    [pin_event_id],
+                )
+                .expect("pin state");
+            connection
+                .execute(
+                    "INSERT INTO moderation_audit_events(
+                       room_id, actor_user_id, actor_display_name,
+                       target_user_id, target_display_name, action_kind,
+                       result_role_bits, result_status_bits, committed_at, retained_bytes
+                     ) VALUES (1, 1, 'Actor', 2, 'Target', 1, NULL, NULL, 1, 75)",
+                    [],
+                )
+                .expect("moderation audit");
+        }
+        let destination = root.join("omenchat-schema9.sqlite");
+        let report = export_schema_nine_copy(&database, &destination).expect("schema nine export");
+        assert_eq!(report.source_version, SCHEMA_VERSION);
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("schema nine database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("export version"),
+            9
+        );
+        assert_eq!(
+            exported
+                .query_row("SELECT COUNT(*) FROM room_pins", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("pin state retained"),
+            1
+        );
+        for name in [
+            "moderation_audit_events",
+            "idx_moderation_audit_room_page",
+            "idx_moderation_audit_retention",
+        ] {
+            assert_eq!(
+                exported
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                        [name],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("moderation audit object lookup"),
+                0,
+                "schema-9 export must omit {name}"
+            );
+        }
+
+        drop(exported);
+        std::fs::remove_dir_all(root).expect("remove schema-nine export root");
     }
 
     #[test]

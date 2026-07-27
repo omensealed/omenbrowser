@@ -213,7 +213,7 @@ impl ModerationAuditRecord {
                 return Err(ModerationAuditError::ActionResultMismatch);
             }
             (ModerationAuditAction::RoleChange, Some(bits), _)
-                if !matches!(bits, 0b001 | 0b011 | 0b111) =>
+                if !matches!(bits, 0 | 0b001 | 0b011 | 0b111) =>
             {
                 return Err(ModerationAuditError::ActionResultMismatch);
             }
@@ -562,6 +562,15 @@ mod tests {
 
     #[test]
     fn record_rejects_missing_target_unknown_bits_and_action_result_mismatch() {
+        assert!(
+            ModerationAuditRecord {
+                result_role_bits: Some(0),
+                ..record(1, ModerationAuditAction::RoleChange)
+            }
+            .into_frame_value()
+            .is_ok(),
+            "the existing standard role must remain representable"
+        );
         assert_eq!(
             ModerationAuditRecord {
                 target_user_id: None,

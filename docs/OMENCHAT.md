@@ -193,7 +193,7 @@ workspace currently represents LXMF conversations, not OMENchat sessions, so
 it does not display OMENchat reaction state.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
-`omenchat.sqlite.pre-v9-from-v<old>.bak`. It never overwrites an existing backup;
+`omenchat.sqlite.pre-v10-from-v<old>.bak`. It never overwrites an existing backup;
 backup failure aborts migration, and a successful backup is retained for
 operator recovery.
 Schema statements and the version update share one immediate transaction, so a
@@ -207,10 +207,18 @@ publication. The selected source remains unchanged and the prior active
 database is retained as an owner-only `pre-restore` backup. Operators must run
 `doctor` before restarting.
 
+An offline non-destructive schema-9 downgrade artifact can be created with
+`omenchatd database export-schema9-copy --to <new-path> --confirm --home
+<path>`. It removes only schema-10 moderation-audit storage and preserves
+schema-9 pins and every earlier layer. The audit capability remains dormant;
+only durable in-room moderation paths whose user change and replay result
+share one immediate transaction populate this bounded storage.
+
 An offline non-destructive schema-8 downgrade artifact can be created with
 `omenchatd database export-schema8-copy --to <new-path> --confirm --home
-<path>`. It removes only dormant schema-9 pin state/audit objects and preserves
-history usage, event sequences, history, reactions, and dormant revisions.
+<path>`. It removes schema-10 moderation history and schema-9 pin state/audit
+objects and preserves history usage, event sequences, history, reactions, and
+dormant revisions.
 
 The desktop maintains a separate bounded pin projection in its
 identity-scoped `chat.sqlite`. It may retain pin rows across restart, but those
@@ -246,7 +254,7 @@ artifact, use
 `omenchatd database export-schema4-copy --to <new-path> --confirm --home
 <path>`. That copy drops both schema-6 revisions and schema-5 reactions before
 moving to `user_version = 4`. Both commands require a new destination, pass
-integrity/foreign-key checks, atomically publish, and leave the active schema-9
+integrity/foreign-key checks, atomically publish, and leave the active schema-10
 database unchanged.
 
 ## Server Commands

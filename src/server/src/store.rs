@@ -8,6 +8,7 @@ use crate::protocol::{EventId, RichMessageEventMetadata, RoomId, UserId};
 pub mod durable_replay;
 pub mod history_retention;
 pub mod message_revisions;
+pub mod moderation_audit;
 pub mod pins;
 pub mod reactions;
 
@@ -134,7 +135,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 9;
+pub(crate) const SCHEMA_VERSION: i64 = 10;
 const HISTORY_USAGE_BACKFILL_BATCH: usize = 256;
 const HISTORY_EVENT_FIXED_RETAINED_BYTES: u64 = 64;
 const HISTORY_REPLY_RETAINED_BYTES: u64 = 8;
@@ -323,16 +324,17 @@ impl OmenchatStore {
                 sequence: sequence_hook,
                 usage: |_| Ok(()),
                 pin: |_| Ok(()),
+                moderation_audit: |_| Ok(()),
             },
         )
     }
 
-    fn migrate_with_sql_step_and_history_hooks<F, H, R, S, U, P>(
+    fn migrate_with_sql_step_and_history_hooks<F, H, R, S, U, P, A>(
         &self,
         backup_source: Option<&std::path::Path>,
         migration_sql: &str,
         schema_step: F,
-        mut hooks: MigrationHooks<H, R, S, U, P>,
+        mut hooks: MigrationHooks<H, R, S, U, P, A>,
     ) -> ServerResult<()>
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
@@ -341,6 +343,7 @@ impl OmenchatStore {
         S: FnMut(EventSequenceMigrationBoundary) -> ServerResult<()>,
         U: FnMut(HistoryUsageMigrationBoundary) -> ServerResult<()>,
         P: FnMut(PinMigrationBoundary) -> ServerResult<()>,
+        A: FnMut(ModerationAuditMigrationBoundary) -> ServerResult<()>,
     {
         let current_version: i64 =
             self.connection
@@ -369,17 +372,20 @@ impl OmenchatStore {
         ensure_event_sequence_schema_with_hook(&transaction, &mut hooks.sequence)?;
         ensure_history_usage_schema_with_hook(&transaction, &mut hooks.usage)?;
         ensure_pin_schema_with_hook(&transaction, &mut hooks.pin)?;
+        ensure_moderation_audit_schema_with_hook(&transaction, &mut hooks.moderation_audit)?;
         (hooks.reaction)(ReactionMigrationBoundary::BeforeVersionUpdate)?;
         (hooks.revision)(MessageRevisionMigrationBoundary::BeforeVersionUpdate)?;
         (hooks.sequence)(EventSequenceMigrationBoundary::VersionUpdate)?;
         (hooks.usage)(HistoryUsageMigrationBoundary::VersionUpdate)?;
         (hooks.pin)(PinMigrationBoundary::BeforeVersionUpdate)?;
+        (hooks.moderation_audit)(ModerationAuditMigrationBoundary::VersionUpdate)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         (hooks.reaction)(ReactionMigrationBoundary::BeforeCommit)?;
         (hooks.revision)(MessageRevisionMigrationBoundary::BeforeCommit)?;
         (hooks.sequence)(EventSequenceMigrationBoundary::Commit)?;
         (hooks.usage)(HistoryUsageMigrationBoundary::Commit)?;
         (hooks.pin)(PinMigrationBoundary::BeforeCommit)?;
+        (hooks.moderation_audit)(ModerationAuditMigrationBoundary::Commit)?;
         transaction.commit()?;
         Ok(())
     }
@@ -406,6 +412,34 @@ impl OmenchatStore {
                 sequence: |_| Ok(()),
                 usage: |_| Ok(()),
                 pin: pin_hook,
+                moderation_audit: |_| Ok(()),
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn migrate_with_sql_step_and_moderation_audit_hook<F, A>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        moderation_audit_hook: A,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        A: FnMut(ModerationAuditMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_history_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            MigrationHooks {
+                reaction: |_| Ok(()),
+                revision: |_| Ok(()),
+                sequence: |_| Ok(()),
+                usage: |_| Ok(()),
+                pin: |_| Ok(()),
+                moderation_audit: moderation_audit_hook,
             },
         )
     }
@@ -1136,12 +1170,21 @@ enum PinMigrationBoundary {
     BeforeCommit,
 }
 
-struct MigrationHooks<H, R, S, U, P> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModerationAuditMigrationBoundary {
+    Table,
+    Indexes,
+    VersionUpdate,
+    Commit,
+}
+
+struct MigrationHooks<H, R, S, U, P, A> {
     reaction: H,
     revision: R,
     sequence: S,
     usage: U,
     pin: P,
+    moderation_audit: A,
 }
 
 fn ensure_pin_schema_with_hook<H>(
@@ -1185,6 +1228,66 @@ where
 
          CREATE INDEX IF NOT EXISTS idx_room_pin_events_retention
          ON room_pin_events(at, room_id, pin_event_id);",
+    )?;
+    Ok(())
+}
+
+fn ensure_moderation_audit_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(ModerationAuditMigrationBoundary) -> ServerResult<()>,
+{
+    hook(ModerationAuditMigrationBoundary::Table)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS moderation_audit_events(
+           audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+           room_id INTEGER NOT NULL CHECK(room_id BETWEEN 1 AND 4294967295),
+           actor_user_id INTEGER NOT NULL
+             CHECK(actor_user_id BETWEEN 1 AND 4294967295),
+           actor_display_name TEXT NOT NULL
+             CHECK(length(CAST(actor_display_name AS BLOB)) BETWEEN 1 AND 256),
+           target_user_id INTEGER NOT NULL
+             CHECK(target_user_id BETWEEN 1 AND 4294967295),
+           target_display_name TEXT NOT NULL
+             CHECK(length(CAST(target_display_name AS BLOB)) BETWEEN 1 AND 256),
+           action_kind INTEGER NOT NULL CHECK(action_kind BETWEEN 1 AND 6),
+           result_role_bits INTEGER,
+           result_status_bits INTEGER,
+           committed_at INTEGER NOT NULL CHECK(committed_at >= 0),
+           retained_bytes INTEGER NOT NULL
+             CHECK(
+               retained_bytes =
+                 64
+                 + length(CAST(actor_display_name AS BLOB))
+                 + length(CAST(target_display_name AS BLOB))
+             ),
+           CHECK(
+             (action_kind = 1 AND result_role_bits IS NULL AND result_status_bits IS NULL)
+             OR
+             (action_kind IN (2, 3, 4, 5)
+               AND result_role_bits IS NULL
+               AND result_status_bits BETWEEN 0 AND 3)
+             OR
+             (action_kind = 6
+               AND result_role_bits IN (0, 1, 3, 7)
+               AND result_status_bits IS NULL)
+           ),
+           CHECK(action_kind != 2 OR (result_status_bits & 1) = 1),
+           CHECK(action_kind != 3 OR (result_status_bits & 1) = 0),
+           CHECK(action_kind != 4 OR (result_status_bits & 2) = 2),
+           CHECK(action_kind != 5 OR (result_status_bits & 2) = 0)
+         );",
+    )?;
+
+    hook(ModerationAuditMigrationBoundary::Indexes)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_moderation_audit_room_page
+         ON moderation_audit_events(room_id, audit_id DESC);
+
+         CREATE INDEX IF NOT EXISTS idx_moderation_audit_retention
+         ON moderation_audit_events(committed_at, room_id, audit_id);",
     )?;
     Ok(())
 }
@@ -2099,6 +2202,20 @@ mod tests {
             .pragma_update(None, "user_version", 8)
             .expect("version eight marker");
         transaction.commit().expect("version eight commit");
+    }
+
+    fn create_version_nine_fixture(path: &std::path::Path) {
+        create_version_eight_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version nine database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version nine transaction");
+        ensure_pin_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version nine pin schema");
+        transaction
+            .pragma_update(None, "user_version", 9)
+            .expect("version nine marker");
+        transaction.commit().expect("version nine commit");
     }
 
     fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
@@ -3264,6 +3381,7 @@ mod tests {
                             }
                         },
                         pin: |_| Ok(()),
+                        moderation_audit: |_| Ok(()),
                     },
                 )
                 .expect_err("injected schema migration failure")
@@ -3450,6 +3568,171 @@ mod tests {
                 8
             );
             assert!(!schema_object_exists(&backup, "table", "room_pins"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_nine_database_adds_empty_constrained_moderation_audit_schema() {
+        let path = isolated_database_path("v9-moderation-audit-schema");
+        create_version_nine_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version ten migration");
+        for (kind, name) in [
+            ("table", "moderation_audit_events"),
+            ("index", "idx_moderation_audit_room_page"),
+            ("index", "idx_moderation_audit_retention"),
+        ] {
+            assert!(
+                schema_object_exists(&store.connection, kind, name),
+                "missing schema-10 object {name}"
+            );
+        }
+        assert_eq!(
+            store
+                .moderation_audit_row_count()
+                .expect("moderation audit row count"),
+            0,
+            "migration must not synthesize moderation history"
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        for statement in [
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (1, 2, 'Actor', 3, 'Target', 2, NULL, 0, 1, 75)",
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (1, 2, '', 3, 'Target', 1, NULL, NULL, 1, 70)",
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (1, 2, 'Actor', 3, 'Target', 6, 2, NULL, 1, 75)",
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (1, 2, 'Actor', 3, 'Target', 1, NULL, NULL, 1, 76)",
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (4294967296, 2, 'Actor', 3, 'Target', 1, NULL, NULL, 1, 75)",
+        ] {
+            assert!(
+                store.connection.execute(statement, []).is_err(),
+                "schema constraint must reject {statement}"
+            );
+        }
+
+        let backup_path = migration_backup_path(&path, 9);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version nine migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            9
+        );
+        assert!(schema_object_exists(&backup, "table", "room_pins"));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "moderation_audit_events"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_moderation_audit_schema_fault_boundary_rolls_back_to_version_nine() {
+        for boundary in [
+            ModerationAuditMigrationBoundary::Table,
+            ModerationAuditMigrationBoundary::Indexes,
+            ModerationAuditMigrationBoundary::VersionUpdate,
+            ModerationAuditMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v10-fault-{boundary:?}"));
+            create_version_nine_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_moderation_audit_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected moderation audit migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected moderation audit migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                9
+            );
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_pins"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "moderation_audit_events"
+            ));
+
+            let backup_path = migration_backup_path(&path, 9);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version nine rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                9
+            );
+            assert!(schema_object_exists(&backup, "table", "room_pins"));
+            assert!(!schema_object_exists(
+                &backup,
+                "table",
+                "moderation_audit_events"
+            ));
 
             drop(backup);
             drop(store);

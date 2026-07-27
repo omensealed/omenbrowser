@@ -4601,7 +4601,22 @@ These gates cover exact request/cursor/limit shape, the fixed action/result
 vocabulary, forbidden extra fields, identifier/timestamp/display-name bounds,
 known role/status bits, newest-first unique paging, item/owned-byte ceilings,
 room scoping, independent byte-exact codecs, and explicit refusal to accept
-the dormant capability. They do not claim schema-10 storage, transactional
-mutation coupling, authorization, inline/Resource equality, client
-presentation, live interoperability, or activation. Exact evidence is in
+the dormant capability. Schema-10 storage, durable transaction coupling,
+migration faults, and guarded schema-9/schema-8 exports are covered separately
+in `docs/audits/omenchat-moderation-audit-storage-qualification.md`. These
+commands do not claim network authorization, inline/Resource equality, client
+presentation, live interoperability, or activation. Wire evidence is in
 `docs/audits/omenchat-moderation-audit-qualification.md`.
+
+Focused schema/storage gates:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless moderation_audit --lib)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless durable_active_peer_moderation_executes_once_for_each_action --lib)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless schema_eight_export --lib)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless schema_nine_export --lib)
+```

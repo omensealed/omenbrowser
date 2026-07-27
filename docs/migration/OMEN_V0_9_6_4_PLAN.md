@@ -1436,6 +1436,16 @@ execution, Resource dispatch, client projection, and UI remain unchanged.
 Evidence is in
 `docs/audits/omenchat-moderation-audit-qualification.md`.
 
+The second moderation-audit slice advances omenchatd from schema 9 to schema
+10 with empty-on-migration, SQL-constrained, item/byte/age-bounded audit
+storage. Durable in-room moderation now commits the user mutation, one
+client-safe audit row, and the replay result atomically; exact replay creates
+no second row. Non-durable and local administrative paths remain excluded
+until their mutations can share that transaction. Confirmation-gated schema-9
+and schema-8 copies preserve all representable older layers. Capability
+negotiation and client traffic remain dormant. Evidence is in
+`docs/audits/omenchat-moderation-audit-storage-qualification.md`.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

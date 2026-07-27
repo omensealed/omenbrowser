@@ -14,10 +14,10 @@ use crate::protocol::{
     append_rich_message_event_metadata, canonical_mutation_request_hash,
     parse_session_open_negotiation, with_session_accept_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
-    MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, PinAck, PinRequest,
-    ReactionAck, ReactionRequest, ReactionSnapshot, RichMessageBody, RichMessageEventMetadata,
-    RoomId, SessionAcceptNegotiation, UserId, DURABLE_MUTATION_CAPABILITY,
-    DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
+    MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, ModerationAuditAction,
+    PinAck, PinRequest, ReactionAck, ReactionRequest, ReactionSnapshot, RichMessageBody,
+    RichMessageEventMetadata, RoomId, SessionAcceptNegotiation, UserId,
+    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
     MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, PROTOCOL_NAME, REACTIONS_CAPABILITY,
     REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG, REPLY_MENTIONS_CAPABILITY,
     ROOM_PINS_CAPABILITY, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
@@ -27,6 +27,7 @@ use crate::store::durable_replay::{
     DurableRoomEventCommit, DurableRoomEventPlan,
 };
 use crate::store::message_revisions::{MessageRevisionActorPolicy, MessageRevisionMutationResult};
+use crate::store::moderation_audit::ModerationAuditAdmission;
 use crate::store::pins::PinMutationResult;
 use crate::store::reactions::ReactionMutationResult;
 use crate::store::{
@@ -3060,6 +3061,29 @@ impl SessionEngine {
                             )?,
                             _ => target_user,
                         };
+                        let audit_action = match command_name.as_str() {
+                            "ban" => ModerationAuditAction::Ban,
+                            "mute" => ModerationAuditAction::Mute,
+                            "unmute" => ModerationAuditAction::Unmute,
+                            _ => ModerationAuditAction::Kick,
+                        };
+                        let result_status_bits = (audit_action != ModerationAuditAction::Kick)
+                            .then_some(changed_user.status_bits);
+                        if OmenchatStore::append_durable_moderation_audit(
+                            transaction,
+                            active_room_id,
+                            &user,
+                            &changed_user,
+                            audit_action,
+                            None,
+                            result_status_bits,
+                        )? == ModerationAuditAdmission::Saturated
+                        {
+                            return Err(ServerError::Message(
+                                "moderation audit retention is saturated; mutation rolled back"
+                                    .into(),
+                            ));
+                        }
                         let event = OmenchatStore::append_durable_room_event(
                             transaction,
                             active_room_id,
@@ -3138,6 +3162,37 @@ impl SessionEngine {
                                 false,
                             )?
                         };
+                        if let Some(active_room_id) = room_id {
+                            let (audit_action, result_role_bits, result_status_bits) =
+                                if role_bits.is_some() {
+                                    (
+                                        ModerationAuditAction::RoleChange,
+                                        Some(changed_user.role_bits),
+                                        None,
+                                    )
+                                } else {
+                                    (
+                                        ModerationAuditAction::Unban,
+                                        None,
+                                        Some(changed_user.status_bits),
+                                    )
+                                };
+                            if OmenchatStore::append_durable_moderation_audit(
+                                transaction,
+                                active_room_id,
+                                &user,
+                                &changed_user,
+                                audit_action,
+                                result_role_bits,
+                                result_status_bits,
+                            )? == ModerationAuditAdmission::Saturated
+                            {
+                                return Err(ServerError::Message(
+                                    "moderation audit retention is saturated; mutation rolled back"
+                                        .into(),
+                                ));
+                            }
+                        }
                         let mut broadcasts = vec![user_delta_frame(seq, room_id, &changed_user)];
                         if let Some(active_room_id) = room_id {
                             let event_body = if let Some(role_bits) = role_bits {
@@ -9073,6 +9128,16 @@ mod tests {
                 .len(),
             1
         );
+        let audit = engine
+            .store
+            .moderation_audit_page(room.room_id, None, 10)
+            .expect("role audit");
+        assert_eq!(audit.records.len(), 1);
+        assert_eq!(audit.records[0].action, ModerationAuditAction::RoleChange);
+        assert_eq!(
+            audit.records[0].result_role_bits,
+            Some(ROLE_TRUSTED | ROLE_MODERATOR)
+        );
 
         engine
             .store
@@ -9108,6 +9173,15 @@ mod tests {
                 .store
                 .latest_events(room.room_id, 10)
                 .expect("replayed events")
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .store
+                .moderation_audit_page(room.room_id, None, 10)
+                .expect("replayed role audit")
+                .records
                 .len(),
             1
         );
@@ -9197,6 +9271,13 @@ mod tests {
                 & STATUS_BANNED,
             0
         );
+        let audit = engine
+            .store
+            .moderation_audit_page(room.room_id, None, 10)
+            .expect("unban audit");
+        assert_eq!(audit.records.len(), 1);
+        assert_eq!(audit.records[0].action, ModerationAuditAction::Unban);
+        assert_eq!(audit.records[0].result_status_bits, Some(0));
 
         engine
             .store
@@ -9233,6 +9314,15 @@ mod tests {
                 .store
                 .latest_events(room.room_id, 10)
                 .expect("events")
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .store
+                .moderation_audit_page(room.room_id, None, 10)
+                .expect("replayed unban audit")
+                .records
                 .len(),
             1
         );
@@ -9382,6 +9472,13 @@ mod tests {
                 .len(),
             2
         );
+        let audit = engine
+            .store
+            .moderation_audit_page(room_id, None, 10)
+            .expect("restart audit");
+        assert_eq!(audit.records.len(), 2);
+        assert_eq!(audit.records[0].action, ModerationAuditAction::Unban);
+        assert_eq!(audit.records[1].action, ModerationAuditAction::RoleChange);
         drop(engine);
         for candidate in [
             path.clone(),
@@ -9481,6 +9578,26 @@ mod tests {
                 1,
                 "{action}"
             );
+            let audit = engine
+                .store
+                .moderation_audit_page(room.room_id, None, 10)
+                .expect("moderation audit");
+            assert_eq!(audit.records.len(), 1, "{action}");
+            assert_eq!(
+                audit.records[0].action,
+                match action {
+                    "ban" => ModerationAuditAction::Ban,
+                    "mute" => ModerationAuditAction::Mute,
+                    "unmute" => ModerationAuditAction::Unmute,
+                    _ => ModerationAuditAction::Kick,
+                },
+                "{action}"
+            );
+            assert_eq!(audit.records[0].actor_display_name_at_action, "Alice");
+            assert_eq!(
+                audit.records[0].target_display_name_at_action.as_deref(),
+                Some("Bob")
+            );
 
             engine
                 .store
@@ -9536,6 +9653,16 @@ mod tests {
                     .store
                     .latest_events(room.room_id, 10)
                     .expect("replayed events")
+                    .len(),
+                1,
+                "{action}"
+            );
+            assert_eq!(
+                engine
+                    .store
+                    .moderation_audit_page(room.room_id, None, 10)
+                    .expect("replayed moderation audit")
+                    .records
                     .len(),
                 1,
                 "{action}"
