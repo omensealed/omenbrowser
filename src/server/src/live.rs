@@ -3607,7 +3607,10 @@ mod tests {
             .count();
         assert_eq!(capable_snapshots.len(), 1);
         assert_eq!(legacy_snapshots, 0);
-        let snapshot = crate::protocol::PinSnapshot::from_frame_body(&capable_snapshots[0].body)
+        let values =
+            crate::protocol::batch::decode_compressed_values_body(&capable_snapshots[0].body)
+                .expect("compressed pin snapshot");
+        let snapshot = crate::protocol::PinSnapshot::from_frame_body(&FrameBody::Fields(values))
             .expect("pin snapshot");
         assert!(snapshot.target_event_ids.contains(&target.event_id));
         assert!(snapshot.entries.is_empty());

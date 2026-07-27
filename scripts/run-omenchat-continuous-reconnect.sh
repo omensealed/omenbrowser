@@ -31,7 +31,7 @@ trap 'status=$?; echo "continuous OMENchat reconnect harness failed at line $LIN
 cargo build --locked --manifest-path "$repo_root/Cargo.toml" \
   --no-default-features --features desktop-product --bin omenbrowser_rs
 cargo build --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
-  --no-default-features --features server-headless --bin omenchatd
+  --no-default-features --features server-full --bin omenchatd
 
 browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
 server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
@@ -51,6 +51,7 @@ run_dir=$(bash "$repo_root/scripts/release-omenchat-smoke.sh" \
   --message "continuous current product reconnect" \
   --reaction-smoke \
   --revision-smoke \
+  --pin-smoke \
   --continuous-client-reconnect | tail -n 1)
 
 summary_file="$run_dir/summary.txt"
@@ -62,6 +63,7 @@ grep -qx 'continuous_session_reconnected: 1' "$summary_file"
 grep -qx 'continuous_message_echoed: 1' "$summary_file"
 grep -qx 'reaction_smoke: 1' "$summary_file"
 grep -qx 'revision_smoke: 1' "$summary_file"
+grep -qx 'pin_smoke: 1' "$summary_file"
 grep -qx 'continuous_reaction_recovered: 1' "$summary_file"
 grep -qx 'restart_destination_stable: 1' "$summary_file"
 grep -qx 'restart_stop: orderly' "$summary_file"
@@ -85,6 +87,7 @@ report = {
     "post_restart_message_echo_observed": True,
     "replacement_link_reaction_recovery_observed": True,
     "replacement_link_revision_recovery_observed": True,
+    "replacement_link_pin_recovery_observed": True,
     "isolated_loopback": True,
 }
 pathlib.Path(sys.argv[1]).write_text(

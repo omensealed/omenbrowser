@@ -23,6 +23,7 @@ restart_server=0
 continuous_client_reconnect=0
 reaction_smoke=0
 revision_smoke=0
+pin_smoke=0
 
 usage() {
   cat <<'USAGE'
@@ -57,6 +58,7 @@ Options:
                        Keep one browser smoke process alive while omenchatd restarts
   --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
   --revision-smoke     Exercise negotiated durable corrections, tombstones, replay, and Resource recovery
+  --pin-smoke          Exercise moderator-only durable pin replay, snapshots, no-op, and unpin
   --keep-roots         Leave generated browser/server roots in place
   -h, --help           Show this help
 
@@ -148,6 +150,10 @@ while [[ $# -gt 0 ]]; do
       revision_smoke=1
       shift
       ;;
+    --pin-smoke)
+      pin_smoke=1
+      shift
+      ;;
     --keep-roots)
       keep_roots=1
       shift
@@ -214,7 +220,7 @@ if [[ "$restart_server" -eq 1 && "$continuous_client_reconnect" -eq 1 ]]; then
   echo "--restart-server and --continuous-client-reconnect are separate cases" >&2
   exit 2
 fi
-if [[ ( "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 ) \
+if [[ ( "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 ) \
   && -z "$server_large_batch_threshold_bytes" ]]; then
   server_large_batch_threshold_bytes=1
 fi
@@ -331,6 +337,73 @@ echo "== Creating isolated browser identity =="
   > "$run_dir/browser-identity.json" \
   2> "$run_dir/browser-identity.stderr"
 
+if [[ "$pin_smoke" -eq 1 ]]; then
+  echo "== Registering isolated pin-smoke moderator identity =="
+  "$browser_bin" \
+    --omenchat-smoke "$destination" \
+    "${client_interface_args[@]}" \
+    --path-wait "$path_wait" \
+    --app-root "$browser_root" \
+    --omenchat-message "${message} (moderator registration)" \
+    --output "$run_dir/omenchat-pin-registration.json" \
+    > "$run_dir/omenchat-pin-registration.stdout" \
+    2> "$run_dir/omenchat-pin-registration.stderr"
+  if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-pin-registration.json"; then
+    echo "OMENchat pin moderator registration did not report pass" >&2
+    cat "$run_dir/omenchat-pin-registration.stderr" >&2
+    exit 1
+  fi
+
+  kill "$server_pid"
+  for _ in {1..80}; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  if kill -0 "$server_pid" 2>/dev/null; then
+    echo "omenchatd did not stop before pin role assignment" >&2
+    exit 1
+  fi
+  wait "$server_pid" || true
+  server_pid=""
+
+  printf 'users\nquit\n' | "$server_bin" tui --home "$server_home" \
+    > "$run_dir/omenchatd-pin-users.txt"
+  pin_user_id="$(sed -n 's/^  id= *\([0-9][0-9]*\).*/\1/p' "$run_dir/omenchatd-pin-users.txt" | head -n 1)"
+  if [[ -z "$pin_user_id" ]]; then
+    echo "could not identify isolated pin-smoke user" >&2
+    cat "$run_dir/omenchatd-pin-users.txt" >&2
+    exit 1
+  fi
+  printf 'set-user-role %s mod\nquit\n' "$pin_user_id" \
+    | "$server_bin" tui --home "$server_home" \
+      > "$run_dir/omenchatd-pin-role.txt"
+  if ! grep -q "user role updated: id=$pin_user_id role=mod" "$run_dir/omenchatd-pin-role.txt"; then
+    echo "isolated pin-smoke moderator assignment failed" >&2
+    cat "$run_dir/omenchatd-pin-role.txt" >&2
+    exit 1
+  fi
+
+  "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+    > "$run_dir/omenchatd-run-pin-role-restart.log" 2>&1 &
+  server_pid="$!"
+  for _ in {1..80}; do
+    if grep -q 'live server ready' "$run_dir/omenchatd-run-pin-role-restart.log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "omenchatd exited after pin role assignment" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if ! grep -q 'live server ready' "$run_dir/omenchatd-run-pin-role-restart.log" 2>/dev/null; then
+    echo "omenchatd did not restart after pin role assignment" >&2
+    exit 1
+  fi
+fi
+
 echo "== Running OMENchat client smoke =="
 restart_destination_stable=0
 restart_stop="not-run"
@@ -353,6 +426,10 @@ revision_args=()
 if [[ "$revision_smoke" -eq 1 ]]; then
   revision_args=(--omenchat-revision-smoke --omenchat-response-wait 30)
 fi
+pin_args=()
+if [[ "$pin_smoke" -eq 1 ]]; then
+  pin_args=(--omenchat-pin-smoke --omenchat-response-wait 30)
+fi
 "$browser_bin" \
   --omenchat-smoke "$destination" \
   "${client_interface_args[@]}" \
@@ -361,6 +438,7 @@ fi
   --omenchat-message "$message" \
   "${reaction_args[@]}" \
   "${revision_args[@]}" \
+  "${pin_args[@]}" \
   "${upload_args[@]}" \
   "${continuous_args[@]}" \
   --output "$run_dir/omenchat-smoke.json" \
@@ -464,7 +542,7 @@ continuous_session_reconnected=0
 continuous_message_echoed=0
 continuous_reaction_recovered=0
 if [[ "$continuous_client_reconnect" -eq 1 ]]; then
-  python3 - "$run_dir/omenchat-smoke.json" "$reaction_smoke" "$revision_smoke" <<'PY'
+  python3 - "$run_dir/omenchat-smoke.json" "$reaction_smoke" "$revision_smoke" "$pin_smoke" <<'PY'
 import json
 import pathlib
 import sys
@@ -472,6 +550,7 @@ import sys
 report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 reaction_smoke = sys.argv[2] == "1"
 revision_smoke = sys.argv[3] == "1"
+pin_smoke = sys.argv[4] == "1"
 stages = {
     stage.get("stage"): stage
     for stage in report.get("stages", [])
@@ -513,6 +592,20 @@ if revision_smoke:
     )
     if any(stages.get(name, {}).get("ok") is not True for name in revision_required):
         raise SystemExit("replacement-link revision evidence was incomplete")
+if pin_smoke:
+    pin_required = (
+        "continuous_pin_capability",
+        "continuous_pin_authority_sync",
+        "continuous_pin_lost_ack",
+        "continuous_pin_exact_replay",
+        "continuous_pin_snapshot",
+        "continuous_pin_noop",
+        "continuous_pin_unpin",
+        "continuous_pin_unpin_snapshot",
+        "continuous_pin_intent_persistence",
+    )
+    if any(stages.get(name, {}).get("ok") is not True for name in pin_required):
+        raise SystemExit("replacement-link pin evidence was incomplete")
 PY
   continuous_link_closed=1
   continuous_link_reopened=1
@@ -597,6 +690,7 @@ if [[ "$restart_server" -eq 1 ]]; then
     --omenchat-message "${message} (after server restart)" \
     "${reaction_args[@]}" \
     "${revision_args[@]}" \
+    "${pin_args[@]}" \
     --output "$run_dir/omenchat-smoke-restart.json" \
     > "$run_dir/omenchat-smoke-restart.stdout" \
     2> "$run_dir/omenchat-smoke-restart.stderr"
@@ -682,6 +776,7 @@ restart_server: $restart_server
 continuous_client_reconnect: $continuous_client_reconnect
 reaction_smoke: $reaction_smoke
 revision_smoke: $revision_smoke
+pin_smoke: $pin_smoke
 continuous_link_closed: $continuous_link_closed
 continuous_link_reopened: $continuous_link_reopened
 continuous_session_reconnected: $continuous_session_reconnected

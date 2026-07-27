@@ -1413,8 +1413,18 @@ identity-scoped client instance and durable base request; omenchatd accepts it
 only alongside that valid durable request. Unsolicited acceptance, pin-only
 requests, downgrade, capability loss, identity replacement, and Link
 retirement remain fail closed. No operation, schema, limit, queue, worker,
-timer, retry, or ordinary protocol-v1 frame changed. Isolated current/current
-process qualification remains required before the release gate is complete.
+timer, retry, or ordinary protocol-v1 frame changed.
+
+The eighth pin slice completes the isolated current/current process gate. One
+client stays alive across orderly omenchatd restart, observes Link closure and
+replacement, restores its session, and repeats moderator-authorized pin,
+deliberately withheld acknowledgement, exact replay, semantic no-op,
+authoritative snapshot reconciliation, unpin, and intent-store cleanup. The
+gate exposed a server/client encoding mismatch for `PinSnapshot`; the server
+now emits the bounded compressed inline body required by the existing live
+client decoder. Focused tests and the independent-process smoke guard that
+boundary. Pin snapshots remain bounded inline frames rather than being
+misclassified as Resource batches.
 
 ### Unit 6G — room policy controls
 

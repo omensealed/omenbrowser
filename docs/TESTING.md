@@ -4557,5 +4557,28 @@ The server filter includes exact global active saturation, per-room/global
 audit replacement, and the maximum 256-target/64-entry inline frame. The
 measurement uses one isolated temporary database, checkpoints it before sizing,
 removes it afterward, and reports observations rather than release thresholds.
-Exact evidence and the still-separate activation/live-smoke boundary are in
+Exact deterministic, activation, and live-process evidence is in
 `docs/audits/omenchat-pins-qualification.md`.
+
+Activated current/current pins are qualified with isolated roots and a
+moderator role assigned through omenchatd's local admin console:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 45 \
+  --out <isolated-output-root> \
+  --message "pin reconnect qualification" \
+  --pin-smoke \
+  --continuous-client-reconnect
+```
+
+The gate covers pin capability and authority, deliberately withheld
+acknowledgement, exact durable replay, authoritative bounded-inline snapshot,
+semantic no-op, unpin, persistent-intent cleanup, graceful server restart, and
+replacement-Link recovery. It does not weaken role checks or automatically
+resend uncertain mutations. The server's small large-batch threshold still
+forces Resource transport for eligible history/reaction/revision batches;
+`PinSnapshot` is intentionally a separately bounded compressed inline frame.

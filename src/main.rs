@@ -194,6 +194,7 @@ async fn async_main() -> anyhow::Result<()> {
             message,
             reaction_smoke,
             revision_smoke,
+            pin_smoke,
             upload_file,
             fetch_upload_filename,
             fetch_upload_bytes,
@@ -212,6 +213,7 @@ async fn async_main() -> anyhow::Result<()> {
                 message,
                 reaction_smoke,
                 revision_smoke,
+                pin_smoke,
                 upload_file,
                 fetch_upload_filename,
                 fetch_upload_bytes,
@@ -358,6 +360,7 @@ enum CliCommand {
         message: String,
         reaction_smoke: bool,
         revision_smoke: bool,
+        pin_smoke: bool,
         upload_file: Option<PathBuf>,
         fetch_upload_filename: Option<String>,
         fetch_upload_bytes: Option<u64>,
@@ -425,6 +428,7 @@ struct OmenChatSmokeCommandInput {
     message: String,
     reaction_smoke: bool,
     revision_smoke: bool,
+    pin_smoke: bool,
     upload_file: Option<PathBuf>,
     fetch_upload_filename: Option<String>,
     fetch_upload_bytes: Option<u64>,
@@ -513,6 +517,7 @@ impl CliCommand {
         let mut omenchat_message = "OMENchat smoke test from OMENbrowser_rs".to_string();
         let mut omenchat_reaction_smoke = false;
         let mut omenchat_revision_smoke = false;
+        let mut omenchat_pin_smoke = false;
         let mut omenchat_upload_file = None;
         let mut omenchat_fetch_upload_filename = None;
         let mut omenchat_fetch_upload_bytes = None;
@@ -603,6 +608,9 @@ impl CliCommand {
                 }
                 "--omenchat-revision-smoke" => {
                     omenchat_revision_smoke = true;
+                }
+                "--omenchat-pin-smoke" => {
+                    omenchat_pin_smoke = true;
                 }
                 "--omenchat-upload-file" | "--upload-file" => {
                     let value = args
@@ -858,6 +866,7 @@ impl CliCommand {
                 message: omenchat_message,
                 reaction_smoke: omenchat_reaction_smoke,
                 revision_smoke: omenchat_revision_smoke,
+                pin_smoke: omenchat_pin_smoke,
                 upload_file: omenchat_upload_file,
                 fetch_upload_filename: omenchat_fetch_upload_filename,
                 fetch_upload_bytes: omenchat_fetch_upload_bytes,
@@ -3626,6 +3635,7 @@ mod tests {
             "hello smoke".to_string(),
             "--omenchat-reaction-smoke".to_string(),
             "--omenchat-revision-smoke".to_string(),
+            "--omenchat-pin-smoke".to_string(),
             "--path-wait".to_string(),
             "3".to_string(),
             "--tcp-client".to_string(),
@@ -3646,6 +3656,7 @@ mod tests {
                 message: "hello smoke".into(),
                 reaction_smoke: true,
                 revision_smoke: true,
+                pin_smoke: true,
                 upload_file: None,
                 fetch_upload_filename: None,
                 fetch_upload_bytes: None,

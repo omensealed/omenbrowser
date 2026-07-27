@@ -13,9 +13,10 @@ production capability activation. A subsequent separately reversible slice
 enabled client request and server acceptance together without changing an
 operation assignment, schema, retention limit, queue, worker, timer, or retry.
 
-Verdict: deterministic and activation gates pass; release qualification is not
-complete. A real current/current two-client pin/unpin/restart smoke remains
-pending and is not claimed.
+Verdict: deterministic, activation, and isolated current/current live process
+gates pass. The live gate uses one continuously running client across an
+orderly omenchatd restart and replacement Link; no automatic uncertain
+mutation retry is enabled.
 
 ## Deterministic evidence
 
@@ -93,10 +94,65 @@ cd src/server
 cargo test --locked --no-default-features --features server-headless pin --lib
 cargo test --locked --no-default-features --features server-headless \
   pin_state_retention_measurement --lib -- --ignored --nocapture
+
+# Isolated live current/current qualification, from repository root
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 45 \
+  --out <isolated-output-root> \
+  --message "pin reconnect qualification" \
+  --pin-smoke \
+  --continuous-client-reconnect
 ```
 
 The complete formatting, check, test, strict-Clippy, protocol, release, and
 packaging commands remain documented in `docs/TESTING.md`.
+
+## Live current/current evidence
+
+The 2026-07-27 isolated run passed all of these initial-Link and
+replacement-Link stages:
+
+- durable and `room-pins-v1` capability negotiation;
+- exact-target authority synchronization;
+- moderator-authorized pin;
+- deliberately withheld acknowledgement and exact durable replay;
+- authoritative pin snapshot;
+- semantic no-op pin;
+- unpin and authoritative absence snapshot;
+- zero nonterminal persistent mutation intents;
+- orderly server shutdown, stable server identity, Link closure, replacement
+  Link, session restoration, and post-reconnect room traffic.
+
+The harness creates isolated browser/server roots, first registers the browser
+identity as an ordinary user, stops omenchatd, assigns that isolated user the
+moderator role through omenchatd's local admin console, and restarts it. It
+does not bypass production authorization. The retained local report for the
+qualification run was:
+
+```text
+outcome: pass
+continuous_client_reconnect: 1
+pin_smoke: 1
+continuous_link_closed: 1
+continuous_link_reopened: 1
+continuous_session_reconnected: 1
+continuous_message_echoed: 1
+restart_destination_stable: 1
+restart_stop: orderly
+```
+
+The live run exposed and now guards one real boundary mismatch:
+`SessionEngine::pin_snapshot_frame` emitted raw snapshot fields while the
+client's `ChatOp::PinSnapshot` transport path expects the same bounded
+compressed inline batch used by its existing decoder. The server now emits
+that bounded compressed inline body. Focused session/live tests decode the
+actual emitted form, and the process test proves the independently built
+desktop receives and applies it. Pin snapshots remain deliberately inline;
+the forced-Resource threshold applies to history, reaction, and revision
+batches, not to the protocol's bounded pin snapshot.
 
 ## Remaining evidence and activation boundary
 
@@ -104,10 +160,6 @@ packaging commands remain documented in `docs/TESTING.md`.
   reversible risk class; deterministic negotiation regressions pass.
 - Preserve fail-closed unsolicited acceptance, base-only peer, downgrade,
   identity replacement, capability loss, and Link retirement behavior.
-- After activation, run an isolated current/current two-client smoke covering
-  pin, semantic no-op, unpin, deliberately lost acknowledgement, exact replay,
-  forced snapshot reconciliation, graceful omenchatd restart, replacement
-  Link, and clean durable-intent completion.
 - Run adjacent-version ordinary traffic and the normal release resource gates.
 - Do not describe an acknowledgement as authoritative pin state; the client
   must continue waiting for the matching delta or explicit snapshot.

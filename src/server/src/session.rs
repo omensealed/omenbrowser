@@ -636,7 +636,15 @@ impl SessionEngine {
         target_event_ids: &[u64],
     ) -> ServerResult<Frame> {
         let snapshot = self.store.pin_snapshot(room_id, target_event_ids)?;
-        let body = snapshot.into_frame_body().map_err(|error| {
+        let FrameBody::Fields(values) = snapshot.into_frame_body().map_err(|error| {
+            ServerError::Message(format!("pin snapshot encode failed: {error}"))
+        })?
+        else {
+            return Err(ServerError::Message(
+                "pin snapshot did not encode as fields".into(),
+            ));
+        };
+        let body = compressed_values_body(&values).map_err(|error| {
             ServerError::Message(format!("pin snapshot encode failed: {error}"))
         })?;
         Ok(Frame::new(ChatOp::PinSnapshot, seq, Some(room_id), body))
@@ -5830,8 +5838,10 @@ mod tests {
             .pin_snapshot_frame(10, room_id, &[target_event_id])
             .expect("pin snapshot");
         assert_eq!(snapshot.op, ChatOp::PinSnapshot);
-        let snapshot =
-            crate::protocol::PinSnapshot::from_frame_body(&snapshot.body).expect("snapshot body");
+        let values = crate::protocol::batch::decode_compressed_values_body(&snapshot.body)
+            .expect("compressed snapshot body");
+        let snapshot = crate::protocol::PinSnapshot::from_frame_body(&FrameBody::Fields(values))
+            .expect("snapshot body");
         assert_eq!(snapshot.target_event_ids, vec![target_event_id]);
         assert_eq!(snapshot.entries.len(), 1);
         drop(engine);

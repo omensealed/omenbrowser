@@ -106,6 +106,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         message,
         reaction_smoke,
         revision_smoke,
+        pin_smoke,
         upload_file,
         fetch_upload_filename,
         fetch_upload_bytes,
@@ -363,7 +364,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
 
     let mut reaction_ok = true;
     let mutation_identity_storage_root = app.paths.identity_storage_root();
-    let mutation_identity_hash = if reaction_smoke || revision_smoke {
+    let mutation_identity_hash = if reaction_smoke || revision_smoke || pin_smoke {
         app.runtime_status
             .active_identity
             .as_ref()
@@ -433,6 +434,38 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         .await?;
         revision_ok = passed;
         stages.extend(revision_stages);
+    }
+
+    let mut pin_ok = true;
+    if joined && message_seen && pin_smoke {
+        let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
+            .context("OMENchat pin smoke target message was not retained")?;
+        let authenticated_identity_hash =
+            mutation_identity_hash.context("OMENchat pin smoke has no active identity")?;
+        let room_id = client
+            .session(session_id)
+            .map(|session| session.active_room.room_id)
+            .unwrap_or(1);
+        let (passed, pin_stages) = run_omenchat_pin_smoke(
+            &*app.runtime,
+            &mut runtime_events,
+            &mut client,
+            &mut live_state,
+            &mut transport,
+            OmenChatPinSmokeOptions {
+                link_id: opened.link_id,
+                session_id,
+                room_id,
+                target_event_id,
+                server_destination: &destination,
+                identity_storage_root: &mutation_identity_storage_root,
+                authenticated_identity_hash,
+                wait: Duration::from_secs(response_wait_secs),
+            },
+        )
+        .await?;
+        pin_ok = passed;
+        stages.extend(pin_stages);
     }
 
     let mut upload_ok = true;
@@ -599,6 +632,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                     response_wait: Duration::from_secs(response_wait_secs),
                     reaction_smoke,
                     revision_smoke,
+                    pin_smoke,
                     server_destination: &destination,
                     identity_storage_root: &mutation_identity_storage_root,
                     authenticated_identity_hash: mutation_identity_hash,
@@ -632,7 +666,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             "status": session.status.clone(),
         })
     });
-    let outcome = joined && message_seen && reaction_ok && revision_ok && upload_ok && reconnect_ok;
+    let outcome =
+        joined && message_seen && reaction_ok && revision_ok && pin_ok && upload_ok && reconnect_ok;
     let failed_stage = if !joined {
         "join_wait"
     } else if !message_seen {
@@ -641,6 +676,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "reaction_smoke"
     } else if !revision_ok {
         "revision_smoke"
+    } else if !pin_ok {
+        "pin_smoke"
     } else if !upload_ok {
         "upload_fetch_wait"
     } else if !reconnect_ok {
@@ -820,6 +857,7 @@ struct OmenChatContinuousReconnectSmoke<'a> {
     response_wait: Duration,
     reaction_smoke: bool,
     revision_smoke: bool,
+    pin_smoke: bool,
     server_destination: &'a str,
     identity_storage_root: &'a std::path::Path,
     authenticated_identity_hash: Option<[u8; 16]>,
@@ -1077,12 +1115,61 @@ async fn run_omenchat_continuous_reconnect_smoke(
             stage
         }));
     }
+    let mut pin_ok = true;
+    if input.pin_smoke && message_seen {
+        let target_event_id =
+            omenchat_session_message_event_id(input.client, input.session_id, &reconnect_message)
+                .context("continuous reconnect pin target message was not retained")?;
+        let room_id = input
+            .client
+            .session(input.session_id)
+            .map(|session| session.active_room.room_id)
+            .unwrap_or(1);
+        let Some(authenticated_identity_hash) = input.authenticated_identity_hash else {
+            stages.push(serde_json::json!({
+                "stage": "continuous_pin_identity",
+                "ok": false,
+                "reason": "active identity was unavailable",
+            }));
+            return Ok((false, Some(opened.link_id), stages));
+        };
+        let (passed, pin_stages) = run_omenchat_pin_smoke(
+            input.runtime,
+            input.runtime_events,
+            input.client,
+            input.live_state,
+            input.transport,
+            OmenChatPinSmokeOptions {
+                link_id: opened.link_id,
+                session_id: input.session_id,
+                room_id,
+                target_event_id,
+                server_destination: input.server_destination,
+                identity_storage_root: input.identity_storage_root,
+                authenticated_identity_hash,
+                wait: input.response_wait,
+            },
+        )
+        .await?;
+        pin_ok = passed;
+        stages.extend(pin_stages.into_iter().map(|mut stage| {
+            if let Some(name) = stage
+                .get("stage")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+            {
+                stage["stage"] = serde_json::Value::String(format!("continuous_{name}"));
+            }
+            stage
+        }));
+    }
     Ok((
         reconnect_started
             && send_ok
             && message_seen
             && reaction_ok
             && revision_ok
+            && pin_ok
             && opened.link_id != input.old_link_id,
         Some(opened.link_id),
         stages,
@@ -1468,6 +1555,428 @@ async fn run_omenchat_reaction_smoke(
             && no_op_ok
             && remove_ok
             && remove_snapshot_ok
+            && persistence_ok,
+        stages,
+    ))
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+struct OmenChatPinSmokeOptions<'a> {
+    link_id: [u8; 16],
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    room_id: u32,
+    target_event_id: u64,
+    server_destination: &'a str,
+    identity_storage_root: &'a std::path::Path,
+    authenticated_identity_hash: [u8; 16],
+    wait: Duration,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn prepare_omenchat_smoke_pin(
+    store: &omenbrowser_rs::chat::mutation_intents::MutationIntentStore,
+    options: &OmenChatPinSmokeOptions<'_>,
+    client_instance_id: omenbrowser_rs::chat::protocol::ClientInstanceId,
+    action: omenbrowser_rs::chat::protocol::PinAction,
+) -> anyhow::Result<omenbrowser_rs::chat::mutation_intents::OutboundMutationIntent> {
+    use omenbrowser_rs::chat::mutation_intents::{
+        IntentTransition, OutboundMutationState, PrepareOutboundMutation,
+    };
+    use omenbrowser_rs::chat::protocol::{ChatOp, PinRequest};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default();
+    let body = PinRequest {
+        target_event_id: options.target_event_id,
+        action,
+    }
+    .into_frame_body()
+    .context("encode OMENchat smoke pin")?;
+    let prepared = store.persist_prepared(PrepareOutboundMutation {
+        server_destination: options.server_destination,
+        authenticated_identity_hash: &options.authenticated_identity_hash,
+        client_instance_id,
+        op: ChatOp::RoomPin,
+        room_id: Some(options.room_id),
+        body,
+        created_at: now,
+        expires_at: now.saturating_add(60 * 60),
+        correlation_id: Some("release-pin-smoke"),
+    })?;
+    match store.transition(
+        prepared.mutation_id,
+        OutboundMutationState::Prepared,
+        OutboundMutationState::SentUncertain,
+    )? {
+        IntentTransition::Updated(intent) => Ok(intent),
+        other => anyhow::bail!("OMENchat smoke pin transition failed: {other:?}"),
+    }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn send_omenchat_smoke_pin(
+    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
+    client: &mut omenbrowser_rs::chat::ChatClient,
+    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &mut OmenChatSmokeTransport,
+    options: &OmenChatPinSmokeOptions<'_>,
+    intent: &omenbrowser_rs::chat::mutation_intents::OutboundMutationIntent,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let events = omenbrowser_rs::chat::live::send_uncertain_durable_pin(
+        client,
+        live_state,
+        transport,
+        options.session_id,
+        intent,
+    );
+    if events
+        .iter()
+        .any(|event| matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. }))
+    {
+        anyhow::bail!("OMENchat smoke pin was rejected before transmission");
+    }
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    Ok(events.iter().map(format_chat_event).collect())
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn discard_omenchat_pin_ack(
+    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    link_id: [u8; 16],
+    wait: Duration,
+) -> anyhow::Result<serde_json::Value> {
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, runtime_events.recv()).await {
+            Ok(Ok(RuntimeBusEvent::OmenChatLinkData(data))) if data.link_id == link_id => {
+                let frame = omenbrowser_rs::chat::codec::decode_frame(&data.frame_bytes)
+                    .context("decode deliberately discarded OMENchat pin response")?;
+                if frame.op == omenbrowser_rs::chat::protocol::ChatOp::PinAck {
+                    return Ok(serde_json::json!({
+                        "stage": "pin_lost_ack",
+                        "ok": true,
+                        "bytes": data.frame_bytes.len(),
+                        "sequence": frame.seq,
+                    }));
+                }
+            }
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
+        }
+    }
+    anyhow::bail!("OMENchat smoke did not observe the pin acknowledgement selected for loss")
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn run_omenchat_pin_smoke(
+    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
+    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    client: &mut omenbrowser_rs::chat::ChatClient,
+    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &mut OmenChatSmokeTransport,
+    options: OmenChatPinSmokeOptions<'_>,
+) -> anyhow::Result<(bool, Vec<serde_json::Value>)> {
+    use omenbrowser_rs::chat::mutation_intents::{MutationIntentStore, OutboundMutationState};
+    use omenbrowser_rs::chat::protocol::PinAction;
+    use omenbrowser_rs::chat::ChatClientRequest;
+
+    let mut stages = Vec::new();
+    let negotiated = live_state.durable_mutations_negotiated(options.session_id)
+        && live_state.pins_negotiated(options.session_id);
+    stages.push(serde_json::json!({
+        "stage": "pin_capability",
+        "ok": negotiated,
+    }));
+    let Some(client_instance_id) = live_state.client_instance_id() else {
+        return Ok((false, stages));
+    };
+    if !negotiated {
+        return Ok((false, stages));
+    }
+    let store = MutationIntentStore::open_for_identity_storage_root(options.identity_storage_root)
+        .context("open isolated OMENchat pin smoke mutation store")?;
+
+    let authority_request = omenbrowser_rs::chat::live::handle_live_request(
+        client,
+        live_state,
+        transport,
+        ChatClientRequest::SyncRecent {
+            session_id: options.session_id,
+        },
+    );
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    let authority_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client.pin_target_authoritative(
+                options.session_id,
+                options.room_id,
+                options.target_event_id,
+            )
+        },
+    )
+    .await;
+    let target_authoritative = client.pin_target_authoritative(
+        options.session_id,
+        options.room_id,
+        options.target_event_id,
+    );
+    stages.push(serde_json::json!({
+        "stage": "pin_authority_sync",
+        "ok": target_authoritative,
+        "request_events": authority_request.iter().map(format_chat_event).collect::<Vec<_>>(),
+        "events": authority_events,
+    }));
+    if !target_authoritative {
+        return Ok((false, stages));
+    }
+
+    // The authority sync can finish as soon as the pin snapshot is applied while
+    // unrelated history resources are still completing. Start the deliberate
+    // lost-ack observation at the current event tail so those bounded diagnostics
+    // cannot evict the acknowledgement we intend to withhold.
+    *runtime_events = runtime
+        .subscribe_events()
+        .ok_or_else(|| anyhow::anyhow!("configured runtime does not expose runtime events"))?;
+
+    let pin = prepare_omenchat_smoke_pin(&store, &options, client_instance_id, PinAction::Pin)?;
+    let sent =
+        send_omenchat_smoke_pin(runtime, client, live_state, transport, &options, &pin).await?;
+    stages.push(serde_json::json!({
+        "stage": "pin_send",
+        "ok": true,
+        "events": sent,
+    }));
+    stages.push(discard_omenchat_pin_ack(runtime_events, options.link_id, options.wait).await?);
+    live_state.cancel_session_transfers(options.session_id);
+
+    let replayed =
+        send_omenchat_smoke_pin(runtime, client, live_state, transport, &options, &pin).await?;
+    let replay_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client.session(options.session_id).is_some_and(|session| {
+                session.status == "pin mutation accepted by server; awaiting room event"
+            })
+        },
+    )
+    .await;
+    let replay_acknowledged = client.session(options.session_id).is_some_and(|session| {
+        session.status == "pin mutation accepted by server; awaiting room event"
+    });
+    stages.push(serde_json::json!({
+        "stage": "pin_exact_replay",
+        "ok": replay_acknowledged,
+        "send_events": replayed,
+        "events": replay_events,
+    }));
+    if replay_acknowledged {
+        let _ = store.transition(
+            pin.mutation_id,
+            OutboundMutationState::SentUncertain,
+            OutboundMutationState::Acknowledged,
+        )?;
+    }
+
+    let sync_events = omenbrowser_rs::chat::live::handle_live_request(
+        client,
+        live_state,
+        transport,
+        ChatClientRequest::SyncRecent {
+            session_id: options.session_id,
+        },
+    );
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    let snapshot_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client
+                .pin_for_target(options.session_id, options.room_id, options.target_event_id)
+                .is_some()
+                && client.pin_target_authoritative(
+                    options.session_id,
+                    options.room_id,
+                    options.target_event_id,
+                )
+        },
+    )
+    .await;
+    let authoritative_snapshot =
+        omenchat_smoke_events_contain_decoded_event(&snapshot_events, "pin_snapshot_applied")
+            && client
+                .pin_for_target(options.session_id, options.room_id, options.target_event_id)
+                .is_some();
+    stages.push(serde_json::json!({
+        "stage": "pin_snapshot",
+        "ok": authoritative_snapshot,
+        "request_events": sync_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+        "events": snapshot_events,
+    }));
+
+    let no_op = prepare_omenchat_smoke_pin(&store, &options, client_instance_id, PinAction::Pin)?;
+    let _ =
+        send_omenchat_smoke_pin(runtime, client, live_state, transport, &options, &no_op).await?;
+    let no_op_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client
+                .session(options.session_id)
+                .is_some_and(|session| session.status == "pin already matched the requested state")
+        },
+    )
+    .await;
+    let no_op_ok = client
+        .session(options.session_id)
+        .is_some_and(|session| session.status == "pin already matched the requested state");
+    if no_op_ok {
+        let _ = store.transition(
+            no_op.mutation_id,
+            OutboundMutationState::SentUncertain,
+            OutboundMutationState::Acknowledged,
+        )?;
+    }
+    stages.push(serde_json::json!({
+        "stage": "pin_noop",
+        "ok": no_op_ok,
+        "events": no_op_events,
+    }));
+
+    let unpin = prepare_omenchat_smoke_pin(&store, &options, client_instance_id, PinAction::Unpin)?;
+    let _ =
+        send_omenchat_smoke_pin(runtime, client, live_state, transport, &options, &unpin).await?;
+    let unpin_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client.session(options.session_id).is_some_and(|session| {
+                session.status == "pin mutation accepted by server; awaiting room event"
+            })
+        },
+    )
+    .await;
+    let unpin_ok = client.session(options.session_id).is_some_and(|session| {
+        session.status == "pin mutation accepted by server; awaiting room event"
+    });
+    if unpin_ok {
+        let _ = store.transition(
+            unpin.mutation_id,
+            OutboundMutationState::SentUncertain,
+            OutboundMutationState::Acknowledged,
+        )?;
+    }
+    stages.push(serde_json::json!({
+        "stage": "pin_unpin",
+        "ok": unpin_ok,
+        "events": unpin_events,
+    }));
+
+    let unpin_sync_events = omenbrowser_rs::chat::live::handle_live_request(
+        client,
+        live_state,
+        transport,
+        ChatClientRequest::SyncRecent {
+            session_id: options.session_id,
+        },
+    );
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    let unpin_snapshot_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client
+                .pin_for_target(options.session_id, options.room_id, options.target_event_id)
+                .is_none()
+                && client.pin_target_authoritative(
+                    options.session_id,
+                    options.room_id,
+                    options.target_event_id,
+                )
+        },
+    )
+    .await;
+    let unpin_snapshot_ok = client
+        .pin_for_target(options.session_id, options.room_id, options.target_event_id)
+        .is_none()
+        && client.pin_target_authoritative(
+            options.session_id,
+            options.room_id,
+            options.target_event_id,
+        );
+    stages.push(serde_json::json!({
+        "stage": "pin_unpin_snapshot",
+        "ok": unpin_snapshot_ok,
+        "request_events": unpin_sync_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+        "events": unpin_snapshot_events,
+    }));
+
+    let recovered = store.recover_nonterminal()?;
+    let persistence_ok = recovered.is_empty();
+    stages.push(serde_json::json!({
+        "stage": "pin_intent_persistence",
+        "ok": persistence_ok,
+        "nonterminal_count": recovered.len(),
+    }));
+    Ok((
+        replay_acknowledged
+            && authoritative_snapshot
+            && no_op_ok
+            && unpin_ok
+            && unpin_snapshot_ok
             && persistence_ok,
         stages,
     ))

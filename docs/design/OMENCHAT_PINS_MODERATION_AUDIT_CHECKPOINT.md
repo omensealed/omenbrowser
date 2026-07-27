@@ -1,8 +1,8 @@
 # OMENchat pins and moderation-audit checkpoint
 
 Status: pin protocol, bounded storage/execution, desktop projection, durable
-controls, deterministic qualification, and reversible production negotiation
-implemented; isolated current/current process qualification remains pending;
+controls, deterministic qualification, reversible production negotiation, and
+isolated current/current restart/replay qualification implemented;
 moderation-audit work remains design-only
 
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`
@@ -438,15 +438,20 @@ The presentation must distinguish:
    together at the existing durable capability boundary. Unsolicited
    acceptance, pin-only requests, downgrade, capability loss, identity
    replacement, and Link retirement remain fail closed. No operation, schema,
-   bound, queue, worker, timer, or retry changed. Live current/current process
-   qualification remains required before release readiness is claimed.
-8. Add shared dormant moderation-audit types and operations 52–55. Keep
+   bound, queue, worker, timer, or retry changed.
+8. **Complete (2026-07-27):** qualify one continuously running current client
+   across orderly omenchatd restart and replacement Link. The isolated gate
+   covers moderator setup, pin, withheld acknowledgement, exact replay,
+   semantic no-op, authoritative snapshot reconciliation, unpin, and clean
+   durable-intent completion on both Links. It also corrected and now guards
+   the live server/client compressed-inline `PinSnapshot` encoding boundary.
+9. Add shared dormant moderation-audit types and operations 52–55. Keep
    negotiation unchanged.
-9. Add schema-10 constrained audit storage and transactionally couple only
+10. Add schema-10 constrained audit storage and transactionally couple only
    proven moderation paths; provide schema-9/schema-8 copies.
-10. Add authorized bounded inline/Resource paging and ephemeral client
+11. Add authorized bounded inline/Resource paging and ephemeral client
    presentation behind test-only negotiated state.
-11. Qualify role loss, pagination, replay, restart, malformed/oversized,
+12. Qualify role loss, pagination, replay, restart, malformed/oversized,
     mixed-version, privacy/redaction, and measurements; then separately review
     activation.
 
