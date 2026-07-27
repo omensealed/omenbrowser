@@ -2,10 +2,11 @@
 
 Date: 2026-07-27
 
-Baseline: `release/v0.9.6-4` at `27d45b9`, plus this dormant wire unit
+Baseline: `release/v0.9.6-4` through `5250d52`, plus this dormant server
+catalog-negotiation unit
 
-Verdict: dormant shared wire contract passes; storage, enforcement,
-presentation, process qualification, and activation are not implemented
+Verdict: dormant shared wire contract and test-enabled server catalog
+negotiation pass; production request/acceptance remains disabled
 
 ## Scope
 
@@ -22,6 +23,14 @@ This unit adds:
 It adds no operation number, error code, schema, room field, configuration,
 server predicate, client model field, UI/TUI control, queue, task, timer,
 cache, retry, or network request.
+
+Later separately qualified units added schema-11 storage, server enforcement,
+bounded client projection, and non-negotiated real-Link authorization. This
+follow-up wire unit adds a test-only server-engine enable boundary. With that
+boundary enabled, an explicit `announcement-rooms-v1` request is accepted and
+the initial room catalog uses the shared five-field encoder with authoritative
+policy. The normal constructor keeps the boundary disabled, so production
+omenchatd still omits acceptance and sends legacy four-field catalogs.
 
 ## Wire invariants
 
@@ -53,6 +62,8 @@ cargo test --locked --no-default-features --features desktop-product \
   --features server-headless announcement_room --lib -- --nocapture)
 cargo test --locked --no-default-features --features desktop-product \
   live_open_requests_supported_durable_extensions_with_persistent_client_identity --lib
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless announcement_rooms --lib -- --nocapture)
 ```
 
 Focused results:
@@ -63,6 +74,10 @@ Focused results:
 - omenchatd independent codec plus dormant acceptance: 2 passed;
 - production desktop capability vector remains unchanged and excludes
   `announcement-rooms-v1`.
+- test-enabled server catalog negotiation plus normal server dormancy: 2
+  passed;
+- standalone server-headless all-target strict Clippy: passed with
+  `-D warnings`.
 
 Full local matrix:
 
@@ -90,11 +105,7 @@ history, and destination names are unchanged.
 
 ## Not claimed
 
-- schema 11 migration or rollback export;
-- room policy persistence;
-- server authorization;
-- policy-aware room catalog or delta dispatch;
-- desktop projection, GUI, TUI, or mock behavior;
+- policy-aware join/delta dispatch;
 - current/current or adjacent-version process traffic;
 - native package behavior;
 - production activation.

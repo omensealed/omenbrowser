@@ -4746,6 +4746,20 @@ from a replacement that does not accept the capability, and is restored only
 after a fresh explicit request/accept. It is not real-Link negotiated process
 evidence.
 
+The dormant server acceptance and initial-catalog encoder boundary is covered
+independently:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  announcement_rooms --lib -- --nocapture
+```
+
+The normal engine must continue omitting acceptance. The test-enabled engine
+must accept only an explicit request and encode authoritative policy through
+the five-field shared room value. This does not cover join/delta fanout or
+activate the production server.
+
 Standard-member upload rejection before server acceptance or allocation is
 covered by:
 

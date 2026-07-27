@@ -16,8 +16,9 @@ use crate::protocol::{
     ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
     MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, ModerationAuditAction,
     ModerationAuditRequest, PinAck, PinRequest, ReactionAck, ReactionRequest, ReactionSnapshot,
-    RichMessageBody, RichMessageEventMetadata, RoomId, SessionAcceptNegotiation, UserId,
-    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
+    RichMessageBody, RichMessageEventMetadata, RoomCatalogEntry, RoomId, SessionAcceptNegotiation,
+    UserId, ANNOUNCEMENT_ROOMS_CAPABILITY, DURABLE_MUTATION_CAPABILITY,
+    DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
     MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME,
     REACTIONS_CAPABILITY, REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG,
     REPLY_MENTIONS_CAPABILITY, ROOM_PINS_CAPABILITY, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
@@ -199,6 +200,7 @@ pub struct SessionEngine {
     pending_uploads: Arc<Mutex<PendingUploadStore>>,
     rate_buckets: RateBuckets,
     moderation_audit_enabled: bool,
+    announcement_rooms_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -364,6 +366,7 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
+            announcement_rooms_enabled: false,
         }
     }
 
@@ -376,6 +379,7 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
+            announcement_rooms_enabled: false,
         }
     }
 
@@ -395,6 +399,7 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
+            announcement_rooms_enabled: false,
         }
     }
 
@@ -402,6 +407,13 @@ impl SessionEngine {
     pub(crate) fn with_test_moderation_audit(store: OmenchatStore, limits: SessionLimits) -> Self {
         let mut engine = Self::with_limits(store, limits);
         engine.moderation_audit_enabled = true;
+        engine
+    }
+
+    #[cfg(test)]
+    fn with_test_announcement_rooms(store: OmenchatStore) -> Self {
+        let mut engine = Self::new(store);
+        engine.announcement_rooms_enabled = true;
         engine
     }
 
@@ -820,12 +832,19 @@ impl SessionEngine {
                 )]);
             }
         };
+        let announcement_rooms_requested = self.announcement_rooms_enabled
+            && negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == ANNOUNCEMENT_ROOMS_CAPABILITY)
+            });
         let rooms = self
             .store
             .list_rooms()?
             .into_iter()
-            .map(|room| room_to_value(&room))
-            .collect::<Vec<_>>();
+            .map(|room| room_to_value_with_policy(&room, announcement_rooms_requested))
+            .collect::<ServerResult<Vec<_>>>()?;
         let mut response_body = FrameBody::Fields(vec![
             FrameValue::String(PROTOCOL_NAME.into()),
             FrameValue::Array(rooms),
@@ -851,10 +870,13 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == MODERATION_AUDIT_CAPABILITY)
             });
-        if durable_requested || moderation_audit_requested {
+        if durable_requested || moderation_audit_requested || announcement_rooms_requested {
             let mut accepted_capabilities = Vec::new();
             if moderation_audit_requested {
                 accepted_capabilities.push(MODERATION_AUDIT_CAPABILITY.into());
+            }
+            if announcement_rooms_requested {
+                accepted_capabilities.push(ANNOUNCEMENT_ROOMS_CAPABILITY.into());
             }
             if durable_requested {
                 accepted_capabilities.push(DURABLE_MUTATION_CAPABILITY.into());
@@ -5000,6 +5022,21 @@ fn room_to_value(room: &ServerRoom) -> FrameValue {
     ])
 }
 
+fn room_to_value_with_policy(
+    room: &ServerRoom,
+    policy_negotiated: bool,
+) -> ServerResult<FrameValue> {
+    RoomCatalogEntry {
+        room_id: room.room_id,
+        name: room.name.clone(),
+        topic: room.topic.clone(),
+        room_revision: room.room_revision,
+        policy_bits: room.policy_bits,
+    }
+    .into_frame_value(policy_negotiated)
+    .map_err(|error| ServerError::Message(format!("stored room cannot be encoded: {error}")))
+}
+
 fn user_to_value(user: &ServerUser) -> FrameValue {
     FrameValue::Array(vec![
         FrameValue::U64(user.user_id as u64),
@@ -6142,6 +6179,52 @@ mod tests {
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn test_enabled_announcement_rooms_accepts_only_an_explicit_request_and_encodes_policy() {
+        let engine =
+            SessionEngine::with_test_announcement_rooms(OmenchatStore::in_memory().expect("store"));
+        let announcement_room = engine
+            .store
+            .set_room_announcement_policy(1, true)
+            .expect("announcement policy");
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![crate::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY.into()],
+                client_instance_id: None,
+            },
+        )
+        .expect("announcement capability request");
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 8, None, request))
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![crate::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY.into(),],
+            }))
+        );
+        let FrameBody::Fields(fields) = &response[0].body else {
+            panic!("session acceptance must contain fields");
+        };
+        let Some(FrameValue::Array(rooms)) = fields.get(1) else {
+            panic!("session acceptance must contain a room catalog");
+        };
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(
+            crate::protocol::RoomCatalogEntry::from_frame_value(&rooms[0], true)
+                .expect("negotiated room"),
+            crate::protocol::RoomCatalogEntry {
+                room_id: 1,
+                name: "lobby".into(),
+                topic: announcement_room.topic,
+                room_revision: announcement_room.room_revision,
+                policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
+            }
         );
     }
 

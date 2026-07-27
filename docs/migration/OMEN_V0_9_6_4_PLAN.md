@@ -1564,6 +1564,11 @@ captured-transport coverage: policy evidence clears before replacement,
 remains absent when the replacement does not accept the capability, and
 returns only after a fresh request/accept. Real negotiated current/current
 catalog/delta and replacement-Link process traffic remains an activation gate.
+A test-enabled server-engine boundary now also proves that only an explicit
+`announcement-rooms-v1` request is accepted and that its initial catalog uses
+the authoritative shared five-field encoder. The normal server constructor
+remains dormant. Link-scoped join/delta shaping and mixed-peer process traffic
+must pass before production activation.
 
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is
