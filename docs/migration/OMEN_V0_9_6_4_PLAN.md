@@ -1465,8 +1465,13 @@ client pages clear ephemeral evidence. Schema-10 records survive a file-backed
 server restart and duplicate read-only requests remain byte-stable. Current
 desktop/server ordinary v0.9.6-3 fixtures remain exact, the desktop still
 requests no audit capability, and production omenchatd still refuses it.
-Current/current process restart, adjacent-binary live traffic, active Resource
-cancellation, and measurements remain separate pre-activation gates.
+The next qualification unit completed isolated measurements at the actual
+configured ceilings: 1,024 client records stayed within the 512-KiB client
+budget and the next admission failed closed; 2,048 file-backed server rows
+stayed within the per-room and global byte budgets. Exact host observations and
+reproducible commands are recorded in the paging qualification audit.
+Current/current process restart, adjacent-binary live traffic, and active
+Resource cancellation remain separate pre-activation gates.
 
 ### Unit 6G — room policy controls
 

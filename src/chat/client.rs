@@ -2270,6 +2270,121 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "explicit isolated moderation-audit client projection measurement"]
+    fn moderation_audit_projection_measurement() {
+        use crate::chat::protocol::{
+            ModerationAuditAction, ModerationAuditRecord, MODERATION_AUDIT_PAGE_MAX_ENTRIES,
+        };
+        use std::time::Instant;
+
+        let server_count =
+            CHAT_MODERATION_AUDIT_MAX_RECORDS / CHAT_MODERATION_AUDIT_MAX_RECORDS_PER_SESSION;
+        let pages_per_server =
+            CHAT_MODERATION_AUDIT_MAX_RECORDS_PER_SESSION / MODERATION_AUDIT_PAGE_MAX_ENTRIES;
+        assert_eq!(
+            server_count * pages_per_server * MODERATION_AUDIT_PAGE_MAX_ENTRIES,
+            CHAT_MODERATION_AUDIT_MAX_RECORDS
+        );
+        let mut client = ChatClient::new();
+        let mut admission_micros = Vec::with_capacity(server_count * pages_per_server);
+
+        for server_index in 0..server_count {
+            let session_id = client.reserve_session_id();
+            let mut session = bounded_history_session(session_id, Vec::new());
+            session.server.server_id = format!("measurement-server-{server_index}");
+            session.active_room.server_id = session.server.server_id.clone();
+            session.rooms[0].server_id = session.server.server_id.clone();
+            assert!(client.push_session(session));
+            for page_index in 0..pages_per_server {
+                let room_id = page_index as RoomId + 1;
+                let page = ModerationAuditPage {
+                    records: (0..MODERATION_AUDIT_PAGE_MAX_ENTRIES)
+                        .map(|record_index| ModerationAuditRecord {
+                            audit_id: (page_index * MODERATION_AUDIT_PAGE_MAX_ENTRIES
+                                + record_index
+                                + 1) as EventId,
+                            room_id,
+                            actor_user_id: 2,
+                            actor_display_name_at_action: "Moderator".into(),
+                            target_user_id: Some(3),
+                            target_display_name_at_action: Some("Target".into()),
+                            action: ModerationAuditAction::Kick,
+                            committed_at_unix: 1_700_000_000 + record_index as i64,
+                            result_role_bits: None,
+                            result_status_bits: None,
+                        })
+                        .collect(),
+                };
+                let started = Instant::now();
+                client
+                    .replace_moderation_audit_page(session_id, room_id, page)
+                    .expect("measurement admission");
+                admission_micros.push(started.elapsed().as_micros());
+            }
+        }
+
+        let retained_records = client
+            .moderation_audit_pages
+            .values()
+            .map(|page| page.records.len())
+            .sum::<usize>();
+        let retained_bytes = client
+            .moderation_audit_pages
+            .values()
+            .map(moderation_audit_page_bytes)
+            .sum::<usize>();
+        let overflow_session_id = client.reserve_session_id();
+        let mut overflow_session = bounded_history_session(overflow_session_id, Vec::new());
+        overflow_session.server.server_id = "measurement-overflow".into();
+        overflow_session.active_room.server_id = overflow_session.server.server_id.clone();
+        overflow_session.rooms[0].server_id = overflow_session.server.server_id.clone();
+        assert!(client.push_session(overflow_session));
+        let overflow_page = ModerationAuditPage {
+            records: vec![ModerationAuditRecord {
+                audit_id: 1,
+                room_id: 1,
+                actor_user_id: 2,
+                actor_display_name_at_action: "Moderator".into(),
+                target_user_id: Some(3),
+                target_display_name_at_action: Some("Target".into()),
+                action: ModerationAuditAction::Kick,
+                committed_at_unix: 1_700_000_000,
+                result_role_bits: None,
+                result_status_bits: None,
+            }],
+        };
+        assert!(client
+            .replace_moderation_audit_page(overflow_session_id, 1, overflow_page)
+            .is_err());
+        assert!(client
+            .moderation_audit_page(overflow_session_id, 1)
+            .is_none());
+
+        let percentile = |samples: &mut Vec<u128>, percent: usize| {
+            samples.sort_unstable();
+            let index = samples
+                .len()
+                .saturating_mul(percent)
+                .saturating_add(99)
+                .checked_div(100)
+                .unwrap_or(0)
+                .saturating_sub(1)
+                .min(samples.len().saturating_sub(1));
+            samples[index]
+        };
+        let admission_max = admission_micros.iter().copied().max().unwrap_or(0);
+        let admission_p50 = percentile(&mut admission_micros.clone(), 50);
+        let admission_p95 = percentile(&mut admission_micros, 95);
+
+        assert_eq!(retained_records, CHAT_MODERATION_AUDIT_MAX_RECORDS);
+        assert!(retained_bytes <= CHAT_MODERATION_AUDIT_MAX_BYTES);
+        println!(
+            "MODERATION_AUDIT_PROJECTION_MEASUREMENT servers={server_count} pages={} records={retained_records} retained_bytes={retained_bytes} admission_p50_us={admission_p50} admission_p95_us={admission_p95} admission_max_us={admission_max}",
+            server_count * pages_per_server
+        );
+    }
+
+    #[test]
     fn client_session_history_is_item_bounded_and_keeps_recent_edge_on_restore() {
         let mut client = ChatClient::new();
         let session_id = client.reserve_session_id();

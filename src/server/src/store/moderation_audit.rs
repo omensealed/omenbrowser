@@ -592,4 +592,133 @@ mod tests {
             "one admission may replace only the one oldest capacity row"
         );
     }
+
+    #[test]
+    #[ignore = "explicit isolated moderation-audit retention measurement"]
+    fn moderation_audit_retention_measurement() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Instant;
+
+        static DATABASE_NONCE: AtomicUsize = AtomicUsize::new(0);
+        let items = std::env::var("OMEN_MODERATION_AUDIT_MEASUREMENT_ITEMS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(MAX_MODERATION_AUDIT_ROWS_PER_ROOM as usize);
+        assert!((1..=MAX_MODERATION_AUDIT_ROWS_PER_ROOM as usize).contains(&items));
+        let nonce = DATABASE_NONCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "omenchat-moderation-audit-measurement-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let store = OmenchatStore::open(&path).expect("measurement store");
+        let actor = user(2, "Moderator");
+        let target = user(3, "Target");
+        let mut append_micros = Vec::with_capacity(items);
+
+        for index in 0..items {
+            let started = Instant::now();
+            let transaction = rusqlite::Transaction::new_unchecked(
+                &store.connection,
+                rusqlite::TransactionBehavior::Immediate,
+            )
+            .expect("measurement transaction");
+            assert!(matches!(
+                append_moderation_audit_at(
+                    &transaction,
+                    1,
+                    &actor,
+                    &target,
+                    ModerationAuditAction::Kick,
+                    None,
+                    None,
+                    1_700_000_000 + index as i64,
+                )
+                .expect("measurement append"),
+                ModerationAuditAdmission::Stored(_)
+            ));
+            transaction.commit().expect("measurement commit");
+            append_micros.push(started.elapsed().as_micros());
+        }
+
+        let mut page_micros = Vec::new();
+        let mut page_count = 0_usize;
+        let mut cursor = None;
+        loop {
+            let started = Instant::now();
+            let page = store
+                .moderation_audit_page(1, cursor, MODERATION_AUDIT_PAGE_MAX_ENTRIES as u16)
+                .expect("measurement page");
+            page_micros.push(started.elapsed().as_micros());
+            if page.records.is_empty() {
+                break;
+            }
+            page_count = page_count.saturating_add(page.records.len());
+            cursor = page.records.last().map(|record| record.audit_id);
+            if page.records.len() < MODERATION_AUDIT_PAGE_MAX_ENTRIES {
+                break;
+            }
+        }
+
+        let rows = store
+            .moderation_audit_row_count()
+            .expect("measurement row count");
+        let retained_bytes: i64 = store
+            .connection
+            .query_row(
+                "SELECT COALESCE(SUM(retained_bytes), 0)
+                 FROM moderation_audit_events",
+                [],
+                |row| row.get(0),
+            )
+            .expect("measurement retained bytes");
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("checkpoint measurement database");
+        let database_bytes = [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ]
+        .into_iter()
+        .filter_map(|candidate| std::fs::metadata(candidate).ok())
+        .map(|metadata| metadata.len())
+        .sum::<u64>();
+
+        let percentile = |samples: &mut Vec<u128>, percent: usize| {
+            samples.sort_unstable();
+            let index = samples
+                .len()
+                .saturating_mul(percent)
+                .saturating_add(99)
+                .checked_div(100)
+                .unwrap_or(0)
+                .saturating_sub(1)
+                .min(samples.len().saturating_sub(1));
+            samples[index]
+        };
+        let append_max = append_micros.iter().copied().max().unwrap_or(0);
+        let page_max = page_micros.iter().copied().max().unwrap_or(0);
+        let append_p50 = percentile(&mut append_micros.clone(), 50);
+        let append_p95 = percentile(&mut append_micros, 95);
+        let page_p50 = percentile(&mut page_micros.clone(), 50);
+        let page_p95 = percentile(&mut page_micros, 95);
+
+        assert_eq!(rows, items as i64);
+        assert_eq!(page_count, items);
+        assert!(retained_bytes <= MAX_MODERATION_AUDIT_BYTES_GLOBAL);
+        println!(
+            "MODERATION_AUDIT_RETENTION_MEASUREMENT items={items} rows={rows} retained_bytes={retained_bytes} database_bytes={database_bytes} pages={} append_p50_us={append_p50} append_p95_us={append_p95} append_max_us={append_max} page_p50_us={page_p50} page_p95_us={page_p95} page_max_us={page_max}",
+            page_micros.len()
+        );
+
+        drop(store);
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
 }

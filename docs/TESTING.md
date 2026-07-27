@@ -4617,6 +4617,22 @@ evidence is in
 `docs/audits/omenchat-moderation-audit-paging-qualification.md`; wire evidence
 is in `docs/audits/omenchat-moderation-audit-qualification.md`.
 
+The explicit isolated moderation-audit measurements are:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  moderation_audit_projection_measurement --lib -- --ignored --nocapture
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    moderation_audit_retention_measurement --lib -- --ignored --nocapture
+)
+```
+
+They exercise the configured client and per-room server ceilings using
+temporary isolated state, print host observations, and remove their files.
+They are not hardware-independent latency thresholds.
+
 Focused schema/storage gates:
 
 ```bash

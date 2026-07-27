@@ -2,7 +2,7 @@
 
 Date: 2026-07-27
 
-Baseline: `release/v0.9.6-4` at `ae45c8d`, plus this qualification unit.
+Baseline: `release/v0.9.6-4` at `227e403`, plus this measurement unit.
 
 ## Scope and activation state
 
@@ -64,6 +64,11 @@ cargo test --locked --no-default-features --features desktop-product \
   live_open_requests_supported_durable_extensions_with_persistent_client_identity --lib
 (cd src/server && cargo test --locked --no-default-features \
   --features server-headless v0_9_6_3_ordinary_message_remains_byte_exact --lib)
+cargo test --locked --no-default-features --features desktop-product \
+  moderation_audit_projection_measurement --lib -- --ignored --nocapture
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless moderation_audit_retention_measurement \
+  --lib -- --ignored --nocapture)
 ```
 
 Focused results:
@@ -74,11 +79,25 @@ Focused results:
 - production desktop capability request remains absent;
 - production omenchatd capability acceptance remains absent.
 
+Isolated resource observations on this Linux development host:
+
+- the bounded client projection admitted its 1,024-record ceiling across four
+  server identities and rejected the next record. Accounted retained bytes were
+  80,896; page admission was 85 us p50, 143 us p95, and 143 us maximum;
+- the file-backed server retained its 2,048-row per-room ceiling using 161,792
+  accounted bytes and 401,408 database bytes after WAL checkpoint. Individual
+  committed appends were 883 us p50, 1,429 us p95, and 1,533 us maximum; bounded
+  page reads were 1,155 us p50, 1,307 us p95, and 1,307 us maximum.
+
+These are reproducible observations, not release thresholds. The tests use
+isolated temporary roots, enforce the configured bounds, print their results,
+and remove the database/WAL/SHM files.
+
 Full local results:
 
-- root tests: all executed tests passed (1,496 library tests passed, 30
+- root tests: all executed tests passed (1,496 library tests passed, 31
   explicitly ignored; all binary/integration tests also passed);
-- omenchatd tests: 373 passed, 10 explicitly ignored;
+- omenchatd tests: 373 passed, 11 explicitly ignored;
 - root strict Clippy: passed with `-D warnings`;
 - omenchatd strict Clippy: passed with `-D warnings`;
 - omenchatd `server-full` check: passed;
@@ -94,7 +113,7 @@ soak, or release-mode measurement gates. None was converted to a pass.
   authority is intentionally discarded);
 - adjacent-version binary live traffic;
 - cancellation during an active Reticulum Resource;
-- decompression-bomb and maximum-size process measurements;
+- decompression-bomb process evidence;
 - user-facing audit presentation or production activation.
 
 Those are Phase 12 qualification work. Until that evidence exists, production
