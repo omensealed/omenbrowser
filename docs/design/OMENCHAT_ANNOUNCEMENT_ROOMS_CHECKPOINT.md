@@ -2,9 +2,9 @@
 
 Date: 2026-07-27
 
-Status: dormant shared wire constants/codecs implemented; no schema,
-configuration, authorization, client projection, GUI, TUI, or production
-negotiation is activated
+Status: dormant shared wire constants/codecs and schema-11 recovery storage
+implemented; no configuration, authorization, client projection, GUI, TUI, or
+production negotiation is activated
 
 Baseline: `release/v0.9.6-4` at `1097a10`
 
@@ -261,5 +261,10 @@ Production negotiation remains disabled until all applicable gates pass.
    byte-exact agreement in both independent MessagePack codecs. The production
    client request vector and server acceptance remain unchanged. Evidence is in
    `docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
-2. Next: schema 11, migration fault injection, and confirmation-gated schema-10
-   copy export. Do not combine it with authorization or activation.
+2. **Complete (2026-07-27):** schema 11 adds constrained room policy storage,
+   migration fault injection proves transactional rollback, and the
+   confirmation-gated stopped-server schema-10 copy removes only that column.
+   Evidence is in
+   `docs/audits/omenchat-announcement-rooms-storage-qualification.md`.
+3. Next: one atomic server authorization predicate and policy mutation
+   transaction, still without production capability activation or client UI.

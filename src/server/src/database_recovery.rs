@@ -47,6 +47,12 @@ pub struct DatabaseSchemaNineExportReport {
     pub destination: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseSchemaTenExportReport {
+    pub source_version: i64,
+    pub destination: PathBuf,
+}
+
 pub fn restore_migration_backup(
     database: &Path,
     backup: &Path,
@@ -240,6 +246,28 @@ pub fn export_schema_nine_copy(
     export_schema_nine_copy_with_publish(database, destination, atomic_replace)
 }
 
+pub fn export_schema_ten_copy(
+    database: &Path,
+    destination: &Path,
+) -> ServerResult<DatabaseSchemaTenExportReport> {
+    export_schema_ten_copy_with_publish(database, destination, atomic_replace)
+}
+
+fn export_schema_ten_copy_with_publish<F>(
+    database: &Path,
+    destination: &Path,
+    mut publish: F,
+) -> ServerResult<DatabaseSchemaTenExportReport>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    export_downgrade_copy_with_publish(database, destination, 10, &mut publish)?;
+    Ok(DatabaseSchemaTenExportReport {
+        source_version: SCHEMA_VERSION,
+        destination: destination.to_path_buf(),
+    })
+}
+
 fn export_schema_nine_copy_with_publish<F>(
     database: &Path,
     destination: &Path,
@@ -264,7 +292,7 @@ fn export_downgrade_copy_with_publish<F>(
 where
     F: FnMut(&Path, &Path) -> std::io::Result<()>,
 {
-    debug_assert!(matches!(target_version, 4..=9));
+    debug_assert!(matches!(target_version, 4..=10));
     let schema_label = format!("schema-{target_version}");
     validate_regular_file(database, "active database")?;
     if database == destination {
@@ -334,11 +362,14 @@ where
             &connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        transaction.execute_batch(
-            "DROP INDEX IF EXISTS idx_moderation_audit_retention;
-             DROP INDEX IF EXISTS idx_moderation_audit_room_page;
-             DROP TABLE IF EXISTS moderation_audit_events;",
-        )?;
+        transaction.execute_batch("ALTER TABLE rooms DROP COLUMN policy_bits;")?;
+        if target_version <= 9 {
+            transaction.execute_batch(
+                "DROP INDEX IF EXISTS idx_moderation_audit_retention;
+                 DROP INDEX IF EXISTS idx_moderation_audit_room_page;
+                 DROP TABLE IF EXISTS moderation_audit_events;",
+            )?;
+        }
         if target_version <= 8 {
             transaction.execute_batch(
                 "DROP INDEX IF EXISTS idx_room_pin_events_retention;
@@ -533,11 +564,21 @@ fn validate_current_database(path: &Path) -> ServerResult<()> {
             "restored database is missing schema-10 moderation-audit storage; found {moderation_audit_objects} of 3 objects"
         )));
     }
+    let policy_columns: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('rooms') WHERE name = 'policy_bits'",
+        [],
+        |row| row.get(0),
+    )?;
+    if policy_columns != 1 {
+        return Err(ServerError::Message(
+            "restored database is missing schema-11 room policy storage".into(),
+        ));
+    }
     Ok(())
 }
 
 fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()> {
-    debug_assert!(matches!(target_version, 4..=9));
+    debug_assert!(matches!(target_version, 4..=10));
     let schema_label = format!("schema-{target_version}");
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -667,9 +708,24 @@ fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()>
         [],
         |row| row.get(0),
     )?;
-    if moderation_audit_objects != 0 {
+    if target_version <= 9 && moderation_audit_objects != 0 {
         return Err(ServerError::Message(format!(
             "{schema_label} export retained schema-10 moderation-audit objects"
+        )));
+    }
+    if target_version == 10 && moderation_audit_objects != 3 {
+        return Err(ServerError::Message(format!(
+            "{schema_label} export did not retain complete schema-10 moderation-audit storage; found {moderation_audit_objects} of 3 objects"
+        )));
+    }
+    let policy_columns: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('rooms') WHERE name = 'policy_bits'",
+        [],
+        |row| row.get(0),
+    )?;
+    if policy_columns != 0 {
+        return Err(ServerError::Message(format!(
+            "{schema_label} export retained schema-11 room policy storage"
         )));
     }
     Ok(())
@@ -1622,6 +1678,105 @@ mod tests {
 
         drop(exported);
         std::fs::remove_dir_all(root).expect("remove schema-nine export root");
+    }
+
+    #[test]
+    fn schema_ten_export_preserves_moderation_audit_and_omits_only_room_policy() {
+        let (root, database, _) = setup_current_for_schema_four_export("schema10-success");
+        {
+            let connection = rusqlite::Connection::open(&database).expect("active database");
+            connection
+                .execute(
+                    "UPDATE rooms SET policy_bits = 1, room_revision = room_revision + 1
+                     WHERE room_id = 1",
+                    [],
+                )
+                .expect("announcement policy fixture");
+            connection
+                .execute(
+                    "INSERT INTO moderation_audit_events(
+                       room_id, actor_user_id, actor_display_name,
+                       target_user_id, target_display_name, action_kind,
+                       result_role_bits, result_status_bits, committed_at, retained_bytes
+                     ) VALUES (1, 1, 'Actor', 2, 'Target', 1, NULL, NULL, 1, 75)",
+                    [],
+                )
+                .expect("moderation audit");
+        }
+        let destination = root.join("omenchat-schema10.sqlite");
+        let report = export_schema_ten_copy(&database, &destination).expect("schema ten export");
+        assert_eq!(report.source_version, SCHEMA_VERSION);
+        assert_eq!(report.destination, destination);
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("schema ten database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("export version"),
+            10
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('rooms')
+                     WHERE name = 'policy_bits'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("policy column lookup"),
+            0
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT room_revision FROM rooms WHERE room_id = 1",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .expect("room revision"),
+            1,
+            "downgrade copy preserves the revision that carried the removed policy"
+        );
+        assert_eq!(
+            exported
+                .query_row("SELECT COUNT(*) FROM moderation_audit_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("moderation audit count"),
+            1
+        );
+
+        drop(exported);
+        std::fs::remove_dir_all(root).expect("remove schema-ten export root");
+    }
+
+    #[test]
+    fn schema_ten_export_publish_failure_preserves_source_and_removes_reservations() {
+        let (root, database, destination) =
+            setup_current_for_schema_four_export("schema10-publish-failure");
+        let original_len = std::fs::metadata(&database).expect("source metadata").len();
+        let error = export_schema_ten_copy_with_publish(&database, &destination, |_, _| {
+            Err(std::io::Error::other("injected schema-ten publish failure"))
+        })
+        .expect_err("publish failure")
+        .to_string();
+        assert!(error.contains("injected schema-ten publish failure"));
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::metadata(&database)
+                .expect("preserved source metadata")
+                .len(),
+            original_len
+        );
+        let source = OmenchatStore::open_existing_for_maintenance(&database)
+            .expect("source remains current and readable");
+        drop(source);
+
+        std::fs::remove_dir_all(root).expect("remove publish-failure root");
     }
 
     #[test]

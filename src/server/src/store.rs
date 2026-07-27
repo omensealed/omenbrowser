@@ -21,6 +21,7 @@ pub struct ServerRoom {
     pub name: String,
     pub topic: Option<String>,
     pub room_revision: u64,
+    pub policy_bits: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,7 +136,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const SCHEMA_VERSION: i64 = 11;
 const HISTORY_USAGE_BACKFILL_BATCH: usize = 256;
 const HISTORY_EVENT_FIXED_RETAINED_BYTES: u64 = 64;
 const HISTORY_REPLY_RETAINED_BYTES: u64 = 8;
@@ -325,16 +326,17 @@ impl OmenchatStore {
                 usage: |_| Ok(()),
                 pin: |_| Ok(()),
                 moderation_audit: |_| Ok(()),
+                room_policy: |_| Ok(()),
             },
         )
     }
 
-    fn migrate_with_sql_step_and_history_hooks<F, H, R, S, U, P, A>(
+    fn migrate_with_sql_step_and_history_hooks<F, H, R, S, U, P, A, Q>(
         &self,
         backup_source: Option<&std::path::Path>,
         migration_sql: &str,
         schema_step: F,
-        mut hooks: MigrationHooks<H, R, S, U, P, A>,
+        mut hooks: MigrationHooks<H, R, S, U, P, A, Q>,
     ) -> ServerResult<()>
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
@@ -344,6 +346,7 @@ impl OmenchatStore {
         U: FnMut(HistoryUsageMigrationBoundary) -> ServerResult<()>,
         P: FnMut(PinMigrationBoundary) -> ServerResult<()>,
         A: FnMut(ModerationAuditMigrationBoundary) -> ServerResult<()>,
+        Q: FnMut(RoomPolicyMigrationBoundary) -> ServerResult<()>,
     {
         let current_version: i64 =
             self.connection
@@ -373,12 +376,14 @@ impl OmenchatStore {
         ensure_history_usage_schema_with_hook(&transaction, &mut hooks.usage)?;
         ensure_pin_schema_with_hook(&transaction, &mut hooks.pin)?;
         ensure_moderation_audit_schema_with_hook(&transaction, &mut hooks.moderation_audit)?;
+        ensure_room_policy_schema_with_hook(&transaction, &mut hooks.room_policy)?;
         (hooks.reaction)(ReactionMigrationBoundary::BeforeVersionUpdate)?;
         (hooks.revision)(MessageRevisionMigrationBoundary::BeforeVersionUpdate)?;
         (hooks.sequence)(EventSequenceMigrationBoundary::VersionUpdate)?;
         (hooks.usage)(HistoryUsageMigrationBoundary::VersionUpdate)?;
         (hooks.pin)(PinMigrationBoundary::BeforeVersionUpdate)?;
         (hooks.moderation_audit)(ModerationAuditMigrationBoundary::VersionUpdate)?;
+        (hooks.room_policy)(RoomPolicyMigrationBoundary::VersionUpdate)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         (hooks.reaction)(ReactionMigrationBoundary::BeforeCommit)?;
         (hooks.revision)(MessageRevisionMigrationBoundary::BeforeCommit)?;
@@ -386,6 +391,7 @@ impl OmenchatStore {
         (hooks.usage)(HistoryUsageMigrationBoundary::Commit)?;
         (hooks.pin)(PinMigrationBoundary::BeforeCommit)?;
         (hooks.moderation_audit)(ModerationAuditMigrationBoundary::Commit)?;
+        (hooks.room_policy)(RoomPolicyMigrationBoundary::Commit)?;
         transaction.commit()?;
         Ok(())
     }
@@ -413,6 +419,7 @@ impl OmenchatStore {
                 usage: |_| Ok(()),
                 pin: pin_hook,
                 moderation_audit: |_| Ok(()),
+                room_policy: |_| Ok(()),
             },
         )
     }
@@ -440,6 +447,35 @@ impl OmenchatStore {
                 usage: |_| Ok(()),
                 pin: |_| Ok(()),
                 moderation_audit: moderation_audit_hook,
+                room_policy: |_| Ok(()),
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn migrate_with_sql_step_and_room_policy_hook<F, Q>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        room_policy_hook: Q,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        Q: FnMut(RoomPolicyMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_history_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            MigrationHooks {
+                reaction: |_| Ok(()),
+                revision: |_| Ok(()),
+                sequence: |_| Ok(()),
+                usage: |_| Ok(()),
+                pin: |_| Ok(()),
+                moderation_audit: |_| Ok(()),
+                room_policy: room_policy_hook,
             },
         )
     }
@@ -476,7 +512,7 @@ impl OmenchatStore {
 
     pub fn room_by_name(&self, name: &str) -> ServerResult<Option<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision
+            "SELECT room_id, name, topic, room_revision, policy_bits
              FROM rooms
              WHERE name = ?1 AND archived = 0",
         )?;
@@ -486,7 +522,7 @@ impl OmenchatStore {
 
     pub fn room_by_id(&self, room_id: RoomId) -> ServerResult<Option<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision
+            "SELECT room_id, name, topic, room_revision, policy_bits
              FROM rooms
              WHERE room_id = ?1 AND archived = 0",
         )?;
@@ -496,7 +532,7 @@ impl OmenchatStore {
 
     pub fn list_rooms(&self) -> ServerResult<Vec<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision
+            "SELECT room_id, name, topic, room_revision, policy_bits
              FROM rooms
              WHERE archived = 0
              ORDER BY name",
@@ -1178,13 +1214,44 @@ enum ModerationAuditMigrationBoundary {
     Commit,
 }
 
-struct MigrationHooks<H, R, S, U, P, A> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoomPolicyMigrationBoundary {
+    Column,
+    VersionUpdate,
+    Commit,
+}
+
+struct MigrationHooks<H, R, S, U, P, A, Q> {
     reaction: H,
     revision: R,
     sequence: S,
     usage: U,
     pin: P,
     moderation_audit: A,
+    room_policy: Q,
+}
+
+fn ensure_room_policy_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(RoomPolicyMigrationBoundary) -> ServerResult<()>,
+{
+    hook(RoomPolicyMigrationBoundary::Column)?;
+    let mut statement = transaction.prepare("PRAGMA table_info(rooms)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    drop(statement);
+    if !columns.contains("policy_bits") {
+        transaction.execute_batch(
+            "ALTER TABLE rooms
+             ADD COLUMN policy_bits INTEGER NOT NULL DEFAULT 0
+             CHECK(policy_bits >= 0 AND policy_bits <= 1);",
+        )?;
+    }
+    Ok(())
 }
 
 fn ensure_pin_schema_with_hook<H>(
@@ -1943,6 +2010,7 @@ fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRoom> {
         name: row.get(1)?,
         topic: row.get(2)?,
         room_revision: row.get::<_, i64>(3)? as u64,
+        policy_bits: row.get::<_, i64>(4)? as u64,
     })
 }
 
@@ -2218,6 +2286,20 @@ mod tests {
         transaction.commit().expect("version nine commit");
     }
 
+    fn create_version_ten_fixture(path: &std::path::Path) {
+        create_version_nine_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version ten database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version ten transaction");
+        ensure_moderation_audit_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version ten moderation-audit schema");
+        transaction
+            .pragma_update(None, "user_version", 10)
+            .expect("version ten marker");
+        transaction.commit().expect("version ten commit");
+    }
+
     fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
         connection
             .query_row(
@@ -2239,6 +2321,17 @@ mod tests {
             .expect("query room event columns")
             .collect::<Result<Vec<_>, _>>()
             .expect("collect room event columns")
+    }
+
+    fn room_columns(connection: &rusqlite::Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(rooms)")
+            .expect("room columns");
+        statement
+            .query_map([], |row| row.get(1))
+            .expect("query room columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect room columns")
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -3382,6 +3475,7 @@ mod tests {
                         },
                         pin: |_| Ok(()),
                         moderation_audit: |_| Ok(()),
+                        room_policy: |_| Ok(()),
                     },
                 )
                 .expect_err("injected schema migration failure")
@@ -3733,6 +3827,137 @@ mod tests {
                 "table",
                 "moderation_audit_events"
             ));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_ten_database_adds_constrained_ordinary_room_policy() {
+        let path = isolated_database_path("v10-room-policy-schema");
+        create_version_ten_fixture(&path);
+        {
+            let connection = rusqlite::Connection::open(&path).expect("version ten fixture");
+            connection
+                .execute(
+                    "INSERT INTO rooms(name, topic, created_at)
+                     VALUES ('preserved-v10-room', 'ordinary after migration', 1)",
+                    [],
+                )
+                .expect("version ten room");
+        }
+
+        let store = OmenchatStore::open(&path).expect("version eleven migration");
+        assert!(room_columns(&store.connection)
+            .iter()
+            .any(|column| column == "policy_bits"));
+        let room = store
+            .room_by_name("preserved-v10-room")
+            .expect("room lookup")
+            .expect("preserved room");
+        assert_eq!(room.policy_bits, 0);
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE rooms SET policy_bits = 2 WHERE room_id = ?1",
+                [room.room_id],
+            )
+            .is_err());
+
+        let backup_path = migration_backup_path(&path, 10);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version ten migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            10
+        );
+        assert!(!room_columns(&backup)
+            .iter()
+            .any(|column| column == "policy_bits"));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_room_policy_schema_fault_boundary_rolls_back_to_version_ten() {
+        for boundary in [
+            RoomPolicyMigrationBoundary::Column,
+            RoomPolicyMigrationBoundary::VersionUpdate,
+            RoomPolicyMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v11-fault-{boundary:?}"));
+            create_version_ten_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_room_policy_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected room policy migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected room policy migration failure")
+                .to_string();
+            assert!(error.contains("injected room policy migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                10
+            );
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "policy_bits"));
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "moderation_audit_events"
+            ));
+
+            let backup_path = migration_backup_path(&path, 10);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version ten rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                10
+            );
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "policy_bits"));
 
             drop(backup);
             drop(store);

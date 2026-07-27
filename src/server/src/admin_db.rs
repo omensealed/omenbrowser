@@ -638,6 +638,7 @@ mod tests {
                 .expect("queued reply")
                 .expect("queued result");
         }
+        await_completed(&database, (ADMIN_DATABASE_QUEUE_ITEMS + 1) as u64);
         let metrics = database.metrics();
         assert_eq!(metrics.completed, (ADMIN_DATABASE_QUEUE_ITEMS + 1) as u64);
         assert_eq!(metrics.rejected, 1);

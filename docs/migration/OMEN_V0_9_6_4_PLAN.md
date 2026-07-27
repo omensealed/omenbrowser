@@ -1512,6 +1512,15 @@ and production omenchatd accepts none. Schema 10, room storage, authorization,
 configuration, client models, and presentation remain unchanged. Evidence is
 in `docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
 
+The second announcement-room slice advances only omenchatd storage to schema
+11. Existing rooms receive constrained ordinary policy `0`; migration faults
+roll back the column and version together while retaining a schema-10 backup.
+The confirmation-gated, stopped-server `export-schema10-copy` path removes only
+the new column and retains moderation-audit and every earlier layer. No
+configuration, authorization, client projection, negotiation, or UI is
+activated. Evidence is in
+`docs/audits/omenchat-announcement-rooms-storage-qualification.md`.
+
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is
 indefinite and its event allocator derives the next identifier from retained

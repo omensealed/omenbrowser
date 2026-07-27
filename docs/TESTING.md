@@ -4606,6 +4606,35 @@ They do not claim schema 11, authorization, presentation, process traffic, or
 activation. Evidence is in
 `docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
 
+Schema-11 announcement-room storage and guarded rollback are covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    version_ten_database_adds_constrained_ordinary_room_policy --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_policy_schema --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    schema_ten_export --lib -- --nocapture
+)
+```
+
+These tests prove the ordinary default and SQLite constraint, transactional
+rollback at every schema-11 fault boundary, readable pre-v11 backup,
+confirmation-gated parsing, preservation of schema-10 moderation audit, removal
+of only `policy_bits`, and cleanup after injected publication failure. The
+operator command is:
+
+```bash
+omenchatd database export-schema10-copy \
+  --to <new-database-path> --confirm --home <server-home>
+```
+
+omenchatd must be stopped. The destination must not exist. This does not
+activate room policy, authorization, negotiation, or presentation. Evidence is
+in `docs/audits/omenchat-announcement-rooms-storage-qualification.md`.
+
 The first moderation-audit slice reserves a read-only operation range and
 bounded shared types without requesting or accepting
 `moderation-audit-v1`:

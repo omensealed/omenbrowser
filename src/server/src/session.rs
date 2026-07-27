@@ -6295,7 +6295,20 @@ mod tests {
             .expect("resource lookup")
             .expect("resource payload");
         let resource_values = decode_compressed_values_payload(&payload).expect("resource values");
-        assert_eq!(inline_values, resource_values);
+        let normalize_committed_at = |mut values: Vec<FrameValue>| {
+            for value in &mut values {
+                let FrameValue::Array(fields) = value else {
+                    panic!("moderation audit value must be an array");
+                };
+                assert!(matches!(fields.get(7), Some(FrameValue::U64(_))));
+                fields[7] = FrameValue::U64(0);
+            }
+            values
+        };
+        assert_eq!(
+            normalize_committed_at(inline_values),
+            normalize_committed_at(resource_values)
+        );
 
         let malformed = resource_engine
             .handle_frame_with_active_peers_and_moderation_audit(

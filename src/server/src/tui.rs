@@ -5584,6 +5584,7 @@ mod tests {
                 name: format!("room-{index}"),
                 topic: Some("topic".into()),
                 room_revision: 0,
+                policy_bits: 0,
             })
             .collect();
         let (rows, truncated) = bounded_admin_room_rows(rooms);
@@ -5595,6 +5596,7 @@ mod tests {
             name: "large".into(),
             topic: Some("x".repeat(ADMIN_ROOM_CACHE_BYTES + 1)),
             room_revision: 0,
+            policy_bits: 0,
         }]);
         assert!(truncated);
         assert!(rows.is_empty());
