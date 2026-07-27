@@ -205,6 +205,18 @@ handlers properly requires project-owned operation state and narrower
 ownership boundaries, which belong to Phase 2/3 behavior work and must not be
 mixed into this mechanical phase.
 
+After the later reaction/revision qualification work made the root binary's
+live-smoke region materially larger, that binary-only region was mechanically
+extracted to `src/omenchat_smoke.rs`. The private child owns the bounded Link,
+Resource, reconnect, upload, reaction, and revision smoke orchestration and its
+report formatting; `src/main.rs` retains argument parsing and shared runtime
+configuration helpers. The implementation was compared byte-for-byte after
+accounting for the private entry-point rename and relocated isolated marker
+test. Full desktop-product tests, strict Clippy, formatting, and the
+mock/no-feature check pass. This does not reopen `src/app.rs` decomposition or
+change runtime, protocol, storage, or CLI behavior. The extraction record is
+`docs/audits/omenchat-smoke-module-extraction.md`.
+
 Phase 1 validation is satisfied by the focused before/after matrices and the
 full product, TUI, formatting, and strict-Clippy gates recorded in Units
 1A–1C. This documentation-only reassessment adds no executable change and does
@@ -1296,6 +1308,23 @@ or optimistic timeline change is added. Eligible targets are derived once per
 bounded room render, avoiding a history rescan per message. Since production
 still omits `message-revisions-v1`, the controls remain hidden.
 
+The tenth slice completes deterministic qualification and reversibly activates
+the capability. The production client requests `message-revisions-v1` only
+beside `durable-mutations-v1` and its persistent identity-scoped client
+instance identifier. The server accepts it only when the durable request is
+valid. Unsolicited acceptance, base-only and adjacent peers, capability loss,
+downgrade, identity replacement, and Link retirement remain fail closed.
+Existing schema-8 retention removes revision state and audit with a compacted
+target, so activation does not create orphaned revision projections.
+
+The current/current process gate passes deliberately lost acknowledgement,
+exact correction replay, forced-Resource correction and tombstone snapshots,
+two isolated client roots, clean persistent-intent completion, and one
+continuous client across orderly omenchatd restart with a replacement Link.
+No automatic retry, wire number, schema, retention default, worker, queue, or
+timer changed. Exact evidence, commands, limitations, and rollback are in
+`docs/audits/omenchat-message-revisions-qualification.md`.
+
 ### Unit 6F — pins and moderation audit history
 
 - Append bounded pin/unpin and moderation-audit events.
@@ -1303,6 +1332,19 @@ still omits `message-revisions-v1`, the controls remain hidden.
 - Expose audit history only to authorized users and redact private operational
   evidence.
 - Bound retained audit records by room, age, count, and bytes.
+
+The pre-implementation checkpoint is
+`docs/design/OMENCHAT_PINS_MODERATION_AUDIT_CHECKPOINT.md`. Current source has
+one free four-operation range between current-history and command operations,
+an unused legacy `audit_log` table, transactional durable moderation, and a
+separate operator-only text audit in the omenchatd TUI. The checkpoint keeps
+those concerns separate: pins use an additive durable capability and explicit
+target snapshots; client-visible moderation history uses a separate read-only
+capability and constrained table and never exposes the operator log. It
+proposes separate schema-9/schema-10 migrations, bounded retention, compaction
+dependencies, guarded downgrade copies, and staged dormant activation. No
+protocol number, schema, capability, storage, or UI behavior is changed by the
+checkpoint itself.
 
 ### Unit 6G — room policy controls
 
