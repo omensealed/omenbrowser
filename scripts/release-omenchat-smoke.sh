@@ -22,6 +22,7 @@ multi_client=0
 restart_server=0
 continuous_client_reconnect=0
 reaction_smoke=0
+revision_smoke=0
 
 usage() {
   cat <<'USAGE'
@@ -55,6 +56,7 @@ Options:
   --continuous-client-reconnect
                        Keep one browser smoke process alive while omenchatd restarts
   --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
+  --revision-smoke     Exercise negotiated durable corrections, tombstones, replay, and Resource recovery
   --keep-roots         Leave generated browser/server roots in place
   -h, --help           Show this help
 
@@ -142,6 +144,10 @@ while [[ $# -gt 0 ]]; do
       reaction_smoke=1
       shift
       ;;
+    --revision-smoke)
+      revision_smoke=1
+      shift
+      ;;
     --keep-roots)
       keep_roots=1
       shift
@@ -208,7 +214,8 @@ if [[ "$restart_server" -eq 1 && "$continuous_client_reconnect" -eq 1 ]]; then
   echo "--restart-server and --continuous-client-reconnect are separate cases" >&2
   exit 2
 fi
-if [[ "$reaction_smoke" -eq 1 && -z "$server_large_batch_threshold_bytes" ]]; then
+if [[ ( "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 ) \
+  && -z "$server_large_batch_threshold_bytes" ]]; then
   server_large_batch_threshold_bytes=1
 fi
 
@@ -342,6 +349,10 @@ reaction_args=()
 if [[ "$reaction_smoke" -eq 1 ]]; then
   reaction_args=(--omenchat-reaction-smoke --omenchat-response-wait 30)
 fi
+revision_args=()
+if [[ "$revision_smoke" -eq 1 ]]; then
+  revision_args=(--omenchat-revision-smoke --omenchat-response-wait 30)
+fi
 "$browser_bin" \
   --omenchat-smoke "$destination" \
   "${client_interface_args[@]}" \
@@ -349,6 +360,7 @@ fi
   --app-root "$browser_root" \
   --omenchat-message "$message" \
   "${reaction_args[@]}" \
+  "${revision_args[@]}" \
   "${upload_args[@]}" \
   "${continuous_args[@]}" \
   --output "$run_dir/omenchat-smoke.json" \
@@ -452,13 +464,14 @@ continuous_session_reconnected=0
 continuous_message_echoed=0
 continuous_reaction_recovered=0
 if [[ "$continuous_client_reconnect" -eq 1 ]]; then
-  python3 - "$run_dir/omenchat-smoke.json" "$reaction_smoke" <<'PY'
+  python3 - "$run_dir/omenchat-smoke.json" "$reaction_smoke" "$revision_smoke" <<'PY'
 import json
 import pathlib
 import sys
 
 report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 reaction_smoke = sys.argv[2] == "1"
+revision_smoke = sys.argv[3] == "1"
 stages = {
     stage.get("stage"): stage
     for stage in report.get("stages", [])
@@ -488,6 +501,18 @@ if reaction_smoke:
     )
     if any(stages.get(name, {}).get("ok") is not True for name in reaction_required):
         raise SystemExit("replacement-link reaction evidence was incomplete")
+if revision_smoke:
+    revision_required = (
+        "continuous_revision_capability",
+        "continuous_revision_lost_ack",
+        "continuous_revision_exact_replay",
+        "continuous_revision_correction_resource_snapshot",
+        "continuous_revision_tombstone",
+        "continuous_revision_tombstone_resource_snapshot",
+        "continuous_revision_intent_persistence",
+    )
+    if any(stages.get(name, {}).get("ok") is not True for name in revision_required):
+        raise SystemExit("replacement-link revision evidence was incomplete")
 PY
   continuous_link_closed=1
   continuous_link_reopened=1
@@ -571,6 +596,7 @@ if [[ "$restart_server" -eq 1 ]]; then
     --app-root "$browser_root" \
     --omenchat-message "${message} (after server restart)" \
     "${reaction_args[@]}" \
+    "${revision_args[@]}" \
     --output "$run_dir/omenchat-smoke-restart.json" \
     > "$run_dir/omenchat-smoke-restart.stdout" \
     2> "$run_dir/omenchat-smoke-restart.stderr"
@@ -614,6 +640,7 @@ if [[ "$multi_client" -eq 1 ]]; then
     --app-root "$browser_root_2" \
     --omenchat-message "$second_message" \
     "${reaction_args[@]}" \
+    "${revision_args[@]}" \
     "${second_upload_args[@]}" \
     --output "$run_dir/omenchat-smoke-2.json" \
     > "$run_dir/omenchat-smoke-2.stdout" \
@@ -654,6 +681,7 @@ multi_client: $multi_client
 restart_server: $restart_server
 continuous_client_reconnect: $continuous_client_reconnect
 reaction_smoke: $reaction_smoke
+revision_smoke: $revision_smoke
 continuous_link_closed: $continuous_link_closed
 continuous_link_reopened: $continuous_link_reopened
 continuous_session_reconnected: $continuous_session_reconnected

@@ -197,6 +197,7 @@ async fn async_main() -> anyhow::Result<()> {
             room,
             message,
             reaction_smoke,
+            revision_smoke,
             upload_file,
             fetch_upload_filename,
             fetch_upload_bytes,
@@ -214,6 +215,7 @@ async fn async_main() -> anyhow::Result<()> {
                 room,
                 message,
                 reaction_smoke,
+                revision_smoke,
                 upload_file,
                 fetch_upload_filename,
                 fetch_upload_bytes,
@@ -359,6 +361,7 @@ enum CliCommand {
         room: String,
         message: String,
         reaction_smoke: bool,
+        revision_smoke: bool,
         upload_file: Option<PathBuf>,
         fetch_upload_filename: Option<String>,
         fetch_upload_bytes: Option<u64>,
@@ -425,6 +428,7 @@ struct OmenChatSmokeCommandInput {
     room: String,
     message: String,
     reaction_smoke: bool,
+    revision_smoke: bool,
     upload_file: Option<PathBuf>,
     fetch_upload_filename: Option<String>,
     fetch_upload_bytes: Option<u64>,
@@ -512,6 +516,7 @@ impl CliCommand {
         let mut omenchat_room = "lobby".to_string();
         let mut omenchat_message = "OMENchat smoke test from OMENbrowser_rs".to_string();
         let mut omenchat_reaction_smoke = false;
+        let mut omenchat_revision_smoke = false;
         let mut omenchat_upload_file = None;
         let mut omenchat_fetch_upload_filename = None;
         let mut omenchat_fetch_upload_bytes = None;
@@ -599,6 +604,9 @@ impl CliCommand {
                 }
                 "--omenchat-reaction-smoke" => {
                     omenchat_reaction_smoke = true;
+                }
+                "--omenchat-revision-smoke" => {
+                    omenchat_revision_smoke = true;
                 }
                 "--omenchat-upload-file" | "--upload-file" => {
                     let value = args
@@ -853,6 +861,7 @@ impl CliCommand {
                 room: omenchat_room,
                 message: omenchat_message,
                 reaction_smoke: omenchat_reaction_smoke,
+                revision_smoke: omenchat_revision_smoke,
                 upload_file: omenchat_upload_file,
                 fetch_upload_filename: omenchat_fetch_upload_filename,
                 fetch_upload_bytes: omenchat_fetch_upload_bytes,
@@ -1210,6 +1219,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         room,
         message,
         reaction_smoke,
+        revision_smoke,
         upload_file,
         fetch_upload_filename,
         fetch_upload_bytes,
@@ -1416,6 +1426,8 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         "durable_notice_ack_negotiated": live_state
             .durable_notice_ack_negotiated(session_id),
         "reply_mentions_negotiated": live_state.reply_mentions_negotiated(session_id),
+        "reactions_negotiated": live_state.reactions_negotiated(session_id),
+        "message_revisions_negotiated": live_state.message_revisions_negotiated(session_id),
         "local_user_id_bound": live_state.local_user_id(session_id).is_some(),
     }));
 
@@ -1464,8 +1476,8 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
     }));
 
     let mut reaction_ok = true;
-    let reaction_identity_storage_root = app.paths.identity_storage_root();
-    let reaction_identity_hash = if reaction_smoke {
+    let mutation_identity_storage_root = app.paths.identity_storage_root();
+    let mutation_identity_hash = if reaction_smoke || revision_smoke {
         app.runtime_status
             .active_identity
             .as_ref()
@@ -1478,7 +1490,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
             .context("OMENchat reaction smoke target message was not retained")?;
         let authenticated_identity_hash =
-            reaction_identity_hash.context("OMENchat reaction smoke has no active identity")?;
+            mutation_identity_hash.context("OMENchat reaction smoke has no active identity")?;
         let room_id = client
             .session(session_id)
             .map(|session| session.active_room.room_id)
@@ -1495,7 +1507,7 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
                 room_id,
                 target_event_id,
                 server_destination: &destination,
-                identity_storage_root: &reaction_identity_storage_root,
+                identity_storage_root: &mutation_identity_storage_root,
                 authenticated_identity_hash,
                 wait: Duration::from_secs(response_wait_secs),
             },
@@ -1503,6 +1515,38 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
         .await?;
         reaction_ok = passed;
         stages.extend(reaction_stages);
+    }
+
+    let mut revision_ok = true;
+    if joined && message_seen && revision_smoke {
+        let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
+            .context("OMENchat revision smoke target message was not retained")?;
+        let authenticated_identity_hash =
+            mutation_identity_hash.context("OMENchat revision smoke has no active identity")?;
+        let room_id = client
+            .session(session_id)
+            .map(|session| session.active_room.room_id)
+            .unwrap_or(1);
+        let (passed, revision_stages) = run_omenchat_revision_smoke(
+            &*app.runtime,
+            &mut runtime_events,
+            &mut client,
+            &mut live_state,
+            &mut transport,
+            OmenChatRevisionSmokeOptions {
+                link_id: opened.link_id,
+                session_id,
+                room_id,
+                target_event_id,
+                server_destination: &destination,
+                identity_storage_root: &mutation_identity_storage_root,
+                authenticated_identity_hash,
+                wait: Duration::from_secs(response_wait_secs),
+            },
+        )
+        .await?;
+        revision_ok = passed;
+        stages.extend(revision_stages);
     }
 
     let mut upload_ok = true;
@@ -1668,9 +1712,10 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
                     link_timeout: Duration::from_secs(link_timeout_secs),
                     response_wait: Duration::from_secs(response_wait_secs),
                     reaction_smoke,
+                    revision_smoke,
                     server_destination: &destination,
-                    identity_storage_root: &reaction_identity_storage_root,
-                    authenticated_identity_hash: reaction_identity_hash,
+                    identity_storage_root: &mutation_identity_storage_root,
+                    authenticated_identity_hash: mutation_identity_hash,
                 })
                 .await?;
             reconnect_ok = passed;
@@ -1701,13 +1746,15 @@ async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow:
             "status": session.status.clone(),
         })
     });
-    let outcome = joined && message_seen && reaction_ok && upload_ok && reconnect_ok;
+    let outcome = joined && message_seen && reaction_ok && revision_ok && upload_ok && reconnect_ok;
     let failed_stage = if !joined {
         "join_wait"
     } else if !message_seen {
         "message_echo_wait"
     } else if !reaction_ok {
         "reaction_smoke"
+    } else if !revision_ok {
+        "revision_smoke"
     } else if !upload_ok {
         "upload_fetch_wait"
     } else if !reconnect_ok {
@@ -1886,6 +1933,7 @@ struct OmenChatContinuousReconnectSmoke<'a> {
     link_timeout: Duration,
     response_wait: Duration,
     reaction_smoke: bool,
+    revision_smoke: bool,
     server_destination: &'a str,
     identity_storage_root: &'a std::path::Path,
     authenticated_identity_hash: Option<[u8; 16]>,
@@ -2095,11 +2143,60 @@ async fn run_omenchat_continuous_reconnect_smoke(
             stage
         }));
     }
+    let mut revision_ok = true;
+    if input.revision_smoke && message_seen {
+        let target_event_id =
+            omenchat_session_message_event_id(input.client, input.session_id, &reconnect_message)
+                .context("continuous reconnect revision target message was not retained")?;
+        let room_id = input
+            .client
+            .session(input.session_id)
+            .map(|session| session.active_room.room_id)
+            .unwrap_or(1);
+        let Some(authenticated_identity_hash) = input.authenticated_identity_hash else {
+            stages.push(serde_json::json!({
+                "stage": "continuous_revision_identity",
+                "ok": false,
+                "reason": "active identity was unavailable",
+            }));
+            return Ok((false, Some(opened.link_id), stages));
+        };
+        let (passed, revision_stages) = run_omenchat_revision_smoke(
+            input.runtime,
+            input.runtime_events,
+            input.client,
+            input.live_state,
+            input.transport,
+            OmenChatRevisionSmokeOptions {
+                link_id: opened.link_id,
+                session_id: input.session_id,
+                room_id,
+                target_event_id,
+                server_destination: input.server_destination,
+                identity_storage_root: input.identity_storage_root,
+                authenticated_identity_hash,
+                wait: input.response_wait,
+            },
+        )
+        .await?;
+        revision_ok = passed;
+        stages.extend(revision_stages.into_iter().map(|mut stage| {
+            if let Some(name) = stage
+                .get("stage")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+            {
+                stage["stage"] = serde_json::Value::String(format!("continuous_{name}"));
+            }
+            stage
+        }));
+    }
     Ok((
         reconnect_started
             && send_ok
             && message_seen
             && reaction_ok
+            && revision_ok
             && opened.link_id != input.old_link_id,
         Some(opened.link_id),
         stages,
@@ -2485,6 +2582,390 @@ async fn run_omenchat_reaction_smoke(
             && no_op_ok
             && remove_ok
             && remove_snapshot_ok
+            && persistence_ok,
+        stages,
+    ))
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+struct OmenChatRevisionSmokeOptions<'a> {
+    link_id: [u8; 16],
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    room_id: u32,
+    target_event_id: u64,
+    server_destination: &'a str,
+    identity_storage_root: &'a std::path::Path,
+    authenticated_identity_hash: [u8; 16],
+    wait: Duration,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn prepare_omenchat_smoke_revision(
+    store: &omenbrowser_rs::chat::mutation_intents::MutationIntentStore,
+    options: &OmenChatRevisionSmokeOptions<'_>,
+    client_instance_id: omenbrowser_rs::chat::protocol::ClientInstanceId,
+    action: omenbrowser_rs::chat::protocol::MessageRevisionAction,
+    replacement: Option<String>,
+) -> anyhow::Result<omenbrowser_rs::chat::mutation_intents::OutboundMutationIntent> {
+    use omenbrowser_rs::chat::mutation_intents::{
+        IntentTransition, OutboundMutationState, PrepareOutboundMutation,
+    };
+    use omenbrowser_rs::chat::protocol::{ChatOp, MessageRevisionRequest};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default();
+    let body = MessageRevisionRequest {
+        target_event_id: options.target_event_id,
+        action,
+        replacement,
+    }
+    .into_frame_body()
+    .context("encode OMENchat smoke message revision")?;
+    let prepared = store.persist_prepared(PrepareOutboundMutation {
+        server_destination: options.server_destination,
+        authenticated_identity_hash: &options.authenticated_identity_hash,
+        client_instance_id,
+        op: ChatOp::RoomMessageRevision,
+        room_id: Some(options.room_id),
+        body,
+        created_at: now,
+        expires_at: now.saturating_add(60 * 60),
+        correlation_id: Some("release-message-revision-smoke"),
+    })?;
+    match store.transition(
+        prepared.mutation_id,
+        OutboundMutationState::Prepared,
+        OutboundMutationState::SentUncertain,
+    )? {
+        IntentTransition::Updated(intent) => Ok(intent),
+        other => anyhow::bail!("OMENchat smoke message revision transition failed: {other:?}"),
+    }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn send_omenchat_smoke_revision(
+    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
+    client: &mut omenbrowser_rs::chat::ChatClient,
+    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &mut OmenChatSmokeTransport,
+    options: &OmenChatRevisionSmokeOptions<'_>,
+    intent: &omenbrowser_rs::chat::mutation_intents::OutboundMutationIntent,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let events = omenbrowser_rs::chat::live::send_uncertain_durable_message_revision(
+        client,
+        live_state,
+        transport,
+        options.session_id,
+        intent,
+    );
+    if events
+        .iter()
+        .any(|event| matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. }))
+    {
+        anyhow::bail!("OMENchat smoke message revision was rejected before transmission");
+    }
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    Ok(events.iter().map(format_chat_event).collect())
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn discard_omenchat_revision_ack(
+    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    link_id: [u8; 16],
+    wait: Duration,
+) -> anyhow::Result<serde_json::Value> {
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, runtime_events.recv()).await {
+            Ok(Ok(RuntimeBusEvent::OmenChatLinkData(data))) if data.link_id == link_id => {
+                let frame = omenbrowser_rs::chat::codec::decode_frame(&data.frame_bytes)
+                    .context("decode deliberately discarded OMENchat revision response")?;
+                if frame.op == omenbrowser_rs::chat::protocol::ChatOp::MessageRevisionAck {
+                    return Ok(serde_json::json!({
+                        "stage": "revision_lost_ack",
+                        "ok": true,
+                        "bytes": data.frame_bytes.len(),
+                        "sequence": frame.seq,
+                    }));
+                }
+            }
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
+        }
+    }
+    anyhow::bail!("OMENchat smoke did not observe the revision acknowledgement selected for loss")
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn run_omenchat_revision_smoke(
+    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
+    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    client: &mut omenbrowser_rs::chat::ChatClient,
+    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &mut OmenChatSmokeTransport,
+    options: OmenChatRevisionSmokeOptions<'_>,
+) -> anyhow::Result<(bool, Vec<serde_json::Value>)> {
+    use omenbrowser_rs::chat::mutation_intents::{MutationIntentStore, OutboundMutationState};
+    use omenbrowser_rs::chat::protocol::MessageRevisionAction;
+    use omenbrowser_rs::chat::ChatClientRequest;
+
+    let mut stages = Vec::new();
+    let negotiated = live_state.durable_mutations_negotiated(options.session_id)
+        && live_state.message_revisions_negotiated(options.session_id);
+    stages.push(serde_json::json!({
+        "stage": "revision_capability",
+        "ok": negotiated,
+    }));
+    let Some(client_instance_id) = live_state.client_instance_id() else {
+        return Ok((false, stages));
+    };
+    if !negotiated {
+        return Ok((false, stages));
+    }
+    let store = MutationIntentStore::open_for_identity_storage_root(options.identity_storage_root)
+        .context("open isolated OMENchat revision smoke mutation store")?;
+
+    let corrected_body = "OMENchat smoke corrected".to_owned();
+    let correction = prepare_omenchat_smoke_revision(
+        &store,
+        &options,
+        client_instance_id,
+        MessageRevisionAction::Correct,
+        Some(corrected_body.clone()),
+    )?;
+    let sent = send_omenchat_smoke_revision(
+        runtime,
+        client,
+        live_state,
+        transport,
+        &options,
+        &correction,
+    )
+    .await?;
+    stages.push(serde_json::json!({
+        "stage": "revision_correction_send",
+        "ok": true,
+        "events": sent,
+    }));
+    stages
+        .push(discard_omenchat_revision_ack(runtime_events, options.link_id, options.wait).await?);
+
+    let replayed = send_omenchat_smoke_revision(
+        runtime,
+        client,
+        live_state,
+        transport,
+        &options,
+        &correction,
+    )
+    .await?;
+    let replay_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client.session(options.session_id).is_some_and(|session| {
+                session.status == "message revision accepted by server; awaiting room event"
+            })
+        },
+    )
+    .await;
+    let correction_acknowledged = client.session(options.session_id).is_some_and(|session| {
+        session.status == "message revision accepted by server; awaiting room event"
+    });
+    stages.push(serde_json::json!({
+        "stage": "revision_exact_replay",
+        "ok": correction_acknowledged,
+        "send_events": replayed,
+        "events": replay_events,
+    }));
+    if correction_acknowledged {
+        let _ = store.transition(
+            correction.mutation_id,
+            OutboundMutationState::SentUncertain,
+            OutboundMutationState::Acknowledged,
+        )?;
+    }
+
+    let sync_events = omenbrowser_rs::chat::live::handle_live_request(
+        client,
+        live_state,
+        transport,
+        ChatClientRequest::SyncRecent {
+            session_id: options.session_id,
+        },
+    );
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    let snapshot_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client
+                .message_revision_for_target(
+                    options.session_id,
+                    options.room_id,
+                    options.target_event_id,
+                )
+                .is_some_and(|revision| {
+                    revision.action == MessageRevisionAction::Correct
+                        && revision.replacement_body.as_deref() == Some(corrected_body.as_str())
+                })
+                && client.message_revision_snapshot_complete(
+                    options.session_id,
+                    options.room_id,
+                    options.target_event_id,
+                )
+        },
+    )
+    .await;
+    let correction_resource_snapshot = snapshot_events.iter().any(|event| {
+        event.get("event").and_then(serde_json::Value::as_str) == Some("resource_data")
+            && omenchat_smoke_events_contain_decoded_event(
+                std::slice::from_ref(event),
+                "message_revision_snapshot_applied",
+            )
+    }) && client
+        .message_revision_for_target(options.session_id, options.room_id, options.target_event_id)
+        .is_some_and(|revision| {
+            revision.action == MessageRevisionAction::Correct
+                && revision.replacement_body.as_deref() == Some(corrected_body.as_str())
+        });
+    stages.push(serde_json::json!({
+        "stage": "revision_correction_resource_snapshot",
+        "ok": correction_resource_snapshot,
+        "request_events": sync_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+        "events": snapshot_events,
+    }));
+
+    let tombstone = prepare_omenchat_smoke_revision(
+        &store,
+        &options,
+        client_instance_id,
+        MessageRevisionAction::Tombstone,
+        None,
+    )?;
+    if let Some(session) = client.session_mut(options.session_id) {
+        session.status = "awaiting message tombstone acknowledgement".into();
+    }
+    let _ =
+        send_omenchat_smoke_revision(runtime, client, live_state, transport, &options, &tombstone)
+            .await?;
+    let tombstone_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client.session(options.session_id).is_some_and(|session| {
+                session.status == "message revision accepted by server; awaiting room event"
+            })
+        },
+    )
+    .await;
+    let tombstone_acknowledged = client.session(options.session_id).is_some_and(|session| {
+        session.status == "message revision accepted by server; awaiting room event"
+    });
+    if tombstone_acknowledged {
+        let _ = store.transition(
+            tombstone.mutation_id,
+            OutboundMutationState::SentUncertain,
+            OutboundMutationState::Acknowledged,
+        )?;
+    }
+    stages.push(serde_json::json!({
+        "stage": "revision_tombstone",
+        "ok": tombstone_acknowledged,
+        "events": tombstone_events,
+    }));
+
+    let tombstone_sync_events = omenbrowser_rs::chat::live::handle_live_request(
+        client,
+        live_state,
+        transport,
+        ChatClientRequest::SyncRecent {
+            session_id: options.session_id,
+        },
+    );
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    let tombstone_snapshot_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client
+                .message_revision_for_target(
+                    options.session_id,
+                    options.room_id,
+                    options.target_event_id,
+                )
+                .is_some_and(|revision| revision.action == MessageRevisionAction::Tombstone)
+                && client.message_revision_snapshot_complete(
+                    options.session_id,
+                    options.room_id,
+                    options.target_event_id,
+                )
+        },
+    )
+    .await;
+    let tombstone_resource_snapshot = tombstone_snapshot_events.iter().any(|event| {
+        event.get("event").and_then(serde_json::Value::as_str) == Some("resource_data")
+            && omenchat_smoke_events_contain_decoded_event(
+                std::slice::from_ref(event),
+                "message_revision_snapshot_applied",
+            )
+    }) && client
+        .message_revision_for_target(options.session_id, options.room_id, options.target_event_id)
+        .is_some_and(|revision| revision.action == MessageRevisionAction::Tombstone);
+    stages.push(serde_json::json!({
+        "stage": "revision_tombstone_resource_snapshot",
+        "ok": tombstone_resource_snapshot,
+        "request_events": tombstone_sync_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+        "events": tombstone_snapshot_events,
+    }));
+
+    let recovered = store.recover_nonterminal()?;
+    let persistence_ok = recovered.is_empty();
+    stages.push(serde_json::json!({
+        "stage": "revision_intent_persistence",
+        "ok": persistence_ok,
+        "nonterminal_count": recovered.len(),
+    }));
+    Ok((
+        correction_acknowledged
+            && correction_resource_snapshot
+            && tombstone_acknowledged
+            && tombstone_resource_snapshot
             && persistence_ok,
         stages,
     ))
@@ -5607,6 +6088,7 @@ mod tests {
             "--omenchat-message".to_string(),
             "hello smoke".to_string(),
             "--omenchat-reaction-smoke".to_string(),
+            "--omenchat-revision-smoke".to_string(),
             "--path-wait".to_string(),
             "3".to_string(),
             "--tcp-client".to_string(),
@@ -5626,6 +6108,7 @@ mod tests {
                 room: "lobby".into(),
                 message: "hello smoke".into(),
                 reaction_smoke: true,
+                revision_smoke: true,
                 upload_file: None,
                 fetch_upload_filename: None,
                 fetch_upload_bytes: None,

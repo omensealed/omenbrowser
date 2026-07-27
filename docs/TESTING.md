@@ -4215,10 +4215,10 @@ OMENchat session/timeline model. The omenchatd TUI is server administration and
 has no client-local user identity. These commands therefore do not claim a TUI
 reaction rendering path.
 
-## Dormant OMENchat message-revision contract
+## OMENchat message-revision contract
 
-The shared correction/tombstone contract reserves operations 35–39 without
-requesting or accepting `message-revisions-v1`:
+The shared correction/tombstone contract uses reserved operations 35–39 and
+activates them only through explicit `message-revisions-v1` negotiation:
 
 ```bash
 cargo test --locked -p omenchat-protocol
@@ -4238,10 +4238,11 @@ cargo test --locked --no-default-features --features desktop-product \
 The shared tests cover exact request/action/replacement shapes, bounds,
 acknowledgement/event agreement, canonical explicit-target snapshots,
 capability dependency, and a stable durable hash. Both independent frame
-codecs preserve the same correction bytes. Client and server tests prove the
-capability remains absent from production request/accept negotiation. The
-server-full focus also covers dormant persistence/execution plus test-injected
-Link-scoped fan-out, history snapshots, replay suppression, and retirement.
+codecs preserve the same correction bytes. Client and server tests prove
+explicit request/accept dependency, unsolicited acceptance rejection,
+downgrade clearing, and base-only peer isolation. The server-full focus also
+covers persistence/execution, Link-scoped fan-out, history snapshots, replay
+suppression, and retirement.
 The desktop-dev focus covers the separate immutable-event revision projection,
 stable item/byte bounds, additive cache and restart recovery, transactional
 capacity rollback, ordered/idempotent deltas, authoritative snapshots,
@@ -4253,9 +4254,9 @@ cargo test --locked --no-default-features --features desktop-dev \
   message_revision --lib -- --nocapture
 ```
 
-Production request lists remain unchanged and unsolicited acceptance cannot
-activate the dormant reducer. These tests do not claim GUI controls,
-mixed-version-process, native package, or live Reticulum support.
+Production requests revisions only beside durable mutations and a persistent
+client instance identifier; unsolicited acceptance cannot activate the
+reducer. Unit tests do not claim native package or interactive GUI support.
 
 The deterministic pre-activation qualification additionally runs the bounded
 retention cleanup/fault and database-recovery filters documented in
@@ -4264,7 +4265,21 @@ regressions prove that action targets disappear and a late acknowledgement
 cannot resolve pending intent outside the negotiated session. Mixed-version
 evidence means unchanged ordinary protocol-v1 traffic and no optional revision
 operation; it does not claim that an adjacent peer implements this capability.
-The current/current process smoke remains a separate post-activation gate.
+The current/current process gate is:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --revision-smoke --multi-client
+bash scripts/run-omenchat-continuous-reconnect.sh \
+  --report target/omenchat-continuous-reconnect-revision-report.json
+```
+
+It covers deliberately lost acknowledgement, exact replay, correction and
+tombstone Resource snapshots, two isolated client roots, and one continuous
+client across an orderly server restart and replacement Link.
 
 ## Bounded local-history desktop search
 

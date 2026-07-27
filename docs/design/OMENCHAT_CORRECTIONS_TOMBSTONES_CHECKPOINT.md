@@ -663,8 +663,8 @@ composer drafts remain unchanged. An isolated-root persistence test proves the
 typed correction intent is durable in `Prepared` state before any transmission.
 Another isolated-root test proves deletion creates no durable intent until the
 explicit confirmation action.
-Production negotiation remains disabled, so no release user sees or can invoke
-these actions yet.
+At this sub-slice boundary production negotiation remained disabled, so no
+release user could invoke these actions.
 
 The pre-activation deterministic qualification then closed the explicit
 capability-loss edge. Action-target derivation becomes empty as soon as
@@ -676,6 +676,15 @@ revision traffic is not sent because they cannot negotiate the new optional
 capability. Exact commands, results, and the remaining live current/current
 gate are recorded in
 `docs/audits/omenchat-message-revisions-qualification.md`.
+
+The subsequent reversible activation requests and accepts
+`message-revisions-v1` only beside `durable-mutations-v1` and a persistent
+client instance identifier. Unsolicited acceptance, base-only peers, downgrade,
+and capability loss remain fail closed. Isolated revision-only, two-client, and
+continuous replacement-Link smokes pass correction, deliberately lost
+acknowledgement, exact replay, forced Resource recovery, tombstone, clean
+intent recovery, and orderly omenchatd restart. No worker, queue, timer,
+automatic retry, protocol number, schema, or retention default changed.
 
 ## Completion gate
 
@@ -695,5 +704,6 @@ Do not advertise `message-revisions-v1` until:
 - capability absence/rejection/loss hides controls and blocks retry;
 - no maintainer data or identity is touched.
 
-This checkpoint authorizes no wire operation, capability advertisement,
-database migration, worker, timer, retry, or UI control by itself.
+This checkpoint alone authorized no activation. The separately reviewed and
+reversible activation is qualified in
+`docs/audits/omenchat-message-revisions-qualification.md`.

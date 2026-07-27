@@ -122,7 +122,7 @@ advance one 256-event accounting batch for one room. The command requires the
 existing current schema, reports its durable cursor and target, and never
 deletes history. Repeating it until `complete=true` closes the fail-closed
 legacy-ledger admission condition without adding a startup sweep or worker.
-The desktop has a matching dormant, rebuildable revision projection outside
+The desktop has a matching rebuildable revision projection outside
 immutable room history. It is bounded per room, server, and identity-scoped
 cache by rows and stable retained bytes; strict deltas and authoritative
 explicit-target snapshots are persisted transactionally and reconciled after
@@ -131,18 +131,19 @@ evidence. The reserved durable-intent operation has a bounded live sender and
 exact typed acknowledgement correlation. The desktop has a bounded correction
 draft separate from the ordinary composer, explicit deletion confirmation,
 durable prepare-before-send actions, and author/moderator/mute/depth checks.
-Those controls require authoritative target evidence plus both negotiated
-capabilities. Session-open still omits `message-revisions-v1`, so the controls
-remain hidden in production and unsolicited acceptance cannot enable them.
-The shared Iced timeline now has dormant read-only presentation for that
-projection. It borrows only authoritative rows for retained targets:
+Those controls require authoritative target evidence plus explicitly
+negotiated `durable-mutations-v1` and `message-revisions-v1`. The client
+requests the revision capability only with its persistent client instance
+identifier; unsolicited acceptance and capability loss remain fail closed.
+The shared Iced timeline renders the negotiated projection. It borrows only
+authoritative rows for retained targets:
 corrections show effective text with an edited marker, while tombstones hide
 the original body plus reply, mention, media, reaction, resend, and mutation
 actions. Stale restored rows remain hidden until an explicit-target snapshot
 or a validated negotiated live delta re-establishes authority for that target.
 An exact live replay restores stale target evidence once without changing the
 retained row; stale or conflicting deltas restore nothing, and other targets
-remain stale. This adds no capability request, control, worker, timer, retry,
+remain stale. This adds no worker, timer, automatic retry,
 or per-redraw revision-body clone. The dormant sender never applies revision
 state optimistically and uses the existing item-bounded per-session pending
 mutation queue.
