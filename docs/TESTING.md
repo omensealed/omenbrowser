@@ -4731,6 +4731,21 @@ restriction. It must continue collecting after unrelated operation errors; the
 normal headless `--pin-smoke` process case is the regression gate for that
 shared wait behavior.
 
+Replacement-Link policy ownership is covered without production capability
+activation:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  dormant_announcement_policy_clears_on_replacement_link_and_requires_renegotiation \
+  --lib -- --nocapture
+```
+
+This drives the production reconnect/retirement function with a captured
+transport. It proves stale policy is cleared before reopening, is not inherited
+from a replacement that does not accept the capability, and is restored only
+after a fresh explicit request/accept. It is not real-Link negotiated process
+evidence.
+
 Standard-member upload rejection before server acceptance or allocation is
 covered by:
 

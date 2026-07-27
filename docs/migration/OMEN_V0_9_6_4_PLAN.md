@@ -1559,6 +1559,11 @@ announcement process mode proves the confirmation-gated command fails closed
 while omenchatd owns the database, then uses the existing orderly
 stop-maintain-restart path. Live reload and cross-process policy-delta fanout
 remain outside this release; they are not activation prerequisites.
+The production live-client reconnect/retirement path also has deterministic
+captured-transport coverage: policy evidence clears before replacement,
+remains absent when the replacement does not accept the capability, and
+returns only after a fresh request/accept. Real negotiated current/current
+catalog/delta and replacement-Link process traffic remains an activation gate.
 
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is

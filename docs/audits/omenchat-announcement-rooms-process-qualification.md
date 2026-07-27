@@ -190,6 +190,9 @@ Focused tests passed:
 
 ```text
 cargo test --locked --no-default-features --features desktop-product \
+  dormant_announcement_policy_clears_on_replacement_link_and_requires_renegotiation \
+  --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
   announcement_rejection_evidence_requires_the_typed_policy_error \
   --bin omenbrowser_rs -- --nocapture
 cargo test --locked --no-default-features --features desktop-product \
@@ -206,7 +209,13 @@ cargo test --locked --manifest-path src/server/Cargo.toml \
   v0_9_6_3_ordinary_message_remains_byte_exact --lib -- --nocapture
 ```
 
-Results were respectively 1, 1, 1, 3, 4, and 1 passing tests. The adjacent
+Results were respectively 1, 1, 1, 1, 3, 4, and 1 passing tests. The
+replacement-Link test drives the production reconnect/retirement path with a
+captured transport. It proves policy evidence clears before the replacement
+session opens, remains absent when the replacement does not accept the
+capability, and returns only after a fresh explicit request/accept. This is
+deterministic same-process lifecycle evidence, not a real Reticulum Link claim.
+The adjacent
 `v0.9.6-3` ordinary frame remains byte-exact in both independent codecs.
 Because that release cannot request `announcement-rooms-v1`, policy is never
 projected to it and four-field room values remain the compatibility contract.
@@ -231,7 +240,7 @@ alter the already-qualified schema-11 policy or server authorization.
 
 ## Remaining activation gates
 
-- negotiated current/current five-field room catalog and delta process traffic;
-- same-process live client replacement-Link capability loss/recovery;
+- negotiated current/current five-field room catalog/delta and replacement-Link
+  process traffic;
 - native GUI member/moderator observation;
 - joint review before production request/acceptance activation.

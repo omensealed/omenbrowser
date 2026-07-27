@@ -11385,6 +11385,97 @@ mod tests {
     }
 
     #[test]
+    fn dormant_announcement_policy_clears_on_replacement_link_and_requires_renegotiation() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let mut events = Vec::new();
+        let session_accept = |policy_negotiated: bool| {
+            let room = RoomCatalogEntry {
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                room_revision: 2,
+                policy_bits: super::super::protocol::ROOM_POLICY_ANNOUNCEMENT,
+            }
+            .into_frame_value(policy_negotiated)
+            .expect("room catalog entry");
+            crate::chat::protocol::with_session_accept_negotiation(
+                FrameBody::Fields(vec![
+                    FrameValue::String(PROTOCOL_NAME.into()),
+                    FrameValue::Array(vec![room]),
+                ]),
+                &crate::chat::protocol::SessionAcceptNegotiation {
+                    accepted_capabilities: if policy_negotiated {
+                        vec![ANNOUNCEMENT_ROOMS_CAPABILITY.into()]
+                    } else {
+                        Vec::new()
+                    },
+                },
+            )
+            .expect("session acceptance")
+        };
+
+        state.set_announcement_rooms_requested_for_test(session_id, true);
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 1, None, session_accept(true)),
+            &mut events,
+        );
+        assert!(state.announcement_rooms_negotiated(session_id));
+        assert_eq!(
+            client.room_policy_bits(session_id, 1),
+            Some(super::super::protocol::ROOM_POLICY_ANNOUNCEMENT)
+        );
+
+        let reconnect_events = reconnect_live_server(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            OmenChatDescriptor {
+                server_destination: "abcd".into(),
+                ..OmenChatDescriptor::default()
+            },
+        );
+        assert!(matches!(
+            reconnect_events.first(),
+            Some(ChatClientEvent::ServerOpened { .. })
+        ));
+        assert!(!state.announcement_rooms_negotiated(session_id));
+        assert_eq!(client.room_policy_bits(session_id, 1), None);
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 2, None, session_accept(false)),
+            &mut events,
+        );
+        assert!(!state.announcement_rooms_negotiated(session_id));
+        assert_eq!(client.room_policy_bits(session_id, 1), None);
+
+        state.set_announcement_rooms_requested_for_test(session_id, true);
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 3, None, session_accept(true)),
+            &mut events,
+        );
+        assert!(state.announcement_rooms_negotiated(session_id));
+        assert_eq!(
+            client.room_policy_bits(session_id, 1),
+            Some(super::super::protocol::ROOM_POLICY_ANNOUNCEMENT)
+        );
+    }
+
+    #[test]
     fn live_event_actor_display_name_is_utf8_byte_bounded() {
         let event = parse_event(
             &FrameValue::Array(vec![

@@ -304,6 +304,11 @@ Production negotiation remains disabled until all applicable gates pass.
    command fails closed while omenchatd owns the database, then succeeds only
    after orderly stop and takes effect after restart. Live reload and
    cross-process policy-delta fanout are outside this version's contract.
-9. Next: negotiated current/current catalog/delta traffic, same-process
-   replacement-Link recovery, and native GUI observation. Do not activate
-   production negotiation before that joint review.
+9. **Partial (2026-07-27):** the production reconnect/retirement path has
+   deterministic captured-transport coverage: it clears policy before a
+   replacement session, does not inherit policy from a non-accepting peer, and
+   restores policy only after fresh explicit negotiation. Real negotiated
+   current/current catalog/delta and replacement-Link process traffic remains.
+10. Next: negotiated current/current catalog/delta and replacement-Link process
+    traffic plus native GUI observation. Do not activate production negotiation
+    before that joint review.
