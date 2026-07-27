@@ -4603,12 +4603,16 @@ known role/status bits, newest-first unique paging, item/owned-byte ceilings,
 room scoping, independent byte-exact codecs, authorized inline/Resource page
 equality, exclusive cursors and end markers, immediate role-loss denial,
 authenticated Link-scoped capability invalidation, the bounded ephemeral
-desktop projection, Resource-purpose validation, and explicit production
-refusal to accept the dormant capability. Schema-10 storage, durable transaction coupling,
+desktop projection, file-backed server restart, stable duplicate reads,
+delayed Resource replay, oversized/invalid Resource rejection before pending
+retention, invalid-page projection clearing, Resource-purpose validation, and
+explicit production refusal to accept the dormant capability. Schema-10
+storage, durable transaction coupling,
 migration faults, and guarded schema-9/schema-8 exports are covered separately
 in `docs/audits/omenchat-moderation-audit-storage-qualification.md`. These
-commands do not claim a current/current process test, restart recovery,
-mixed-version live interoperability, UI presentation, or activation. Paging
+commands do not claim a current/current process restart, adjacent-binary live
+interoperability, active Reticulum Resource cancellation, UI presentation,
+resource measurements, or activation. Paging
 evidence is in
 `docs/audits/omenchat-moderation-audit-paging-qualification.md`; wire evidence
 is in `docs/audits/omenchat-moderation-audit-qualification.md`.

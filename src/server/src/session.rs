@@ -6268,12 +6268,36 @@ mod tests {
         assert_eq!(malformed.len(), 1);
         assert_eq!(malformed[0].op, ChatOp::Error);
 
-        let not_negotiated = resource_engine
+        let oversized = resource_engine
             .handle_frame_with_active_peers_and_moderation_audit(
                 &peer(),
                 Frame::new(
                     ChatOp::ModerationAuditBefore,
                     32,
+                    Some(resource_room_id),
+                    FrameBody::Fields(vec![
+                        FrameValue::String(
+                            crate::protocol::MODERATION_AUDIT_REQUEST_BODY_TAG.into(),
+                        ),
+                        FrameValue::Nil,
+                        FrameValue::U64(
+                            (crate::protocol::MODERATION_AUDIT_PAGE_MAX_ENTRIES + 1) as u64,
+                        ),
+                    ]),
+                ),
+                &[],
+                true,
+            )
+            .expect("oversized response");
+        assert_eq!(oversized.len(), 1);
+        assert_eq!(oversized[0].op, ChatOp::Error);
+
+        let not_negotiated = resource_engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                Frame::new(
+                    ChatOp::ModerationAuditBefore,
+                    33,
                     Some(resource_room_id),
                     ModerationAuditRequest {
                         before_audit_id: None,
@@ -6288,6 +6312,80 @@ mod tests {
             .expect("not negotiated response");
         assert_eq!(not_negotiated.len(), 1);
         assert_eq!(not_negotiated[0].op, ChatOp::Error);
+    }
+
+    #[test]
+    fn moderation_audit_page_survives_server_restart_and_duplicate_reads_are_stable() {
+        let path = temp_store_path("moderation-audit-restart");
+        let room_id;
+        {
+            let store = OmenchatStore::open(&path).expect("store");
+            let room = store
+                .ensure_room("lobby", Some("Default OMENchat lobby"))
+                .expect("room");
+            room_id = room.room_id;
+            let actor = store
+                .ensure_user(&peer().identity_hash, "Alice", Some("lxmf-a"))
+                .expect("actor");
+            store
+                .set_user_role_bits(actor.user_id, ROLE_ADMIN)
+                .expect("admin");
+            store.join_room(room_id, actor.user_id).expect("actor join");
+            store.ensure_user(b"peer-b", "Bob", None).expect("target");
+            let engine = SessionEngine::with_test_moderation_audit(store, SessionLimits::default());
+            let committed = engine
+                .handle_durable_mutation(
+                    &peer(),
+                    1,
+                    Some(room_id),
+                    ChatOp::Command,
+                    ClientInstanceId::new([20; 16]),
+                    durable_envelope(ChatOp::Command, room_id, 1, "role Bob mod"),
+                )
+                .expect("committed moderation");
+            assert_eq!(committed.origin.op, ChatOp::CommandResult);
+        }
+
+        let engine = SessionEngine::with_test_moderation_audit(
+            OmenchatStore::open(&path).expect("reopened store"),
+            SessionLimits::default(),
+        );
+        let request = Frame::new(
+            ChatOp::ModerationAuditBefore,
+            40,
+            Some(room_id),
+            ModerationAuditRequest {
+                before_audit_id: None,
+                limit: 10,
+            }
+            .into_frame_body()
+            .expect("request"),
+        );
+        let first = engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                request.clone(),
+                &[],
+                true,
+            )
+            .expect("first read");
+        let duplicate = engine
+            .handle_frame_with_active_peers_and_moderation_audit(&peer(), request, &[], true)
+            .expect("duplicate read");
+        assert_eq!(duplicate, first);
+        assert_eq!(
+            first.iter().map(|frame| frame.op).collect::<Vec<_>>(),
+            vec![ChatOp::ModerationAuditInline, ChatOp::ModerationAuditEnd]
+        );
+        let values = decode_compressed_values_body(&first[0].body).expect("page values");
+        let page = crate::protocol::ModerationAuditPage::from_frame_values(&values).expect("page");
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].action, ModerationAuditAction::RoleChange);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
     #[test]

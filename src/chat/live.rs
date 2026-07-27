@@ -4512,6 +4512,7 @@ fn apply_batch(
         }
         ChatOp::ModerationAuditInline | ChatOp::ModerationAuditResource => {
             if !capabilities.moderation_audit {
+                client.clear_moderation_audit(session_id);
                 events.push(ChatClientEvent::Error {
                     session_id: Some(session_id),
                     message:
@@ -4521,6 +4522,7 @@ fn apply_batch(
                 return;
             }
             let Some(room_id) = room_id else {
+                client.clear_moderation_audit(session_id);
                 events.push(ChatClientEvent::Error {
                     session_id: Some(session_id),
                     message: "OMENchat moderation audit page did not identify a room".into(),
@@ -4530,6 +4532,7 @@ fn apply_batch(
             let page = match ModerationAuditPage::from_frame_values(&values) {
                 Ok(page) => page,
                 Err(error) => {
+                    client.clear_moderation_audit(session_id);
                     events.push(ChatClientEvent::Error {
                         session_id: Some(session_id),
                         message: format!("invalid OMENchat moderation audit page: {error}"),
@@ -4543,10 +4546,13 @@ fn apply_batch(
                     room_id,
                     page,
                 }),
-                Err(error) => events.push(ChatClientEvent::Error {
-                    session_id: Some(session_id),
-                    message: error.into(),
-                }),
+                Err(error) => {
+                    client.clear_moderation_audit(session_id);
+                    events.push(ChatClientEvent::Error {
+                        session_id: Some(session_id),
+                        message: error.into(),
+                    });
+                }
             }
         }
         _ => {}
@@ -5694,6 +5700,40 @@ mod tests {
             &page
         );
 
+        let record_value = page
+            .clone()
+            .into_frame_values()
+            .expect("record value")
+            .remove(0);
+        events.clear();
+        apply_batch(
+            &mut client,
+            Some(session_id),
+            ChatOp::ModerationAuditInline,
+            Some(1),
+            vec![record_value; crate::chat::protocol::MODERATION_AUDIT_PAGE_MAX_ENTRIES + 1],
+            BatchCapabilities {
+                moderation_audit: true,
+                ..BatchCapabilities::default()
+            },
+            &mut events,
+        );
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+        assert!(client.moderation_audit_page(session_id, 1).is_none());
+
+        events.clear();
+        apply_batch(
+            &mut client,
+            Some(session_id),
+            ChatOp::ModerationAuditInline,
+            Some(1),
+            page.clone().into_frame_values().expect("page values"),
+            BatchCapabilities {
+                moderation_audit: true,
+                ..BatchCapabilities::default()
+            },
+            &mut events,
+        );
         let mut state = LiveChatClientState::default();
         state.set_moderation_audit_negotiated_for_test(session_id, true);
         let mut transport = NoopChatTransport;

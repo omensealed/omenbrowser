@@ -492,9 +492,16 @@ The presentation must distinguish:
    capability loss. Production request and server acceptance remain disabled;
    there is no UI control, polling worker, timer, persistence, or automatic
    refresh.
-12. Qualify role loss, pagination, replay, restart, malformed/oversized,
-    mixed-version, privacy/redaction, and measurements; then separately review
-    activation.
+12. **Deterministic portion complete (2026-07-27):** qualify role and
+    membership loss, pagination, duplicate read stability, file-backed server
+    restart, malformed/oversized input, delayed Resource replay, Resource
+    metadata/size rejection, ordinary v0.9.6-3 fixture stability, dormant
+    production negotiation, and privacy by construction. Invalid client pages
+    clear the ephemeral projection. Current/current process restart,
+    adjacent-binary live traffic, cancellation during an active Reticulum
+    Resource, and resource measurements remain explicit pre-activation gates.
+13. Separately review activation only after the remaining process and
+    measurement gates pass.
 
 Each step is a separate commit-ready risk class. Pin activation does not imply
 moderation-audit activation, and either feature may be deferred independently.

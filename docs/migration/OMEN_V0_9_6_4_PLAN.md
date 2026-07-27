@@ -1457,6 +1457,17 @@ requests and accepts no `moderation-audit-v1`, and no UI, timer, worker,
 automatic refresh, schema, or retention setting changed. Evidence is in
 `docs/audits/omenchat-moderation-audit-paging-qualification.md`.
 
+The fourth moderation-audit slice qualifies deterministic failure and restart
+boundaries without activating the feature. Oversized requests and malformed,
+wrong-purpose, or oversized Resource offers fail before pending retention.
+Delayed valid Resources replay through the existing bounded owner. Invalid
+client pages clear ephemeral evidence. Schema-10 records survive a file-backed
+server restart and duplicate read-only requests remain byte-stable. Current
+desktop/server ordinary v0.9.6-3 fixtures remain exact, the desktop still
+requests no audit capability, and production omenchatd still refuses it.
+Current/current process restart, adjacent-binary live traffic, active Resource
+cancellation, and measurements remain separate pre-activation gates.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

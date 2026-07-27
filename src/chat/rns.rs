@@ -589,6 +589,90 @@ mod tests {
     }
 
     #[test]
+    fn moderation_audit_resource_deferral_replays_and_invalid_offers_are_not_retained() {
+        let page = crate::chat::protocol::ModerationAuditPage {
+            records: vec![crate::chat::protocol::ModerationAuditRecord {
+                audit_id: 11,
+                room_id: 1,
+                actor_user_id: 2,
+                actor_display_name_at_action: "Moderator".into(),
+                target_user_id: Some(3),
+                target_display_name_at_action: Some("Member".into()),
+                action: crate::chat::protocol::ModerationAuditAction::Ban,
+                committed_at_unix: 5,
+                result_role_bits: None,
+                result_status_bits: Some(1),
+            }],
+        };
+        let values = page.into_frame_values().expect("page values");
+        let batch = compressed_values_batch(&values).expect("batch");
+        let payload = compressed_values_payload(&values).expect("payload");
+        let resource_id = "moderation-audit:3:newest".to_owned();
+        let offer = ResourceOffer {
+            resource_id: resource_id.clone(),
+            compression: super::super::protocol::Compression::Bzip2,
+            uncompressed_len: batch.uncompressed_len,
+            compressed_len: batch.bytes.len() as u64,
+            purpose: "moderation-audit:3:newest".into(),
+        };
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ModerationAuditResource,
+                3,
+                Some(1),
+                resource_offer_body(&offer),
+            ))
+            .expect("push deferred offer");
+
+        assert!(recv_chat_event(&mut transport)
+            .expect("resource is pending")
+            .is_none());
+        assert_eq!(
+            transport
+                .pending_resource_offers
+                .get(&resource_id)
+                .map(VecDeque::len),
+            Some(1)
+        );
+        transport.insert_resource(resource_id.clone(), payload);
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("replayed page"),
+            Some(ChatLinkEvent::ResourceBatch {
+                op: ChatOp::ModerationAuditResource,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+        assert!(!transport.pending_resource_offers.contains_key(&resource_id));
+
+        for invalid_offer in [
+            ResourceOffer {
+                purpose: "history".into(),
+                ..offer.clone()
+            },
+            ResourceOffer {
+                resource_id: "moderation-audit:3:oversized".into(),
+                uncompressed_len: (crate::chat::protocol::batch::MAX_BATCH_UNCOMPRESSED_BYTES + 1)
+                    as u64,
+                ..offer
+            },
+        ] {
+            let mut transport = CapturedChatTransport::default();
+            transport
+                .push_incoming_frame(&Frame::new(
+                    ChatOp::ModerationAuditResource,
+                    4,
+                    Some(1),
+                    resource_offer_body(&invalid_offer),
+                ))
+                .expect("push invalid offer");
+            recv_chat_event(&mut transport).expect_err("invalid offer must fail closed");
+            assert!(transport.pending_resource_offers.is_empty());
+        }
+    }
+
+    #[test]
     fn client_transport_decodes_dormant_message_revision_snapshots() {
         let snapshot = crate::chat::protocol::MessageRevisionSnapshot {
             target_event_ids: vec![10],

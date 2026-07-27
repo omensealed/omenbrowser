@@ -2,7 +2,7 @@
 
 Date: 2026-07-27
 
-Baseline: `release/v0.9.6-4` at `9ee6407`, plus this uncommitted unit.
+Baseline: `release/v0.9.6-4` at `ae45c8d`, plus this qualification unit.
 
 ## Scope and activation state
 
@@ -30,6 +30,10 @@ This unit implements the read-only paging boundary designed in
 - The same canonical values are used for compressed inline and Resource
   delivery. Resource purposes must begin with `moderation-audit:`.
 - Malformed or unnegotiated operations fail closed.
+- Oversized requests and invalid or oversized Resource offers fail before
+  pending-offer retention.
+- A valid offer may arrive before its Resource; the existing bounded owner
+  retains and replays it once the matching Resource arrives.
 - The client accepts inline/Resource pages and end markers only after explicit
   test-only negotiation.
 - The client projection is memory-only, keyed by server and room, limited to
@@ -39,29 +43,42 @@ This unit implements the read-only paging boundary designed in
   identity hashes, Link identifiers, Reticulum endpoints, mutation identifiers,
   request hashes, reusable secrets, or operator text-log contents because none
   are present in the page contract.
+- Invalid client pages clear the ephemeral projection instead of leaving stale
+  rows presented as current.
+- Schema-10 rows survive a file-backed server restart, and duplicate read-only
+  requests return byte-identical responses without another mutation.
 
 ## Commands and results
 
 Passed:
 
 ```text
-cargo fmt --all
+cargo fmt --all --check
 cargo check --locked --no-default-features --features desktop-product
 cargo test --locked --no-default-features --features desktop-product moderation_audit -- --nocapture
 (cd src/server && cargo check --locked --no-default-features --features server-headless)
 (cd src/server && cargo test --locked --no-default-features --features server-headless moderation_audit -- --nocapture)
+cargo test --locked --no-default-features --features desktop-product \
+  v0_9_6_3_ordinary_message_remains_byte_exact --lib
+cargo test --locked --no-default-features --features desktop-product \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity --lib
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless v0_9_6_3_ordinary_message_remains_byte_exact --lib)
 ```
 
 Focused results:
 
-- desktop: 3 passed, 0 failed;
-- omenchatd: 14 passed, 0 failed.
+- desktop moderation-audit filter: 4 passed, 0 failed;
+- omenchatd moderation-audit filter: 15 passed, 0 failed;
+- ordinary v0.9.6-3 desktop/server fixtures: passed byte-exact;
+- production desktop capability request remains absent;
+- production omenchatd capability acceptance remains absent.
 
 Full local results:
 
-- root tests: all executed tests passed (1,495 library tests passed, 30
+- root tests: all executed tests passed (1,496 library tests passed, 30
   explicitly ignored; all binary/integration tests also passed);
-- omenchatd tests: 372 passed, 10 explicitly ignored;
+- omenchatd tests: 373 passed, 10 explicitly ignored;
 - root strict Clippy: passed with `-D warnings`;
 - omenchatd strict Clippy: passed with `-D warnings`;
 - omenchatd `server-full` check: passed;
@@ -72,10 +89,11 @@ soak, or release-mode measurement gates. None was converted to a pass.
 
 ## Not yet claimed
 
-- a current/current multi-process fetch;
-- reconnect or server-restart continuation of an audit paging session;
-- adjacent-version live traffic;
-- deferred Resource arrival/cancellation for this operation;
+- a current/current multi-process fetch or process restart;
+- continuation of an in-flight page across a replacement Link (the old Link
+  authority is intentionally discarded);
+- adjacent-version binary live traffic;
+- cancellation during an active Reticulum Resource;
 - decompression-bomb and maximum-size process measurements;
 - user-facing audit presentation or production activation.
 
