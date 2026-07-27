@@ -1549,6 +1549,11 @@ policy, and proves moderator message plus upload/Resource publication before
 and after orderly restart. The user listing is redacted and role maintenance
 uses the existing exclusive stopped-server database boundary; no TUI
 dependency or capability activation is required.
+The standard-member Resource boundary now also passes over real Links before
+and after orderly restart: upload offers receive typed policy rejection with
+no acceptance, completion, committed event, ledger entry, or server file.
+Machine-readable doctor redaction remains unchanged; the isolated harness
+checks the existing human ledger detail.
 
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is

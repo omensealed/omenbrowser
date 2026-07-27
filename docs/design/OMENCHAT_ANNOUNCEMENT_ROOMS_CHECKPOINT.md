@@ -294,7 +294,12 @@ Production negotiation remains disabled until all applicable gates pass.
    announcement room and again after an orderly restart. No capability vector
    changed. Evidence is in
    `docs/audits/omenchat-announcement-rooms-process-qualification.md`.
-7. Next: negotiated current/current catalog/delta traffic, same-process
-   replacement-Link recovery, standard-member upload rejection, native GUI
-   observation, and a restart-only versus live reload/fanout decision. Do not
-   activate production negotiation before that joint review.
+7. **Complete (2026-07-27):** real-Link standard-member upload offers receive
+   typed policy rejection without acceptance, completion, committed upload
+   event, ledger row, or server file. The same assertions pass after orderly
+   restart, with the server ledger remaining at zero files/bytes. Evidence is
+   in `docs/audits/omenchat-announcement-rooms-process-qualification.md`.
+8. Next: negotiated current/current catalog/delta traffic, same-process
+   replacement-Link recovery, native GUI observation, and a restart-only versus
+   live reload/fanout decision. Do not activate production negotiation before
+   that joint review.

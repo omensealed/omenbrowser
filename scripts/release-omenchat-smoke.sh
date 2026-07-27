@@ -22,6 +22,7 @@ multi_client=0
 restart_server=0
 continuous_client_reconnect=0
 announcement_rejection_smoke=0
+announcement_upload_rejection_smoke=0
 announcement_moderator_smoke=0
 reaction_smoke=0
 revision_smoke=0
@@ -60,6 +61,8 @@ Options:
                        Keep one browser smoke process alive while omenchatd restarts
   --announcement-rejection-smoke
                        Configure lobby read-only and prove a member message is rejected without commit
+  --announcement-upload-rejection-smoke
+                       Configure lobby read-only and prove a member upload is rejected before acceptance
   --announcement-moderator-smoke
                        Promote the isolated client, configure lobby read-only, and prove moderator publication
   --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
@@ -152,6 +155,10 @@ while [[ $# -gt 0 ]]; do
       announcement_rejection_smoke=1
       shift
       ;;
+    --announcement-upload-rejection-smoke)
+      announcement_upload_rejection_smoke=1
+      shift
+      ;;
     --announcement-moderator-smoke)
       announcement_moderator_smoke=1
       shift
@@ -241,8 +248,17 @@ if [[ "$announcement_rejection_smoke" -eq 1 ]] \
   echo "--announcement-rejection-smoke is an isolated authorization case; combine it only with --restart-server" >&2
   exit 2
 fi
+if [[ "$announcement_upload_rejection_smoke" -eq 1 ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 || "$announcement_moderator_smoke" -eq 1 \
+    || "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
+    || -z "$upload_file" ]]; then
+  echo "--announcement-upload-rejection-smoke requires --upload-file and is an isolated authorization case; combine it only with --restart-server" >&2
+  exit 2
+fi
 if [[ "$announcement_moderator_smoke" -eq 1 ]] \
-  && [[ "$announcement_rejection_smoke" -eq 1 || "$continuous_client_reconnect" -eq 1 \
+  && [[ "$announcement_rejection_smoke" -eq 1 \
+    || "$announcement_upload_rejection_smoke" -eq 1 || "$continuous_client_reconnect" -eq 1 \
     || "$multi_client" -eq 1 || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 \
     || "$pin_smoke" -eq 1 ]]; then
   echo "--announcement-moderator-smoke is an isolated authorization case; combine it only with --upload-file and/or --restart-server" >&2
@@ -307,6 +323,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+verify_empty_server_upload_state() {
+  local label="$1"
+  "$server_bin" doctor --home "$server_home" \
+    > "$run_dir/omenchatd-upload-rejection-doctor-${label}.txt"
+  if ! grep -Fq \
+    '[PASS] upload ledger: tracked=0 files/0 B disk=0 files/0 B missing=0 mismatched=0 orphan=0 unsafe=0' \
+    "$run_dir/omenchatd-upload-rejection-doctor-${label}.txt"; then
+    echo "rejected upload changed the upload ledger" >&2
+    cat "$run_dir/omenchatd-upload-rejection-doctor-${label}.txt" >&2
+    return 1
+  fi
+  if [[ -d "$server_home/uploads" ]] \
+    && find "$server_home/uploads" -type f -print -quit | grep -q .; then
+    echo "rejected announcement-room upload created a server file" >&2
+    return 1
+  fi
+}
+
 echo "== Initializing isolated omenchatd =="
 "$server_bin" init --home "$server_home" "${server_interface_args[@]}" \
   > "$run_dir/omenchatd-init.txt"
@@ -356,7 +390,7 @@ if ! grep -q 'live server ready' "$run_dir/omenchatd-run.log" 2>/dev/null; then
   exit 1
 fi
 
-if [[ "$announcement_rejection_smoke" -eq 1 ]]; then
+if [[ "$announcement_rejection_smoke" -eq 1 || "$announcement_upload_rejection_smoke" -eq 1 ]]; then
   echo "== Stopping initialized omenchatd for room policy maintenance =="
   kill "$server_pid"
   for _ in {1..80}; do
@@ -498,6 +532,10 @@ upload_args=()
 if [[ -n "$upload_file" ]]; then
   upload_args=(--omenchat-upload-file "$upload_file")
 fi
+restart_upload_args=()
+if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+  restart_upload_args=("${upload_args[@]}")
+fi
 continuous_args=()
 if [[ "$continuous_client_reconnect" -eq 1 ]]; then
   continuous_args=(
@@ -520,6 +558,8 @@ fi
 announcement_rejection_args=()
 if [[ "$announcement_rejection_smoke" -eq 1 ]]; then
   announcement_rejection_args=(--omenchat-announcement-rejection-smoke)
+elif [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+  announcement_rejection_args=(--omenchat-announcement-upload-rejection-smoke)
 fi
 "$browser_bin" \
   --omenchat-smoke "$destination" \
@@ -627,6 +667,11 @@ if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke.json"; then
   echo "OMENchat smoke did not report pass" >&2
   cat "$run_dir/omenchat-smoke.stderr" >&2
   exit 1
+fi
+server_upload_rejection_clean="not-run"
+if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+  verify_empty_server_upload_state "initial"
+  server_upload_rejection_clean=1
 fi
 continuous_link_closed=0
 continuous_link_reopened=0
@@ -784,6 +829,7 @@ if [[ "$restart_server" -eq 1 ]]; then
     "${reaction_args[@]}" \
     "${revision_args[@]}" \
     "${pin_args[@]}" \
+    "${restart_upload_args[@]}" \
     --output "$run_dir/omenchat-smoke-restart.json" \
     > "$run_dir/omenchat-smoke-restart.stdout" \
     2> "$run_dir/omenchat-smoke-restart.stderr"
@@ -792,6 +838,9 @@ if [[ "$restart_server" -eq 1 ]]; then
     echo "post-restart OMENchat smoke did not report pass" >&2
     cat "$run_dir/omenchat-smoke-restart.stderr" >&2
     exit 1
+  fi
+  if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+    verify_empty_server_upload_state "restart"
   fi
 fi
 
@@ -868,6 +917,7 @@ multi_client: $multi_client
 restart_server: $restart_server
 continuous_client_reconnect: $continuous_client_reconnect
 announcement_rejection_smoke: $announcement_rejection_smoke
+announcement_upload_rejection_smoke: $announcement_upload_rejection_smoke
 announcement_moderator_smoke: $announcement_moderator_smoke
 reaction_smoke: $reaction_smoke
 revision_smoke: $revision_smoke
@@ -881,6 +931,7 @@ restart_destination_stable: $restart_destination_stable
 restart_stop: $restart_stop
 server_large_batch_threshold_bytes: $([[ -n "$server_large_batch_threshold_bytes" ]] && printf '%s' "$server_large_batch_threshold_bytes" || printf 'default')
 upload_file: $([[ -n "$upload_file" ]] && printf '%s' "$upload_file" || printf 'not-run')
+server_upload_rejection_clean: $server_upload_rejection_clean
 EOF
 
 echo "$run_dir"

@@ -105,6 +105,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         room,
         message,
         announcement_rejection_smoke,
+        announcement_upload_rejection_smoke,
         reaction_smoke,
         revision_smoke,
         pin_smoke,
@@ -219,6 +220,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                     room: &room,
                     message: &message,
                     announcement_rejection_smoke,
+                    announcement_upload_rejection_smoke,
                 },
                 stages,
                 None,
@@ -276,6 +278,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                 room: &room,
                 message: &message,
                 announcement_rejection_smoke,
+                announcement_upload_rejection_smoke,
             },
             stages,
             None,
@@ -325,7 +328,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "local_user_id_bound": live_state.local_user_id(session_id).is_some(),
     }));
 
-    if joined {
+    if joined && !announcement_upload_rejection_smoke {
         let send_events = omenbrowser_rs::chat::live::handle_live_request(
             &mut client,
             &mut live_state,
@@ -344,7 +347,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
     }
 
-    let message_events = if joined {
+    let message_events = if joined && !announcement_upload_rejection_smoke {
         wait_for_omenchat_condition(
             &*app.runtime,
             &mut runtime_events,
@@ -380,6 +383,90 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "committed_message_seen": message_seen,
         "events": message_events,
     }));
+
+    let mut announcement_upload_rejection_ok = false;
+    if joined && announcement_upload_rejection_smoke {
+        let upload_file = upload_file
+            .as_ref()
+            .context("announcement upload rejection smoke requires an upload file")?;
+        let upload_bytes = std::fs::read(upload_file).with_context(|| {
+            format!(
+                "failed to read OMENchat rejection smoke upload file {}",
+                upload_file.display()
+            )
+        })?;
+        let upload_filename = upload_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("omenchat-rejected-upload.bin")
+            .to_owned();
+        let upload_len = upload_bytes.len() as u64;
+        let send_upload_events = omenbrowser_rs::chat::live::handle_live_request(
+            &mut client,
+            &mut live_state,
+            &mut transport,
+            ChatClientRequest::SendUpload {
+                session_id,
+                room: room.clone(),
+                filename: upload_filename.clone(),
+                content_type: Some("application/octet-stream".into()),
+                bytes: upload_bytes,
+            },
+        );
+        let local_upload_error = send_upload_events
+            .iter()
+            .any(|event| matches!(event, ChatClientEvent::Error { .. }));
+        stages.push(serde_json::json!({
+            "stage": "announcement_upload_offer_frame",
+            "ok": !local_upload_error,
+            "filename": upload_filename.clone(),
+            "bytes": upload_len,
+            "events": send_upload_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+        }));
+        send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
+
+        let rejection_events = wait_for_omenchat_condition(
+            &*app.runtime,
+            &mut runtime_events,
+            &mut client,
+            &mut live_state,
+            &mut transport,
+            OmenChatWaitOptions {
+                link_id: opened.link_id,
+                session_id,
+                wait: Duration::from_secs(response_wait_secs),
+            },
+            |_| false,
+        )
+        .await;
+        let announcement_upload_rejected =
+            omenchat_smoke_events_contain_announcement_policy_rejection(&rejection_events);
+        let upload_accepted =
+            omenchat_smoke_events_contain_decoded_event(&rejection_events, "upload_accepted");
+        let upload_completed =
+            omenchat_smoke_events_contain_decoded_event(&rejection_events, "upload_completed");
+        let announcement_upload_committed = omenchat_session_upload_resource_id(
+            &client,
+            session_id,
+            &upload_filename,
+            Some(upload_len),
+        )
+        .is_some();
+        announcement_upload_rejection_ok = announcement_upload_rejected
+            && !upload_accepted
+            && !upload_completed
+            && !announcement_upload_committed;
+        stages.push(serde_json::json!({
+            "stage": "announcement_upload_rejection_wait",
+            "ok": announcement_upload_rejection_ok,
+            "announcement_rejected": announcement_upload_rejected,
+            "upload_accepted": upload_accepted,
+            "upload_completed": upload_completed,
+            "committed_upload_seen": announcement_upload_committed,
+            "events": rejection_events,
+        }));
+    }
 
     let mut reaction_ok = true;
     let mutation_identity_storage_root = app.paths.identity_storage_root();
@@ -685,7 +772,9 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             "status": session.status.clone(),
         })
     });
-    let message_outcome = if announcement_rejection_smoke {
+    let message_outcome = if announcement_upload_rejection_smoke {
+        announcement_upload_rejection_ok
+    } else if announcement_rejection_smoke {
         announcement_rejected && !message_seen
     } else {
         message_seen
@@ -699,6 +788,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         && reconnect_ok;
     let failed_stage = if !joined {
         "join_wait"
+    } else if !message_outcome && announcement_upload_rejection_smoke {
+        "announcement_upload_rejection_wait"
     } else if !message_outcome && announcement_rejection_smoke {
         "announcement_rejection_wait"
     } else if !message_outcome {
@@ -724,6 +815,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             room: &room,
             message: &message,
             announcement_rejection_smoke,
+            announcement_upload_rejection_smoke,
         },
         stages,
         session_summary,
@@ -3026,6 +3118,7 @@ struct OmenChatSmokeReportContext<'a> {
     room: &'a str,
     message: &'a str,
     announcement_rejection_smoke: bool,
+    announcement_upload_rejection_smoke: bool,
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -3041,13 +3134,16 @@ fn omenchat_smoke_report(
         room,
         message,
         announcement_rejection_smoke,
+        announcement_upload_rejection_smoke,
     } = context;
     serde_json::json!({
         "report": "omenchat_smoke",
         "classification": {
             "outcome": if ok { "pass" } else { "fail" },
             "stage": stage,
-            "reason": if ok && announcement_rejection_smoke {
+            "reason": if ok && announcement_upload_rejection_smoke {
+                "OMENchat Link opened, room joined, and the server rejected the member upload before acceptance or commit"
+            } else if ok && announcement_rejection_smoke {
                 "OMENchat Link opened, room joined, and the server rejected member publication without committing the message"
             } else if ok {
                 "OMENchat Link opened, room joined, and message echo was observed"
@@ -3064,6 +3160,7 @@ fn omenchat_smoke_report(
         "room": room,
         "message": message,
         "announcement_rejection_smoke": announcement_rejection_smoke,
+        "announcement_upload_rejection_smoke": announcement_upload_rejection_smoke,
         "stages": stages,
         "session": session,
     })

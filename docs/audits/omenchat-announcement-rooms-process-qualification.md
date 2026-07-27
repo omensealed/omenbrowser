@@ -2,7 +2,8 @@
 
 Date: 2026-07-27
 
-Baseline: `release/v0.9.6-4` at `e7a9257`, plus this process-smoke unit
+Baseline: `release/v0.9.6-4` through `b7f959f`, plus this standard-member
+upload-rejection process unit
 
 Verdict: current/current member rejection plus moderator message/Resource
 publication and restart persistence pass over real isolated Reticulum Links; negotiated
@@ -120,6 +121,36 @@ short-circuits only for the exact typed announcement restriction. The canonical
 headless pin smoke then passed, and the member announcement-rejection smoke
 was rerun successfully.
 
+The standard-member upload boundary passed over a real Link with the same
+873-byte deterministic fixture:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out /tmp/omenbrowser-announcement-upload-rejection \
+  --message 'announcement upload rejection qualification' \
+  --announcement-upload-rejection-smoke \
+  --upload-file fixtures/omenchat/v0_6_0_1_wire.rs \
+  --restart-server
+```
+
+Initial and post-restart reports both passed with:
+
+- typed announcement-policy rejection;
+- `upload_accepted: false`;
+- `upload_completed: false`; and
+- `committed_upload_seen: false`.
+
+The isolated server reported `tracked=0 files/0 B` and
+`disk=0 files/0 B`, all discrepancy counters zero, and no regular file in its
+upload root. The check runs before and after restart. The normal
+machine-readable doctor intentionally omits private detail, so this local
+isolated harness reads the existing human detail rather than weakening
+redaction.
+
 ## Deterministic and adjacent evidence
 
 Focused tests passed:
@@ -170,7 +201,6 @@ alter the already-qualified schema-11 policy or server authorization.
 - negotiated current/current five-field room catalog and delta process traffic;
 - same-process live client replacement-Link capability loss/recovery;
 - native GUI member/moderator observation;
-- standard-member upload/resource rejection before allocation;
 - a documented restart-only policy contract or a separately reviewed live
   policy reload/fanout design;
 - joint review before production request/acceptance activation.

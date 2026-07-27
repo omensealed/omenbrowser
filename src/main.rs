@@ -193,6 +193,7 @@ async fn async_main() -> anyhow::Result<()> {
             room,
             message,
             announcement_rejection_smoke,
+            announcement_upload_rejection_smoke,
             reaction_smoke,
             revision_smoke,
             pin_smoke,
@@ -213,6 +214,7 @@ async fn async_main() -> anyhow::Result<()> {
                 room,
                 message,
                 announcement_rejection_smoke,
+                announcement_upload_rejection_smoke,
                 reaction_smoke,
                 revision_smoke,
                 pin_smoke,
@@ -361,6 +363,7 @@ enum CliCommand {
         room: String,
         message: String,
         announcement_rejection_smoke: bool,
+        announcement_upload_rejection_smoke: bool,
         reaction_smoke: bool,
         revision_smoke: bool,
         pin_smoke: bool,
@@ -430,6 +433,7 @@ struct OmenChatSmokeCommandInput {
     room: String,
     message: String,
     announcement_rejection_smoke: bool,
+    announcement_upload_rejection_smoke: bool,
     reaction_smoke: bool,
     revision_smoke: bool,
     pin_smoke: bool,
@@ -520,6 +524,7 @@ impl CliCommand {
         let mut omenchat_room = "lobby".to_string();
         let mut omenchat_message = "OMENchat smoke test from OMENbrowser_rs".to_string();
         let mut omenchat_announcement_rejection_smoke = false;
+        let mut omenchat_announcement_upload_rejection_smoke = false;
         let mut omenchat_reaction_smoke = false;
         let mut omenchat_revision_smoke = false;
         let mut omenchat_pin_smoke = false;
@@ -610,6 +615,9 @@ impl CliCommand {
                 }
                 "--omenchat-announcement-rejection-smoke" => {
                     omenchat_announcement_rejection_smoke = true;
+                }
+                "--omenchat-announcement-upload-rejection-smoke" => {
+                    omenchat_announcement_upload_rejection_smoke = true;
                 }
                 "--omenchat-reaction-smoke" => {
                     omenchat_reaction_smoke = true;
@@ -867,6 +875,12 @@ impl CliCommand {
                 overrides: Box::new(overrides),
             })
         } else if let Some(destination) = omenchat_smoke_destination {
+            if omenchat_announcement_rejection_smoke && omenchat_announcement_upload_rejection_smoke
+            {
+                return Err(anyhow::anyhow!(
+                    "choose only one OMENchat announcement rejection smoke mode"
+                ));
+            }
             if omenchat_announcement_rejection_smoke
                 && (omenchat_reaction_smoke
                     || omenchat_revision_smoke
@@ -879,12 +893,25 @@ impl CliCommand {
                     "--omenchat-announcement-rejection-smoke is an isolated authorization case"
                 ));
             }
+            if omenchat_announcement_upload_rejection_smoke
+                && (omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_none()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-announcement-upload-rejection-smoke requires one upload file and is an isolated authorization case"
+                ));
+            }
             overrides.ensure_runtime_backend(RuntimeBackendSetting::Reticulum);
             Ok(Self::OmenChatSmoke {
                 destination,
                 room: omenchat_room,
                 message: omenchat_message,
                 announcement_rejection_smoke: omenchat_announcement_rejection_smoke,
+                announcement_upload_rejection_smoke: omenchat_announcement_upload_rejection_smoke,
                 reaction_smoke: omenchat_reaction_smoke,
                 revision_smoke: omenchat_revision_smoke,
                 pin_smoke: omenchat_pin_smoke,
@@ -3676,6 +3703,7 @@ mod tests {
                 room: "lobby".into(),
                 message: "hello smoke".into(),
                 announcement_rejection_smoke: false,
+                announcement_upload_rejection_smoke: false,
                 reaction_smoke: true,
                 revision_smoke: true,
                 pin_smoke: true,
@@ -3756,6 +3784,33 @@ mod tests {
         assert!(error
             .to_string()
             .contains("is an isolated authorization case"));
+    }
+
+    #[test]
+    fn cli_requires_one_upload_for_announcement_upload_rejection() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-announcement-upload-rejection-smoke".to_string(),
+            "--omenchat-upload-file".to_string(),
+            "/tmp/rejected.bin".to_string(),
+        ])
+        .expect("parse announcement upload rejection");
+        assert!(matches!(
+            parsed,
+            CliCommand::OmenChatSmoke {
+                announcement_upload_rejection_smoke: true,
+                ..
+            }
+        ));
+
+        let error = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-announcement-upload-rejection-smoke".to_string(),
+        ])
+        .expect_err("missing upload must fail");
+        assert!(error.to_string().contains("requires one upload file"));
     }
 
     #[test]

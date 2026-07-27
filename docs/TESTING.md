@@ -4728,6 +4728,29 @@ restriction. It must continue collecting after unrelated operation errors; the
 normal headless `--pin-smoke` process case is the regression gate for that
 shared wait behavior.
 
+Standard-member upload rejection before server acceptance or allocation is
+covered by:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out <isolated-output-root> \
+  --message "announcement upload rejection qualification" \
+  --announcement-upload-rejection-smoke \
+  --upload-file fixtures/omenchat/v0_6_0_1_wire.rs \
+  --restart-server
+```
+
+Both client reports must contain typed policy rejection with no upload
+acceptance, completion, or committed upload event. Before and after the orderly
+restart, the isolated server doctor must report zero tracked/disk upload files
+and bytes, and the upload root must contain no regular file. The machine
+doctor remains redacted; this local isolated harness uses the human detail
+line rather than weakening that boundary.
+
 The first moderation-audit slice reserves a read-only operation range and
 bounded shared types without requesting or accepting
 `moderation-audit-v1`:
