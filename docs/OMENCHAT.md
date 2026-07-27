@@ -128,9 +128,12 @@ cache by rows and stable retained bytes; strict deltas and authoritative
 explicit-target snapshots are persisted transactionally and reconciled after
 restart. Invalid snapshots retain prior rows while clearing authoritative
 evidence. The reserved durable-intent operation has a bounded live sender and
-exact typed acknowledgement correlation, but there is no desktop prepare path
-or GUI action. Session-open still omits `message-revisions-v1`, and unsolicited
-acceptance cannot enable it.
+exact typed acknowledgement correlation. The desktop has a bounded correction
+draft separate from the ordinary composer, explicit deletion confirmation,
+durable prepare-before-send actions, and author/moderator/mute/depth checks.
+Those controls require authoritative target evidence plus both negotiated
+capabilities. Session-open still omits `message-revisions-v1`, so the controls
+remain hidden in production and unsolicited acceptance cannot enable them.
 The shared Iced timeline now has dormant read-only presentation for that
 projection. It borrows only authoritative rows for retained targets:
 corrections show effective text with an edited marker, while tombstones hide

@@ -491,6 +491,31 @@ pub(in crate::desktop) enum OmenChatMessage {
         token: crate::chat::protocol::ReactionToken,
     },
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    BeginMessageCorrection {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    MessageCorrectionChanged {
+        session_id: ChatSessionId,
+        value: String,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    SubmitMessageCorrection(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    CancelMessageCorrection(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    BeginMessageDeletion {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ConfirmMessageDeletion,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    CancelMessageDeletion,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     BeginMutationResolution {
         mutation_id: crate::chat::protocol::MutationId,
         action: OmenChatMutationResolutionAction,

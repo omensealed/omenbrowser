@@ -1283,6 +1283,19 @@ validation and redacted labels understand the operation, and revision sends do
 not clear an unrelated ordinary composer draft. Production negotiation remains
 disabled.
 
+The ninth dormant slice adds desktop correction/deletion actions without
+activating the capability. One bounded correction draft per session is separate
+from the ordinary message composer; one deletion confirmation requires a
+second explicit action. Eligibility is fail-closed on both negotiated
+capabilities, authoritative target evidence, retained message type, local
+identity and role evidence, mute/ban state, tombstone state, and revision
+depth. Correction intent persistence completes before transport admission,
+room/session changes cancel local action state, and a successful revision send
+clears only its matching correction draft. No worker, timer, automatic retry,
+or optimistic timeline change is added. Eligible targets are derived once per
+bounded room render, avoiding a history rescan per message. Since production
+still omits `message-revisions-v1`, the controls remain hidden.
+
 ### Unit 6F — pins and moderation audit history
 
 - Append bounded pin/unpin and moderation-audit events.

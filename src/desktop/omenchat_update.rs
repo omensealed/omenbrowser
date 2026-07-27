@@ -3,6 +3,14 @@ use iced::widget::scrollable::RelativeOffset;
 use iced::Task;
 
 use crate::chat::protocol::{RoomId, RICH_MESSAGE_MAX_MENTIONS};
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+use crate::chat::{
+    protocol::{
+        MessageRevisionAction, MESSAGE_REVISION_MAX_NUMBER, MESSAGE_REVISION_MAX_REPLACEMENT_BYTES,
+    },
+    ChatMessageRevisionPresentation, CHAT_ROLE_ADMIN, CHAT_ROLE_MODERATOR, CHAT_STATUS_BANNED,
+    CHAT_STATUS_MUTED,
+};
 use crate::chat::{ChatEventKind, ChatSessionId};
 use crate::micron::LinkAction;
 
@@ -103,6 +111,47 @@ impl DesktopApp {
                 event_id,
                 token,
             }) => Ok(self.prepare_omenchat_reaction_mutation(session_id, room_id, event_id, token)),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::BeginMessageCorrection {
+                session_id,
+                room_id,
+                event_id,
+            }) => {
+                self.begin_omenchat_message_correction(session_id, room_id, event_id);
+                Ok(Task::none())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::MessageCorrectionChanged { session_id, value }) => {
+                self.update_omenchat_message_correction(session_id, value);
+                Ok(Task::none())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::SubmitMessageCorrection(session_id)) => {
+                Ok(self.submit_omenchat_message_correction(session_id))
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::CancelMessageCorrection(session_id)) => {
+                self.omenchat.omenchat_revision_drafts.remove(&session_id);
+                Ok(Task::none())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::BeginMessageDeletion {
+                session_id,
+                room_id,
+                event_id,
+            }) => {
+                self.begin_omenchat_message_deletion(session_id, room_id, event_id);
+                Ok(Task::none())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::ConfirmMessageDeletion) => {
+                Ok(self.confirm_omenchat_message_deletion())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::CancelMessageDeletion) => {
+                self.omenchat.omenchat_revision_delete_confirmation = None;
+                Ok(Task::none())
+            }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChat(OmenChatMessage::BeginMutationResolution {
                 mutation_id,
@@ -301,6 +350,17 @@ impl DesktopApp {
         if previous_room_id != current_room_id {
             self.omenchat.omenchat_reply_drafts.remove(&session_id);
             self.omenchat.omenchat_selected_mentions.remove(&session_id);
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            {
+                self.omenchat.omenchat_revision_drafts.remove(&session_id);
+                if self
+                    .omenchat
+                    .omenchat_revision_delete_confirmation
+                    .is_some_and(|confirmation| confirmation.session_id == session_id)
+                {
+                    self.omenchat.omenchat_revision_delete_confirmation = None;
+                }
+            }
             #[cfg(feature = "desktop-qr")]
             self.clear_omenchat_invitation_qr_for_session(session_id);
         }
@@ -349,6 +409,223 @@ impl DesktopApp {
             let _ = session_id;
             false
         }
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) fn omenchat_message_revision_action_available(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+        action: MessageRevisionAction,
+    ) -> bool {
+        let (corrections, deletions) =
+            self.omenchat_message_revision_action_targets(session_id, room_id);
+        match action {
+            MessageRevisionAction::Correct => corrections.contains(&event_id),
+            MessageRevisionAction::Tombstone => deletions.contains(&event_id),
+        }
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) fn omenchat_message_revision_action_targets(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) -> (
+        std::collections::BTreeSet<u64>,
+        std::collections::BTreeSet<u64>,
+    ) {
+        let mut corrections = std::collections::BTreeSet::new();
+        let mut deletions = std::collections::BTreeSet::new();
+        if !self
+            .omenchat
+            .omenchat_live_state
+            .message_revisions_negotiated(session_id)
+            || !self
+                .omenchat
+                .omenchat_live_state
+                .durable_mutations_negotiated(session_id)
+        {
+            return (corrections, deletions);
+        }
+        let Some(local_user_id) = self.omenchat.chat_client.local_user_id(session_id) else {
+            return (corrections, deletions);
+        };
+        let Some(session) = self.omenchat.chat_client.session(session_id) else {
+            return (corrections, deletions);
+        };
+        let Some(local_user) = session
+            .users
+            .iter()
+            .find(|user| user.user_id == local_user_id)
+        else {
+            return (corrections, deletions);
+        };
+        if local_user.status_bits & CHAT_STATUS_BANNED != 0 {
+            return (corrections, deletions);
+        }
+        let can_moderate = local_user.role_bits & (CHAT_ROLE_MODERATOR | CHAT_ROLE_ADMIN) != 0;
+        for target in session.events.iter().filter(|event| {
+            event.room_id == room_id
+                && crate::chat::model::chat_event_supports_message_revisions(event)
+                && self
+                    .omenchat
+                    .chat_client
+                    .message_revision_target_authoritative(session_id, room_id, event.event_id)
+        }) {
+            let revision = self.omenchat.chat_client.message_revision_for_target(
+                session_id,
+                room_id,
+                target.event_id,
+            );
+            if revision.is_some_and(|revision| {
+                revision.action == MessageRevisionAction::Tombstone
+                    || revision.revision_number >= MESSAGE_REVISION_MAX_NUMBER
+            }) {
+                continue;
+            }
+            let is_author = target.actor_user_id == Some(local_user_id);
+            if is_author
+                && local_user.status_bits & CHAT_STATUS_MUTED == 0
+                && revision.map_or(0, |revision| revision.revision_number)
+                    < MESSAGE_REVISION_MAX_NUMBER.saturating_sub(1)
+            {
+                corrections.insert(target.event_id);
+            }
+            if is_author || can_moderate {
+                deletions.insert(target.event_id);
+            }
+        }
+        (corrections, deletions)
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    fn begin_omenchat_message_correction(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    ) {
+        if !self.omenchat_message_revision_action_available(
+            session_id,
+            room_id,
+            event_id,
+            MessageRevisionAction::Correct,
+        ) {
+            self.set_omenchat_session_status(
+                session_id,
+                "message correction is unavailable for this target".into(),
+            );
+            return;
+        }
+        let Some(session) = self.omenchat.chat_client.session(session_id) else {
+            return;
+        };
+        let Some(event) = session
+            .events
+            .iter()
+            .find(|event| event.room_id == room_id && event.event_id == event_id)
+        else {
+            return;
+        };
+        let revision = self
+            .omenchat
+            .chat_client
+            .message_revision_for_target(session_id, room_id, event_id);
+        let replacement =
+            match crate::chat::model::chat_message_revision_presentation(event, revision) {
+                Some(ChatMessageRevisionPresentation::Edited { body, .. })
+                | Some(ChatMessageRevisionPresentation::Original(body)) => body.to_owned(),
+                Some(ChatMessageRevisionPresentation::Deleted { .. }) | None => return,
+            };
+        self.omenchat.omenchat_revision_drafts.insert(
+            session_id,
+            super::omenchat_desktop_state::OmenChatRevisionDraft {
+                room_id,
+                event_id,
+                replacement,
+            },
+        );
+        self.omenchat.omenchat_revision_delete_confirmation = None;
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    fn update_omenchat_message_correction(&mut self, session_id: ChatSessionId, value: String) {
+        if value.len() > MESSAGE_REVISION_MAX_REPLACEMENT_BYTES {
+            self.set_omenchat_session_status(
+                session_id,
+                format!(
+                    "message correction is limited to {MESSAGE_REVISION_MAX_REPLACEMENT_BYTES} bytes"
+                ),
+            );
+            return;
+        }
+        if let Some(draft) = self.omenchat.omenchat_revision_drafts.get_mut(&session_id) {
+            draft.replacement = value;
+        }
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    fn submit_omenchat_message_correction(&mut self, session_id: ChatSessionId) -> Task<Message> {
+        let Some(draft) = self
+            .omenchat
+            .omenchat_revision_drafts
+            .get(&session_id)
+            .cloned()
+        else {
+            return Task::none();
+        };
+        self.prepare_omenchat_message_revision_mutation(
+            session_id,
+            draft.room_id,
+            draft.event_id,
+            MessageRevisionAction::Correct,
+            Some(draft.replacement),
+        )
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    fn begin_omenchat_message_deletion(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    ) {
+        if !self.omenchat_message_revision_action_available(
+            session_id,
+            room_id,
+            event_id,
+            MessageRevisionAction::Tombstone,
+        ) {
+            self.set_omenchat_session_status(
+                session_id,
+                "message deletion is unavailable for this target".into(),
+            );
+            return;
+        }
+        self.omenchat.omenchat_revision_drafts.remove(&session_id);
+        self.omenchat.omenchat_revision_delete_confirmation = Some(
+            super::omenchat_desktop_state::OmenChatRevisionDeleteConfirmation {
+                session_id,
+                room_id,
+                event_id,
+            },
+        );
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    fn confirm_omenchat_message_deletion(&mut self) -> Task<Message> {
+        let Some(confirmation) = self.omenchat.omenchat_revision_delete_confirmation.take() else {
+            return Task::none();
+        };
+        self.prepare_omenchat_message_revision_mutation(
+            confirmation.session_id,
+            confirmation.room_id,
+            confirmation.event_id,
+            MessageRevisionAction::Tombstone,
+            None,
+        )
     }
 
     fn update_begin_omenchat_reply(
@@ -550,5 +827,358 @@ impl DesktopApp {
         self.close_omenchat_session(session_id);
         self.reconcile_workspace_panes_after_target_mutation(None, None);
         self.persist_workspace_panes("workspace panes");
+    }
+}
+
+#[cfg(all(
+    test,
+    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+))]
+mod tests {
+    use super::*;
+    use crate::app::{current_epoch_ms, App};
+    use crate::chat::protocol::{MessageRevisionSnapshot, MessageRevisionSnapshotEntry};
+    use crate::chat::{
+        ChatEvent, ChatRoomSummary, ChatServerSummary, ChatSessionView, ChatUserSummary,
+    };
+
+    fn revision_test_desktop(suffix: &str) -> (DesktopApp, ChatSessionId, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-revision-controls-{}-{}-{suffix}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths: crate::config::AppPaths::from_root(root.clone()),
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+        let session_id = desktop.omenchat.chat_client.reserve_session_id();
+        let room = ChatRoomSummary {
+            server_id: "server".into(),
+            room_id: 1,
+            name: "lobby".into(),
+            topic: None,
+            unread: 0,
+            joined: true,
+        };
+        assert!(desktop.omenchat.chat_client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "server".into(),
+                destination: "destination".into(),
+                display_name: "Server".into(),
+            },
+            rooms: vec![room.clone()],
+            active_room: room,
+            users: vec![ChatUserSummary {
+                server_id: "server".into(),
+                user_id: 7,
+                display_name: "Alice".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+            }],
+            events: vec![ChatEvent {
+                server_id: "server".into(),
+                room_id: 1,
+                event_id: 9,
+                actor_user_id: Some(7),
+                actor_display_name: Some("Alice".into()),
+                at_unix: 1,
+                kind: ChatEventKind::Message {
+                    body: "original".into(),
+                },
+            }],
+            status: "ready".into(),
+        }));
+        assert!(desktop
+            .omenchat
+            .chat_client
+            .bind_local_user_id(session_id, 7));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_durable_mutations_negotiated_for_test(session_id, true);
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_message_revisions_negotiated_for_test(session_id, true);
+        (desktop, session_id, root)
+    }
+
+    fn enable_revision_prepare(desktop: &mut DesktopApp, session_id: ChatSessionId) {
+        desktop.app.paths.ensure().expect("isolated paths");
+        desktop
+            .omenchat
+            .chat_client
+            .replace_message_revision_snapshot(
+                session_id,
+                1,
+                &MessageRevisionSnapshot {
+                    target_event_ids: vec![9],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("authoritative empty revision snapshot");
+        let client_instance_id = crate::chat::protocol::ClientInstanceId::new([0x61; 16]);
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_client_instance_id(Some(client_instance_id));
+        desktop.omenchat.omenchat_authenticated_identity_hash = Some(vec![0x62; 16]);
+        desktop.omenchat.omenchat_mutation_intent_worker = Some(
+            crate::chat::mutation_intent_worker::MutationIntentWorker::start(
+                desktop.app.paths.identity_storage_root(),
+            )
+            .expect("intent worker"),
+        );
+    }
+
+    fn recover_revision_intents(
+        desktop: &DesktopApp,
+    ) -> Vec<crate::chat::mutation_intents::OutboundMutationIntent> {
+        desktop
+            .omenchat
+            .omenchat_mutation_intent_worker
+            .as_ref()
+            .expect("worker")
+            .try_recover()
+            .expect("recovery admitted")
+            .recv()
+            .expect("recovery reply")
+            .expect("recovery result")
+    }
+
+    fn shutdown_revision_test(mut desktop: DesktopApp, root: std::path::PathBuf) {
+        desktop
+            .omenchat
+            .omenchat_mutation_intent_worker
+            .take()
+            .expect("worker")
+            .shutdown()
+            .expect("worker shutdown");
+        drop(desktop);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn revision_controls_require_authority_preserve_drafts_and_confirm_deletion() {
+        let (mut desktop, session_id, _) = revision_test_desktop("authority");
+        assert!(!desktop.omenchat_message_revision_action_available(
+            session_id,
+            1,
+            9,
+            MessageRevisionAction::Correct,
+        ));
+        desktop
+            .omenchat
+            .chat_client
+            .replace_message_revision_snapshot(
+                session_id,
+                1,
+                &MessageRevisionSnapshot {
+                    target_event_ids: vec![9],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("authoritative empty revision snapshot");
+        assert!(desktop.omenchat_message_revision_action_available(
+            session_id,
+            1,
+            9,
+            MessageRevisionAction::Correct,
+        ));
+        assert!(desktop.omenchat_message_revision_action_available(
+            session_id,
+            1,
+            9,
+            MessageRevisionAction::Tombstone,
+        ));
+
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "ordinary draft".into());
+        desktop.begin_omenchat_message_correction(session_id, 1, 9);
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_revision_drafts
+                .get(&session_id)
+                .map(|draft| draft.replacement.as_str()),
+            Some("original")
+        );
+        desktop.update_omenchat_message_correction(session_id, "corrected".into());
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+            Some("ordinary draft")
+        );
+
+        desktop.begin_omenchat_message_deletion(session_id, 1, 9);
+        assert!(!desktop
+            .omenchat
+            .omenchat_revision_drafts
+            .contains_key(&session_id));
+        assert_eq!(
+            desktop.omenchat.omenchat_revision_delete_confirmation,
+            Some(
+                super::super::omenchat_desktop_state::OmenChatRevisionDeleteConfirmation {
+                    session_id,
+                    room_id: 1,
+                    event_id: 9,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn revision_controls_enforce_author_mute_and_moderator_boundaries() {
+        let (mut desktop, session_id, _) = revision_test_desktop("permissions");
+        desktop
+            .omenchat
+            .chat_client
+            .replace_message_revision_snapshot(
+                session_id,
+                1,
+                &MessageRevisionSnapshot {
+                    target_event_ids: vec![9],
+                    entries: vec![MessageRevisionSnapshotEntry {
+                        target_event_id: 9,
+                        latest_revision_event_id: 10,
+                        action: MessageRevisionAction::Correct,
+                        actor_user_id: 7,
+                        at_unix: 2,
+                        replacement: Some("corrected".into()),
+                        revision_number: 1,
+                    }],
+                },
+            )
+            .expect("authoritative revision snapshot");
+        desktop
+            .omenchat
+            .chat_client
+            .session_mut(session_id)
+            .expect("session")
+            .users[0]
+            .status_bits = CHAT_STATUS_MUTED;
+        assert!(!desktop.omenchat_message_revision_action_available(
+            session_id,
+            1,
+            9,
+            MessageRevisionAction::Correct,
+        ));
+        assert!(desktop.omenchat_message_revision_action_available(
+            session_id,
+            1,
+            9,
+            MessageRevisionAction::Tombstone,
+        ));
+        desktop
+            .omenchat
+            .chat_client
+            .session_mut(session_id)
+            .expect("session")
+            .users[0]
+            .status_bits = CHAT_STATUS_BANNED;
+        assert!(!desktop.omenchat_message_revision_action_available(
+            session_id,
+            1,
+            9,
+            MessageRevisionAction::Tombstone,
+        ));
+
+        let session = desktop
+            .omenchat
+            .chat_client
+            .session_mut(session_id)
+            .expect("session");
+        session.users[0].status_bits = 0;
+        session.users[0].role_bits = CHAT_ROLE_MODERATOR;
+        session.events[0].actor_user_id = Some(8);
+        assert!(!desktop.omenchat_message_revision_action_available(
+            session_id,
+            1,
+            9,
+            MessageRevisionAction::Correct,
+        ));
+        assert!(desktop.omenchat_message_revision_action_available(
+            session_id,
+            1,
+            9,
+            MessageRevisionAction::Tombstone,
+        ));
+    }
+
+    #[test]
+    fn correction_prepare_persists_before_send_and_preserves_ordinary_draft() {
+        let (mut desktop, session_id, root) = revision_test_desktop("persistence");
+        enable_revision_prepare(&mut desktop, session_id);
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "ordinary draft".into());
+
+        let _task = desktop.prepare_omenchat_message_revision_mutation(
+            session_id,
+            1,
+            9,
+            MessageRevisionAction::Correct,
+            Some("corrected".into()),
+        );
+        let recovered = recover_revision_intents(&desktop);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(
+            recovered[0].op,
+            crate::chat::protocol::ChatOp::RoomMessageRevision
+        );
+        assert_eq!(
+            recovered[0].state,
+            crate::chat::mutation_intents::OutboundMutationState::Prepared
+        );
+        assert_eq!(
+            crate::chat::protocol::MessageRevisionRequest::from_frame_body(&recovered[0].body)
+                .expect("stored revision request")
+                .replacement
+                .as_deref(),
+            Some("corrected")
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+            Some("ordinary draft")
+        );
+
+        shutdown_revision_test(desktop, root);
+    }
+
+    #[test]
+    fn deletion_requires_confirmation_before_durable_prepare() {
+        let (mut desktop, session_id, root) = revision_test_desktop("delete-confirmation");
+        enable_revision_prepare(&mut desktop, session_id);
+
+        desktop.begin_omenchat_message_deletion(session_id, 1, 9);
+        assert!(recover_revision_intents(&desktop).is_empty());
+        let _task = desktop.confirm_omenchat_message_deletion();
+        let recovered = recover_revision_intents(&desktop);
+        assert_eq!(recovered.len(), 1);
+        let request =
+            crate::chat::protocol::MessageRevisionRequest::from_frame_body(&recovered[0].body)
+                .expect("stored deletion request");
+        assert_eq!(request.target_event_id, 9);
+        assert_eq!(request.action, MessageRevisionAction::Tombstone);
+        assert_eq!(request.replacement, None);
+        assert!(desktop
+            .omenchat
+            .omenchat_revision_delete_confirmation
+            .is_none());
+
+        shutdown_revision_test(desktop, root);
     }
 }

@@ -16,6 +16,17 @@ impl DesktopApp {
         self.omenchat.chat_drafts.remove(&session_id);
         self.omenchat.omenchat_reply_drafts.remove(&session_id);
         self.omenchat.omenchat_selected_mentions.remove(&session_id);
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        {
+            self.omenchat.omenchat_revision_drafts.remove(&session_id);
+            if self
+                .omenchat
+                .omenchat_revision_delete_confirmation
+                .is_some_and(|confirmation| confirmation.session_id == session_id)
+            {
+                self.omenchat.omenchat_revision_delete_confirmation = None;
+            }
+        }
         self.omenchat.omenchat_motds.remove(&session_id);
         for cache_key in self
             .omenchat

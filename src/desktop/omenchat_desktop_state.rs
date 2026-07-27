@@ -22,6 +22,22 @@ pub(in crate::desktop) struct OmenChatReplyDraft {
     pub(in crate::desktop) event_id: u64,
 }
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct OmenChatRevisionDraft {
+    pub(in crate::desktop) room_id: RoomId,
+    pub(in crate::desktop) event_id: u64,
+    pub(in crate::desktop) replacement: String,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct OmenChatRevisionDeleteConfirmation {
+    pub(in crate::desktop) session_id: ChatSessionId,
+    pub(in crate::desktop) room_id: RoomId,
+    pub(in crate::desktop) event_id: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::desktop) struct PendingOmenChatInvitationRoom {
     pub(in crate::desktop) server_destination: String,
@@ -456,6 +472,11 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) chat_drafts: HashMap<ChatSessionId, String>,
     pub(in crate::desktop) omenchat_reply_drafts: HashMap<ChatSessionId, OmenChatReplyDraft>,
     pub(in crate::desktop) omenchat_selected_mentions: HashMap<ChatSessionId, BTreeSet<u32>>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_revision_drafts: HashMap<ChatSessionId, OmenChatRevisionDraft>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_revision_delete_confirmation:
+        Option<OmenChatRevisionDeleteConfirmation>,
     pub(in crate::desktop) chat_event_counts: HashMap<(ChatSessionId, RoomId), usize>,
     pub(in crate::desktop) chat_scroll_offsets: HashMap<(ChatSessionId, RoomId), RelativeOffset>,
     pub(in crate::desktop) chat_scroll_bottom_locks: HashSet<(ChatSessionId, RoomId)>,
@@ -591,6 +612,10 @@ impl OmenChatDesktopState {
             chat_drafts: HashMap::new(),
             omenchat_reply_drafts: HashMap::new(),
             omenchat_selected_mentions: HashMap::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_revision_drafts: HashMap::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_revision_delete_confirmation: None,
             chat_event_counts,
             chat_scroll_offsets,
             chat_scroll_bottom_locks,

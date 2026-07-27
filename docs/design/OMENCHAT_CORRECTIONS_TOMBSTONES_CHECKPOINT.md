@@ -32,8 +32,8 @@ This checkpoint does not authorize activation. Unit 6G now supplies persistent
 event-ID sequences, bounded usage accounting, dependency-aware compaction, a
 disabled-by-default policy, atomic admission integration, and explicit bounded
 ledger maintenance. That closes the structural retention prerequisite.
-The capability remains dormant until its durable desktop prepare/actions and
-live current/current plus mixed-version gates pass.
+The capability remains dormant until its live current/current plus
+mixed-version gates pass.
 
 ## Existing boundaries verified
 
@@ -500,11 +500,21 @@ omenchatd state.
    projection change occurs. Recovery validation and redacted operation labels
    understand the operation, while ordinary composer drafts remain untouched.
    Production still has no prepare action and requests no capability.
-9. Add the bounded durable desktop prepare path and correction/tombstone
-   controls behind the still-dormant capability gate, then run deterministic,
-   mixed-version, retention, Resource, restart, fault, and live isolated smoke
-   gates.
-10. Request and accept `message-revisions-v1` only after every gate passes.
+9. **Desktop prepare/actions complete and dormant.** One correction draft per
+   live session is bounded by the protocol replacement ceiling and remains
+   separate from the ordinary composer. One deletion confirmation is owned
+   globally and requires a second explicit action. Room/session changes cancel
+   the relevant state. Controls require both negotiated capabilities,
+   authoritative target evidence, a retained ordinary message, known local
+   user/role state, and valid author/moderator/mute/revision-depth policy.
+   Durable intent persistence completes before transmission, and successful
+   correction dispatch clears only the matching correction draft. Production
+   requests no revision capability, so these controls remain hidden. The view
+   derives eligible targets once per bounded room render rather than rescanning
+   room history for every message.
+10. Run deterministic, mixed-version, retention, Resource, restart, fault, and
+    live isolated smoke gates.
+11. Request and accept `message-revisions-v1` only after every gate passes.
 
 Each step must leave root and standalone server builds valid and independently
 reversible. No step may introduce automatic retry.
@@ -640,8 +650,21 @@ persistence state. Focused live tests prove both-capability gating, no
 optimistic projection change, exact typed acknowledgement correlation, and
 pending-state retention after a mismatched acknowledgement. Desktop recovery
 validation rejects missing capability or malformed bodies, and recovered
-operation labels do not expose correction text. There is still no desktop
-prepare action or visible correction/tombstone control.
+operation labels do not expose correction text. At that transport-only stage,
+there was no desktop prepare action or visible correction/tombstone control.
+
+The desktop action sub-slice then added one bounded correction editor per
+session and one explicit deletion confirmation without adding a worker, timer,
+or retry path. Focused tests prove that controls remain hidden without
+authoritative target evidence, author correction and author deletion are
+distinct, muted authors cannot rewrite text, banned users receive no action,
+moderators can delete but cannot rewrite another author's words, and ordinary
+composer drafts remain unchanged. An isolated-root persistence test proves the
+typed correction intent is durable in `Prepared` state before any transmission.
+Another isolated-root test proves deletion creates no durable intent until the
+explicit confirmation action.
+Production negotiation remains disabled, so no release user sees or can invoke
+these actions yet.
 
 ## Completion gate
 

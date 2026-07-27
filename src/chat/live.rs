@@ -5236,31 +5236,6 @@ mod tests {
 
         transport
             .push_incoming_frame(&Frame::new(
-                ChatOp::MessageRevisionAck,
-                sent.seq,
-                Some(1),
-                MessageRevisionAck {
-                    target_event_id: 10,
-                    action: super::super::protocol::MessageRevisionAction::Correct,
-                    actor_user_id: 8,
-                    changed: true,
-                    revision_event_id: Some(11),
-                    revision_number: 1,
-                }
-                .into_frame_body()
-                .expect("wrong-identity ack"),
-            ))
-            .expect("queue wrong-identity ack");
-        let wrong_identity =
-            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
-        assert!(matches!(
-            wrong_identity.as_slice(),
-            [ChatClientEvent::Error { message, .. }] if message.contains("mismatched")
-        ));
-        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
-
-        transport
-            .push_incoming_frame(&Frame::new(
                 ChatOp::ReactionAck,
                 sent.seq,
                 Some(1),
@@ -5438,6 +5413,31 @@ mod tests {
         )
         .is_empty());
         let sent = decode_frame(&transport.sent_frames[0]).expect("sent frame");
+
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::MessageRevisionAck,
+                sent.seq,
+                Some(1),
+                MessageRevisionAck {
+                    target_event_id: 10,
+                    action: super::super::protocol::MessageRevisionAction::Correct,
+                    actor_user_id: 8,
+                    changed: true,
+                    revision_event_id: Some(11),
+                    revision_number: 1,
+                }
+                .into_frame_body()
+                .expect("wrong-identity ack"),
+            ))
+            .expect("queue wrong-identity ack");
+        let wrong_identity =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(matches!(
+            wrong_identity.as_slice(),
+            [ChatClientEvent::Error { message, .. }] if message.contains("mismatched")
+        ));
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
 
         transport
             .push_incoming_frame(&Frame::new(

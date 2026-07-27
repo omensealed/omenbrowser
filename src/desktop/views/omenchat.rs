@@ -226,6 +226,48 @@ fn omenchat_reaction_controls(
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_message_revision_controls(
+    session_id: crate::chat::ChatSessionId,
+    room_id: crate::chat::protocol::RoomId,
+    event_id: u64,
+    correction: bool,
+    deletion: bool,
+) -> Element<'static, Message> {
+    let mut controls = row![].spacing(4).align_y(iced::Alignment::Center);
+    if correction {
+        controls = controls.push(tooltip_button(
+            button(centered_toolbar_icon(ICON_EDIT))
+                .on_press(Message::OmenChat(OmenChatMessage::BeginMessageCorrection {
+                    session_id,
+                    room_id,
+                    event_id,
+                }))
+                .padding(0)
+                .width(Length::Fixed(toolbar_icon_button_side()))
+                .height(Length::Fixed(toolbar_icon_button_side()))
+                .style(inline_icon_button_style),
+            "Correct this message",
+        ));
+    }
+    if deletion {
+        controls = controls.push(tooltip_button(
+            button(centered_toolbar_icon(ICON_DELETE))
+                .on_press(Message::OmenChat(OmenChatMessage::BeginMessageDeletion {
+                    session_id,
+                    room_id,
+                    event_id,
+                }))
+                .padding(0)
+                .width(Length::Fixed(toolbar_icon_button_side()))
+                .height(Length::Fixed(toolbar_icon_button_side()))
+                .style(inline_icon_button_style),
+            "Delete this message",
+        ));
+    }
+    controls.into()
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn recovered_mutation_notice(count: usize, connection: crate::chat::ChatConnectionState) -> String {
     let noun = if count == 1 { "send" } else { "sends" };
     let verb = if count == 1 { "needs" } else { "need" };
@@ -374,6 +416,9 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             )
         })
         .collect::<Vec<_>>();
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    let (revision_correction_targets, revision_deletion_targets) = desktop
+        .omenchat_message_revision_action_targets(session.session_id, session.active_room.room_id);
     for group in chat_timeline_groups_for_local_user_reactions_and_revisions(
         session,
         local_user_id,
@@ -448,6 +493,20 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 );
             } else {
                 group_content = group_content.push(line);
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            if let Some(event_id) = body.reply_target {
+                let correction = revision_correction_targets.contains(&event_id);
+                let deletion = revision_deletion_targets.contains(&event_id);
+                if correction || deletion {
+                    group_content = group_content.push(omenchat_message_revision_controls(
+                        session.session_id,
+                        session.active_room.room_id,
+                        event_id,
+                        correction,
+                        deletion,
+                    ));
+                }
             }
             if !body.reactions.is_empty() {
                 group_content = group_content.push(omenchat_reaction_summary_row(&body.reactions));
@@ -610,6 +669,90 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     ]
     .spacing(8);
     let mut composer_panel = column![].spacing(6).width(Length::Fill);
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    if let Some(revision) = desktop
+        .omenchat
+        .omenchat_revision_drafts
+        .get(&session.session_id)
+        .filter(|revision| {
+            revision.room_id == active_room_id
+                && revision_correction_targets.contains(&revision.event_id)
+        })
+    {
+        let session_id = session.session_id;
+        composer_panel = composer_panel.push(
+            container(
+                column![
+                    text(format!("Editing message #{}", revision.event_id)).size(ui_size(12)),
+                    row![
+                        text_input("Corrected message", &revision.replacement)
+                            .size(ui_size(14))
+                            .padding(8)
+                            .width(Length::Fill)
+                            .on_input(move |value| {
+                                Message::OmenChat(OmenChatMessage::MessageCorrectionChanged {
+                                    session_id,
+                                    value,
+                                })
+                            })
+                            .on_submit(Message::OmenChat(
+                                OmenChatMessage::SubmitMessageCorrection(session_id),
+                            )),
+                        omen_button(
+                            "Save correction",
+                            Message::OmenChat(OmenChatMessage::SubmitMessageCorrection(session_id)),
+                        ),
+                        subtle_button(
+                            "Cancel",
+                            Message::OmenChat(OmenChatMessage::CancelMessageCorrection(session_id)),
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                ]
+                .spacing(4),
+            )
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(status_container_style),
+        );
+    }
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    if let Some(confirmation) = desktop
+        .omenchat
+        .omenchat_revision_delete_confirmation
+        .filter(|confirmation| {
+            confirmation.session_id == session.session_id
+                && confirmation.room_id == active_room_id
+                && revision_deletion_targets.contains(&confirmation.event_id)
+        })
+    {
+        composer_panel = composer_panel.push(
+            container(
+                row![
+                    text(format!(
+                        "Delete message #{}? This cannot be undone.",
+                        confirmation.event_id
+                    ))
+                    .size(ui_size(12))
+                    .width(Length::Fill),
+                    omen_button(
+                        "Confirm delete",
+                        Message::OmenChat(OmenChatMessage::ConfirmMessageDeletion),
+                    ),
+                    subtle_button(
+                        "Cancel",
+                        Message::OmenChat(OmenChatMessage::CancelMessageDeletion),
+                    ),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(warning_container_style),
+        );
+    }
     if let Some(reply) = desktop
         .omenchat
         .omenchat_reply_drafts

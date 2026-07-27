@@ -164,6 +164,100 @@ impl DesktopApp {
         })
     }
 
+    pub(in crate::desktop) fn prepare_omenchat_message_revision_mutation(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: u32,
+        event_id: u64,
+        action: crate::chat::protocol::MessageRevisionAction,
+        replacement: Option<String>,
+    ) -> Task<Message> {
+        if !self.omenchat_message_revision_action_available(session_id, room_id, event_id, action) {
+            self.set_omenchat_session_status(
+                session_id,
+                "message revision is unavailable because capability, authority, or permission evidence is missing"
+                    .into(),
+            );
+            return Task::none();
+        }
+        let request = MessageRevisionRequest {
+            target_event_id: event_id,
+            action,
+            replacement,
+        };
+        let body = match request.into_frame_body() {
+            Ok(body) => body,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("message revision request is invalid: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        let Some(server_destination) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.server.destination.clone())
+        else {
+            self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
+            return Task::none();
+        };
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.set_omenchat_session_status(
+                session_id,
+                "message revision was not sent because durable mutation persistence is unavailable"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let (Some(client_instance_id), Some(authenticated_identity_hash)) = (
+            self.omenchat.omenchat_live_state.client_instance_id(),
+            self.omenchat.omenchat_authenticated_identity_hash.clone(),
+        ) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "message revision was not sent because durable mutation identity is unavailable"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let created_at = current_unix_seconds();
+        let reply = match worker.try_prepare(OwnedPrepareOutboundMutation {
+            server_destination,
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::RoomMessageRevision,
+            room_id: Some(room_id),
+            body,
+            created_at,
+            expires_at: created_at.saturating_add(DURABLE_MUTATION_INTENT_LIFETIME_SECONDS),
+            correlation_id: None,
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("message revision was not admitted for durable persistence: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        self.set_omenchat_session_status(
+            session_id,
+            "persisting message revision intent before transmission".into(),
+        );
+        Task::perform(await_intent_worker_reply(reply), move |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::Prepared {
+                    session_id,
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
     pub(in crate::desktop) fn recover_omenchat_mutation_intents_if_pending(
         &mut self,
     ) -> Task<Message> {
@@ -1407,7 +1501,22 @@ impl DesktopApp {
         let failed = events
             .iter()
             .any(|event| matches!(event, ChatClientEvent::Error { .. }));
-        if !failed && !recovered && intent.op != ChatOp::RoomMessageRevision {
+        if !failed && !recovered && intent.op == ChatOp::RoomMessageRevision {
+            if let Ok(sent) = MessageRevisionRequest::from_frame_body(&intent.body) {
+                let matches_draft = self
+                    .omenchat
+                    .omenchat_revision_drafts
+                    .get(&session_id)
+                    .is_some_and(|draft| {
+                        Some(draft.room_id) == intent.room_id
+                            && draft.event_id == sent.target_event_id
+                            && sent.replacement.as_deref() == Some(draft.replacement.as_str())
+                    });
+                if matches_draft {
+                    self.omenchat.omenchat_revision_drafts.remove(&session_id);
+                }
+            }
+        } else if !failed && !recovered {
             self.omenchat.chat_drafts.insert(session_id, String::new());
             if let Ok(sent) = RichMessageBody::from_frame_body(&intent.body) {
                 let selected_reply =
