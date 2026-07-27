@@ -614,6 +614,56 @@ mod tests {
     }
 
     #[test]
+    fn active_global_limit_rejects_without_audit_or_partial_state() {
+        let (store, room_id, actor_user_id, targets) = setup(1);
+        store
+            .connection
+            .execute_batch(
+                "WITH RECURSIVE seq(value) AS (
+                   SELECT 1 UNION ALL
+                   SELECT value + 1 FROM seq WHERE value < 4096
+                 )
+                 INSERT INTO room_pin_events(
+                   room_id, target_event_id, actor_user_id, pin_action, at, retained_bytes
+                 )
+                 SELECT
+                   1000 + ((value - 1) / 64),
+                   1 + ((value - 1) % 64),
+                   1, 1, 10, 41
+                 FROM seq;
+                 INSERT INTO room_pins(
+                   room_id, target_event_id, pin_event_id, actor_user_id,
+                   pinned_at, retained_bytes
+                 )
+                 SELECT
+                   room_id, target_event_id, pin_event_id, actor_user_id,
+                   at, 32
+                 FROM room_pin_events;",
+            )
+            .expect("global active fixture");
+        assert_eq!(
+            store.pin_row_counts().expect("full global counts"),
+            (MAX_ACTIVE_PINS_GLOBAL, MAX_ACTIVE_PINS_GLOBAL)
+        );
+
+        assert_eq!(
+            apply(
+                &store,
+                room_id,
+                actor_user_id,
+                targets[0],
+                PinAction::Pin,
+                11
+            ),
+            PinMutationResult::Saturated
+        );
+        assert_eq!(
+            store.pin_row_counts().expect("rejected global counts"),
+            (MAX_ACTIVE_PINS_GLOBAL, MAX_ACTIVE_PINS_GLOBAL)
+        );
+    }
+
+    #[test]
     fn audit_pruning_is_bounded_and_never_prunes_current_pin_event() {
         let (store, room_id, actor_user_id, targets) = setup(1);
         let current = apply(
@@ -824,6 +874,68 @@ mod tests {
     }
 
     #[test]
+    fn full_global_audit_replaces_one_oldest_eligible_row() {
+        let (store, room_id, actor_user_id, targets) = setup(1);
+        store
+            .connection
+            .execute_batch(
+                "WITH RECURSIVE seq(value) AS (
+                   SELECT 1 UNION ALL
+                   SELECT value + 1 FROM seq WHERE value < 16384
+                 )
+                 INSERT INTO room_pin_events(
+                   room_id, target_event_id, actor_user_id, pin_action, at, retained_bytes
+                 )
+                 SELECT
+                   1000 + ((value - 1) / 1024),
+                   1 + ((value - 1) % 1024),
+                   1, 2, 10, 41
+                 FROM seq;",
+            )
+            .expect("global audit fixture");
+        assert_eq!(
+            store.pin_row_counts().expect("full global audit counts"),
+            (0, MAX_PIN_AUDIT_ROWS_GLOBAL)
+        );
+        let oldest_id = store
+            .connection
+            .query_row("SELECT MIN(pin_event_id) FROM room_pin_events", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("oldest audit id");
+
+        assert!(matches!(
+            apply(
+                &store,
+                room_id,
+                actor_user_id,
+                targets[0],
+                PinAction::Pin,
+                11
+            ),
+            PinMutationResult::Changed(_)
+        ));
+        assert_eq!(
+            store
+                .pin_row_counts()
+                .expect("replaced global audit counts"),
+            (1, MAX_PIN_AUDIT_ROWS_GLOBAL)
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT 1 FROM room_pin_events WHERE pin_event_id = ?1",
+                    [oldest_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .expect("oldest audit lookup"),
+            None
+        );
+    }
+
+    #[test]
     fn snapshot_rejects_noncanonical_and_overlarge_target_sets() {
         let (store, room_id, _, _) = setup(0);
         assert!(store.pin_snapshot(room_id, &[2, 1]).is_err());
@@ -835,5 +947,168 @@ mod tests {
                 &(1..=(ROOM_PIN_SNAPSHOT_MAX_TARGETS as u64 + 1)).collect::<Vec<_>>()
             )
             .is_err());
+    }
+
+    #[test]
+    #[ignore = "explicit isolated pin-state retention measurement"]
+    fn pin_state_retention_measurement() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Instant;
+
+        static DATABASE_NONCE: AtomicUsize = AtomicUsize::new(0);
+        let items = std::env::var("OMEN_PIN_MEASUREMENT_ITEMS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(MAX_ACTIVE_PINS_PER_ROOM as usize);
+        assert!((1..=MAX_ACTIVE_PINS_PER_ROOM as usize).contains(&items));
+        let nonce = DATABASE_NONCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "omenchat-pin-state-measurement-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let store = OmenchatStore::open(&path).expect("measurement store");
+        let room = store
+            .ensure_room("pin-measurement", None)
+            .expect("measurement room");
+        let user = store
+            .ensure_user(b"pin-measurement-user", "measurement", None)
+            .expect("measurement user");
+        store
+            .join_room(room.room_id, user.user_id)
+            .expect("measurement join");
+
+        let mut targets = Vec::with_capacity(items);
+        for index in 0..items {
+            targets.push(
+                store
+                    .append_event(
+                        room.room_id,
+                        Some(user.user_id),
+                        ServerRoomEventKind::Message {
+                            body: format!("measurement target {index}"),
+                        },
+                    )
+                    .expect("measurement target")
+                    .event_id,
+            );
+        }
+
+        let mut mutation_micros = Vec::with_capacity(items);
+        for (index, target_event_id) in targets.iter().copied().enumerate() {
+            let started = Instant::now();
+            assert!(matches!(
+                apply(
+                    &store,
+                    room.room_id,
+                    user.user_id,
+                    target_event_id,
+                    PinAction::Pin,
+                    1_000 + index as i64,
+                ),
+                PinMutationResult::Changed(_)
+            ));
+            mutation_micros.push(started.elapsed().as_micros());
+        }
+
+        let mut noop_micros = Vec::with_capacity(items);
+        for target_event_id in targets.iter().copied().rev() {
+            let started = Instant::now();
+            assert_eq!(
+                apply(
+                    &store,
+                    room.room_id,
+                    user.user_id,
+                    target_event_id,
+                    PinAction::Pin,
+                    10_000,
+                ),
+                PinMutationResult::Unchanged
+            );
+            noop_micros.push(started.elapsed().as_micros());
+        }
+
+        let mut snapshot_micros = Vec::new();
+        let mut snapshot_entries = 0_usize;
+        for page in targets.chunks(ROOM_PIN_SNAPSHOT_MAX_TARGETS) {
+            let started = Instant::now();
+            let snapshot = store
+                .pin_snapshot(room.room_id, page)
+                .expect("measurement snapshot");
+            snapshot_micros.push(started.elapsed().as_micros());
+            snapshot_entries = snapshot_entries.saturating_add(snapshot.entries.len());
+            assert_eq!(snapshot.target_event_ids, page);
+        }
+
+        let (active_rows, audit_rows) = store.pin_row_counts().expect("pin counts");
+        let active_bytes: i64 = store
+            .connection
+            .query_row(
+                "SELECT COALESCE(SUM(retained_bytes), 0) FROM room_pins",
+                [],
+                |row| row.get(0),
+            )
+            .expect("active bytes");
+        let audit_bytes: i64 = store
+            .connection
+            .query_row(
+                "SELECT COALESCE(SUM(retained_bytes), 0) FROM room_pin_events",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit bytes");
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("checkpoint measurement database");
+        let database_bytes = [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ]
+        .into_iter()
+        .filter_map(|candidate| std::fs::metadata(candidate).ok())
+        .map(|metadata| metadata.len())
+        .sum::<u64>();
+
+        let percentile = |samples: &mut Vec<u128>, percent: usize| {
+            samples.sort_unstable();
+            let index = samples
+                .len()
+                .saturating_mul(percent)
+                .saturating_add(99)
+                .checked_div(100)
+                .unwrap_or(0)
+                .saturating_sub(1)
+                .min(samples.len().saturating_sub(1));
+            samples[index]
+        };
+        let mutation_max = mutation_micros.iter().copied().max().unwrap_or(0);
+        let noop_max = noop_micros.iter().copied().max().unwrap_or(0);
+        let snapshot_max = snapshot_micros.iter().copied().max().unwrap_or(0);
+        let mutation_p50 = percentile(&mut mutation_micros.clone(), 50);
+        let mutation_p95 = percentile(&mut mutation_micros, 95);
+        let noop_p50 = percentile(&mut noop_micros.clone(), 50);
+        let noop_p95 = percentile(&mut noop_micros, 95);
+        let snapshot_p50 = percentile(&mut snapshot_micros.clone(), 50);
+        let snapshot_p95 = percentile(&mut snapshot_micros, 95);
+
+        assert_eq!(active_rows, items as i64);
+        assert_eq!(audit_rows, items as i64);
+        assert_eq!(snapshot_entries, items);
+        assert!(active_bytes <= MAX_ACTIVE_PIN_BYTES_GLOBAL);
+        assert!(audit_bytes <= MAX_PIN_AUDIT_BYTES_PER_ROOM);
+        println!(
+            "PIN_STATE_MEASUREMENT items={items} active_rows={active_rows} active_bytes={active_bytes} audit_rows={audit_rows} audit_bytes={audit_bytes} snapshot_pages={} snapshot_entries={snapshot_entries} database_bytes={database_bytes} mutation_p50_us={mutation_p50} mutation_p95_us={mutation_p95} mutation_max_us={mutation_max} noop_p50_us={noop_p50} noop_p95_us={noop_p95} noop_max_us={noop_max} snapshot_p50_us={snapshot_p50} snapshot_p95_us={snapshot_p95} snapshot_max_us={snapshot_max}",
+            snapshot_micros.len()
+        );
+
+        drop(store);
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite-wal"),
+            path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 }

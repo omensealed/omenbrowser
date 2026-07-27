@@ -4537,3 +4537,22 @@ delta or exact-target snapshot arrives. Post-ACK confirmation slots share the
 existing 256-global/64-per-session mutation budget and clear on capability or
 Link loss. The final test continues to prove the production desktop does not
 request `room-pins-v1`. Server acceptance remains disabled.
+
+The dormant deterministic qualification filter and explicit isolated
+measurement are:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product pin --lib
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pin --lib)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pin_state_retention_measurement \
+  --lib -- --ignored --nocapture)
+```
+
+The server filter includes exact global active saturation, per-room/global
+audit replacement, and the maximum 256-target/64-entry inline frame. The
+measurement uses one isolated temporary database, checkpoints it before sizing,
+removes it afterward, and reports observations rather than release thresholds.
+Exact evidence and the still-separate activation/live-smoke boundary are in
+`docs/audits/omenchat-pins-qualification.md`.

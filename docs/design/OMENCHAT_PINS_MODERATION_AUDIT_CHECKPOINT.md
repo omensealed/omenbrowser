@@ -425,8 +425,12 @@ The presentation must distinguish:
    mutation is admitted per target within the existing mutation budget, exact
    acknowledgements remain distinct from authoritative pin state, and
    production negotiation remains disabled.
-6. Qualify replay, restart, retention, frame-size, mixed-version, overload, and
-   resource measurements; then separately review activation.
+6. **Complete (2026-07-27):** qualify replay, restart, retention, maximum inline
+   frame size, adjacent-version ordinary fixtures, per-room/global overload,
+   bounded audit replacement, and isolated resource measurements. Deterministic
+   evidence is recorded in
+   `docs/audits/omenchat-pins-qualification.md`; production activation and its
+   required current/current process smoke remain a separate review.
 7. Add shared dormant moderation-audit types and operations 52–55. Keep
    negotiation unchanged.
 8. Add schema-10 constrained audit storage and transactionally couple only

@@ -321,8 +321,9 @@ mod tests {
         message_revisions_v1, pins_v1, reactions_v1, reply_mentions_v1, v0_6_0_1, v0_9_6_3,
     };
     use omenchat_protocol::{
-        MessageRevisionAction, MessageRevisionRequest, PinAction, PinRequest, ReactionAction,
-        ReactionRequest, ReactionToken, ReplyReference, RichMessageBody,
+        MessageRevisionAction, MessageRevisionRequest, PinAction, PinRequest, PinSnapshot,
+        PinSnapshotEntry, ReactionAction, ReactionRequest, ReactionToken, ReplyReference,
+        RichMessageBody, ROOM_PIN_SNAPSHOT_MAX_ENTRIES, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
     };
 
     #[test]
@@ -515,6 +516,38 @@ mod tests {
         );
         assert_eq!(
             decode_frame(pins_v1::ROOM_PIN_ADD).expect("decode pin"),
+            frame
+        );
+    }
+
+    #[test]
+    fn maximum_pin_snapshot_remains_an_inline_bounded_frame() {
+        let snapshot = PinSnapshot {
+            target_event_ids: (1..=ROOM_PIN_SNAPSHOT_MAX_TARGETS as u64).collect(),
+            entries: (1..=ROOM_PIN_SNAPSHOT_MAX_ENTRIES as u64)
+                .map(|target_event_id| PinSnapshotEntry {
+                    target_event_id,
+                    pin_event_id: target_event_id + 1_000,
+                    actor_user_id: u32::MAX,
+                    pinned_at_unix: i64::MAX,
+                })
+                .collect(),
+        };
+        let frame = Frame::new(
+            ChatOp::PinSnapshot,
+            u32::MAX,
+            Some(u32::MAX),
+            snapshot.into_frame_body().expect("maximum pin snapshot"),
+        );
+
+        let encoded = encode_frame(&frame).expect("encode maximum pin snapshot");
+        assert!(
+            encoded.len() < MAX_FRAME_BYTES,
+            "maximum pin snapshot encoded to {} bytes",
+            encoded.len()
+        );
+        assert_eq!(
+            decode_frame(&encoded).expect("decode maximum pin snapshot"),
             frame
         );
     }

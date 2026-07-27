@@ -1396,6 +1396,17 @@ arrives. Those bounded confirmation slots share the existing mutation budget
 and clear on capability or Link loss. No optimistic pin projection or
 automatic retry was added.
 
+The sixth qualification slice closes the dormant deterministic gate. Root and
+standalone-server pin filters cover the independent exact wire fixture,
+restart-stale projection, persistence-before-send, capability/role/authority
+loss, transactional replay/conflict, Link-scoped fan-out, migration faults,
+downgrade copy, compaction, per-room and global active/audit ceilings, bounded
+pruning, and maximum inline snapshot encoding. An ignored isolated measurement
+records 64-row ceiling storage and latency observations without imposing
+hardware-specific thresholds. Evidence is in
+`docs/audits/omenchat-pins-qualification.md`; production activation and the
+two-client process smoke remain separate.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.
