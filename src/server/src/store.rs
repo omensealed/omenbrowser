@@ -3,7 +3,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::OptionalExtension;
 
 use crate::error::ServerResult;
-use crate::protocol::{EventId, RichMessageEventMetadata, RoomId, UserId};
+use crate::protocol::{
+    EventId, RichMessageEventMetadata, RoomId, UserId, ROOM_POLICY_ANNOUNCEMENT,
+};
 
 pub mod durable_replay;
 pub mod history_retention;
@@ -22,6 +24,18 @@ pub struct ServerRoom {
     pub topic: Option<String>,
     pub room_revision: u64,
     pub policy_bits: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RoomContentMutationAdmission {
+    Allowed,
+    RoomNotFound,
+    AnnouncementRestricted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoomPolicyUpdateBoundary {
+    BeforeCommit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +151,7 @@ pub struct OmenchatStore {
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const SCHEMA_VERSION: i64 = 11;
+const ROOM_PUBLISHER_ROLE_MASK: u64 = (1 << 1) | (1 << 2);
 const HISTORY_USAGE_BACKFILL_BATCH: usize = 256;
 const HISTORY_EVENT_FIXED_RETAINED_BYTES: u64 = 64;
 const HISTORY_REPLY_RETAINED_BYTES: u64 = 8;
@@ -165,13 +180,22 @@ impl OmenchatStore {
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
-        connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        connection.busy_timeout(Duration::ZERO)?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version != SCHEMA_VERSION {
             return Err(crate::error::ServerError::Message(format!(
                 "maintenance requires database schema version {SCHEMA_VERSION}, found {version}; start the matching omenchatd version normally to perform any supported migration first"
             )));
         }
+        connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        connection
+            .execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
+            .map_err(|error| {
+                crate::error::ServerError::Message(format!(
+                    "database maintenance could not obtain exclusive access; ensure omenchatd is stopped: {error}"
+                ))
+            })?;
+        connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         Ok(Self::from_connection(connection))
     }
 
@@ -555,6 +579,73 @@ impl OmenchatStore {
         self.room_by_id(room_id)?.ok_or_else(|| {
             crate::error::ServerError::Message("room was not found after topic update".into())
         })
+    }
+
+    pub fn set_room_announcement_policy(
+        &self,
+        room_id: RoomId,
+        announcement_only: bool,
+    ) -> ServerResult<ServerRoom> {
+        self.set_room_announcement_policy_with_hook(room_id, announcement_only, |_| Ok(()))
+    }
+
+    fn set_room_announcement_policy_with_hook<H>(
+        &self,
+        room_id: RoomId,
+        announcement_only: bool,
+        mut hook: H,
+    ) -> ServerResult<ServerRoom>
+    where
+        H: FnMut(RoomPolicyUpdateBoundary) -> ServerResult<()>,
+    {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let policy_bits = if announcement_only {
+            ROOM_POLICY_ANNOUNCEMENT
+        } else {
+            0
+        };
+        let changed = transaction.execute(
+            "UPDATE rooms
+             SET policy_bits = ?1, room_revision = room_revision + 1
+             WHERE room_id = ?2 AND archived = 0 AND policy_bits != ?1",
+            (policy_bits as i64, room_id as i64),
+        )?;
+        let room = transaction
+            .query_row(
+                "SELECT room_id, name, topic, room_revision, policy_bits
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                room_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| crate::error::ServerError::Message("room not found".into()))?;
+        if changed > 1 {
+            return Err(crate::error::ServerError::Message(
+                "room policy update changed more than one room".into(),
+            ));
+        }
+        hook(RoomPolicyUpdateBoundary::BeforeCommit)?;
+        transaction.commit()?;
+        Ok(room)
+    }
+
+    pub(crate) fn room_content_mutation_admission(
+        &self,
+        room_id: RoomId,
+        actor_role_bits: u64,
+    ) -> ServerResult<RoomContentMutationAdmission> {
+        room_content_mutation_admission_on(&self.connection, room_id, actor_role_bits)
+    }
+
+    pub(crate) fn durable_room_content_mutation_admission(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        actor_role_bits: u64,
+    ) -> ServerResult<RoomContentMutationAdmission> {
+        room_content_mutation_admission_on(transaction, room_id, actor_role_bits)
     }
 
     pub fn archive_room(&self, room_id: RoomId) -> ServerResult<()> {
@@ -2012,6 +2103,29 @@ fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRoom> {
         room_revision: row.get::<_, i64>(3)? as u64,
         policy_bits: row.get::<_, i64>(4)? as u64,
     })
+}
+
+fn room_content_mutation_admission_on(
+    connection: &rusqlite::Connection,
+    room_id: RoomId,
+    actor_role_bits: u64,
+) -> ServerResult<RoomContentMutationAdmission> {
+    let policy_bits = connection
+        .query_row(
+            "SELECT policy_bits FROM rooms WHERE room_id = ?1 AND archived = 0",
+            [room_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(policy_bits) = policy_bits else {
+        return Ok(RoomContentMutationAdmission::RoomNotFound);
+    };
+    if policy_bits as u64 & ROOM_POLICY_ANNOUNCEMENT != 0
+        && actor_role_bits & ROOM_PUBLISHER_ROLE_MASK == 0
+    {
+        return Ok(RoomContentMutationAdmission::AnnouncementRestricted);
+    }
+    Ok(RoomContentMutationAdmission::Allowed)
 }
 
 fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerUser> {
@@ -3964,6 +4078,127 @@ mod tests {
             std::fs::remove_file(backup_path).expect("remove migration backup");
             remove_database_files(&path);
         }
+    }
+
+    #[test]
+    fn room_policy_update_is_atomic_idempotent_and_persists_across_restart() {
+        let path = isolated_database_path("room-policy-update");
+        let store = OmenchatStore::open(&path).expect("store");
+        let room = store
+            .ensure_room("policy-room", Some("policy"))
+            .expect("room");
+        assert_eq!(room.policy_bits, 0);
+
+        let announcement = store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+        assert_eq!(announcement.policy_bits, ROOM_POLICY_ANNOUNCEMENT);
+        assert_eq!(announcement.room_revision, room.room_revision + 1);
+        let unchanged = store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("idempotent policy");
+        assert_eq!(unchanged.room_revision, announcement.room_revision);
+        drop(store);
+
+        let reopened = OmenchatStore::open(&path).expect("reopened store");
+        let persisted = reopened
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("persisted room");
+        assert_eq!(persisted.policy_bits, ROOM_POLICY_ANNOUNCEMENT);
+        assert_eq!(persisted.room_revision, announcement.room_revision);
+        drop(reopened);
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn room_policy_update_failure_rolls_back_policy_and_revision_together() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("policy-rollback", None).expect("room");
+        let error = store
+            .set_room_announcement_policy_with_hook(room.room_id, true, |boundary| {
+                assert_eq!(boundary, RoomPolicyUpdateBoundary::BeforeCommit);
+                Err(crate::error::ServerError::Message(
+                    "injected policy update failure".into(),
+                ))
+            })
+            .expect_err("injected update failure")
+            .to_string();
+        assert!(error.contains("injected policy update failure"));
+        let unchanged = store
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("room");
+        assert_eq!(unchanged.policy_bits, 0);
+        assert_eq!(unchanged.room_revision, room.room_revision);
+    }
+
+    #[test]
+    fn room_content_policy_uses_current_role_and_transaction_state() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("policy-admission", None).expect("room");
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 0)
+                .expect("ordinary admission"),
+            RoomContentMutationAdmission::Allowed
+        );
+        store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 0)
+                .expect("member admission"),
+            RoomContentMutationAdmission::AnnouncementRestricted
+        );
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 1)
+                .expect("trusted admission"),
+            RoomContentMutationAdmission::AnnouncementRestricted
+        );
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 1 << 1)
+                .expect("moderator admission"),
+            RoomContentMutationAdmission::Allowed
+        );
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 1 << 2)
+                .expect("administrator admission"),
+            RoomContentMutationAdmission::Allowed
+        );
+        assert_eq!(
+            store
+                .room_content_mutation_admission(u32::MAX, 1 << 2)
+                .expect("missing admission"),
+            RoomContentMutationAdmission::RoomNotFound
+        );
+    }
+
+    #[test]
+    fn room_policy_maintenance_refuses_an_active_writer_and_succeeds_after_release() {
+        let path = isolated_database_path("room-policy-exclusive-maintenance");
+        let store = OmenchatStore::open(&path).expect("active store");
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .expect("active writer");
+        let error = match OmenchatStore::open_existing_for_maintenance(&path) {
+            Ok(_) => panic!("maintenance must not overlap an active writer"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("exclusive access"));
+        transaction.rollback().expect("release writer");
+        drop(store);
+
+        let maintenance =
+            OmenchatStore::open_existing_for_maintenance(&path).expect("exclusive maintenance");
+        drop(maintenance);
+        remove_database_files(&path);
     }
 
     #[test]

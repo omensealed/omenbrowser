@@ -172,6 +172,14 @@ impl AdminDatabase {
         self.call(move |store| store.update_room_topic(room_id, topic.as_deref()))
     }
 
+    pub fn set_room_announcement_policy(
+        &self,
+        room_id: RoomId,
+        announcement_only: bool,
+    ) -> ServerResult<ServerRoom> {
+        self.call(move |store| store.set_room_announcement_policy(room_id, announcement_only))
+    }
+
     pub fn request_update_room_topic(
         &self,
         room_id: RoomId,

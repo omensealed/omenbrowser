@@ -1521,6 +1521,16 @@ configuration, authorization, client projection, negotiation, or UI is
 activated. Evidence is in
 `docs/audits/omenchat-announcement-rooms-storage-qualification.md`.
 
+The third announcement-room slice centralizes server authorization. Standard
+and trusted members receive stable error 1016 before content side effects;
+moderators/admins retain publication rights; durable replay returns its
+original result after policy/role changes; upload policy is checked at offer
+and publication; and policy/revision updates are atomic and confirmation-gated
+while the server is stopped. Human and JSON room listings expose effective
+policy. Production capability negotiation and client policy projection remain
+dormant. Evidence is in
+`docs/audits/omenchat-announcement-rooms-authorization-qualification.md`.
+
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is
 indefinite and its event allocator derives the next identifier from retained

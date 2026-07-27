@@ -266,5 +266,13 @@ Production negotiation remains disabled until all applicable gates pass.
    confirmation-gated stopped-server schema-10 copy removes only that column.
    Evidence is in
    `docs/audits/omenchat-announcement-rooms-storage-qualification.md`.
-3. Next: one atomic server authorization predicate and policy mutation
-   transaction, still without production capability activation or client UI.
+3. **Complete (2026-07-27):** one store-owned policy predicate now gates
+   legacy/durable content mutations; durable paths read current policy inside
+   replay transactions; error 1016 is stable; and a confirmation-gated
+   stopped-server command changes policy/revision atomically. Human/JSON room
+   listings report effective policy. Production negotiation remains dormant.
+   Evidence is in
+   `docs/audits/omenchat-announcement-rooms-authorization-qualification.md`.
+4. Next: bounded client model projection, negotiated catalog/delta decoding,
+   capability-loss clearing, and GUI/TUI controls. Do not activate server
+   negotiation until process and adjacent-version qualification passes.

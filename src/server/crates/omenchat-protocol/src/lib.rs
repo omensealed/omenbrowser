@@ -216,6 +216,7 @@ pub enum ChatErrorCode {
     DurableMutationConflict = 1013,
     DurableMutationResultExpired = 1014,
     DurableMutationStoreBusy = 1015,
+    RoomPolicyRestricted = 1016,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -348,6 +349,7 @@ mod tests {
         assert_eq!(ChatErrorCode::DurableMutationConflict as u16, 1013);
         assert_eq!(ChatErrorCode::DurableMutationResultExpired as u16, 1014);
         assert_eq!(ChatErrorCode::DurableMutationStoreBusy as u16, 1015);
+        assert_eq!(ChatErrorCode::RoomPolicyRestricted as u16, 1016);
         assert_eq!(fixtures::v0_6_0_1::PROTOCOL_VERSION, PROTOCOL_VERSION);
         assert_eq!(fixtures::v0_6_0_1::PROTOCOL_NAME, PROTOCOL_NAME);
         assert_eq!(fixtures::v0_6_0_1::LINK_CONTEXT, 0x4f);

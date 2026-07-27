@@ -31,8 +31,8 @@ use crate::store::moderation_audit::ModerationAuditAdmission;
 use crate::store::pins::PinMutationResult;
 use crate::store::reactions::ReactionMutationResult;
 use crate::store::{
-    normalize_room_name, OmenchatStore, ServerRoom, ServerRoomEvent, ServerRoomEventKind,
-    ServerUser,
+    normalize_room_name, OmenchatStore, RoomContentMutationAdmission, ServerRoom, ServerRoomEvent,
+    ServerRoomEventKind, ServerUser,
 };
 use crate::upload::{
     plan_upload_with_index, store_upload_with_policy_indexed_and_commit, UploadPolicy,
@@ -1781,6 +1781,15 @@ impl SessionEngine {
                         ))?,
                     });
                 }
+                if let Some(result_frame) = self.durable_room_policy_rejection(
+                    transaction,
+                    seq,
+                    room_id,
+                    user.role_bits,
+                    "publishing messages",
+                )? {
+                    return Ok(DurableRoomEventPlan::Response { result_frame });
+                }
                 if op == ChatOp::RoomNotice && user.role_bits & (ROLE_MODERATOR | ROLE_ADMIN) == 0 {
                     return Ok(DurableRoomEventPlan::Response {
                         result_frame: self.encode_durable_result(self.error_frame(
@@ -2047,6 +2056,15 @@ impl SessionEngine {
                             "join the room before reacting",
                         ))?,
                     });
+                }
+                if let Some(result_frame) = self.durable_room_policy_rejection(
+                    transaction,
+                    seq,
+                    room_id,
+                    user.role_bits,
+                    "publishing reactions",
+                )? {
+                    return Ok(DurableMutationEffectPlan::Response { result_frame });
                 }
                 let admission = match self.reserve_rate(peer, RateKind::Command)? {
                     RateAdmission::Admitted(admission) => admission,
@@ -2569,6 +2587,15 @@ impl SessionEngine {
                             "join the room before revising a message",
                         ))?,
                     });
+                }
+                if let Some(result_frame) = self.durable_room_policy_rejection(
+                    transaction,
+                    seq,
+                    room_id,
+                    user.role_bits,
+                    "revising messages",
+                )? {
+                    return Ok(DurableMutationEffectPlan::Response { result_frame });
                 }
                 let admission = match self.reserve_rate(peer, RateKind::Command)? {
                     RateAdmission::Admitted(admission) => admission,
@@ -3505,11 +3532,6 @@ impl SessionEngine {
                 "message body exceeds server limit",
             )]);
         }
-        if let Some(error) =
-            self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Message)?
-        {
-            return Ok(vec![error]);
-        }
         let Some(user) = self.ensure_allowed_peer(peer, seq, Some(room_id))? else {
             return Ok(vec![self.error_frame(
                 seq,
@@ -3525,6 +3547,16 @@ impl SessionEngine {
                 ChatErrorCode::PermissionDenied,
                 "user is muted",
             )]);
+        }
+        if let Some(error) =
+            self.reject_room_content_policy(seq, room_id, user.role_bits, "publishing messages")?
+        {
+            return Ok(vec![error]);
+        }
+        if let Some(error) =
+            self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Message)?
+        {
+            return Ok(vec![error]);
         }
         self.store.join_room(room_id, user.user_id)?;
         let event = self
@@ -3577,11 +3609,6 @@ impl SessionEngine {
                 "notice body exceeds server limit",
             )]);
         }
-        if let Some(error) =
-            self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Message)?
-        {
-            return Ok(vec![error]);
-        }
         let Some(user) = self.ensure_allowed_peer(peer, seq, Some(room_id))? else {
             return Ok(vec![self.error_frame(
                 seq,
@@ -3598,6 +3625,11 @@ impl SessionEngine {
                 "user is muted",
             )]);
         }
+        if let Some(error) =
+            self.reject_room_content_policy(seq, room_id, user.role_bits, "publishing notices")?
+        {
+            return Ok(vec![error]);
+        }
         if user.role_bits & (ROLE_MODERATOR | ROLE_ADMIN) == 0 {
             return Ok(vec![self.error_frame(
                 seq,
@@ -3605,6 +3637,11 @@ impl SessionEngine {
                 ChatErrorCode::PermissionDenied,
                 "room notices require moderator or admin role",
             )]);
+        }
+        if let Some(error) =
+            self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Message)?
+        {
+            return Ok(vec![error]);
         }
         self.store.join_room(room_id, user.user_id)?;
         let event = self.store.append_event(
@@ -3835,11 +3872,6 @@ impl SessionEngine {
                 0,
             )]);
         }
-        if let Some(error) =
-            self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Command)?
-        {
-            return Ok(vec![error]);
-        }
         let Some(user) = self.ensure_allowed_peer(peer, seq, Some(room_id))? else {
             return Ok(vec![self.upload_reject_frame(
                 seq,
@@ -3866,6 +3898,16 @@ impl SessionEngine {
                 self.limits.upload_quota_bytes,
                 0,
             )]);
+        }
+        if let Some(error) =
+            self.reject_room_content_policy(seq, room_id, user.role_bits, "publishing uploads")?
+        {
+            return Ok(vec![error]);
+        }
+        if let Some(error) =
+            self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Command)?
+        {
+            return Ok(vec![error]);
         }
 
         let Some(offer) = upload_offer_body(&body) else {
@@ -4046,7 +4088,15 @@ impl SessionEngine {
             cache_root,
             quota_bytes: self.limits.upload_quota_bytes,
         };
-        let _user = self.ensure_peer(peer)?;
+        let user = self.ensure_peer(peer)?;
+        if let Some(error) = self.reject_room_content_policy(
+            0,
+            upload.room_id,
+            user.role_bits,
+            "publishing uploads",
+        )? {
+            return Ok(vec![error]);
+        }
         let identity_dir =
             crate::upload::upload_identity_dir_for_root(&policy.cache_root, &peer.identity_hash);
         let stored = store_upload_with_policy_indexed_and_commit(
@@ -4326,6 +4376,73 @@ impl SessionEngine {
             window_start,
             active: true,
         })))
+    }
+
+    fn reject_room_content_policy(
+        &self,
+        seq: u32,
+        room_id: RoomId,
+        actor_role_bits: u64,
+        operation: &str,
+    ) -> ServerResult<Option<Frame>> {
+        match self
+            .store
+            .room_content_mutation_admission(room_id, actor_role_bits)?
+        {
+            RoomContentMutationAdmission::Allowed => Ok(None),
+            RoomContentMutationAdmission::RoomNotFound => Ok(Some(self.error_frame(
+                seq,
+                Some(room_id),
+                ChatErrorCode::RoomNotFound,
+                "room not found",
+            ))),
+            RoomContentMutationAdmission::AnnouncementRestricted => {
+                Ok(Some(self.error_frame(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::RoomPolicyRestricted,
+                    &format!(
+                        "{operation} is restricted to moderators and administrators in this announcement room"
+                    ),
+                )))
+            }
+        }
+    }
+
+    fn durable_room_policy_rejection(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        seq: u32,
+        room_id: RoomId,
+        actor_role_bits: u64,
+        operation: &str,
+    ) -> ServerResult<Option<Vec<u8>>> {
+        match OmenchatStore::durable_room_content_mutation_admission(
+            transaction,
+            room_id,
+            actor_role_bits,
+        )? {
+            RoomContentMutationAdmission::Allowed => Ok(None),
+            RoomContentMutationAdmission::RoomNotFound => {
+                self.encode_durable_result(self.error_frame(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::RoomNotFound,
+                    "room not found",
+                ))
+                .map(Some)
+            }
+            RoomContentMutationAdmission::AnnouncementRestricted => self
+                .encode_durable_result(self.error_frame(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::RoomPolicyRestricted,
+                    &format!(
+                        "{operation} is restricted to moderators and administrators in this announcement room"
+                    ),
+                ))
+                .map(Some),
+        }
     }
 
     fn error_frame(
@@ -6025,6 +6142,270 @@ mod tests {
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn announcement_room_rejects_legacy_member_content_without_rate_or_queue_side_effects() {
+        let root = temp_upload_root("announcement-policy");
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                rate_messages_per_minute: 1,
+                rate_commands_per_minute: 1,
+                upload_quota_bytes: 1024,
+                upload_cache_root: Some(root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        let room = engine
+            .store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let user = engine.ensure_peer(&peer()).expect("user");
+        engine
+            .store
+            .join_room(room.room_id, user.user_id)
+            .expect("join");
+        engine
+            .store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+
+        for (seq, op, body) in [
+            (1, ChatOp::RoomMessage, FrameBody::Text("message".into())),
+            (2, ChatOp::RoomAction, FrameBody::Text("action".into())),
+            (3, ChatOp::RoomNotice, FrameBody::Text("notice".into())),
+            (
+                4,
+                ChatOp::UploadOffer,
+                FrameBody::Fields(vec![
+                    FrameValue::String("blocked.bin".into()),
+                    FrameValue::U64(1),
+                ]),
+            ),
+        ] {
+            let response = engine
+                .handle_frame(&peer(), Frame::new(op, seq, Some(room.room_id), body))
+                .expect("policy response");
+            assert_eq!(response.len(), 1);
+            assert_eq!(response[0].op, ChatOp::Error);
+            assert_eq!(
+                frame_error_code(&response[0]),
+                Some(ChatErrorCode::RoomPolicyRestricted as u16 as u64)
+            );
+        }
+        assert!(engine
+            .store
+            .latest_events(room.room_id, 10)
+            .expect("events")
+            .is_empty());
+        assert_eq!(
+            engine
+                .pending_upload_metrics()
+                .expect("pending upload metrics"),
+            (0, 0, 0, 0)
+        );
+
+        engine
+            .store
+            .set_room_announcement_policy(room.room_id, false)
+            .expect("ordinary policy");
+        let accepted = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::RoomMessage,
+                    5,
+                    Some(room.room_id),
+                    FrameBody::Text("accepted".into()),
+                ),
+            )
+            .expect("ordinary message");
+        assert_eq!(accepted[0].op, ChatOp::RoomEvent);
+        let upload = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    6,
+                    Some(room.room_id),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("accepted.bin".into()),
+                        FrameValue::U64(1),
+                    ]),
+                ),
+            )
+            .expect("ordinary upload");
+        assert_eq!(upload[0].op, ChatOp::UploadAccept);
+        let resource_id = frame_body_values(&upload[0].body)
+            .and_then(|values| values.first())
+            .and_then(frame_value_string)
+            .expect("accepted resource id")
+            .to_owned();
+        engine
+            .store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("policy changed before resource");
+        let rejected_resource = engine
+            .handle_upload_resource(&peer(), &resource_id, vec![1])
+            .expect("resource policy response");
+        assert_eq!(rejected_resource[0].op, ChatOp::Error);
+        assert_eq!(
+            frame_error_code(&rejected_resource[0]),
+            Some(ChatErrorCode::RoomPolicyRestricted as u16 as u64)
+        );
+        assert!(engine
+            .store
+            .upload_file(&resource_id)
+            .expect("upload row")
+            .is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn announcement_room_durable_policy_is_transactional_replay_safe_and_role_aware() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let room = engine
+            .store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        engine
+            .store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+        let client_instance_id = ClientInstanceId::new([72; 16]);
+        let envelope = durable_envelope(
+            ChatOp::RoomMessage,
+            room.room_id,
+            73,
+            "blocked durable message",
+        );
+        let rejected = engine
+            .handle_durable_mutation(
+                &peer(),
+                10,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                envelope.clone(),
+            )
+            .expect("policy rejection");
+        assert_eq!(
+            frame_error_code(&rejected.origin),
+            Some(ChatErrorCode::RoomPolicyRestricted as u16 as u64)
+        );
+        assert!(rejected.broadcasts.is_empty());
+        assert!(engine
+            .store
+            .latest_events(room.room_id, 10)
+            .expect("events")
+            .is_empty());
+
+        let user = engine.ensure_peer(&peer()).expect("user");
+        engine
+            .store
+            .set_user_role_bits(user.user_id, ROLE_MODERATOR)
+            .expect("moderator");
+        let replayed = engine
+            .handle_durable_mutation(
+                &peer(),
+                11,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                envelope,
+            )
+            .expect("exact replay");
+        assert_replayed_response(&replayed.origin, &rejected.origin, 11);
+        assert!(replayed.broadcasts.is_empty());
+
+        let accepted = engine
+            .handle_durable_mutation(
+                &peer(),
+                12,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                durable_envelope(
+                    ChatOp::RoomMessage,
+                    room.room_id,
+                    74,
+                    "moderator publication",
+                ),
+            )
+            .expect("moderator publication");
+        assert_eq!(accepted.origin.op, ChatOp::MessageAck);
+        assert_eq!(accepted.broadcasts.len(), 1);
+        let target_event_id =
+            engine.store.latest_events(room.room_id, 1).expect("events")[0].event_id;
+
+        engine
+            .store
+            .set_user_role_bits(user.user_id, 0)
+            .expect("standard member");
+        for (seq, op, marker, body) in [
+            (
+                13,
+                ChatOp::RoomReaction,
+                75,
+                ReactionRequest {
+                    target_event_id,
+                    token: crate::protocol::ReactionToken::Heart,
+                    action: crate::protocol::ReactionAction::Add,
+                }
+                .into_frame_body()
+                .expect("reaction"),
+            ),
+            (
+                14,
+                ChatOp::RoomMessageRevision,
+                76,
+                MessageRevisionRequest {
+                    target_event_id,
+                    action: crate::protocol::MessageRevisionAction::Correct,
+                    replacement: Some("blocked correction".into()),
+                }
+                .into_frame_body()
+                .expect("revision"),
+            ),
+        ] {
+            let dispatch = engine
+                .handle_durable_mutation_with_active_peers(
+                    DurableMutationPeerContext {
+                        peer: &peer(),
+                        active_room_peers: &[],
+                        durable_notice_ack: true,
+                        reply_mentions: false,
+                        reactions: true,
+                        message_revisions: true,
+                        pins: false,
+                    },
+                    seq,
+                    Some(room.room_id),
+                    op,
+                    client_instance_id,
+                    durable_envelope_body(op, room.room_id, marker, body),
+                )
+                .expect("policy rejection");
+            assert_eq!(
+                frame_error_code(&dispatch.origin),
+                Some(ChatErrorCode::RoomPolicyRestricted as u16 as u64)
+            );
+            assert!(dispatch.broadcasts.is_empty());
+        }
+        assert_eq!(
+            engine.store.reaction_row_counts().expect("reaction counts"),
+            (0, 0)
+        );
+        assert_eq!(
+            engine
+                .store
+                .message_revision_row_counts()
+                .expect("revision counts"),
+            (0, 0)
         );
     }
 

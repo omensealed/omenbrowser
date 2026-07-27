@@ -46,6 +46,7 @@ omenchatd config show
 omenchatd config set --name "My Chat" --operator-label "node-admin"
 omenchatd config set --announce-interval 360 --max-message-bytes 2048
 omenchatd rooms list
+omenchatd rooms list --json
 omenchatd rooms add field-ops --topic "Field operations"
 omenchatd interfaces tcp-server 127.0.0.1:42420
 omenchatd interfaces tcp-client gateway.example:42420
@@ -201,8 +202,34 @@ The previous active database is retained as a unique owner-only
 files are modified. Run `doctor` before restarting. Restore is deliberately an
 offline, explicit `--confirm` operation.
 
+Schema 11 stores an explicit ordinary/announcement policy per room. Policy
+changes are intentionally stopped-server operations until live reload and
+policy-delta fanout are separately qualified:
+
+```bash
+omenchatd rooms policy 1 announcement --confirm --home ~/.omenchatd
+omenchatd rooms list --json --home ~/.omenchatd
+```
+
+Only `ordinary` and `announcement` are accepted. The policy and room revision
+change in one immediate transaction. Announcement rooms remain readable by
+members, while content publication is enforced server-side for moderators and
+administrators regardless of client capability negotiation. To prepare a
+separate schema-10-compatible rollback copy while retaining the active
+schema-11 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema10-copy \
+  --to ~/.omenchatd/omenchat-schema10.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes only the schema-11 policy
+column from a staged copy and preserves moderation-audit and every earlier
+layer.
+
 To prepare a separate schema-9-compatible rollback copy while retaining the
-active schema-10 database, stop the server cleanly and run:
+active schema-11 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema9-copy \
@@ -217,7 +244,7 @@ room, and upload layer. The capability remains dormant, so this stored audit
 is operator-recoverable state rather than active client-visible traffic.
 
 To prepare a separate schema-8-compatible rollback copy while retaining the
-active schema-10 database, stop the server cleanly and run:
+active schema-11 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema8-copy \
@@ -630,12 +657,14 @@ from that instance return `Expired` without mutation execution, including after
 restart. Remembered instances are capped at 100,000 globally and 1,024 per
 identity, with capacity exhaustion failing closed. Protocol-v1 error numbers
 1011 through 1015 describe negotiated durable outcomes; ordinary sessions do
-not emit them. Older files are migrated
+not emit them. Error 1016 is the typed announcement-room publication
+restriction and can apply to legacy or durable mutations independently of
+capability negotiation. Older files are migrated
 transactionally. Files with
 a newer schema version are rejected without modification; run the matching or
 newer omenchatd rather than forcing the version backward.
 Migration of a non-empty older database first retains an online SQLite backup
-at `omenchat.sqlite.pre-v10-from-v<old>.bak`. The backup is owner-only on
+at `omenchat.sqlite.pre-v11-from-v<old>.bak`. The backup is owner-only on
 Unix and is never overwritten. If that path already exists or backup creation
 fails, startup aborts before changing the source database.
 Migration schema work and its version update are transactional. On failure the
@@ -644,6 +673,8 @@ and the completed pre-migration backup remains available.
 The confirmation-gated restore command described above validates and migrates
 that retained artifact through a staging database before replacement, and
 preserves the prior active database for rollback.
+The separate `export-schema10-copy` command removes only announcement-room
+policy storage while preserving moderation-audit and every earlier layer.
 The separate `export-schema9-copy` command removes only moderation-audit
 storage while preserving schema-9 pins and every earlier layer.
 `export-schema8-copy` removes moderation-audit and pin storage while preserving

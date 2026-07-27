@@ -48,8 +48,10 @@ pub enum CliCommand {
     ConfigShow(ServerOptions),
     ConfigSet(ServerOptions, ConfigSetOptions),
     RoomsList(ServerOptions),
+    RoomsListJson(ServerOptions),
     RoomsAdd(ServerOptions, RoomAddOptions),
     RoomsSetTopic(ServerOptions, RoomTopicOptions),
+    RoomsSetPolicy(ServerOptions, RoomPolicyOptions),
     RoomsArchive(ServerOptions, RoomSelectOptions),
     InterfacesList(ServerOptions),
     InterfacesTcpServer(ServerOptions, TcpServerOverride),
@@ -109,6 +111,12 @@ pub struct RoomAddOptions {
 pub struct RoomTopicOptions {
     pub room_id: i64,
     pub topic: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomPolicyOptions {
+    pub room_id: i64,
+    pub announcement_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -489,12 +497,54 @@ impl Omenchatd {
                 let database = admin_db::AdminDatabase::open(&config.database_path)?;
                 for room in database.list_rooms()? {
                     println!(
-                        "#{name}\troom_id={room_id}\ttopic={topic}",
+                        "#{name}\troom_id={room_id}\tpolicy={policy}\trevision={revision}\ttopic={topic}",
                         name = room.name,
                         room_id = room.room_id,
+                        policy = if room.policy_bits == 0 {
+                            "ordinary"
+                        } else {
+                            "announcement"
+                        },
+                        revision = room.room_revision,
                         topic = room.topic.unwrap_or_default()
                     );
                 }
+                Ok(())
+            }
+            CliCommand::RoomsListJson(options) => {
+                let config = config_from_options(&options)?;
+                config::init_files(&config)?;
+                let database = admin_db::AdminDatabase::open(&config.database_path)?;
+                let rooms = database
+                    .list_rooms()?
+                    .into_iter()
+                    .map(|room| {
+                        serde_json::json!({
+                            "room_id": room.room_id,
+                            "name": room.name,
+                            "topic": room.topic,
+                            "policy": if room.policy_bits == 0 {
+                                "ordinary"
+                            } else {
+                                "announcement"
+                            },
+                            "policy_bits": room.policy_bits,
+                            "room_revision": room.room_revision,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema_version": 1,
+                        "rooms": rooms,
+                    }))
+                    .map_err(|error| {
+                        crate::error::ServerError::Message(format!(
+                            "room status JSON encoding failed: {error}"
+                        ))
+                    })?
+                );
                 Ok(())
             }
             CliCommand::RoomsAdd(options, room) => {
@@ -513,6 +563,32 @@ impl Omenchatd {
                     .map_err(|_| error::ServerError::Message("room not found".into()))?;
                 database.update_room_topic(room_id, room.topic)?;
                 println!("room topic updated: id={}", room.room_id);
+                Ok(())
+            }
+            CliCommand::RoomsSetPolicy(options, room) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "room policy update refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let room_id = u32::try_from(room.room_id)
+                    .map_err(|_| error::ServerError::Message("room not found".into()))?;
+                let updated =
+                    database.set_room_announcement_policy(room_id, room.announcement_only)?;
+                println!(
+                    "room policy updated: id={} policy={} revision={}",
+                    updated.room_id,
+                    if updated.policy_bits == 0 {
+                        "ordinary"
+                    } else {
+                        "announcement"
+                    },
+                    updated.room_revision
+                );
                 Ok(())
             }
             CliCommand::RoomsArchive(options, room) => {
@@ -761,7 +837,14 @@ fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
         return CliCommand::Help;
     };
     match command.as_str() {
-        "list" => CliCommand::RoomsList(parse_options(args)),
+        "list" => {
+            let (options, json) = parse_machine_output_options(args);
+            if json {
+                CliCommand::RoomsListJson(options)
+            } else {
+                CliCommand::RoomsList(options)
+            }
+        }
         "add" => {
             let (options, room) = parse_room_add_options(args);
             match room {
@@ -774,6 +857,16 @@ fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
             match room {
                 Some(room) => CliCommand::RoomsSetTopic(options, room),
                 None => CliCommand::Help,
+            }
+        }
+        "policy" => {
+            let (options, room) = parse_room_policy_options(args);
+            match room {
+                Some(room) => CliCommand::RoomsSetPolicy(options, room),
+                None => CliCommand::Invalid(
+                    "room policy requires <room_id> ordinary|announcement --confirm and must be run while omenchatd is stopped"
+                        .into(),
+                ),
             }
         }
         "archive" => {
@@ -1047,6 +1140,39 @@ fn parse_room_select_options(
     )
 }
 
+fn parse_room_policy_options(
+    args: impl IntoIterator<Item = String>,
+) -> (ServerOptions, Option<RoomPolicyOptions>) {
+    let mut options = ServerOptions::default();
+    let mut room_id = None;
+    let mut policy = None;
+    let mut confirmed = false;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => options.home = args.next().map(PathBuf::from),
+            "--confirm" => confirmed = true,
+            "ordinary" if policy.is_none() => policy = Some(false),
+            "announcement" if policy.is_none() => policy = Some(true),
+            value if room_id.is_none() => {
+                room_id = value.parse::<i64>().ok().filter(|value| *value > 0)
+            }
+            _ => return (options, None),
+        }
+    }
+    (
+        options,
+        confirmed
+            .then_some(())
+            .and(room_id)
+            .zip(policy)
+            .map(|(room_id, announcement_only)| RoomPolicyOptions {
+                room_id,
+                announcement_only,
+            }),
+    )
+}
+
 fn parse_tcp_server_override(value: &str) -> Option<TcpServerOverride> {
     let (listen_ip, port) = value.rsplit_once(':')?;
     let listen_port = port.parse::<u16>().ok()?;
@@ -1202,9 +1328,10 @@ fn print_help() {
     );
     println!("             [--max-message-bytes <bytes>] [--history-batch-size <count>] [--join-backlog-events <count>]");
     println!("             [--large-batch-threshold-bytes <bytes>] [--rate-messages-per-minute <count>] [--rate-commands-per-minute <count>]");
-    println!("  rooms list [--home <path>]");
+    println!("  rooms list [--home <path>] [--json]");
     println!("  rooms add <name> [--topic <topic>] [--home <path>]");
     println!("  rooms topic <room_id> [--topic <topic>] [--home <path>]");
+    println!("  rooms policy <room_id> ordinary|announcement --confirm [--home <path>]  # server must be stopped");
     println!("  rooms archive <room_id> [--home <path>]");
     println!("  interfaces list [--home <path>]");
     println!("  interfaces tcp-server <listen_ip:port> [--home <path>]");
@@ -2115,6 +2242,62 @@ mod tests {
                 }
             )
         );
+        assert_eq!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::RoomsListJson(ServerOptions {
+                home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                tcp_server: None,
+                tcp_client: None,
+            })
+        );
+
+        assert!(matches!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "policy".to_string(),
+                "7".to_string(),
+                "announcement".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "policy".to_string(),
+                "7".to_string(),
+                "unsupported".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("ordinary|announcement")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "policy".to_string(),
+                "7".to_string(),
+                "announcement".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::RoomsSetPolicy(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                RoomPolicyOptions {
+                    room_id: 7,
+                    announcement_only: true,
+                }
+            )
+        );
     }
 
     #[test]
@@ -2947,6 +3130,28 @@ mod tests {
                 .and_then(|(_, _, topic)| topic),
             Some("Incidents".into())
         );
+        Omenchatd
+            .run(CliCommand::RoomsSetPolicy(
+                options.clone(),
+                RoomPolicyOptions {
+                    room_id: room.0,
+                    announcement_only: true,
+                },
+            ))
+            .expect("update room policy through administrative database");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open current policy database");
+        let policy_room = database
+            .room_by_id(room.0 as u32)
+            .expect("policy room lookup")
+            .expect("policy room");
+        assert_eq!(
+            policy_room.policy_bits,
+            crate::protocol::ROOM_POLICY_ANNOUNCEMENT
+        );
+        assert_eq!(policy_room.room_revision, 2);
+        drop(database);
         Omenchatd
             .run(CliCommand::RoomsArchive(
                 options,

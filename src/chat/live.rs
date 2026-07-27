@@ -4920,6 +4920,9 @@ fn error_code_label(code: u64) -> Option<&'static str> {
         value if value == ChatErrorCode::DurableMutationStoreBusy as u16 => {
             Some("durable mutation store busy")
         }
+        value if value == ChatErrorCode::RoomPolicyRestricted as u16 => {
+            Some("room is read-only for members")
+        }
         _ => None,
     }
 }
@@ -11075,6 +11078,17 @@ mod tests {
         assert_eq!(
             expired,
             "durable mutation result expired: OMENchat server returned an error"
+        );
+
+        let restricted = parse_error_text(&FrameBody::Fields(vec![
+            FrameValue::U64(ChatErrorCode::RoomPolicyRestricted as u16 as u64),
+            FrameValue::String(
+                "publishing messages is restricted to moderators and administrators".into(),
+            ),
+        ]));
+        assert_eq!(
+            restricted,
+            "room is read-only for members: publishing messages is restricted to moderators and administrators"
         );
     }
 

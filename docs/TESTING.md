@@ -4635,6 +4635,43 @@ omenchatd must be stopped. The destination must not exist. This does not
 activate room policy, authorization, negotiation, or presentation. Evidence is
 in `docs/audits/omenchat-announcement-rooms-storage-qualification.md`.
 
+Announcement-room server authorization and stopped-server administration are
+covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    announcement_room --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_content_policy --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_policy_update --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_policy_maintenance_refuses_an_active_writer --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    cli_parses_admin_config_and_room_commands --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    cli_room_mutations_use_the_initialized_administrative_database_path \
+    --lib -- --nocapture
+)
+```
+
+These tests cover standard/trusted rejection, moderator publication, legacy
+messages/actions/notices, durable message replay after a role change,
+reactions, revisions, upload offer/publication boundaries, absence of event,
+rate, replay-effect, pending-upload, file, and ledger side effects, atomic
+policy/revision rollback, idempotency, restart, strict CLI vocabulary, and
+dormant negotiation. Effective policy is available through:
+
+```bash
+omenchatd rooms list --json --home <server-home>
+```
+
+This does not claim negotiated room-policy evidence, GUI/TUI controls, process
+traffic, or adjacent-version compatibility. Evidence is in
+`docs/audits/omenchat-announcement-rooms-authorization-qualification.md`.
+
 The first moderation-audit slice reserves a read-only operation range and
 bounded shared types without requesting or accepting
 `moderation-audit-v1`:
