@@ -36,6 +36,13 @@ fn recovered_mutation_operation(
                 Err(_) => "message revision",
             }
         }
+        ChatOp::RoomPin => match crate::chat::protocol::PinRequest::from_frame_body(body) {
+            Ok(request) => match request.action {
+                crate::chat::protocol::PinAction::Pin => "pin message",
+                crate::chat::protocol::PinAction::Unpin => "unpin message",
+            },
+            Err(_) => "pin mutation",
+        },
         ChatOp::PartRoom => "leave room",
         ChatOp::Command => match body {
             FrameBody::Text(command) => match command.split_whitespace().next() {
@@ -268,6 +275,31 @@ fn omenchat_message_revision_controls(
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_pin_control(
+    session_id: crate::chat::ChatSessionId,
+    room_id: crate::chat::protocol::RoomId,
+    event_id: u64,
+    action: crate::chat::protocol::PinAction,
+) -> Element<'static, Message> {
+    let label = match action {
+        crate::chat::protocol::PinAction::Pin => "Pin this message",
+        crate::chat::protocol::PinAction::Unpin => "Unpin this message",
+    };
+    tooltip_button(
+        button(text("📌").font(emoji_font()).size(ui_size(15)))
+            .on_press(Message::OmenChat(OmenChatMessage::TogglePin {
+                session_id,
+                room_id,
+                event_id,
+                action,
+            }))
+            .padding([1, 3])
+            .style(inline_icon_button_style),
+        label,
+    )
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn recovered_mutation_notice(count: usize, connection: crate::chat::ChatConnectionState) -> String {
     let noun = if count == 1 { "send" } else { "sends" };
     let verb = if count == 1 { "needs" } else { "need" };
@@ -476,7 +508,28 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 ) == crate::directory::TrustLevel::Trusted,
                 &desktop.omenchat.omenchat_media_cache,
             );
-            let line_text = chat_timeline_body_text(&body);
+            let mut line_text = chat_timeline_body_text(&body);
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            if let Some(action) = body.pin_target.and_then(|event_id| {
+                desktop
+                    .omenchat
+                    .omenchat_live_state
+                    .pending_pin_confirmation(
+                        session.session_id,
+                        session.active_room.room_id,
+                        event_id,
+                    )
+            }) {
+                let pending = match action {
+                    crate::chat::protocol::PinAction::Pin => {
+                        "  [pin accepted · awaiting room update]"
+                    }
+                    crate::chat::protocol::PinAction::Unpin => {
+                        "  [unpin accepted · awaiting room update]"
+                    }
+                };
+                line_text.push_str(pending);
+            }
             let mut line = safe_timeline_text(line_text, 14);
             if body.is_action {
                 line = line.font(Font {
@@ -536,6 +589,23 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                         deletion,
                     ));
                 }
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            if let Some((event_id, action)) = body.pin_target.and_then(|event_id| {
+                desktop
+                    .omenchat_pin_action_for_target(
+                        session.session_id,
+                        session.active_room.room_id,
+                        event_id,
+                    )
+                    .map(|action| (event_id, action))
+            }) {
+                group_content = group_content.push(omenchat_pin_control(
+                    session.session_id,
+                    session.active_room.room_id,
+                    event_id,
+                    action,
+                ));
             }
             if !body.reactions.is_empty() {
                 group_content = group_content.push(omenchat_reaction_summary_row(&body.reactions));
@@ -1257,6 +1327,16 @@ mod accessibility_tests {
         assert!(
             !recovered_mutation_operation(ChatOp::RoomMessageRevision, &correction)
                 .contains("private corrected body")
+        );
+        let pin = crate::chat::protocol::PinRequest {
+            target_event_id: 7,
+            action: crate::chat::protocol::PinAction::Pin,
+        }
+        .into_frame_body()
+        .expect("pin body");
+        assert_eq!(
+            recovered_mutation_operation(ChatOp::RoomPin, &pin),
+            "pin message"
         );
         assert!(!recovered_mutation_operation(ChatOp::Command, &secret_body)
             .contains("private-target-name"));

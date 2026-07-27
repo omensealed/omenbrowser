@@ -30,6 +30,7 @@ pub(in crate::desktop) struct ChatTimelineBody {
     pub(in crate::desktop) reply: Option<ChatTimelineReply>,
     pub(in crate::desktop) reply_target: Option<u64>,
     pub(in crate::desktop) reaction_target: Option<u64>,
+    pub(in crate::desktop) pin_target: Option<u64>,
     pub(in crate::desktop) upload: Option<ChatTimelineUpload>,
     pub(in crate::desktop) resend: Option<ChatTimelineResend>,
     pub(in crate::desktop) revision: Option<ChatTimelineRevision>,
@@ -119,6 +120,9 @@ pub(in crate::desktop) fn chat_event_body<'a>(
     let reaction_target = chat_event_supports_reactions(event)
         .then_some(event.event_id)
         .filter(|_| !is_omenchat_local_echo_event(event));
+    let pin_target = crate::chat::model::chat_event_supports_pins(event)
+        .then_some(event.event_id)
+        .filter(|_| !is_omenchat_local_echo_event(event));
     let reply = deleted_revision
         .is_none()
         .then_some(presentation.reply)
@@ -150,6 +154,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             reply,
             reply_target: None,
             reaction_target,
+            pin_target,
             upload: None,
             resend: local_echo_resend(session, event, body, true),
             revision: None,
@@ -183,6 +188,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
                     .is_none()
                     .then_some(reaction_target)
                     .flatten(),
+                pin_target,
                 upload: None,
                 resend: deleted_revision
                     .is_none()
@@ -206,6 +212,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             reply,
             reply_target,
             reaction_target,
+            pin_target,
             upload: None,
             resend: None,
             revision: None,
@@ -224,6 +231,7 @@ pub(in crate::desktop) fn chat_event_body<'a>(
             reply,
             reply_target: None,
             reaction_target,
+            pin_target,
             upload: Some(ChatTimelineUpload {
                 session_id: session.session_id,
                 resource_id: resource_id.clone(),

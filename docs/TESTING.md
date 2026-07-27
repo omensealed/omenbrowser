@@ -4509,6 +4509,31 @@ cargo test --locked --no-default-features --features desktop-product --lib \
 
 Restart preserves bounded cached pin rows but deliberately clears authority.
 The timeline renders authoritative state as `📌 pinned` and unreconciled
-restart state as `📌 pinned · cached`. No pin action is rendered. Production
-negotiation remains unchanged, and mutation controls, mixed-version live
-qualification, and capability activation remain separate slices.
+restart state as `📌 pinned · cached`. No pin action is rendered in a
+production session. Production negotiation remains unchanged; mixed-version
+live qualification and capability activation remain separate slices.
+
+The next dormant slice exercises pin/unpin controls only through test-bound
+negotiation state:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product --lib \
+  durable_pin_
+cargo test --locked --no-default-features --features desktop-product --lib \
+  pin_controls_require_test_negotiation_role_authority_and_current_state
+cargo test --locked --no-default-features --features desktop-product --lib \
+  pin_prepare_persists_before_send_and_preserves_ordinary_draft
+cargo test --locked --no-default-features --features desktop-product --lib \
+  dormant_pin_intent_kind_is_restart_safe_without_capability_activation
+cargo test --locked --no-default-features --features desktop-product --lib \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity
+```
+
+These tests require current moderator/administrator and retained-target
+evidence, persist intent before transmission, permit only one pending pin
+mutation per target, reject mismatched ACKs, preserve uncertainty across
+restart, and keep accepted mutation evidence separate until an authoritative
+delta or exact-target snapshot arrives. Post-ACK confirmation slots share the
+existing 256-global/64-per-session mutation budget and clear on capability or
+Link loss. The final test continues to prove the production desktop does not
+request `room-pins-v1`. Server acceptance remains disabled.

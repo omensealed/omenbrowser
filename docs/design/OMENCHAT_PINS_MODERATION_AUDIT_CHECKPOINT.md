@@ -1,8 +1,8 @@
 # OMENchat pins and moderation-audit checkpoint
 
-Status: dormant pin protocol, server storage/execution, and desktop read-only
-projection implemented; production capability request/acceptance and mutation
-controls remain disabled; moderation-audit work remains design-only
+Status: dormant pin protocol, server storage/execution, desktop projection, and
+test-only durable controls implemented; production capability
+request/acceptance remains disabled; moderation-audit work remains design-only
 
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`
 
@@ -420,7 +420,11 @@ The presentation must distinguish:
    dormant delta/snapshot reducers, and read-only current/cached presentation.
    The desktop still does not request `room-pins-v1`; no mutation control is
    present.
-5. Add durable pin/unpin controls behind test-only negotiated state.
+5. **Complete (2026-07-27):** add durable pin/unpin controls behind test-only
+   negotiated state. Intent persistence precedes transmission, one pending
+   mutation is admitted per target within the existing mutation budget, exact
+   acknowledgements remain distinct from authoritative pin state, and
+   production negotiation remains disabled.
 6. Qualify replay, restart, retention, frame-size, mixed-version, overload, and
    resource measurements; then separately review activation.
 7. Add shared dormant moderation-audit types and operations 52–55. Keep

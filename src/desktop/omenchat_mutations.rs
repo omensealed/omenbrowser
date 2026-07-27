@@ -9,8 +9,8 @@ use crate::chat::mutation_intents::{
     IntentTransition, OutboundMutationIntent, OutboundMutationState, OwnedPrepareOutboundMutation,
 };
 use crate::chat::protocol::{
-    ChatOp, FrameBody, MessageRevisionRequest, MutationId, ReactionAction, ReactionRequest,
-    ReactionToken, ReplyReference, RichMessageBody,
+    ChatOp, FrameBody, MessageRevisionRequest, MutationId, PinAction, PinRequest, ReactionAction,
+    ReactionRequest, ReactionToken, ReplyReference, RichMessageBody,
 };
 use crate::chat::{ChatClientEvent, ChatEventKind, ChatSessionId};
 
@@ -247,6 +247,98 @@ impl DesktopApp {
         self.set_omenchat_session_status(
             session_id,
             "persisting message revision intent before transmission".into(),
+        );
+        Task::perform(await_intent_worker_reply(reply), move |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::Prepared {
+                    session_id,
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
+    pub(in crate::desktop) fn prepare_omenchat_pin_mutation(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: u32,
+        event_id: u64,
+        action: PinAction,
+    ) -> Task<Message> {
+        if self.omenchat_pin_action_for_target(session_id, room_id, event_id) != Some(action) {
+            self.set_omenchat_session_status(
+                session_id,
+                "pin mutation is unavailable because capability, authority, role, or target evidence is missing"
+                    .into(),
+            );
+            return Task::none();
+        }
+        let body = match (PinRequest {
+            target_event_id: event_id,
+            action,
+        })
+        .into_frame_body()
+        {
+            Ok(body) => body,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("pin request is invalid: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        let Some(server_destination) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.server.destination.clone())
+        else {
+            self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
+            return Task::none();
+        };
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.set_omenchat_session_status(
+                session_id,
+                "pin mutation was not sent because durable mutation persistence is unavailable"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let (Some(client_instance_id), Some(authenticated_identity_hash)) = (
+            self.omenchat.omenchat_live_state.client_instance_id(),
+            self.omenchat.omenchat_authenticated_identity_hash.clone(),
+        ) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "pin mutation was not sent because durable mutation identity is unavailable".into(),
+            );
+            return Task::none();
+        };
+        let created_at = current_unix_seconds();
+        let reply = match worker.try_prepare(OwnedPrepareOutboundMutation {
+            server_destination,
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::RoomPin,
+            room_id: Some(room_id),
+            body,
+            created_at,
+            expires_at: created_at.saturating_add(DURABLE_MUTATION_INTENT_LIFETIME_SECONDS),
+            correlation_id: None,
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("pin mutation was not admitted for durable persistence: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        self.set_omenchat_session_status(
+            session_id,
+            "persisting pin mutation intent before transmission".into(),
         );
         Task::perform(await_intent_worker_reply(reply), move |result| {
             Message::OmenChatMutationCompletion(Box::new(
@@ -1090,6 +1182,35 @@ impl DesktopApp {
                 );
             }
         }
+        if intent.op == ChatOp::RoomPin {
+            if !self
+                .omenchat
+                .omenchat_live_state
+                .pins_negotiated(session_id)
+            {
+                return Err(
+                    "the live OMENchat peer did not negotiate room-pins-v1; this pin mutation was not retried"
+                        .into(),
+                );
+            }
+            let Ok(request) = PinRequest::from_frame_body(&intent.body) else {
+                return Err(
+                    "the recovered OMENchat pin request is malformed; it was not sent".into(),
+                );
+            };
+            let pin_room_id = room_id.ok_or_else(|| {
+                "the recovered OMENchat pin request has no room identity; it was not sent"
+                    .to_string()
+            })?;
+            if self.omenchat_pin_action_for_target(session_id, pin_room_id, request.target_event_id)
+                != Some(request.action)
+            {
+                return Err(
+                    "the recovered OMENchat pin request no longer has authoritative permission evidence; it was not sent"
+                        .into(),
+                );
+            }
+        }
         if self
             .omenchat
             .omenchat_live_state
@@ -1305,6 +1426,11 @@ impl DesktopApp {
                     .omenchat
                     .omenchat_live_state
                     .message_revisions_negotiated(session_id))
+            || (intent.op == ChatOp::RoomPin
+                && !self
+                    .omenchat
+                    .omenchat_live_state
+                    .pins_negotiated(session_id))
             || !self
                 .omenchat
                 .omenchat_live_transports
@@ -1442,6 +1568,13 @@ impl DesktopApp {
                         &intent,
                     )
                 }
+                ChatOp::RoomPin => crate::chat::live::send_uncertain_durable_pin(
+                    &mut self.omenchat.chat_client,
+                    &mut self.omenchat.omenchat_live_state,
+                    transport,
+                    session_id,
+                    &intent,
+                ),
                 ChatOp::PartRoom => crate::chat::live::send_uncertain_durable_part_room(
                     &mut self.omenchat.chat_client,
                     &mut self.omenchat.omenchat_live_state,
@@ -1516,7 +1649,13 @@ impl DesktopApp {
                     self.omenchat.omenchat_revision_drafts.remove(&session_id);
                 }
             }
-        } else if !failed && !recovered {
+        } else if !failed
+            && !recovered
+            && !matches!(
+                intent.op,
+                ChatOp::RoomReaction | ChatOp::RoomMessageRevision | ChatOp::RoomPin
+            )
+        {
             self.omenchat.chat_drafts.insert(session_id, String::new());
             if let Ok(sent) = RichMessageBody::from_frame_body(&intent.body) {
                 let selected_reply =
@@ -1766,7 +1905,7 @@ mod tests {
     use crate::app::{current_epoch_ms, App};
     use crate::chat::codec::encode_frame;
     use crate::chat::protocol::{
-        with_session_accept_negotiation, ClientInstanceId, Frame, FrameValue,
+        with_session_accept_negotiation, ClientInstanceId, Frame, FrameValue, PinSnapshot,
         SessionAcceptNegotiation, DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
     };
     use crate::chat::{
@@ -1992,6 +2131,65 @@ mod tests {
             .omenchat
             .omenchat_live_state
             .set_message_revisions_negotiated_for_test(session_id, false);
+
+        assert!(desktop
+            .omenchat
+            .chat_client
+            .bind_local_user_id(session_id, 7));
+        desktop
+            .omenchat
+            .chat_client
+            .session_mut(session_id)
+            .expect("session")
+            .users[0]
+            .role_bits = crate::chat::CHAT_ROLE_MODERATOR;
+        desktop
+            .omenchat
+            .chat_client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![9],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("authoritative pin target");
+        let pin_body = PinRequest {
+            target_event_id: 9,
+            action: PinAction::Pin,
+        }
+        .into_frame_body()
+        .expect("pin body");
+        let recovered_pin = OutboundMutationIntent {
+            mutation_id: MutationId::new([0x77; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomPin,
+                Some(1),
+                &pin_body,
+            )
+            .expect("pin request hash"),
+            op: ChatOp::RoomPin,
+            body: pin_body,
+            ..recovered
+        };
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_pin)
+            .expect_err("dormant capability must block recovered pin retry")
+            .contains("did not negotiate room-pins-v1"));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_pins_negotiated_for_test(session_id, true);
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&recovered_pin),
+            Ok(session_id)
+        );
+        desktop.omenchat.chat_client.mark_pins_stale(session_id);
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_pin)
+            .expect_err("authority loss must block recovered pin retry")
+            .contains("authoritative permission evidence"));
     }
 
     #[tokio::test]

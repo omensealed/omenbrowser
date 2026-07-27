@@ -1385,6 +1385,17 @@ distinguishes `📌 pinned` from `📌 pinned · cached`. The desktop still does
 request `room-pins-v1`, and no pin/unpin control, queue, timer, worker, or
 automatic retry was added.
 
+The fifth dormant pin slice adds test-negotiated pin/unpin controls without
+activating production negotiation. Current moderator/administrator,
+membership, target retention, exact-target authority, and durable identity are
+required before intent admission. The existing persistence worker records the
+canonical request before transmission, and one target cannot hold parallel pin
+mutations. A matching ACK marks the durable intent acknowledged but shows
+`awaiting room update` until a matching authoritative delta or snapshot
+arrives. Those bounded confirmation slots share the existing mutation budget
+and clear on capability or Link loss. No optimistic pin projection or
+automatic retry was added.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

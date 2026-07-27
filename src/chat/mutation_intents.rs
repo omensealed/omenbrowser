@@ -602,6 +602,7 @@ fn validate_prepare_request(
             | ChatOp::RoomNotice
             | ChatOp::RoomReaction
             | ChatOp::RoomMessageRevision
+            | ChatOp::RoomPin
             | ChatOp::PartRoom
             | ChatOp::Command
     ) {
@@ -930,6 +931,48 @@ mod tests {
             .expect("recover dormant revision");
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].op, ChatOp::RoomMessageRevision);
+        assert_eq!(recovered[0].body, body);
+        assert_eq!(recovered[0].request_hash, prepared.request_hash);
+        assert_eq!(recovered[0].state, OutboundMutationState::Prepared);
+        drop(reopened);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn dormant_pin_intent_kind_is_restart_safe_without_capability_activation() {
+        let root = isolated_root("pin-restart");
+        let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
+        let body = crate::chat::protocol::PinRequest {
+            target_event_id: 42,
+            action: crate::chat::protocol::PinAction::Pin,
+        }
+        .into_frame_body()
+        .expect("pin body");
+        let mutation_id = MutationId::new([0x93; 16]);
+        let prepared = store
+            .persist_prepared_with_id(
+                PrepareOutboundMutation {
+                    server_destination: "0123456789abcdef",
+                    authenticated_identity_hash: b"authenticated-peer",
+                    client_instance_id: ClientInstanceId::new([7; 16]),
+                    op: ChatOp::RoomPin,
+                    room_id: Some(9),
+                    body: body.clone(),
+                    created_at: 100,
+                    expires_at: 200,
+                    correlation_id: None,
+                },
+                mutation_id,
+                PRODUCTION_LIMITS,
+            )
+            .expect("persist dormant pin");
+        drop(store);
+
+        let reopened =
+            MutationIntentStore::open_for_identity_storage_root(&root).expect("reopen store");
+        let recovered = reopened.recover_nonterminal().expect("recover dormant pin");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].op, ChatOp::RoomPin);
         assert_eq!(recovered[0].body, body);
         assert_eq!(recovered[0].request_hash, prepared.request_hash);
         assert_eq!(recovered[0].state, OutboundMutationState::Prepared);

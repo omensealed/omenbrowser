@@ -6,7 +6,8 @@ use crate::chat::protocol::{RoomId, RICH_MESSAGE_MAX_MENTIONS};
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use crate::chat::{
     protocol::{
-        MessageRevisionAction, MESSAGE_REVISION_MAX_NUMBER, MESSAGE_REVISION_MAX_REPLACEMENT_BYTES,
+        MessageRevisionAction, PinAction, MESSAGE_REVISION_MAX_NUMBER,
+        MESSAGE_REVISION_MAX_REPLACEMENT_BYTES,
     },
     ChatMessageRevisionPresentation, CHAT_ROLE_ADMIN, CHAT_ROLE_MODERATOR, CHAT_STATUS_BANNED,
     CHAT_STATUS_MUTED,
@@ -111,6 +112,13 @@ impl DesktopApp {
                 event_id,
                 token,
             }) => Ok(self.prepare_omenchat_reaction_mutation(session_id, room_id, event_id, token)),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::TogglePin {
+                session_id,
+                room_id,
+                event_id,
+                action,
+            }) => Ok(self.prepare_omenchat_pin_mutation(session_id, room_id, event_id, action)),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChat(OmenChatMessage::BeginMessageCorrection {
                 session_id,
@@ -501,6 +509,74 @@ impl DesktopApp {
     }
 
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) fn omenchat_pin_action_for_target(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    ) -> Option<PinAction> {
+        if !self
+            .omenchat
+            .omenchat_live_state
+            .pins_negotiated(session_id)
+            || !self
+                .omenchat
+                .omenchat_live_state
+                .durable_mutations_negotiated(session_id)
+            || self
+                .omenchat
+                .omenchat_live_state
+                .pin_mutation_is_pending(session_id, room_id, event_id)
+            || !self
+                .omenchat
+                .chat_client
+                .pin_target_authoritative(session_id, room_id, event_id)
+        {
+            return None;
+        }
+        let local_user_id = self.omenchat.chat_client.local_user_id(session_id)?;
+        let session = self.omenchat.chat_client.session(session_id)?;
+        if !session
+            .rooms
+            .iter()
+            .any(|room| room.room_id == room_id && room.joined)
+        {
+            return None;
+        }
+        let local_user = session
+            .users
+            .iter()
+            .find(|user| user.user_id == local_user_id)?;
+        if local_user.status_bits & CHAT_STATUS_BANNED != 0
+            || local_user.role_bits & (CHAT_ROLE_MODERATOR | CHAT_ROLE_ADMIN) == 0
+        {
+            return None;
+        }
+        let target = session.events.iter().find(|event| {
+            event.room_id == room_id
+                && event.event_id == event_id
+                && crate::chat::model::chat_event_supports_pins(event)
+        })?;
+        if self
+            .omenchat
+            .chat_client
+            .pin_for_target(session_id, room_id, target.event_id)
+            .is_some()
+        {
+            return Some(PinAction::Unpin);
+        }
+        if self
+            .omenchat
+            .chat_client
+            .message_revision_for_target(session_id, room_id, target.event_id)
+            .is_some_and(|revision| revision.action == MessageRevisionAction::Tombstone)
+        {
+            return None;
+        }
+        Some(PinAction::Pin)
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     fn begin_omenchat_message_correction(
         &mut self,
         session_id: ChatSessionId,
@@ -837,7 +913,9 @@ impl DesktopApp {
 mod tests {
     use super::*;
     use crate::app::{current_epoch_ms, App};
-    use crate::chat::protocol::{MessageRevisionSnapshot, MessageRevisionSnapshotEntry};
+    use crate::chat::protocol::{
+        MessageRevisionSnapshot, MessageRevisionSnapshotEntry, PinSnapshot, PinSnapshotEntry,
+    };
     use crate::chat::{
         ChatEvent, ChatRoomSummary, ChatServerSummary, ChatSessionView, ChatUserSummary,
     };
@@ -1126,6 +1204,124 @@ mod tests {
     }
 
     #[test]
+    fn pin_controls_require_test_negotiation_role_authority_and_current_state() {
+        let (mut desktop, session_id, _) = revision_test_desktop("pin-controls");
+        assert_eq!(
+            desktop.omenchat_pin_action_for_target(session_id, 1, 9),
+            None
+        );
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_pins_negotiated_for_test(session_id, true);
+        desktop
+            .omenchat
+            .chat_client
+            .session_mut(session_id)
+            .expect("session")
+            .users[0]
+            .role_bits = CHAT_ROLE_MODERATOR;
+        desktop
+            .omenchat
+            .chat_client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![9],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("authoritative unpinned target");
+        assert_eq!(
+            desktop.omenchat_pin_action_for_target(session_id, 1, 9),
+            Some(PinAction::Pin)
+        );
+
+        desktop
+            .omenchat
+            .chat_client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![9],
+                    entries: vec![PinSnapshotEntry {
+                        target_event_id: 9,
+                        pin_event_id: 10,
+                        actor_user_id: 7,
+                        pinned_at_unix: 2,
+                    }],
+                },
+            )
+            .expect("authoritative pinned target");
+        assert_eq!(
+            desktop.omenchat_pin_action_for_target(session_id, 1, 9),
+            Some(PinAction::Unpin)
+        );
+        desktop
+            .omenchat
+            .chat_client
+            .session_mut(session_id)
+            .expect("session")
+            .users[0]
+            .role_bits = 0;
+        assert_eq!(
+            desktop.omenchat_pin_action_for_target(session_id, 1, 9),
+            None
+        );
+        desktop
+            .omenchat
+            .chat_client
+            .session_mut(session_id)
+            .expect("session")
+            .users[0]
+            .role_bits = CHAT_ROLE_MODERATOR;
+        desktop.omenchat.chat_client.mark_pins_stale(session_id);
+        assert_eq!(
+            desktop.omenchat_pin_action_for_target(session_id, 1, 9),
+            None
+        );
+        desktop
+            .omenchat
+            .chat_client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![9],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("restored pin authority");
+        desktop
+            .omenchat
+            .chat_client
+            .replace_message_revision_snapshot(
+                session_id,
+                1,
+                &MessageRevisionSnapshot {
+                    target_event_ids: vec![9],
+                    entries: vec![MessageRevisionSnapshotEntry {
+                        target_event_id: 9,
+                        latest_revision_event_id: 11,
+                        action: MessageRevisionAction::Tombstone,
+                        actor_user_id: 7,
+                        at_unix: 3,
+                        replacement: None,
+                        revision_number: 1,
+                    }],
+                },
+            )
+            .expect("tombstone target");
+        assert_eq!(
+            desktop.omenchat_pin_action_for_target(session_id, 1, 9),
+            None,
+            "a new pin must not be offered for a tombstoned target"
+        );
+    }
+
+    #[test]
     fn correction_prepare_persists_before_send_and_preserves_ordinary_draft() {
         let (mut desktop, session_id, root) = revision_test_desktop("persistence");
         enable_revision_prepare(&mut desktop, session_id);
@@ -1167,6 +1363,63 @@ mod tests {
             Some("ordinary draft")
         );
 
+        shutdown_revision_test(desktop, root);
+    }
+
+    #[test]
+    fn pin_prepare_persists_before_send_and_preserves_ordinary_draft() {
+        let (mut desktop, session_id, root) = revision_test_desktop("pin-persistence");
+        enable_revision_prepare(&mut desktop, session_id);
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_pins_negotiated_for_test(session_id, true);
+        desktop
+            .omenchat
+            .chat_client
+            .session_mut(session_id)
+            .expect("session")
+            .users[0]
+            .role_bits = CHAT_ROLE_MODERATOR;
+        desktop
+            .omenchat
+            .chat_client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![9],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("authoritative pin target");
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "ordinary draft".into());
+
+        let _task = desktop.prepare_omenchat_pin_mutation(session_id, 1, 9, PinAction::Pin);
+        let recovered = recover_revision_intents(&desktop);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].op, crate::chat::protocol::ChatOp::RoomPin);
+        assert_eq!(
+            recovered[0].state,
+            crate::chat::mutation_intents::OutboundMutationState::Prepared
+        );
+        assert_eq!(
+            crate::chat::protocol::PinRequest::from_frame_body(&recovered[0].body)
+                .expect("stored pin request")
+                .action,
+            PinAction::Pin
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+            Some("ordinary draft")
+        );
         shutdown_revision_test(desktop, root);
     }
 

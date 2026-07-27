@@ -19,10 +19,11 @@ use super::protocol::{
     canonical_mutation_request_hash, parse_rich_message_event_metadata,
     parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MessageRevisionAck,
-    MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot, MutationId, PinEvent,
-    PinSnapshot, ReactionAck, ReactionEvent, ReactionRequest, ReactionSnapshot, RichMessageBody,
-    RoomId, SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
-    DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
+    MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot, MutationId, PinAck,
+    PinAction, PinEvent, PinRequest, PinSnapshot, ReactionAck, ReactionEvent, ReactionRequest,
+    ReactionSnapshot, RichMessageBody, RoomId, SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS,
+    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME,
+    REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -75,6 +76,7 @@ pub struct LiveChatClientState {
     local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
+    pending_pin_confirmations: BTreeMap<(ChatSessionId, RoomId, u64), PinAction>,
     pending_uploads: BTreeMap<(ChatSessionId, u32), PendingLiveUpload>,
     pending_upload_downloads: BTreeMap<String, PendingLiveUploadDownload>,
     rejected_pending_local_echoes: u64,
@@ -107,6 +109,7 @@ enum PendingCommandResult {
     },
     Reaction(ReactionRequest),
     MessageRevision(MessageRevisionRequest),
+    Pin(PinRequest),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,6 +245,8 @@ impl LiveChatClientState {
             self.pin_sessions.insert(session_id);
         } else {
             self.pin_sessions.remove(&session_id);
+            self.pending_pin_confirmations
+                .retain(|(stored_session, ..), _| *stored_session != session_id);
         }
     }
 
@@ -257,6 +262,36 @@ impl LiveChatClientState {
         self.pending_local_echoes.values().any(|pending| {
             pending.session_id == session_id && pending.mutation_id == Some(mutation_id)
         })
+    }
+
+    pub fn pin_mutation_is_pending(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_id: u64,
+    ) -> bool {
+        self.pending_pin_confirmations
+            .contains_key(&(session_id, room_id, target_event_id))
+            || self.pending_local_echoes.values().any(|pending| {
+                pending.session_id == session_id
+                    && pending.room_id == room_id
+                    && matches!(
+                        &pending.command_result,
+                        Some(PendingCommandResult::Pin(request))
+                            if request.target_event_id == target_event_id
+                    )
+            })
+    }
+
+    pub fn pending_pin_confirmation(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_id: u64,
+    ) -> Option<PinAction> {
+        self.pending_pin_confirmations
+            .get(&(session_id, room_id, target_event_id))
+            .copied()
     }
 
     fn reserve_sequence_range(
@@ -344,6 +379,22 @@ impl LiveChatClientState {
             .count()
     }
 
+    fn pending_mutation_items(&self) -> usize {
+        self.pending_local_echoes
+            .len()
+            .saturating_add(self.pending_pin_confirmations.len())
+    }
+
+    fn pending_mutation_session_items(&self, session_id: ChatSessionId) -> usize {
+        self.pending_local_echo_session_items(session_id)
+            .saturating_add(
+                self.pending_pin_confirmations
+                    .keys()
+                    .filter(|(stored_session, ..)| *stored_session == session_id)
+                    .count(),
+            )
+    }
+
     pub fn cancel_session_transfers(&mut self, session_id: ChatSessionId) {
         self.pending_local_echoes
             .retain(|_, echo| echo.session_id != session_id);
@@ -351,6 +402,8 @@ impl LiveChatClientState {
             .retain(|_, upload| upload.session_id != session_id);
         self.pending_upload_downloads
             .retain(|_, download| download.session_id != session_id);
+        self.pending_pin_confirmations
+            .retain(|(stored_session, ..), _| *stored_session != session_id);
     }
 
     pub fn retire_session_link_state(
@@ -724,6 +777,9 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.message_revision_requests.remove(&session_id);
     state.message_revision_sessions.remove(&session_id);
     state.pin_sessions.remove(&session_id);
+    state
+        .pending_pin_confirmations
+        .retain(|(stored_session, ..), _| *stored_session != session_id);
     state.local_user_ids.remove(&session_id);
     let mut durable_requested = false;
     let mut session_open_body = local_display_name
@@ -871,8 +927,8 @@ fn send_live_room_text<T: ChatLinkTransport>(
     };
     let tracks_server_acceptance = matches!(op, ChatOp::RoomMessage | ChatOp::RoomAction);
     if tracks_server_acceptance
-        && (state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
-            || state.pending_local_echo_session_items(session_id)
+        && (state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+            || state.pending_mutation_session_items(session_id)
                 >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION)
     {
         state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
@@ -1004,8 +1060,8 @@ pub fn send_uncertain_durable_room_text<T: ChatLinkTransport>(
         }
         _ => return error("durable OMENchat room text body is invalid"),
     };
-    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
-        || state.pending_local_echo_session_items(session_id)
+    if state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_mutation_session_items(session_id)
             >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
     {
         state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
@@ -1121,8 +1177,8 @@ pub fn send_uncertain_durable_reaction<T: ChatLinkTransport>(
     ) {
         return error("durable OMENchat reaction hash does not match its stored request");
     }
-    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
-        || state.pending_local_echo_session_items(session_id)
+    if state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_mutation_session_items(session_id)
             >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
     {
         state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
@@ -1165,6 +1221,117 @@ pub fn send_uncertain_durable_reaction<T: ChatLinkTransport>(
     );
     if let Some(session) = client.session_mut(session_id) {
         session.status = "reaction request sent; awaiting server result".into();
+    }
+    drain_live_events_with_state(client, state, transport, Some(session_id))
+}
+
+pub fn send_uncertain_durable_pin<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    intent: &OutboundMutationIntent,
+) -> Vec<ChatClientEvent> {
+    let error = |message: &str| {
+        vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: message.into(),
+        }]
+    };
+    if !state.durable_mutations_negotiated(session_id) || !state.pins_negotiated(session_id) {
+        return error("durable OMENchat pins were not negotiated for this live session");
+    }
+    if intent.op != ChatOp::RoomPin
+        || intent.state != OutboundMutationState::SentUncertain
+        || intent.expires_at <= current_unix_secs()
+    {
+        return error("durable OMENchat pin is not eligible for transmission");
+    }
+    if state.client_instance_id != Some(intent.client_instance_id) {
+        return error("durable OMENchat pin belongs to a different client instance");
+    }
+    let Some(session) = client.session(session_id) else {
+        return error("OMENchat live session is not available");
+    };
+    let Some(room_id) = intent.room_id else {
+        return error("durable OMENchat pin has no room identity");
+    };
+    if session.server.destination != intent.server_destination
+        || !session
+            .rooms
+            .iter()
+            .any(|room| room.room_id == room_id && room.joined)
+    {
+        return error("durable OMENchat pin belongs to a different server or joined room");
+    }
+    let request = match PinRequest::from_frame_body(&intent.body) {
+        Ok(request) => request,
+        Err(_) => return error("durable OMENchat pin request is invalid"),
+    };
+    if !session.events.iter().any(|event| {
+        event.room_id == room_id
+            && event.event_id == request.target_event_id
+            && event.event_id <= u64::MAX.saturating_sub(1_000_000)
+            && super::model::chat_event_supports_pins(event)
+    }) {
+        return error("durable OMENchat pin target is no longer retained");
+    }
+    if !client.pin_target_authoritative(session_id, room_id, request.target_event_id) {
+        return error("durable OMENchat pin target is waiting for authoritative state");
+    }
+    if !matches!(
+        canonical_mutation_request_hash(intent.op, intent.room_id, &intent.body),
+        Ok(request_hash) if request_hash == intent.request_hash
+    ) {
+        return error("durable OMENchat pin hash does not match its stored request");
+    }
+    if state.pin_mutation_is_pending(session_id, room_id, request.target_event_id) {
+        return error("an OMENchat pin mutation is already pending for this target");
+    }
+    if state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_mutation_session_items(session_id)
+            >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
+    {
+        state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
+        return error("OMENchat pending mutation queue is full; wait for server acceptance");
+    }
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
+    let envelope = match (DurableMutationEnvelope {
+        mutation_id: intent.mutation_id,
+        request_hash: intent.request_hash,
+        body: intent.body.clone(),
+    })
+    .into_frame_body()
+    {
+        Ok(body) => body,
+        Err(envelope_error) => {
+            return error(&format!(
+                "durable OMENchat pin envelope is invalid: {envelope_error}"
+            ))
+        }
+    };
+    if let Some(event) = send_frame_or_error(
+        transport,
+        Frame::new(ChatOp::RoomPin, seq, Some(room_id), envelope),
+        Some(session_id),
+    ) {
+        return vec![event];
+    }
+    state.pending_local_echoes.insert(
+        (session_id, seq),
+        PendingLocalEcho {
+            session_id,
+            room_id,
+            temp_event_id: None,
+            mutation_id: Some(intent.mutation_id),
+            command_result: Some(PendingCommandResult::Pin(request)),
+        },
+    );
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = "pin request sent; awaiting server result".into();
     }
     drain_live_events_with_state(client, state, transport, Some(session_id))
 }
@@ -1227,8 +1394,8 @@ pub fn send_uncertain_durable_message_revision<T: ChatLinkTransport>(
     ) {
         return error("durable OMENchat message revision hash does not match its stored request");
     }
-    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
-        || state.pending_local_echo_session_items(session_id)
+    if state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_mutation_session_items(session_id)
             >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
     {
         state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
@@ -1321,8 +1488,8 @@ pub fn send_uncertain_durable_part_room<T: ChatLinkTransport>(
     ) {
         return error("durable OMENchat mutation request hash does not match its stored request");
     }
-    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
-        || state.pending_local_echo_session_items(session_id)
+    if state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_mutation_session_items(session_id)
             >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
     {
         state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
@@ -1427,8 +1594,8 @@ pub fn send_uncertain_durable_topic<T: ChatLinkTransport>(
     ) {
         return error("durable OMENchat mutation request hash does not match its stored request");
     }
-    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
-        || state.pending_local_echo_session_items(session_id)
+    if state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_mutation_session_items(session_id)
             >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
     {
         state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
@@ -1541,8 +1708,8 @@ pub fn send_uncertain_durable_create<T: ChatLinkTransport>(
     ) {
         return error("durable OMENchat mutation request hash does not match its stored request");
     }
-    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
-        || state.pending_local_echo_session_items(session_id)
+    if state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_mutation_session_items(session_id)
             >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
     {
         state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
@@ -1711,8 +1878,8 @@ pub fn send_uncertain_durable_user_command<T: ChatLinkTransport>(
     ) {
         return error("durable OMENchat mutation request hash does not match its stored request");
     }
-    if state.pending_local_echoes.len() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
-        || state.pending_local_echo_session_items(session_id)
+    if state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
+        || state.pending_mutation_session_items(session_id)
             >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS_PER_SESSION
     {
         state.rejected_pending_local_echoes = state.rejected_pending_local_echoes.saturating_add(1);
@@ -2246,6 +2413,7 @@ fn apply_live_link_event(
                     .as_deref()
                     .is_some_and(|state| state.pins_negotiated(session_id))
             });
+            let event_start = events.len();
             apply_batch(
                 client,
                 preferred_session_id,
@@ -2259,6 +2427,27 @@ fn apply_live_link_event(
                 },
                 events,
             );
+            if let (Some(state), Some(session_id)) = (state, preferred_session_id) {
+                for event in &events[event_start..] {
+                    if let ChatClientEvent::PinSnapshotApplied {
+                        room_id, snapshot, ..
+                    } = event
+                    {
+                        let targets = snapshot
+                            .target_event_ids
+                            .iter()
+                            .copied()
+                            .collect::<BTreeSet<_>>();
+                        state.pending_pin_confirmations.retain(
+                            |(stored_session, stored_room, target), _| {
+                                *stored_session != session_id
+                                    || *stored_room != *room_id
+                                    || !targets.contains(target)
+                            },
+                        );
+                    }
+                }
+            }
         }
         ChatLinkEvent::UploadResource {
             resource_id,
@@ -2353,6 +2542,9 @@ fn apply_frame_with_state(
                 .any(|capability| capability == super::protocol::MESSAGE_REVISIONS_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
                 state.pin_sessions.remove(&session_id);
+                state
+                    .pending_pin_confirmations
+                    .retain(|(stored_session, ..), _| *stored_session != session_id);
                 client.mark_pins_stale(session_id);
                 let request_pending = state.durable_requests.remove(&session_id);
                 let reply_mentions_requested = state.reply_mentions_requests.remove(&session_id);
@@ -2712,12 +2904,25 @@ fn apply_frame_with_state(
                 }
             };
             match client.apply_pin_event(session_id, room_id, event) {
-                Ok(true) => events.push(ChatClientEvent::PinDeltaApplied {
-                    session_id,
-                    room_id,
-                    event,
-                }),
-                Ok(false) => {}
+                Ok(changed) => {
+                    if let Some(state) = state.as_deref_mut() {
+                        state.pending_pin_confirmations.remove(&(
+                            session_id,
+                            room_id,
+                            event.target_event_id,
+                        ));
+                    }
+                    if let Some(session) = client.session_mut(session_id) {
+                        session.status = "pin state synchronized".into();
+                    }
+                    if changed {
+                        events.push(ChatClientEvent::PinDeltaApplied {
+                            session_id,
+                            room_id,
+                            event,
+                        });
+                    }
+                }
                 Err(error) => events.push(ChatClientEvent::Error {
                     session_id: Some(session_id),
                     message: error.into(),
@@ -2729,6 +2934,9 @@ fn apply_frame_with_state(
         }
         ChatOp::MessageRevisionAck => {
             apply_message_revision_ack(client, state, preferred_session_id, &frame, events);
+        }
+        ChatOp::PinAck => {
+            apply_pin_ack(client, state, preferred_session_id, &frame, events);
         }
         ChatOp::MessageAck => {
             if let Some(state) = state {
@@ -2949,6 +3157,74 @@ fn apply_message_revision_ack(
             "message revision accepted by server; awaiting room event".into()
         } else {
             "message already matched the requested revision state".into()
+        };
+    }
+    if let Some(mutation_id) = pending.mutation_id {
+        events.push(ChatClientEvent::DurableMutationAcknowledged {
+            session_id,
+            mutation_id,
+        });
+    }
+}
+
+fn apply_pin_ack(
+    client: &mut ChatClient,
+    state: Option<&mut LiveChatClientState>,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let (Some(state), Some(session_id)) = (state, preferred_session_id) else {
+        return;
+    };
+    let Some(pending) = state
+        .pending_local_echoes
+        .get(&(session_id, frame.seq))
+        .cloned()
+    else {
+        return;
+    };
+    let Some(PendingCommandResult::Pin(expected)) = pending.command_result else {
+        return;
+    };
+    if !state.pins_negotiated(session_id) || frame.room_id != Some(pending.room_id) {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat ignored a pin acknowledgement outside its negotiated room".into(),
+        });
+        return;
+    }
+    let Ok(ack) = PinAck::from_frame_body(&frame.body) else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat ignored an invalid pin acknowledgement".into(),
+        });
+        return;
+    };
+    if ack.target_event_id != expected.target_event_id
+        || ack.action != expected.action
+        || state.local_user_id(session_id) != Some(ack.actor_user_id)
+    {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat ignored a mismatched pin acknowledgement".into(),
+        });
+        return;
+    }
+    state.pending_local_echoes.remove(&(session_id, frame.seq));
+    let confirmation_key = (session_id, pending.room_id, expected.target_event_id);
+    if ack.changed {
+        state
+            .pending_pin_confirmations
+            .insert(confirmation_key, expected.action);
+    } else {
+        state.pending_pin_confirmations.remove(&confirmation_key);
+    }
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = if ack.changed {
+            "pin mutation accepted by server; awaiting room event".into()
+        } else {
+            "pin already matched the requested state".into()
         };
     }
     if let Some(mutation_id) = pending.mutation_id {
@@ -3355,9 +3631,9 @@ fn durable_command_result_match(
             },
             Some(pending.room_id),
         ),
-        PendingCommandResult::Reaction(_) | PendingCommandResult::MessageRevision(_) => {
-            return None
-        }
+        PendingCommandResult::Reaction(_)
+        | PendingCommandResult::MessageRevision(_)
+        | PendingCommandResult::Pin(_) => return None,
     };
     let Some(mutation_id) = pending.mutation_id else {
         return Some(Err(()));
@@ -3430,9 +3706,9 @@ fn durable_command_result_match(
                 _ => {}
             }
         }
-        PendingCommandResult::Reaction(_) | PendingCommandResult::MessageRevision(_) => {
-            return None
-        }
+        PendingCommandResult::Reaction(_)
+        | PendingCommandResult::MessageRevision(_)
+        | PendingCommandResult::Pin(_) => return None,
     }
     Some(Ok(mutation_id))
 }
@@ -5547,6 +5823,265 @@ mod tests {
         )));
         assert!(!state.durable_mutation_is_pending(session_id, intent.mutation_id));
         assert!(client.reactions_for_targets(session_id, 1, &[9]).is_empty());
+    }
+
+    fn durable_pin_intent(
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+    ) -> OutboundMutationIntent {
+        let body = PinRequest {
+            target_event_id: 9,
+            action: crate::chat::protocol::PinAction::Pin,
+        }
+        .into_frame_body()
+        .expect("pin body");
+        OutboundMutationIntent {
+            server_destination: "abcd".into(),
+            authenticated_identity_hash: vec![3; 16],
+            client_instance_id,
+            mutation_id: MutationId::new([0x78; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomPin,
+                Some(1),
+                &body,
+            )
+            .expect("request hash"),
+            op: ChatOp::RoomPin,
+            room_id: Some(1),
+            body,
+            state,
+            created_at: 10,
+            expires_at: i64::MAX,
+            correlation_id: None,
+        }
+    }
+
+    #[test]
+    fn durable_pin_requires_capability_authority_and_one_pending_target() {
+        let client_instance_id = ClientInstanceId::new([2; 16]);
+        let (mut client, session_id) = live_test_client();
+        client
+            .session_mut(session_id)
+            .expect("session")
+            .events
+            .push(parse_event(&event_value(9, 2, "target"), "abcd".into(), 1).expect("event"));
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        let intent = durable_pin_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        let mut transport = CapturedChatTransport::default();
+
+        assert!(matches!(
+            send_uncertain_durable_pin(
+                &mut client,
+                &mut state,
+                &mut transport,
+                session_id,
+                &intent,
+            )
+            .as_slice(),
+            [ChatClientEvent::Error { .. }]
+        ));
+        state.set_pins_negotiated_for_test(session_id, true);
+        assert!(matches!(
+            send_uncertain_durable_pin(
+                &mut client,
+                &mut state,
+                &mut transport,
+                session_id,
+                &intent,
+            )
+            .as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("authoritative")
+        ));
+        client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![9],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("authoritative empty pin snapshot");
+        assert!(send_uncertain_durable_pin(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        )
+        .is_empty());
+        assert_eq!(transport.sent_frames.len(), 1);
+        assert!(state.pin_mutation_is_pending(session_id, 1, 9));
+        assert!(matches!(
+            send_uncertain_durable_pin(
+                &mut client,
+                &mut state,
+                &mut transport,
+                session_id,
+                &OutboundMutationIntent {
+                    mutation_id: MutationId::new([0x79; 16]),
+                    ..intent.clone()
+                },
+            )
+            .as_slice(),
+            [ChatClientEvent::Error { message, .. }] if message.contains("already pending")
+        ));
+        assert!(client.pin_for_target(session_id, 1, 9).is_none());
+    }
+
+    #[test]
+    fn durable_pin_ack_requires_exact_request_identity_and_capability() {
+        let client_instance_id = ClientInstanceId::new([2; 16]);
+        let (mut client, session_id) = live_test_client();
+        client
+            .session_mut(session_id)
+            .expect("session")
+            .events
+            .push(parse_event(&event_value(9, 2, "target"), "abcd".into(), 1).expect("event"));
+        client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![9],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("authority");
+        assert!(client.bind_local_user_id(session_id, 7));
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        state.set_pins_negotiated_for_test(session_id, true);
+        state.local_user_ids.insert(session_id, 7);
+        let intent = durable_pin_intent(client_instance_id, OutboundMutationState::SentUncertain);
+        let mut transport = CapturedChatTransport::default();
+        assert!(send_uncertain_durable_pin(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        )
+        .is_empty());
+        let sent = decode_frame(&transport.sent_frames[0]).expect("sent frame");
+
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::PinAck,
+                sent.seq,
+                Some(1),
+                PinAck {
+                    target_event_id: 9,
+                    action: crate::chat::protocol::PinAction::Pin,
+                    actor_user_id: 8,
+                    changed: true,
+                    pin_event_id: Some(10),
+                }
+                .into_frame_body()
+                .expect("ack"),
+            ))
+            .expect("mismatched ack");
+        let mismatched =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(matches!(
+            mismatched.as_slice(),
+            [ChatClientEvent::Error { message, .. }] if message.contains("mismatched")
+        ));
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+
+        state.set_pins_negotiated_for_test(session_id, false);
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::PinAck,
+                sent.seq,
+                Some(1),
+                PinAck {
+                    target_event_id: 9,
+                    action: crate::chat::protocol::PinAction::Pin,
+                    actor_user_id: 7,
+                    changed: true,
+                    pin_event_id: Some(10),
+                }
+                .into_frame_body()
+                .expect("ack"),
+            ))
+            .expect("capability-lost ack");
+        let capability_lost =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(matches!(
+            capability_lost.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("outside its negotiated room")
+        ));
+        assert!(state.durable_mutation_is_pending(session_id, intent.mutation_id));
+
+        state.set_pins_negotiated_for_test(session_id, true);
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::PinAck,
+                sent.seq,
+                Some(1),
+                PinAck {
+                    target_event_id: 9,
+                    action: crate::chat::protocol::PinAction::Pin,
+                    actor_user_id: 7,
+                    changed: true,
+                    pin_event_id: Some(10),
+                }
+                .into_frame_body()
+                .expect("ack"),
+            ))
+            .expect("matching ack");
+        let acknowledged =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(acknowledged.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::DurableMutationAcknowledged { mutation_id, .. }
+                if *mutation_id == intent.mutation_id
+        )));
+        assert!(!state.durable_mutation_is_pending(session_id, intent.mutation_id));
+        assert!(client.pin_for_target(session_id, 1, 9).is_none());
+        assert_eq!(
+            state.pending_pin_confirmation(session_id, 1, 9),
+            Some(crate::chat::protocol::PinAction::Pin)
+        );
+        assert!(client
+            .session(session_id)
+            .expect("session")
+            .status
+            .contains("awaiting room event"));
+        state.set_pins_negotiated_for_test(session_id, false);
+        assert_eq!(state.pending_pin_confirmation(session_id, 1, 9), None);
+        state.set_pins_negotiated_for_test(session_id, true);
+
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::PinEvent,
+                sent.seq.saturating_add(1),
+                Some(1),
+                PinEvent {
+                    pin_event_id: 10,
+                    target_event_id: 9,
+                    action: crate::chat::protocol::PinAction::Pin,
+                    actor_user_id: 7,
+                    at_unix: 3,
+                }
+                .into_frame_body()
+                .expect("pin event"),
+            ))
+            .expect("authoritative pin event");
+        let synchronized =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(matches!(
+            synchronized.as_slice(),
+            [ChatClientEvent::PinDeltaApplied { .. }]
+        ));
+        assert_eq!(state.pending_pin_confirmation(session_id, 1, 9), None);
+        assert!(client.pin_for_target(session_id, 1, 9).is_some());
     }
 
     fn durable_message_revision_intent(

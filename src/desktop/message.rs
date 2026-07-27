@@ -491,6 +491,13 @@ pub(in crate::desktop) enum OmenChatMessage {
         token: crate::chat::protocol::ReactionToken,
     },
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    TogglePin {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+        action: crate::chat::protocol::PinAction,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     BeginMessageCorrection {
         session_id: ChatSessionId,
         room_id: RoomId,
