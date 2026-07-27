@@ -1671,6 +1671,19 @@ current-schema database, prints cursor/target/item/byte/completion evidence,
 and never invokes compaction or deletes history. A 300-event file-backed
 regression requires two invocations and preserves all 300 events.
 
+The slow-mode checkpoint is recorded in
+`docs/design/OMENCHAT_SLOW_MODE_CHECKPOINT.md`. The existing identity-wide
+fixed-window limiter is not reused as room policy: it is neither per-room nor
+persistent and relies on wall time. The proposed `room-slow-mode-v1` extension
+preserves exact four-field legacy and five-field announcement shapes while
+adding an explicitly negotiated six-field scalar shape. Schema 12 would add a
+disabled-by-default room interval and a bounded persistent admission ledger.
+New durable message/action admission would couple event, replay result, and
+cooldown state in one transaction, with a bounded monotonic in-process owner
+preventing active-runtime wall-clock bypass. No protocol, schema,
+configuration, negotiation, or runtime behavior changes in the checkpoint
+slice.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an
