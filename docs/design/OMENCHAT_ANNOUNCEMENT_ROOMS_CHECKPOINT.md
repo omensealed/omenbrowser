@@ -304,11 +304,13 @@ Production negotiation remains disabled until all applicable gates pass.
    command fails closed while omenchatd owns the database, then succeeds only
    after orderly stop and takes effect after restart. Live reload and
    cross-process policy-delta fanout are outside this version's contract.
-9. **Partial (2026-07-27):** the production reconnect/retirement path has
+9. **Complete (2026-07-27):** the production reconnect/retirement path has
    deterministic captured-transport coverage: it clears policy before a
    replacement session, does not inherit policy from a non-accepting peer, and
-   restores policy only after fresh explicit negotiation. Real negotiated
-   current/current catalog/delta and replacement-Link process traffic remains.
+   restores policy only after fresh explicit negotiation. Explicit
+   qualification binaries also pass current/current real-Link policy
+   negotiation and the same assertions after orderly server and Link
+   replacement.
 10. **Complete (2026-07-27):** a test-enabled server-engine boundary accepts
     only an explicit policy capability request and emits the authoritative
     five-field initial catalog through the shared encoder. Authenticated
@@ -316,11 +318,11 @@ Production negotiation remains disabled until all applicable gates pass.
     negotiated test peer and unchanged four-field values to a simultaneous
     legacy peer; identity/link retirement clears the bounded binding. The
     normal server constructor remains dormant.
-11. **Partial (2026-07-27):** independent, dependency-free, non-default
+11. **Complete (2026-07-27):** independent, dependency-free, non-default
     qualification features let explicit client/server binaries request and
     accept the capability. Canonical desktop/static-media/server aliases are
-    unchanged, and the product graph assertion rejects leakage. Real
-    current/current and mixed replacement-Link process traffic remains.
-12. Next: run current/current and mixed replacement-Link qualification
-    binaries, then native GUI observation. Do not activate production aliases
-    before that joint review.
+    unchanged, and the product graph assertion rejects leakage. Current/current
+    and replacement-Link process qualification passes with authoritative
+    policy preflight and no queued publication frame.
+12. Next: perform native GUI observation and joint activation review. Do not
+    activate production aliases solely from the headless qualification result.

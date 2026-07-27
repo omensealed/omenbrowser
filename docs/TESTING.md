@@ -4794,6 +4794,28 @@ The first two commands require request/accept behavior only in explicit
 qualification builds. The product assertion requires canonical animated,
 static-media, and headless server graphs to exclude that feature.
 
+Real-Link negotiation and replacement-Link qualification uses those same
+explicit binaries:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out <isolated-output-root> \
+  --message "negotiated announcement qualification" \
+  --announcement-negotiation-smoke \
+  --restart-server
+```
+
+The mode requires negotiated capability and authoritative room-policy
+evidence, the exact local preflight error, no queued publication frame, and no
+committed message in both reports. It does not call local queue admission a
+server rejection. Run the ordinary `--announcement-rejection-smoke` against
+canonical binaries separately to preserve typed server-error `1016`
+enforcement evidence.
+
 Standard-member upload rejection before server acceptance or allocation is
 covered by:
 

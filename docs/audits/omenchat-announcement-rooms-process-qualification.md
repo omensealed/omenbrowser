@@ -2,12 +2,15 @@
 
 Date: 2026-07-27
 
-Baseline: `release/v0.9.6-4` through `c400dec`, plus this restart-only policy
-administration qualification unit
+Baseline: `release/v0.9.6-4` through `f0060b7`, plus this negotiated process
+qualification unit
 
 Verdict: current/current member rejection plus moderator message/Resource
-publication and restart persistence pass over real isolated Reticulum Links; negotiated
-`announcement-rooms-v1` remains dormant
+publication and restart persistence pass over real isolated Reticulum Links.
+Explicit qualification binaries also negotiate `announcement-rooms-v1`,
+observe authoritative policy, and prevent publication before transmission on
+both the initial and replacement Links. Canonical product aliases remain
+dormant.
 
 ## Scope and invariant
 
@@ -36,6 +39,22 @@ Other operation errors remain observable without incorrectly terminating an
 unrelated message wait. The wait remains bounded by the existing response
 deadline and does not add a worker, channel, timer, retry, cache, or retained
 history.
+
+The separate `--announcement-negotiation-smoke` case uses binaries built with
+the independent `omenchat-announcement-qualification` feature. It configures
+the same isolated announcement room, then additionally requires:
+
+- explicit `announcement-rooms-v1` negotiation;
+- the authoritative announcement policy bit in the joined room;
+- the exact local preflight policy error;
+- no queued publication frame; and
+- no committed message.
+
+This is not described as a server delivery or rejection receipt. It is an
+authoritative negotiated policy preflight. The ordinary
+`--announcement-rejection-smoke` case remains a distinct regression gate and
+still requires typed server error `1016`; therefore the new local outcome
+cannot weaken the non-negotiated server-enforcement proof.
 
 The companion `--announcement-moderator-smoke` case registers exactly one
 isolated client while the lobby is ordinary, stops omenchatd, uses the
@@ -85,6 +104,35 @@ The first attempted run correctly failed before networking because the harness
 tried stopped-server maintenance against schema version 0. The final harness
 preserves that fail-closed rule by performing a bounded initialization
 start/stop before policy maintenance.
+
+The negotiated qualification binaries passed the same real-Link boundary,
+including an orderly server restart and replacement Link:
+
+```bash
+cargo build --locked --no-default-features \
+  --features desktop-product,omenchat-announcement-qualification \
+  --bin omenbrowser_rs
+cargo build --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features \
+  --features server-headless,omenchat-announcement-qualification \
+  --bin omenchatd
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out /tmp/omenbrowser-announcement-negotiated-qualification \
+  --message 'negotiated announcement qualification' \
+  --announcement-negotiation-smoke \
+  --restart-server
+```
+
+Both reports recorded negotiated capability and policy evidence, a local
+policy block, `outgoing_frame_queued: false`, and
+`committed_message_seen: false`. The restart was orderly and the destination
+stable. A separate canonical build/run of
+`--announcement-rejection-smoke` still passed by receiving the typed server
+rejection, proving both enforcement lanes.
 
 The moderator/resource case also passed locally:
 
@@ -230,13 +278,14 @@ existing mixed-release harness.
 
 ## Compatibility, storage, and rollback
 
-Production capability request and acceptance vectors are unchanged. Protocol
+Canonical production capability request and acceptance vectors are unchanged. Protocol
 version, database schema, identity ownership, state paths, ordinary room
 behavior, and packaged feature profiles are unchanged. The only persistent
 write in this smoke is inside its disposable server root.
 
-Rollback removes the CLI/shell smoke option and this evidence. It does not
-alter the already-qualified schema-11 policy or server authorization.
+Rollback removes the negotiated smoke oracle/shell option and this evidence.
+It does not alter the already-qualified schema-11 policy, server
+authorization, or opt-in qualification feature boundary.
 
 ## Remaining activation gates
 

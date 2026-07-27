@@ -311,6 +311,16 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
     let joined = client
         .session(session_id)
         .is_some_and(|session| session.active_room.joined);
+    let active_room_id = client
+        .session(session_id)
+        .map(|session| session.active_room.room_id);
+    let announcement_rooms_negotiated = live_state.announcement_rooms_negotiated(session_id);
+    let announcement_policy_bits =
+        active_room_id.and_then(|room_id| client.room_policy_bits(session_id, room_id));
+    let announcement_policy_observed = announcement_rooms_negotiated
+        && announcement_policy_bits.is_some_and(|bits| {
+            bits & omenbrowser_rs::chat::protocol::ROOM_POLICY_ANNOUNCEMENT != 0
+        });
     stages.push(serde_json::json!({
         "stage": "join_wait",
         "ok": joined,
@@ -325,10 +335,15 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "reply_mentions_negotiated": live_state.reply_mentions_negotiated(session_id),
         "reactions_negotiated": live_state.reactions_negotiated(session_id),
         "message_revisions_negotiated": live_state.message_revisions_negotiated(session_id),
+        "announcement_rooms_negotiated": announcement_rooms_negotiated,
+        "announcement_policy_bits": announcement_policy_bits,
+        "announcement_policy_observed": announcement_policy_observed,
         "local_user_id_bound": live_state.local_user_id(session_id).is_some(),
     }));
 
+    let mut announcement_local_policy_blocked = false;
     if joined && !announcement_upload_rejection_smoke {
+        let outgoing_before_send = transport.outgoing_frames.len();
         let send_events = omenbrowser_rs::chat::live::handle_live_request(
             &mut client,
             &mut live_state,
@@ -339,35 +354,49 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                 body: message.clone(),
             },
         );
+        announcement_local_policy_blocked = announcement_rejection_smoke
+            && omenchat_local_announcement_policy_blocked(
+                announcement_rooms_negotiated,
+                announcement_policy_observed,
+                outgoing_before_send,
+                transport.outgoing_frames.len(),
+                &send_events,
+            );
         stages.push(serde_json::json!({
             "stage": "message_send_frame",
-            "ok": !send_events.iter().any(|event| matches!(event, ChatClientEvent::Error { .. })),
+            "ok": announcement_local_policy_blocked
+                || !send_events.iter().any(|event| matches!(event, ChatClientEvent::Error { .. })),
+            "announcement_local_policy_blocked": announcement_local_policy_blocked,
+            "outgoing_frame_queued": transport.outgoing_frames.len() > outgoing_before_send,
             "events": send_events.iter().map(format_chat_event).collect::<Vec<_>>(),
         }));
         send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
     }
 
-    let message_events = if joined && !announcement_upload_rejection_smoke {
-        wait_for_omenchat_condition(
-            &*app.runtime,
-            &mut runtime_events,
-            &mut client,
-            &mut live_state,
-            &mut transport,
-            OmenChatWaitOptions {
-                link_id: opened.link_id,
-                session_id,
-                wait: Duration::from_secs(response_wait_secs),
-            },
-            |client| omenchat_session_contains_message(client, session_id, &message),
-        )
-        .await
-    } else {
-        Vec::new()
-    };
+    let message_events =
+        if joined && !announcement_upload_rejection_smoke && !announcement_local_policy_blocked {
+            wait_for_omenchat_condition(
+                &*app.runtime,
+                &mut runtime_events,
+                &mut client,
+                &mut live_state,
+                &mut transport,
+                OmenChatWaitOptions {
+                    link_id: opened.link_id,
+                    session_id,
+                    wait: Duration::from_secs(response_wait_secs),
+                },
+                |client| omenchat_session_contains_message(client, session_id, &message),
+            )
+            .await
+        } else {
+            Vec::new()
+        };
     let message_seen = omenchat_session_contains_message(&client, session_id, &message);
     let announcement_rejected =
         omenchat_smoke_events_contain_announcement_policy_rejection(&message_events);
+    let announcement_publication_blocked =
+        announcement_rejected || announcement_local_policy_blocked;
     stages.push(serde_json::json!({
         "stage": if announcement_rejection_smoke {
             "announcement_rejection_wait"
@@ -375,11 +404,13 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             "message_echo_wait"
         },
         "ok": if announcement_rejection_smoke {
-            announcement_rejected && !message_seen
+            announcement_publication_blocked && !message_seen
         } else {
             message_seen
         },
         "announcement_rejected": announcement_rejected,
+        "announcement_local_policy_blocked": announcement_local_policy_blocked,
+        "announcement_publication_blocked": announcement_publication_blocked,
         "committed_message_seen": message_seen,
         "events": message_events,
     }));
@@ -775,7 +806,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
     let message_outcome = if announcement_upload_rejection_smoke {
         announcement_upload_rejection_ok
     } else if announcement_rejection_smoke {
-        announcement_rejected && !message_seen
+        announcement_publication_blocked && !message_seen
     } else {
         message_seen
     };
@@ -2783,6 +2814,35 @@ fn is_announcement_policy_rejection_message(message: &str) -> bool {
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_local_announcement_policy_blocked(
+    announcement_rooms_negotiated: bool,
+    announcement_policy_observed: bool,
+    outgoing_before_send: usize,
+    outgoing_after_send: usize,
+    events: &[omenbrowser_rs::chat::ChatClientEvent],
+) -> bool {
+    const LOCAL_POLICY_ERROR: &str =
+        "room is read-only for members; only moderators and admins can publish";
+
+    let mut error_messages = events.iter().filter_map(|event| match event {
+        omenbrowser_rs::chat::ChatClientEvent::Error { message, .. } => Some(message.as_str()),
+        _ => None,
+    });
+    let mut saw_policy_error = false;
+    let only_expected_errors = error_messages.all(|message| {
+        let expected = message == LOCAL_POLICY_ERROR;
+        saw_policy_error |= expected;
+        expected
+    });
+
+    announcement_rooms_negotiated
+        && announcement_policy_observed
+        && outgoing_after_send == outgoing_before_send
+        && saw_policy_error
+        && only_expected_errors
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_json::Value {
     match event {
         omenbrowser_rs::chat::ChatClientEvent::ServerOpened { session_id, server } => {
@@ -3144,7 +3204,7 @@ fn omenchat_smoke_report(
             "reason": if ok && announcement_upload_rejection_smoke {
                 "OMENchat Link opened, room joined, and the server rejected the member upload before acceptance or commit"
             } else if ok && announcement_rejection_smoke {
-                "OMENchat Link opened, room joined, and the server rejected member publication without committing the message"
+                "OMENchat Link opened, room joined, and authoritative policy blocked member publication without committing the message"
             } else if ok {
                 "OMENchat Link opened, room joined, and message echo was observed"
             } else {
@@ -3227,9 +3287,10 @@ fn hex_bytes(bytes: &[u8]) -> String {
 ))]
 mod tests {
     use super::{
-        create_omenchat_reconnect_ready_file,
+        create_omenchat_reconnect_ready_file, omenchat_local_announcement_policy_blocked,
         omenchat_smoke_events_contain_announcement_policy_rejection,
     };
+    use omenbrowser_rs::chat::ChatClientEvent;
 
     #[test]
     fn reconnect_ready_marker_is_create_new_and_isolated() {
@@ -3267,5 +3328,62 @@ mod tests {
             }]
         })];
         assert!(!omenchat_smoke_events_contain_announcement_policy_rejection(&unrelated));
+    }
+
+    #[test]
+    fn local_announcement_policy_evidence_requires_negotiated_authoritative_block() {
+        let blocked = vec![ChatClientEvent::Error {
+            session_id: None,
+            message: "room is read-only for members; only moderators and admins can publish"
+                .to_owned(),
+        }];
+        assert!(omenchat_local_announcement_policy_blocked(
+            true, true, 2, 2, &blocked
+        ));
+
+        assert!(!omenchat_local_announcement_policy_blocked(
+            false, true, 2, 2, &blocked
+        ));
+        assert!(!omenchat_local_announcement_policy_blocked(
+            true, false, 2, 2, &blocked
+        ));
+        assert!(!omenchat_local_announcement_policy_blocked(
+            true, true, 2, 3, &blocked
+        ));
+
+        let unrelated = vec![ChatClientEvent::Error {
+            session_id: None,
+            message: "permission denied: user is muted".to_owned(),
+        }];
+        assert!(!omenchat_local_announcement_policy_blocked(
+            true, true, 2, 2, &unrelated
+        ));
+
+        let mixed_errors = vec![
+            blocked[0].clone(),
+            ChatClientEvent::Error {
+                session_id: None,
+                message: "unexpected secondary failure".to_owned(),
+            },
+        ];
+        assert!(!omenchat_local_announcement_policy_blocked(
+            true,
+            true,
+            2,
+            2,
+            &mixed_errors
+        ));
+
+        let server_rejection = vec![ChatClientEvent::Error {
+            session_id: None,
+            message: "room is read-only for members: publishing messages is restricted to moderators and administrators in this announcement room".to_owned(),
+        }];
+        assert!(!omenchat_local_announcement_policy_blocked(
+            true,
+            true,
+            2,
+            2,
+            &server_rejection
+        ));
     }
 }

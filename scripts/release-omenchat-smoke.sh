@@ -22,6 +22,7 @@ multi_client=0
 restart_server=0
 continuous_client_reconnect=0
 announcement_rejection_smoke=0
+announcement_negotiation_smoke=0
 announcement_upload_rejection_smoke=0
 announcement_moderator_smoke=0
 live_policy_maintenance_refused="not-run"
@@ -62,6 +63,8 @@ Options:
                        Keep one browser smoke process alive while omenchatd restarts
   --announcement-rejection-smoke
                        Configure lobby read-only and prove a member message is rejected without commit
+  --announcement-negotiation-smoke
+                       Require negotiated room-policy evidence and prove local preflight blocks the message
   --announcement-upload-rejection-smoke
                        Configure lobby read-only and prove a member upload is rejected before acceptance
   --announcement-moderator-smoke
@@ -154,6 +157,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --announcement-rejection-smoke)
       announcement_rejection_smoke=1
+      shift
+      ;;
+    --announcement-negotiation-smoke)
+      announcement_rejection_smoke=1
+      announcement_negotiation_smoke=1
       shift
       ;;
     --announcement-upload-rejection-smoke)
@@ -340,6 +348,35 @@ verify_empty_server_upload_state() {
     echo "rejected announcement-room upload created a server file" >&2
     return 1
   fi
+}
+
+verify_announcement_negotiation_report() {
+  local report="$1"
+  python3 - "$report" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+stages = {
+    stage.get("stage"): stage
+    for stage in report.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+capabilities = stages.get("capability_observation", {})
+send = stages.get("message_send_frame", {})
+blocked = stages.get("announcement_rejection_wait", {})
+if capabilities.get("announcement_rooms_negotiated") is not True:
+    raise SystemExit("announcement-rooms-v1 was not negotiated")
+if capabilities.get("announcement_policy_observed") is not True:
+    raise SystemExit("authoritative announcement policy was not observed")
+if send.get("announcement_local_policy_blocked") is not True:
+    raise SystemExit("client did not report the authoritative local policy block")
+if send.get("outgoing_frame_queued") is not False:
+    raise SystemExit("client queued a publication frame despite authoritative policy")
+if blocked.get("committed_message_seen") is not False:
+    raise SystemExit("announcement-room message was committed")
+PY
 }
 
 echo "== Initializing isolated omenchatd =="
@@ -693,6 +730,9 @@ if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke.json"; then
   cat "$run_dir/omenchat-smoke.stderr" >&2
   exit 1
 fi
+if [[ "$announcement_negotiation_smoke" -eq 1 ]]; then
+  verify_announcement_negotiation_report "$run_dir/omenchat-smoke.json"
+fi
 server_upload_rejection_clean="not-run"
 if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
   verify_empty_server_upload_state "initial"
@@ -864,6 +904,9 @@ if [[ "$restart_server" -eq 1 ]]; then
     cat "$run_dir/omenchat-smoke-restart.stderr" >&2
     exit 1
   fi
+  if [[ "$announcement_negotiation_smoke" -eq 1 ]]; then
+    verify_announcement_negotiation_report "$run_dir/omenchat-smoke-restart.json"
+  fi
   if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
     verify_empty_server_upload_state "restart"
   fi
@@ -942,6 +985,7 @@ multi_client: $multi_client
 restart_server: $restart_server
 continuous_client_reconnect: $continuous_client_reconnect
 announcement_rejection_smoke: $announcement_rejection_smoke
+announcement_negotiation_smoke: $announcement_negotiation_smoke
 announcement_upload_rejection_smoke: $announcement_upload_rejection_smoke
 announcement_moderator_smoke: $announcement_moderator_smoke
 live_policy_maintenance_refused: $live_policy_maintenance_refused

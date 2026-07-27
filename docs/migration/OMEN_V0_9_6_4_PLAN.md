@@ -1576,8 +1576,15 @@ must still pass before production activation.
 Independent root/server `omenchat-announcement-qualification` features now
 enable those dormant request/accept paths only for deliberately built
 qualification binaries. They add no dependency and remain outside every
-canonical release alias; the product-feature script rejects leakage. These
-binaries are the next real-Link process inputs, not release artifacts.
+canonical release alias; the product-feature script rejects leakage. Those
+binaries now pass current/current real-Link negotiation before and after an
+orderly server restart and replacement Link. The client observes authoritative
+announcement policy, emits the exact local preflight error, queues no
+publication frame, and observes no committed message. The canonical
+non-negotiated process case separately still receives typed server rejection
+`1016`, so qualification does not weaken server enforcement. Native GUI
+observation and an explicit activation review remain; qualification binaries
+are not release artifacts.
 
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is
