@@ -2876,6 +2876,25 @@ fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_jso
                 "total": total,
             })
         }
+        omenbrowser_rs::chat::ChatClientEvent::ModerationAuditPageApplied {
+            session_id,
+            room_id,
+            page,
+        } => serde_json::json!({
+            "event": "moderation_audit_page",
+            "session_id": session_id,
+            "room_id": room_id,
+            "records": page.records.len(),
+            "oldest_audit_id": page.records.last().map(|record| record.audit_id),
+        }),
+        omenbrowser_rs::chat::ChatClientEvent::ModerationAuditEnd {
+            session_id,
+            room_id,
+        } => serde_json::json!({
+            "event": "moderation_audit_end",
+            "session_id": session_id,
+            "room_id": room_id,
+        }),
         omenbrowser_rs::chat::ChatClientEvent::Error {
             session_id,
             message,

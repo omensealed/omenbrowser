@@ -15,16 +15,20 @@ pub use super::model::{
 };
 use super::protocol::{
     EventId, MessageRevisionAction, MessageRevisionEvent, MessageRevisionSnapshot,
-    MessageRevisionSnapshotEntry, PinAction, PinEvent, PinSnapshot, PinSnapshotEntry,
-    ReactionAction, ReactionEvent, ReactionSnapshot, ReactionSnapshotEntry, ReactionToken, RoomId,
-    ServerId, MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, REACTION_SNAPSHOT_MAX_TARGETS,
-    ROOM_PIN_SNAPSHOT_MAX_TARGETS,
+    MessageRevisionSnapshotEntry, ModerationAuditPage, PinAction, PinEvent, PinSnapshot,
+    PinSnapshotEntry, ReactionAction, ReactionEvent, ReactionSnapshot, ReactionSnapshotEntry,
+    ReactionToken, RoomId, ServerId, MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS,
+    REACTION_SNAPSHOT_MAX_TARGETS, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
 };
 use super::store::ChatStore;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const CHAT_SESSION_HISTORY_MAX_EVENTS: usize = 1_024;
 pub const CHAT_SESSION_HISTORY_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub const CHAT_MODERATION_AUDIT_MAX_RECORDS_PER_SESSION: usize = 256;
+pub const CHAT_MODERATION_AUDIT_MAX_RECORDS: usize = 1_024;
+pub const CHAT_MODERATION_AUDIT_MAX_BYTES: usize = 512 * 1024;
+const CHAT_MODERATION_AUDIT_RECORD_OVERHEAD_BYTES: usize = 64;
 
 pub type ChatSessionId = u64;
 
@@ -290,6 +294,15 @@ pub enum ChatClientEvent {
         room_id: RoomId,
         snapshot: PinSnapshot,
     },
+    ModerationAuditPageApplied {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        page: ModerationAuditPage,
+    },
+    ModerationAuditEnd {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    },
     UploadAccepted {
         session_id: ChatSessionId,
         resource_id: String,
@@ -466,6 +479,7 @@ pub struct ChatClient {
     pins: BTreeMap<(ServerId, RoomId, EventId), ChatPin>,
     pin_event_cursors: BTreeMap<(ServerId, RoomId, EventId), EventId>,
     authoritative_pin_targets: BTreeMap<ServerId, BTreeSet<(RoomId, EventId)>>,
+    moderation_audit_pages: BTreeMap<(ServerId, RoomId), ModerationAuditPage>,
 }
 
 impl ChatClient {
@@ -482,6 +496,7 @@ impl ChatClient {
             pins: BTreeMap::new(),
             pin_event_cursors: BTreeMap::new(),
             authoritative_pin_targets: BTreeMap::new(),
+            moderation_audit_pages: BTreeMap::new(),
         }
     }
 
@@ -529,6 +544,83 @@ impl ChatClient {
         self.session(session_id)
             .and_then(|session| self.local_user_ids.get(&session.server.server_id))
             .copied()
+    }
+
+    pub fn moderation_audit_page(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) -> Option<&ModerationAuditPage> {
+        let server_id = &self.session(session_id)?.server.server_id;
+        self.moderation_audit_pages
+            .get(&(server_id.clone(), room_id))
+    }
+
+    pub(crate) fn replace_moderation_audit_page(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        page: ModerationAuditPage,
+    ) -> Result<(), &'static str> {
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.clone())
+        else {
+            return Err("moderation audit page did not identify an active session");
+        };
+        page.validate_room(room_id)
+            .map_err(|_| "moderation audit page failed room validation")?;
+        let key = (server_id, room_id);
+        let replaced_records = self
+            .moderation_audit_pages
+            .get(&key)
+            .map_or(0, |current| current.records.len());
+        let replaced_bytes = self
+            .moderation_audit_pages
+            .get(&key)
+            .map_or(0, moderation_audit_page_bytes);
+        let retained_records = self
+            .moderation_audit_pages
+            .values()
+            .map(|page| page.records.len())
+            .sum::<usize>()
+            .saturating_sub(replaced_records)
+            .saturating_add(page.records.len());
+        let session_records = self
+            .moderation_audit_pages
+            .iter()
+            .filter(|((stored_server, _), _)| stored_server == &key.0)
+            .map(|(_, page)| page.records.len())
+            .sum::<usize>()
+            .saturating_sub(replaced_records)
+            .saturating_add(page.records.len());
+        let retained_bytes = self
+            .moderation_audit_pages
+            .values()
+            .map(moderation_audit_page_bytes)
+            .sum::<usize>()
+            .saturating_sub(replaced_bytes)
+            .saturating_add(moderation_audit_page_bytes(&page));
+        if session_records > CHAT_MODERATION_AUDIT_MAX_RECORDS_PER_SESSION
+            || retained_records > CHAT_MODERATION_AUDIT_MAX_RECORDS
+            || retained_bytes > CHAT_MODERATION_AUDIT_MAX_BYTES
+        {
+            self.moderation_audit_pages.remove(&key);
+            return Err("moderation audit client projection exceeded its bounded retention");
+        }
+        self.moderation_audit_pages.insert(key, page);
+        Ok(())
+    }
+
+    pub(crate) fn clear_moderation_audit(&mut self, session_id: ChatSessionId) {
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.clone())
+        else {
+            return;
+        };
+        self.moderation_audit_pages
+            .retain(|(stored_server, _), _| stored_server != &server_id);
     }
 
     pub fn retained_mention_count(&self, session_id: ChatSessionId, room_id: RoomId) -> u32 {
@@ -1335,6 +1427,8 @@ impl ChatClient {
                 .retain(|(server_id, ..), _| server_id != &removed.server.server_id);
             self.authoritative_pin_targets
                 .remove(&removed.server.server_id);
+            self.moderation_audit_pages
+                .retain(|(server_id, _), _| server_id != &removed.server.server_id);
         } else {
             self.prune_message_revision_state_for_server(&removed.server.server_id);
             self.prune_pin_state_for_server(&removed.server.server_id);
@@ -1906,6 +2000,20 @@ impl ChatClient {
         }
         Ok(restored)
     }
+}
+
+fn moderation_audit_page_bytes(page: &ModerationAuditPage) -> usize {
+    page.records.iter().fold(0usize, |bytes, record| {
+        bytes
+            .saturating_add(CHAT_MODERATION_AUDIT_RECORD_OVERHEAD_BYTES)
+            .saturating_add(record.actor_display_name_at_action.len())
+            .saturating_add(
+                record
+                    .target_display_name_at_action
+                    .as_deref()
+                    .map_or(0, str::len),
+            )
+    })
 }
 
 fn retained_room_catalog_bytes(rooms: &[ChatRoomSummary]) -> usize {

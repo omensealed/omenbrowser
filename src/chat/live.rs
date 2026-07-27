@@ -19,11 +19,11 @@ use super::protocol::{
     canonical_mutation_request_hash, parse_rich_message_event_metadata,
     parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MessageRevisionAck,
-    MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot, MutationId, PinAck,
-    PinAction, PinEvent, PinRequest, PinSnapshot, ReactionAck, ReactionEvent, ReactionRequest,
-    ReactionSnapshot, RichMessageBody, RoomId, SessionOpenNegotiation, DEFAULT_JOIN_BACKLOG_EVENTS,
-    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, PROTOCOL_NAME,
-    REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
+    MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot, ModerationAuditPage,
+    MutationId, PinAck, PinAction, PinEvent, PinRequest, PinSnapshot, ReactionAck, ReactionEvent,
+    ReactionRequest, ReactionSnapshot, RichMessageBody, RoomId, SessionOpenNegotiation,
+    DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY,
+    MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -74,6 +74,8 @@ pub struct LiveChatClientState {
     message_revision_sessions: BTreeSet<ChatSessionId>,
     pin_requests: BTreeSet<ChatSessionId>,
     pin_sessions: BTreeSet<ChatSessionId>,
+    moderation_audit_requests: BTreeSet<ChatSessionId>,
+    moderation_audit_sessions: BTreeSet<ChatSessionId>,
     local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
@@ -195,6 +197,25 @@ impl LiveChatClientState {
 
     pub fn pins_negotiated(&self, session_id: ChatSessionId) -> bool {
         self.pin_sessions.contains(&session_id)
+    }
+
+    pub fn moderation_audit_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.moderation_audit_sessions.contains(&session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_moderation_audit_negotiated_for_test(
+        &mut self,
+        session_id: ChatSessionId,
+        negotiated: bool,
+    ) {
+        if negotiated {
+            self.moderation_audit_requests.insert(session_id);
+            self.moderation_audit_sessions.insert(session_id);
+        } else {
+            self.moderation_audit_requests.remove(&session_id);
+            self.moderation_audit_sessions.remove(&session_id);
+        }
     }
 
     #[cfg(test)]
@@ -780,6 +801,9 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.message_revision_sessions.remove(&session_id);
     state.pin_requests.remove(&session_id);
     state.pin_sessions.remove(&session_id);
+    state.moderation_audit_requests.remove(&session_id);
+    state.moderation_audit_sessions.remove(&session_id);
+    client.clear_moderation_audit(session_id);
     state
         .pending_pin_confirmations
         .retain(|(stored_session, ..), _| *stored_session != session_id);
@@ -2418,6 +2442,11 @@ fn apply_live_link_event(
                     .as_deref()
                     .is_some_and(|state| state.pins_negotiated(session_id))
             });
+            let moderation_audit_negotiated = preferred_session_id.is_some_and(|session_id| {
+                state
+                    .as_deref()
+                    .is_some_and(|state| state.moderation_audit_negotiated(session_id))
+            });
             let event_start = events.len();
             apply_batch(
                 client,
@@ -2429,6 +2458,7 @@ fn apply_live_link_event(
                     reactions: reactions_negotiated,
                     message_revisions: message_revisions_negotiated,
                     pins: pins_negotiated,
+                    moderation_audit: moderation_audit_negotiated,
                 },
                 events,
             );
@@ -2548,6 +2578,9 @@ fn apply_frame_with_state(
             let pins_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == super::protocol::ROOM_PINS_CAPABILITY);
+            let moderation_audit_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == MODERATION_AUDIT_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
                 state.pin_sessions.remove(&session_id);
                 state
@@ -2560,6 +2593,8 @@ fn apply_frame_with_state(
                 let message_revisions_requested =
                     state.message_revision_requests.remove(&session_id);
                 let pins_requested = state.pin_requests.remove(&session_id);
+                let moderation_audit_requested =
+                    state.moderation_audit_requests.remove(&session_id);
                 let already_accepted = state.durable_sessions.contains(&session_id);
                 if durable_accepted
                     && state.client_instance_id.is_some()
@@ -2600,6 +2635,12 @@ fn apply_frame_with_state(
                     state.message_revision_sessions.remove(&session_id);
                     state.pin_sessions.remove(&session_id);
                     state.local_user_ids.remove(&session_id);
+                }
+                if moderation_audit_requested && moderation_audit_accepted {
+                    state.moderation_audit_sessions.insert(session_id);
+                } else {
+                    state.moderation_audit_sessions.remove(&session_id);
+                    client.clear_moderation_audit(session_id);
                 }
             }
             let policy = body_values(&frame.body).map(|values| {
@@ -2703,7 +2744,9 @@ fn apply_frame_with_state(
             };
             let mut local_user_id = None;
             if let Some(state) = state.as_deref_mut() {
-                if state.reply_mentions_sessions.contains(&session_id) {
+                if state.reply_mentions_sessions.contains(&session_id)
+                    || state.moderation_audit_sessions.contains(&session_id)
+                {
                     match body_values(&frame.body)
                         .and_then(|values| values.get(1))
                         .and_then(FrameValueExt::as_u64)
@@ -2716,7 +2759,9 @@ fn apply_frame_with_state(
                         }
                         None => {
                             state.reply_mentions_sessions.remove(&session_id);
+                            state.moderation_audit_sessions.remove(&session_id);
                             state.local_user_ids.remove(&session_id);
+                            client.clear_moderation_audit(session_id);
                         }
                     }
                 } else {
@@ -2729,6 +2774,7 @@ fn apply_frame_with_state(
                 .filter(|previous_room_id| *previous_room_id != room.room_id)
             {
                 client.mark_pin_room_stale(session_id, previous_room_id);
+                client.clear_moderation_audit(session_id);
             }
             if let Some(session) = client.session_mut(session_id) {
                 session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
@@ -2985,6 +3031,26 @@ fn apply_frame_with_state(
                 session.status = "start of room history reached".into();
             }
         }
+        ChatOp::ModerationAuditEnd => {
+            if let (Some(session_id), Some(room_id)) = (preferred_session_id, frame.room_id) {
+                let negotiated = state
+                    .as_deref()
+                    .is_some_and(|state| state.moderation_audit_negotiated(session_id));
+                if negotiated {
+                    events.push(ChatClientEvent::ModerationAuditEnd {
+                        session_id,
+                        room_id,
+                    });
+                } else {
+                    events.push(ChatClientEvent::Error {
+                        session_id: Some(session_id),
+                        message:
+                            "ignored OMENchat moderation audit end without moderation-audit-v1 negotiation"
+                                .into(),
+                    });
+                }
+            }
+        }
         ChatOp::HistoryCurrent => {
             if let Some(session_id) = preferred_session_id {
                 if let Some(session) = client.session_mut(session_id) {
@@ -3034,6 +3100,20 @@ fn apply_frame_with_state(
         }
         ChatOp::UserDelta => {
             apply_user_delta(client, preferred_session_id, &frame.body, events);
+            if let Some(session_id) = preferred_session_id {
+                let local_user_id = client.local_user_id(session_id);
+                let local_role_lost = events.last().is_some_and(|event| {
+                    matches!(
+                        event,
+                        ChatClientEvent::UserUpdated { user, .. }
+                            if Some(user.user_id) == local_user_id
+                                && user.role_bits & (CHAT_ROLE_MODERATOR | CHAT_ROLE_ADMIN) == 0
+                    )
+                });
+                if local_role_lost {
+                    client.clear_moderation_audit(session_id);
+                }
+            }
         }
         ChatOp::UploadAccept => {
             apply_upload_accept(
@@ -4212,6 +4292,7 @@ struct BatchCapabilities {
     reactions: bool,
     message_revisions: bool,
     pins: bool,
+    moderation_audit: bool,
 }
 
 fn apply_batch(
@@ -4422,6 +4503,45 @@ fn apply_batch(
                     session_id,
                     room_id,
                     snapshot,
+                }),
+                Err(error) => events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: error.into(),
+                }),
+            }
+        }
+        ChatOp::ModerationAuditInline | ChatOp::ModerationAuditResource => {
+            if !capabilities.moderation_audit {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message:
+                        "ignored OMENchat moderation audit page without moderation-audit-v1 negotiation"
+                            .into(),
+                });
+                return;
+            }
+            let Some(room_id) = room_id else {
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "OMENchat moderation audit page did not identify a room".into(),
+                });
+                return;
+            };
+            let page = match ModerationAuditPage::from_frame_values(&values) {
+                Ok(page) => page,
+                Err(error) => {
+                    events.push(ChatClientEvent::Error {
+                        session_id: Some(session_id),
+                        message: format!("invalid OMENchat moderation audit page: {error}"),
+                    });
+                    return;
+                }
+            };
+            match client.replace_moderation_audit_page(session_id, room_id, page.clone()) {
+                Ok(()) => events.push(ChatClientEvent::ModerationAuditPageApplied {
+                    session_id,
+                    room_id,
+                    page,
                 }),
                 Err(error) => events.push(ChatClientEvent::Error {
                     session_id: Some(session_id),
@@ -4982,6 +5102,7 @@ mod tests {
                 reactions: true,
                 message_revisions: false,
                 pins: false,
+                moderation_audit: false,
             },
             &mut events,
         );
@@ -5118,6 +5239,7 @@ mod tests {
                 reactions: false,
                 message_revisions: true,
                 pins: false,
+                moderation_audit: false,
             },
             &mut events,
         );
@@ -5254,6 +5376,7 @@ mod tests {
                 reactions: false,
                 message_revisions: false,
                 pins: true,
+                moderation_audit: false,
             },
             &mut events,
         );
@@ -5496,6 +5619,134 @@ mod tests {
         assert!(!state.reactions_negotiated(1));
         assert!(!state.message_revisions_negotiated(1));
         assert!(!state.pins_negotiated(1));
+        assert!(!state.moderation_audit_negotiated(1));
+    }
+
+    #[test]
+    fn moderation_audit_projection_requires_negotiation_and_clears_on_capability_loss() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "audit-server".into(),
+                destination: "audit-server".into(),
+                display_name: "Audit Server".into(),
+            },
+            rooms: vec![room_summary("audit-server", 1, "lobby")],
+            active_room: room_summary("audit-server", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "joined".into(),
+        }));
+        let page = ModerationAuditPage {
+            records: vec![crate::chat::protocol::ModerationAuditRecord {
+                audit_id: 7,
+                room_id: 1,
+                actor_user_id: 2,
+                actor_display_name_at_action: "Moderator".into(),
+                target_user_id: Some(3),
+                target_display_name_at_action: Some("Member".into()),
+                action: crate::chat::protocol::ModerationAuditAction::Mute,
+                committed_at_unix: 10,
+                result_role_bits: None,
+                result_status_bits: Some(2),
+            }],
+        };
+        let values = page.clone().into_frame_values().expect("page values");
+        let mut events = Vec::new();
+        apply_batch(
+            &mut client,
+            Some(session_id),
+            ChatOp::ModerationAuditInline,
+            Some(1),
+            values.clone(),
+            BatchCapabilities::default(),
+            &mut events,
+        );
+        assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
+        assert!(client.moderation_audit_page(session_id, 1).is_none());
+
+        events.clear();
+        apply_batch(
+            &mut client,
+            Some(session_id),
+            ChatOp::ModerationAuditInline,
+            Some(1),
+            values,
+            BatchCapabilities {
+                moderation_audit: true,
+                ..BatchCapabilities::default()
+            },
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::ModerationAuditPageApplied {
+                page: applied,
+                ..
+            }] if applied == &page
+        ));
+        assert_eq!(
+            client
+                .moderation_audit_page(session_id, 1)
+                .expect("retained page"),
+            &page
+        );
+
+        let mut state = LiveChatClientState::default();
+        state.set_moderation_audit_negotiated_for_test(session_id, true);
+        let mut transport = NoopChatTransport;
+        assert!(client.bind_local_user_id(session_id, 2));
+        events.clear();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::UserDelta,
+                2,
+                Some(1),
+                FrameBody::Fields(vec![user_value(2, "Moderator", CHAT_ROLE_TRUSTED, 0)]),
+            ),
+            &mut events,
+        );
+        assert!(client.moderation_audit_page(session_id, 1).is_none());
+
+        events.clear();
+        apply_batch(
+            &mut client,
+            Some(session_id),
+            ChatOp::ModerationAuditInline,
+            Some(1),
+            page.clone().into_frame_values().expect("page values"),
+            BatchCapabilities {
+                moderation_audit: true,
+                ..BatchCapabilities::default()
+            },
+            &mut events,
+        );
+        assert!(client.moderation_audit_page(session_id, 1).is_some());
+        events.clear();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::SessionAccept,
+                3,
+                None,
+                FrameBody::Fields(vec![
+                    FrameValue::String(PROTOCOL_NAME.into()),
+                    FrameValue::Array(Vec::new()),
+                ]),
+            ),
+            &mut events,
+        );
+        assert!(!state.moderation_audit_negotiated(session_id));
+        assert!(client.moderation_audit_page(session_id, 1).is_none());
     }
 
     #[test]

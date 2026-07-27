@@ -6,8 +6,8 @@ use crate::protocol::{
     parse_session_accept_negotiation, parse_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
     DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG, DURABLE_NOTICE_ACK_CAPABILITY,
-    MESSAGE_REVISIONS_CAPABILITY, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
-    ROOM_PINS_CAPABILITY,
+    MESSAGE_REVISIONS_CAPABILITY, MODERATION_AUDIT_CAPABILITY, REACTIONS_CAPABILITY,
+    REPLY_MENTIONS_CAPABILITY, ROOM_PINS_CAPABILITY,
 };
 use crate::session::{DurableMutationPeerContext, ServerPeer, SessionEngine};
 use crate::transport::{
@@ -156,6 +156,7 @@ struct FrameDispatchOutcome {
     reactions_accepted: bool,
     message_revisions_accepted: bool,
     pins_accepted: bool,
+    moderation_audit_accepted: bool,
     part_succeeded: bool,
     moderation_disconnect_succeeded: bool,
 }
@@ -442,6 +443,7 @@ pub struct OmenchatLiveServer<T> {
     identified_links: BTreeSet<LinkId>,
     session_open_links: BTreeSet<LinkId>,
     durable_sessions: BTreeMap<LinkId, DurableSessionBinding>,
+    moderation_audit_links: BTreeMap<LinkId, Vec<u8>>,
     recent_closed_links: VecDeque<ClosedLinkSummary>,
     replay_cache: LinkReplayCache,
     stats: LiveServerStats,
@@ -460,6 +462,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             identified_links: BTreeSet::new(),
             session_open_links: BTreeSet::new(),
             durable_sessions: BTreeMap::new(),
+            moderation_audit_links: BTreeMap::new(),
             recent_closed_links: VecDeque::new(),
             replay_cache: LinkReplayCache::default(),
             stats: LiveServerStats::default(),
@@ -501,6 +504,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 let mut identified = existing;
                 identified.identity_hash = identity_hash.to_vec();
                 self.durable_sessions.remove(&link_id);
+                self.moderation_audit_links.remove(&link_id);
                 self.identified_links.insert(link_id);
                 self.replace_duplicate_peer_links(link_id, &identified);
                 self.peers.insert(link_id, identified);
@@ -597,6 +601,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                     }
                     self.session_open_links.insert(link_id);
                     self.durable_sessions.remove(&link_id);
+                    self.moderation_audit_links.remove(&link_id);
                     if self.identified_links.contains(&link_id) {
                         if let Some(client_instance_id) = dispatch.accepted_client_instance_id {
                             self.durable_sessions.insert(
@@ -611,6 +616,10 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                                     pins: dispatch.pins_accepted,
                                 },
                             );
+                        }
+                        if dispatch.moderation_audit_accepted {
+                            self.moderation_audit_links
+                                .insert(link_id, candidate_peer.identity_hash.clone());
                         }
                     }
                     self.refresh_active_links();
@@ -764,6 +773,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 self.identified_links.remove(&link_id);
                 self.session_open_links.remove(&link_id);
                 self.durable_sessions.remove(&link_id);
+                self.moderation_audit_links.remove(&link_id);
                 if let Some(room_id) = room_id {
                     self.broadcast_userlist_for_room(room_id)?;
                 }
@@ -799,6 +809,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         let message_revisions_requested =
             session_open_requests_capability(&frame, MESSAGE_REVISIONS_CAPABILITY);
         let pins_requested = session_open_requests_capability(&frame, ROOM_PINS_CAPABILITY);
+        let moderation_audit_requested =
+            session_open_requests_capability(&frame, MODERATION_AUDIT_CAPABILITY);
         let replay_candidate = is_replay_guarded_request(&frame);
         let request_fingerprint = if replay_candidate {
             Some(encode_frame(&frame).map_err(|error| {
@@ -835,13 +847,22 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             }
         }
 
-        let mut responses =
-            self.engine
-                .handle_frame_with_active_peers(peer, frame, active_room_peers)?;
+        let moderation_audit_active = self
+            .moderation_audit_links
+            .get(&link_id)
+            .is_some_and(|identity_hash| identity_hash == &peer.identity_hash);
+        let mut responses = self
+            .engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                peer,
+                frame,
+                active_room_peers,
+                moderation_audit_active,
+            )?;
         let reply_mentions_active = self.durable_sessions.get(&link_id).is_some_and(|binding| {
             binding.identity_hash == peer.identity_hash && binding.reply_mentions
         });
-        if request_op == ChatOp::JoinRoom && reply_mentions_active {
+        if request_op == ChatOp::JoinRoom && (reply_mentions_active || moderation_audit_active) {
             append_join_accept_user_id(&mut responses, self.engine.local_user_id(peer)?)?;
         }
         let reactions_active = self.durable_sessions.get(&link_id).is_some_and(|binding| {
@@ -938,6 +959,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 && responses_accept_capability(&responses, MESSAGE_REVISIONS_CAPABILITY),
             pins_accepted: pins_requested
                 && responses_accept_capability(&responses, ROOM_PINS_CAPABILITY),
+            moderation_audit_accepted: moderation_audit_requested
+                && responses_accept_capability(&responses, MODERATION_AUDIT_CAPABILITY),
             part_succeeded: request_op == ChatOp::PartRoom
                 && responses.iter().any(is_successful_part_response),
             moderation_disconnect_succeeded: request_op == ChatOp::Command
@@ -1356,6 +1379,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             self.identified_links.remove(link_id);
             self.session_open_links.remove(link_id);
             self.durable_sessions.remove(link_id);
+            self.moderation_audit_links.remove(link_id);
         }
         self.stats.links_closed = self.stats.links_closed.saturating_add(links.len() as u64);
         for room_id in unique_room_ids(affected_rooms) {
@@ -1534,6 +1558,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.identified_links.remove(&link_id);
         self.session_open_links.remove(&link_id);
         self.durable_sessions.remove(&link_id);
+        self.moderation_audit_links.remove(&link_id);
     }
 
     fn retire_link(&mut self, link_id: LinkId, reason: &str) {
@@ -1560,6 +1585,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.identified_links.remove(&link_id);
         self.session_open_links.remove(&link_id);
         self.durable_sessions.remove(&link_id);
+        self.moderation_audit_links.remove(&link_id);
     }
 
     fn discard_pending_uploads_for_identity(&mut self, identity_hash: &[u8]) -> usize {
@@ -3000,6 +3026,65 @@ mod tests {
                 .map(|peer| peer.display_name.as_str()),
             Some("Durable Candidate")
         );
+    }
+
+    #[test]
+    fn moderation_audit_capability_binding_is_authenticated_and_link_scoped() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let engine = SessionEngine::with_test_moderation_audit(store, SessionLimits::default());
+        let link_id = [0x47; 16];
+        let original_peer = ServerPeer {
+            identity_hash: [0x61; 16].to_vec(),
+            display_name: "Audit Moderator".into(),
+            lxmf_destination: None,
+        };
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: original_peer.clone(),
+        })
+        .expect("open identified link");
+        let body = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Audit Moderator".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![MODERATION_AUDIT_CAPABILITY.into()],
+                client_instance_id: None,
+            },
+        )
+        .expect("audit capability request");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::SessionOpen, 1, None, body))
+                .expect("session frame"),
+        })
+        .expect("session response");
+
+        assert_eq!(
+            live.moderation_audit_links.get(&link_id),
+            Some(&original_peer.identity_hash)
+        );
+        assert!(
+            !live.durable_sessions.contains_key(&link_id),
+            "read-only audit capability must not fabricate a durable mutation binding"
+        );
+
+        live.handle_event(OmenchatLinkEvent::PeerIdentified {
+            link_id,
+            identity_hash: [0x62; 16],
+        })
+        .expect("identity replacement");
+        assert!(
+            !live.moderation_audit_links.contains_key(&link_id),
+            "identity replacement must invalidate negotiated audit authority"
+        );
+
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id,
+            reason: Some("test close".into()),
+        })
+        .expect("close");
+        assert!(live.moderation_audit_links.is_empty());
     }
 
     #[test]

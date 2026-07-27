@@ -132,6 +132,7 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
         | ChatOp::UserListSnapshotInline
         | ChatOp::ReactionSnapshotInline
         | ChatOp::MessageRevisionSnapshotInline
+        | ChatOp::ModerationAuditInline
         | ChatOp::PinSnapshot => {
             let values = decode_compressed_values_body(&frame.body)?;
             Ok(Some(ChatLinkEvent::InlineBatch {
@@ -143,7 +144,8 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
         ChatOp::HistoryResourceOffer
         | ChatOp::UserListSnapshotResource
         | ChatOp::ReactionSnapshotResource
-        | ChatOp::MessageRevisionSnapshotResource => {
+        | ChatOp::MessageRevisionSnapshotResource
+        | ChatOp::ModerationAuditResource => {
             let offer = decode_resource_offer_body(&frame.body)?;
             validate_resource_offer(&offer, frame.op)?;
             let Some(payload) = transport.fetch_resource(&offer.resource_id)? else {
@@ -189,6 +191,7 @@ fn validate_resource_offer(offer: &ResourceOffer, op: ChatOp) -> anyhow::Result<
         ChatOp::UserListSnapshotResource => offer.purpose == "userlist",
         ChatOp::ReactionSnapshotResource => offer.purpose.starts_with("reactions:"),
         ChatOp::MessageRevisionSnapshotResource => offer.purpose.starts_with("message-revisions:"),
+        ChatOp::ModerationAuditResource => offer.purpose.starts_with("moderation-audit:"),
         _ => anyhow::bail!("OMENchat operation is not a batch resource offer"),
     };
     if !purpose_matches {
@@ -514,6 +517,71 @@ mod tests {
             recv_chat_event(&mut transport).expect("resource"),
             Some(ChatLinkEvent::ResourceBatch {
                 op: ChatOp::ReactionSnapshotResource,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+    }
+
+    #[test]
+    fn client_transport_decodes_moderation_audit_inline_and_resource_pages() {
+        let page = crate::chat::protocol::ModerationAuditPage {
+            records: vec![crate::chat::protocol::ModerationAuditRecord {
+                audit_id: 9,
+                room_id: 1,
+                actor_user_id: 2,
+                actor_display_name_at_action: "Moderator".into(),
+                target_user_id: Some(3),
+                target_display_name_at_action: Some("Member".into()),
+                action: crate::chat::protocol::ModerationAuditAction::Mute,
+                committed_at_unix: 4,
+                result_role_bits: None,
+                result_status_bits: Some(2),
+            }],
+        };
+        let values = page.into_frame_values().expect("page values");
+        let batch = compressed_values_batch(&values).expect("batch");
+        let resource_id = "moderation-audit:2:newest".to_owned();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ModerationAuditInline,
+                1,
+                Some(1),
+                compressed_values_body(&values).expect("inline body"),
+            ))
+            .expect("push inline");
+        transport.insert_resource(
+            resource_id.clone(),
+            compressed_values_payload(&values).expect("payload"),
+        );
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ModerationAuditResource,
+                2,
+                Some(1),
+                resource_offer_body(&ResourceOffer {
+                    resource_id,
+                    compression: super::super::protocol::Compression::Bzip2,
+                    uncompressed_len: batch.uncompressed_len,
+                    compressed_len: batch.bytes.len() as u64,
+                    purpose: "moderation-audit:2:newest".into(),
+                }),
+            ))
+            .expect("push resource");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("inline"),
+            Some(ChatLinkEvent::InlineBatch {
+                op: ChatOp::ModerationAuditInline,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("resource"),
+            Some(ChatLinkEvent::ResourceBatch {
+                op: ChatOp::ModerationAuditResource,
                 values: decoded,
                 ..
             }) if decoded == values

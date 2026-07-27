@@ -1446,6 +1446,17 @@ and schema-8 copies preserve all representable older layers. Capability
 negotiation and client traffic remain dormant. Evidence is in
 `docs/audits/omenchat-moderation-audit-storage-qualification.md`.
 
+The third moderation-audit slice adds the test-only read boundary. Paging is
+exclusive-cursor, newest-first, command-rate-limited, and rechecks current
+moderator/admin role plus room membership for every request. Inline and
+Resource responses carry identical bounded values and explicit short-page end
+evidence. Capability state belongs to one authenticated Link identity and is
+discarded on replacement or close. The desktop projection is memory-only and
+capped at 1,024 records/512 KiB; capability loss clears it. Production still
+requests and accepts no `moderation-audit-v1`, and no UI, timer, worker,
+automatic refresh, schema, or retention setting changed. Evidence is in
+`docs/audits/omenchat-moderation-audit-paging-qualification.md`.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

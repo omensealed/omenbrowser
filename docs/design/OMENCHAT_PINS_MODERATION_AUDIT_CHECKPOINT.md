@@ -483,8 +483,15 @@ The presentation must distinguish:
     non-durable client commands, roomless role/unban, and local administrative
     paths remain absent because their current boundaries cannot provide that
     atomic guarantee.
-11. Add authorized bounded inline/Resource paging and ephemeral client
-   presentation behind test-only negotiated state.
+11. **Complete (2026-07-27):** add authorized bounded inline/Resource paging
+   and an ephemeral client projection behind test-only negotiated state.
+   Authorization is rechecked against current moderator/admin role and room
+   membership on every page. Capability state is bound to the authenticated
+   Link identity and cleared on identity replacement or Link retirement.
+   Desktop retention is capped at 1,024 records and 512 KiB and is cleared on
+   capability loss. Production request and server acceptance remain disabled;
+   there is no UI control, polling worker, timer, persistence, or automatic
+   refresh.
 12. Qualify role loss, pagination, replay, restart, malformed/oversized,
     mixed-version, privacy/redaction, and measurements; then separately review
     activation.

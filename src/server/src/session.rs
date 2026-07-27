@@ -15,12 +15,12 @@ use crate::protocol::{
     parse_session_open_negotiation, with_session_accept_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
     MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, ModerationAuditAction,
-    PinAck, PinRequest, ReactionAck, ReactionRequest, ReactionSnapshot, RichMessageBody,
-    RichMessageEventMetadata, RoomId, SessionAcceptNegotiation, UserId,
+    ModerationAuditRequest, PinAck, PinRequest, ReactionAck, ReactionRequest, ReactionSnapshot,
+    RichMessageBody, RichMessageEventMetadata, RoomId, SessionAcceptNegotiation, UserId,
     DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
-    MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, PROTOCOL_NAME, REACTIONS_CAPABILITY,
-    REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG, REPLY_MENTIONS_CAPABILITY,
-    ROOM_PINS_CAPABILITY, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
+    MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME,
+    REACTIONS_CAPABILITY, REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG,
+    REPLY_MENTIONS_CAPABILITY, ROOM_PINS_CAPABILITY, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -59,6 +59,7 @@ const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
 const REACTIONS_SERVER_ENABLED: bool = true;
 const MESSAGE_REVISIONS_SERVER_ENABLED: bool = true;
 const ROOM_PINS_SERVER_ENABLED: bool = true;
+const MODERATION_AUDIT_SERVER_ENABLED: bool = false;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -197,6 +198,7 @@ pub struct SessionEngine {
     pending_resources: Arc<Mutex<PendingResourceStore>>,
     pending_uploads: Arc<Mutex<PendingUploadStore>>,
     rate_buckets: RateBuckets,
+    moderation_audit_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -361,6 +363,7 @@ impl SessionEngine {
             pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
+            moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
         }
     }
 
@@ -372,6 +375,7 @@ impl SessionEngine {
             pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
+            moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
         }
     }
 
@@ -390,7 +394,15 @@ impl SessionEngine {
             pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
+            moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_moderation_audit(store: OmenchatStore, limits: SessionLimits) -> Self {
+        let mut engine = Self::with_limits(store, limits);
+        engine.moderation_audit_enabled = true;
+        engine
     }
 
     pub fn handle_frame(&self, peer: &ServerPeer, frame: Frame) -> ServerResult<Vec<Frame>> {
@@ -406,6 +418,21 @@ impl SessionEngine {
         peer: &ServerPeer,
         frame: Frame,
         active_room_peers: &[ServerPeer],
+    ) -> ServerResult<Vec<Frame>> {
+        self.handle_frame_with_active_peers_and_moderation_audit(
+            peer,
+            frame,
+            active_room_peers,
+            false,
+        )
+    }
+
+    pub(crate) fn handle_frame_with_active_peers_and_moderation_audit(
+        &self,
+        peer: &ServerPeer,
+        frame: Frame,
+        active_room_peers: &[ServerPeer],
+        moderation_audit_negotiated: bool,
     ) -> ServerResult<Vec<Frame>> {
         match frame.op {
             ChatOp::SessionOpen => self.handle_session_open(peer, frame.seq, frame.body),
@@ -431,6 +458,11 @@ impl SessionEngine {
             }
             ChatOp::HistoryRecent => {
                 self.handle_history_recent(peer, frame.seq, frame.room_id, frame.body)
+            }
+            ChatOp::ModerationAuditBefore
+                if self.moderation_audit_enabled && moderation_audit_negotiated =>
+            {
+                self.handle_moderation_audit_before(peer, frame.seq, frame.room_id, frame.body)
             }
             ChatOp::UploadOffer => {
                 self.handle_upload_offer(peer, frame.seq, frame.room_id, frame.body)
@@ -458,6 +490,97 @@ impl SessionEngine {
                 "unsupported server op",
             )]),
         }
+    }
+
+    fn handle_moderation_audit_before(
+        &self,
+        peer: &ServerPeer,
+        seq: u32,
+        room_id: Option<RoomId>,
+        body: FrameBody,
+    ) -> ServerResult<Vec<Frame>> {
+        let Some(room_id) = room_id else {
+            return Ok(vec![self.error_frame(
+                seq,
+                None,
+                ChatErrorCode::MalformedFrame,
+                "moderation audit request requires a room",
+            )]);
+        };
+        let request = match ModerationAuditRequest::from_frame_body(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return Ok(vec![self.error_frame(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::MalformedFrame,
+                    &format!("invalid moderation audit request: {error}"),
+                )])
+            }
+        };
+        let Some(actor) = self.ensure_allowed_peer(peer, seq, Some(room_id))? else {
+            return Ok(vec![self.error_frame(
+                seq,
+                Some(room_id),
+                ChatErrorCode::PermissionDenied,
+                "user is banned",
+            )]);
+        };
+        if actor.role_bits & (ROLE_MODERATOR | ROLE_ADMIN) == 0 {
+            return Ok(vec![self.error_frame(
+                seq,
+                Some(room_id),
+                ChatErrorCode::PermissionDenied,
+                "moderation audit requires moderator or administrator role",
+            )]);
+        }
+        if !self.store.room_has_member(room_id, actor.user_id)? {
+            return Ok(vec![self.error_frame(
+                seq,
+                Some(room_id),
+                ChatErrorCode::PermissionDenied,
+                "moderation audit requires current room membership",
+            )]);
+        }
+        if let Some(error) =
+            self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Command)?
+        {
+            return Ok(vec![error]);
+        }
+
+        let page =
+            self.store
+                .moderation_audit_page(room_id, request.before_audit_id, request.limit)?;
+        let reached_end = page.records.len() < usize::from(request.limit);
+        let values = page.into_frame_values().map_err(|error| {
+            ServerError::Message(format!("moderation audit page encode failed: {error}"))
+        })?;
+        let mut responses = Vec::with_capacity(2);
+        if !values.is_empty() {
+            let cursor = request
+                .before_audit_id
+                .map_or_else(|| "newest".into(), |audit_id| audit_id.to_string());
+            let purpose = format!("moderation-audit:{seq}:{cursor}");
+            responses.push(Frame::new(
+                self.batch_op(
+                    ChatOp::ModerationAuditInline,
+                    ChatOp::ModerationAuditResource,
+                    &values,
+                )?,
+                seq,
+                Some(room_id),
+                self.batch_body(room_id, &purpose, &values)?,
+            ));
+        }
+        if reached_end {
+            responses.push(Frame::new(
+                ChatOp::ModerationAuditEnd,
+                seq,
+                Some(room_id),
+                FrameBody::Empty,
+            ));
+        }
+        Ok(responses)
     }
 
     pub fn moderation_disconnect_target_for_frame(
@@ -721,15 +844,28 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
         });
-        if durable_requested {
+        let moderation_audit_requested = self.moderation_audit_enabled
+            && negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == MODERATION_AUDIT_CAPABILITY)
+            });
+        if durable_requested || moderation_audit_requested {
+            let mut accepted_capabilities = Vec::new();
+            if moderation_audit_requested {
+                accepted_capabilities.push(MODERATION_AUDIT_CAPABILITY.into());
+            }
+            if durable_requested {
+                accepted_capabilities.push(DURABLE_MUTATION_CAPABILITY.into());
+            }
             let notice_ack_requested = negotiation.as_ref().is_some_and(|negotiation| {
                 negotiation
                     .requested_capabilities
                     .iter()
                     .any(|capability| capability == DURABLE_NOTICE_ACK_CAPABILITY)
             });
-            let mut accepted_capabilities = vec![DURABLE_MUTATION_CAPABILITY.into()];
-            if notice_ack_requested {
+            if durable_requested && notice_ack_requested {
                 accepted_capabilities.push(DURABLE_NOTICE_ACK_CAPABILITY.into());
             }
             let reply_mentions_requested = negotiation.as_ref().is_some_and(|negotiation| {
@@ -738,7 +874,7 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == REPLY_MENTIONS_CAPABILITY)
             });
-            if reply_mentions_requested && REPLY_MENTIONS_SERVER_ENABLED {
+            if durable_requested && reply_mentions_requested && REPLY_MENTIONS_SERVER_ENABLED {
                 accepted_capabilities.push(REPLY_MENTIONS_CAPABILITY.into());
             }
             let reactions_requested = negotiation.as_ref().is_some_and(|negotiation| {
@@ -747,7 +883,7 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == REACTIONS_CAPABILITY)
             });
-            if reactions_requested && REACTIONS_SERVER_ENABLED {
+            if durable_requested && reactions_requested && REACTIONS_SERVER_ENABLED {
                 accepted_capabilities.push(REACTIONS_CAPABILITY.into());
             }
             let message_revisions_requested = negotiation.as_ref().is_some_and(|negotiation| {
@@ -756,7 +892,8 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == MESSAGE_REVISIONS_CAPABILITY)
             });
-            if message_revisions_requested && MESSAGE_REVISIONS_SERVER_ENABLED {
+            if durable_requested && message_revisions_requested && MESSAGE_REVISIONS_SERVER_ENABLED
+            {
                 accepted_capabilities.push(MESSAGE_REVISIONS_CAPABILITY.into());
             }
             let pins_requested = negotiation.as_ref().is_some_and(|negotiation| {
@@ -765,7 +902,7 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == ROOM_PINS_CAPABILITY)
             });
-            if pins_requested && ROOM_PINS_SERVER_ENABLED {
+            if durable_requested && pins_requested && ROOM_PINS_SERVER_ENABLED {
                 accepted_capabilities.push(ROOM_PINS_CAPABILITY.into());
             }
             response_body = with_session_accept_negotiation(
@@ -5844,6 +5981,313 @@ mod tests {
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn test_moderation_audit_capability_is_independent_of_durable_mutations() {
+        let engine = SessionEngine::with_test_moderation_audit(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits::default(),
+        );
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![crate::protocol::MODERATION_AUDIT_CAPABILITY.into()],
+                client_instance_id: None,
+            },
+        )
+        .expect("moderation audit capability request");
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 6, None, request))
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![crate::protocol::MODERATION_AUDIT_CAPABILITY.into()],
+            }))
+        );
+    }
+
+    #[test]
+    fn moderation_audit_paging_is_authorized_exclusive_and_bounded() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        let actor = store
+            .ensure_user(&peer().identity_hash, "Alice", Some("lxmf-a"))
+            .expect("actor");
+        store
+            .set_user_role_bits(actor.user_id, ROLE_ADMIN)
+            .expect("admin");
+        store
+            .join_room(room.room_id, actor.user_id)
+            .expect("actor join");
+        store.ensure_user(b"peer-b", "Bob", None).expect("target");
+        let engine = SessionEngine::with_test_moderation_audit(
+            store,
+            SessionLimits {
+                large_batch_threshold_bytes: usize::MAX,
+                ..SessionLimits::default()
+            },
+        );
+        let client_instance_id = ClientInstanceId::new([18; 16]);
+        for marker in 1..=3 {
+            let envelope = durable_envelope(ChatOp::Command, room.room_id, marker, "role Bob mod");
+            let response = engine
+                .handle_durable_mutation(
+                    &peer(),
+                    u32::from(marker),
+                    Some(room.room_id),
+                    ChatOp::Command,
+                    client_instance_id,
+                    envelope,
+                )
+                .expect("durable role command");
+            assert_eq!(response.origin.op, ChatOp::CommandResult);
+        }
+
+        let first = engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                Frame::new(
+                    ChatOp::ModerationAuditBefore,
+                    20,
+                    Some(room.room_id),
+                    ModerationAuditRequest {
+                        before_audit_id: None,
+                        limit: 2,
+                    }
+                    .into_frame_body()
+                    .expect("request"),
+                ),
+                &[],
+                true,
+            )
+            .expect("first page");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].op, ChatOp::ModerationAuditInline);
+        let first_values =
+            decode_compressed_values_body(&first[0].body).expect("first page values");
+        let first_page = crate::protocol::ModerationAuditPage::from_frame_values(&first_values)
+            .expect("first page");
+        assert_eq!(first_page.records.len(), 2);
+        assert!(
+            first_page.records[0].audit_id > first_page.records[1].audit_id,
+            "pages must be newest-first"
+        );
+
+        let cursor = first_page.records[1].audit_id;
+        let second = engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                Frame::new(
+                    ChatOp::ModerationAuditBefore,
+                    21,
+                    Some(room.room_id),
+                    ModerationAuditRequest {
+                        before_audit_id: Some(cursor),
+                        limit: 2,
+                    }
+                    .into_frame_body()
+                    .expect("cursor request"),
+                ),
+                &[],
+                true,
+            )
+            .expect("second page");
+        assert_eq!(
+            second.iter().map(|frame| frame.op).collect::<Vec<_>>(),
+            vec![ChatOp::ModerationAuditInline, ChatOp::ModerationAuditEnd]
+        );
+        let second_values =
+            decode_compressed_values_body(&second[0].body).expect("second page values");
+        let second_page = crate::protocol::ModerationAuditPage::from_frame_values(&second_values)
+            .expect("second page");
+        assert_eq!(second_page.records.len(), 1);
+        assert!(second_page.records[0].audit_id < cursor);
+
+        engine
+            .store
+            .set_user_role_bits(actor.user_id, 0)
+            .expect("remove role");
+        let denied = engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                Frame::new(
+                    ChatOp::ModerationAuditBefore,
+                    22,
+                    Some(room.room_id),
+                    ModerationAuditRequest {
+                        before_audit_id: None,
+                        limit: 2,
+                    }
+                    .into_frame_body()
+                    .expect("denied request"),
+                ),
+                &[],
+                true,
+            )
+            .expect("role loss response");
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].op, ChatOp::Error);
+        assert!(matches!(
+            &denied[0].body,
+            FrameBody::Fields(fields)
+                if fields.first()
+                    == Some(&FrameValue::U64(ChatErrorCode::PermissionDenied as u16 as u64))
+        ));
+
+        engine
+            .store
+            .set_user_role_bits(actor.user_id, ROLE_ADMIN)
+            .expect("restore role");
+        engine
+            .store
+            .leave_room(room.room_id, actor.user_id)
+            .expect("leave room");
+        let denied = engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                Frame::new(
+                    ChatOp::ModerationAuditBefore,
+                    23,
+                    Some(room.room_id),
+                    ModerationAuditRequest {
+                        before_audit_id: None,
+                        limit: 2,
+                    }
+                    .into_frame_body()
+                    .expect("membership-loss request"),
+                ),
+                &[],
+                true,
+            )
+            .expect("membership loss response");
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].op, ChatOp::Error);
+    }
+
+    #[test]
+    fn moderation_audit_resource_matches_inline_and_malformed_requests_fail_closed() {
+        fn seeded_engine(threshold: usize) -> (SessionEngine, RoomId) {
+            let store = OmenchatStore::in_memory().expect("store");
+            let room = store
+                .room_by_name("lobby")
+                .expect("room query")
+                .expect("room");
+            let actor = store
+                .ensure_user(&peer().identity_hash, "Alice", Some("lxmf-a"))
+                .expect("actor");
+            store
+                .set_user_role_bits(actor.user_id, ROLE_ADMIN)
+                .expect("admin");
+            store.join_room(room.room_id, actor.user_id).expect("join");
+            store.ensure_user(b"peer-b", "Bob", None).expect("target");
+            let engine = SessionEngine::with_test_moderation_audit(
+                store,
+                SessionLimits {
+                    large_batch_threshold_bytes: threshold,
+                    ..SessionLimits::default()
+                },
+            );
+            engine
+                .handle_durable_mutation(
+                    &peer(),
+                    1,
+                    Some(room.room_id),
+                    ChatOp::Command,
+                    ClientInstanceId::new([19; 16]),
+                    durable_envelope(ChatOp::Command, room.room_id, 1, "role Bob mod"),
+                )
+                .expect("seed audit");
+            (engine, room.room_id)
+        }
+
+        let request = ModerationAuditRequest {
+            before_audit_id: None,
+            limit: 2,
+        }
+        .into_frame_body()
+        .expect("request");
+        let (inline_engine, room_id) = seeded_engine(usize::MAX);
+        let inline = inline_engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                Frame::new(
+                    ChatOp::ModerationAuditBefore,
+                    30,
+                    Some(room_id),
+                    request.clone(),
+                ),
+                &[],
+                true,
+            )
+            .expect("inline");
+        let inline_values = decode_compressed_values_body(&inline[0].body).expect("inline values");
+
+        let (resource_engine, resource_room_id) = seeded_engine(1);
+        let resource = resource_engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                Frame::new(
+                    ChatOp::ModerationAuditBefore,
+                    30,
+                    Some(resource_room_id),
+                    request,
+                ),
+                &[],
+                true,
+            )
+            .expect("resource");
+        assert_eq!(resource[0].op, ChatOp::ModerationAuditResource);
+        let offer = decode_resource_offer_body(&resource[0].body).expect("offer");
+        assert!(offer.purpose.starts_with("moderation-audit:30:"));
+        let payload = resource_engine
+            .resource_payload(&offer.resource_id)
+            .expect("resource lookup")
+            .expect("resource payload");
+        let resource_values = decode_compressed_values_payload(&payload).expect("resource values");
+        assert_eq!(inline_values, resource_values);
+
+        let malformed = resource_engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                Frame::new(
+                    ChatOp::ModerationAuditBefore,
+                    31,
+                    Some(resource_room_id),
+                    FrameBody::Empty,
+                ),
+                &[],
+                true,
+            )
+            .expect("malformed response");
+        assert_eq!(malformed.len(), 1);
+        assert_eq!(malformed[0].op, ChatOp::Error);
+
+        let not_negotiated = resource_engine
+            .handle_frame_with_active_peers_and_moderation_audit(
+                &peer(),
+                Frame::new(
+                    ChatOp::ModerationAuditBefore,
+                    32,
+                    Some(resource_room_id),
+                    ModerationAuditRequest {
+                        before_audit_id: None,
+                        limit: 1,
+                    }
+                    .into_frame_body()
+                    .expect("request"),
+                ),
+                &[],
+                false,
+            )
+            .expect("not negotiated response");
+        assert_eq!(not_negotiated.len(), 1);
+        assert_eq!(not_negotiated[0].op, ChatOp::Error);
     }
 
     #[test]

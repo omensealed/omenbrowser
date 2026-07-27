@@ -4600,13 +4600,18 @@ cargo test --locked --no-default-features --features desktop-product \
 These gates cover exact request/cursor/limit shape, the fixed action/result
 vocabulary, forbidden extra fields, identifier/timestamp/display-name bounds,
 known role/status bits, newest-first unique paging, item/owned-byte ceilings,
-room scoping, independent byte-exact codecs, and explicit refusal to accept
-the dormant capability. Schema-10 storage, durable transaction coupling,
+room scoping, independent byte-exact codecs, authorized inline/Resource page
+equality, exclusive cursors and end markers, immediate role-loss denial,
+authenticated Link-scoped capability invalidation, the bounded ephemeral
+desktop projection, Resource-purpose validation, and explicit production
+refusal to accept the dormant capability. Schema-10 storage, durable transaction coupling,
 migration faults, and guarded schema-9/schema-8 exports are covered separately
 in `docs/audits/omenchat-moderation-audit-storage-qualification.md`. These
-commands do not claim network authorization, inline/Resource equality, client
-presentation, live interoperability, or activation. Wire evidence is in
-`docs/audits/omenchat-moderation-audit-qualification.md`.
+commands do not claim a current/current process test, restart recovery,
+mixed-version live interoperability, UI presentation, or activation. Paging
+evidence is in
+`docs/audits/omenchat-moderation-audit-paging-qualification.md`; wire evidence
+is in `docs/audits/omenchat-moderation-audit-qualification.md`.
 
 Focused schema/storage gates:
 
