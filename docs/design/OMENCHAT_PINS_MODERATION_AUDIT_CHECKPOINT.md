@@ -59,8 +59,8 @@ Source evidence:
   `DurableMutationEnvelope` and `canonical_mutation_request_hash`;
 - `src/server/src/session.rs`: `ROLE_MODERATOR`, `ROLE_ADMIN`, durable command
   execution, and one-use moderation effects;
-- `src/server/src/store.rs`: `SCHEMA_VERSION`, schema-8 migration hooks, and
-  current room-event/reaction/revision storage;
+- `src/server/src/store.rs`: `SCHEMA_VERSION`, schema-9 migration hooks, and
+  current room-event/reaction/revision/pin storage;
 - `src/server/src/store/history_retention.rs`: bounded dependency preflight and
   transactional target cleanup;
 - `src/server/migrations/001_init.sql`: the unused legacy `audit_log` shape;
@@ -408,8 +408,9 @@ The presentation must distinguish:
    exact bounds, canonical hash fixtures, and independent codec agreement.
    Negotiation remains unchanged; the production client does not request
    `room-pins-v1`, and omenchatd does not accept it.
-2. Add schema-9 pin state/audit, migration fault injection, recovery validation,
-   bounded store operations, compaction dependencies, and schema-8 copy.
+2. **Complete (2026-07-26):** add schema-9 pin state/audit, migration fault
+   injection, recovery validation, bounded store operations, compaction
+   dependencies, and schema-8 copy.
 3. Add transactional durable server execution and Link-scoped dormant
    fan-out/snapshot plumbing.
 4. Add bounded client projection, persistence, authority, and read-only

@@ -4461,3 +4461,21 @@ canonical-order bounds, target scoping, canonical durable hash inputs, and
 byte-exact agreement between the independent desktop and server codecs. They
 do not claim storage, authorization, replay, fan-out, client projection, UI,
 mixed-version live behavior, or capability activation.
+
+Schema-9 dormant pin storage, migration faults, bounded admission, compaction,
+and the guarded schema-8 copy use isolated SQLite roots:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless store::pins::tests -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pin_schema -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless compaction_ -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless schema_eight_export -- --nocapture)
+```
+
+The store tests do not advertise `room-pins-v1` or exercise durable replay,
+role authorization, Link fan-out, client projection, or UI. Those remain
+separate dormant slices.

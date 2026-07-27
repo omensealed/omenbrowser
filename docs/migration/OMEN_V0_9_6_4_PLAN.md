@@ -1356,6 +1356,18 @@ server codecs agree on one frozen byte fixture. Production capability request,
 acceptance, durable execution, persistence, fan-out, and UI behavior remain
 unchanged; a server regression test proves `room-pins-v1` is not accepted.
 
+The second dormant pin slice advances omenchatd to schema 9 with constrained
+current-pin and append-only audit tables. Store admission enforces 64 active
+pins per room, 4,096 globally, a 1 MiB active-byte ceiling, 1,024 audit rows
+per room, 16,384 globally, per-room/global audit-byte ceilings, 180-day
+retention, and at most 64 pruned audit rows per mutation. Active pin audit is
+not evicted; additions fail closed at capacity while unpins remain possible.
+Migration faults roll back at every table/index/version/commit boundary.
+History compaction preflights and removes pin dependencies in its existing
+bounded transaction. A stopped-server, confirmation-gated schema-8 copy
+removes only pin objects and preserves all prior history layers. Capability
+negotiation and live execution remain dormant.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

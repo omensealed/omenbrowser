@@ -8,6 +8,7 @@ use crate::protocol::{EventId, RichMessageEventMetadata, RoomId, UserId};
 pub mod durable_replay;
 pub mod history_retention;
 pub mod message_revisions;
+pub mod pins;
 pub mod reactions;
 
 pub use history_retention::RoomHistoryRetentionPolicy;
@@ -133,7 +134,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 8;
+pub(crate) const SCHEMA_VERSION: i64 = 9;
 const HISTORY_USAGE_BACKFILL_BATCH: usize = 256;
 const HISTORY_EVENT_FIXED_RETAINED_BYTES: u64 = 64;
 const HISTORY_REPLY_RETAINED_BYTES: u64 = 8;
@@ -321,16 +322,17 @@ impl OmenchatStore {
                 revision: revision_hook,
                 sequence: sequence_hook,
                 usage: |_| Ok(()),
+                pin: |_| Ok(()),
             },
         )
     }
 
-    fn migrate_with_sql_step_and_history_hooks<F, H, R, S, U>(
+    fn migrate_with_sql_step_and_history_hooks<F, H, R, S, U, P>(
         &self,
         backup_source: Option<&std::path::Path>,
         migration_sql: &str,
         schema_step: F,
-        mut hooks: MigrationHooks<H, R, S, U>,
+        mut hooks: MigrationHooks<H, R, S, U, P>,
     ) -> ServerResult<()>
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
@@ -338,6 +340,7 @@ impl OmenchatStore {
         R: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
         S: FnMut(EventSequenceMigrationBoundary) -> ServerResult<()>,
         U: FnMut(HistoryUsageMigrationBoundary) -> ServerResult<()>,
+        P: FnMut(PinMigrationBoundary) -> ServerResult<()>,
     {
         let current_version: i64 =
             self.connection
@@ -365,17 +368,46 @@ impl OmenchatStore {
         ensure_message_revision_schema_with_hook(&transaction, &mut hooks.revision)?;
         ensure_event_sequence_schema_with_hook(&transaction, &mut hooks.sequence)?;
         ensure_history_usage_schema_with_hook(&transaction, &mut hooks.usage)?;
+        ensure_pin_schema_with_hook(&transaction, &mut hooks.pin)?;
         (hooks.reaction)(ReactionMigrationBoundary::BeforeVersionUpdate)?;
         (hooks.revision)(MessageRevisionMigrationBoundary::BeforeVersionUpdate)?;
         (hooks.sequence)(EventSequenceMigrationBoundary::VersionUpdate)?;
         (hooks.usage)(HistoryUsageMigrationBoundary::VersionUpdate)?;
+        (hooks.pin)(PinMigrationBoundary::BeforeVersionUpdate)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         (hooks.reaction)(ReactionMigrationBoundary::BeforeCommit)?;
         (hooks.revision)(MessageRevisionMigrationBoundary::BeforeCommit)?;
         (hooks.sequence)(EventSequenceMigrationBoundary::Commit)?;
         (hooks.usage)(HistoryUsageMigrationBoundary::Commit)?;
+        (hooks.pin)(PinMigrationBoundary::BeforeCommit)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn migrate_with_sql_step_and_pin_hook<F, P>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        pin_hook: P,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        P: FnMut(PinMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_history_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            MigrationHooks {
+                reaction: |_| Ok(()),
+                revision: |_| Ok(()),
+                sequence: |_| Ok(()),
+                usage: |_| Ok(()),
+                pin: pin_hook,
+            },
+        )
     }
 
     pub fn ensure_room(&self, name: &str, topic: Option<&str>) -> ServerResult<ServerRoom> {
@@ -1095,11 +1127,66 @@ enum HistoryUsageMigrationBoundary {
     Commit,
 }
 
-struct MigrationHooks<H, R, S, U> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PinMigrationBoundary {
+    BeforeTables,
+    BetweenTables,
+    BeforeIndexes,
+    BeforeVersionUpdate,
+    BeforeCommit,
+}
+
+struct MigrationHooks<H, R, S, U, P> {
     reaction: H,
     revision: R,
     sequence: S,
     usage: U,
+    pin: P,
+}
+
+fn ensure_pin_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(PinMigrationBoundary) -> ServerResult<()>,
+{
+    hook(PinMigrationBoundary::BeforeTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_pins(
+           room_id INTEGER NOT NULL,
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           pin_event_id INTEGER NOT NULL CHECK(pin_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           pinned_at INTEGER NOT NULL CHECK(pinned_at >= 0),
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           PRIMARY KEY(room_id, target_event_id),
+           UNIQUE(pin_event_id)
+         );",
+    )?;
+
+    hook(PinMigrationBoundary::BetweenTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_pin_events(
+           pin_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+           room_id INTEGER NOT NULL,
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           pin_action INTEGER NOT NULL CHECK(pin_action IN (1, 2)),
+           at INTEGER NOT NULL CHECK(at >= 0),
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0)
+         );",
+    )?;
+
+    hook(PinMigrationBoundary::BeforeIndexes)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_pin_events_target
+         ON room_pin_events(room_id, target_event_id, pin_event_id);
+
+         CREATE INDEX IF NOT EXISTS idx_room_pin_events_retention
+         ON room_pin_events(at, room_id, pin_event_id);",
+    )?;
+    Ok(())
 }
 
 fn ensure_history_usage_schema_with_hook<H>(
@@ -1998,6 +2085,20 @@ mod tests {
             .pragma_update(None, "user_version", 7)
             .expect("version seven marker");
         transaction.commit().expect("version seven commit");
+    }
+
+    fn create_version_eight_fixture(path: &std::path::Path) {
+        create_version_seven_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version eight database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version eight transaction");
+        ensure_history_usage_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version eight history usage schema");
+        transaction
+            .pragma_update(None, "user_version", 8)
+            .expect("version eight marker");
+        transaction.commit().expect("version eight commit");
     }
 
     fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
@@ -3162,6 +3263,7 @@ mod tests {
                                 Ok(())
                             }
                         },
+                        pin: |_| Ok(()),
                     },
                 )
                 .expect_err("injected schema migration failure")
@@ -3201,6 +3303,153 @@ mod tests {
                 "table",
                 "room_history_usage"
             ));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_eight_database_adds_empty_constrained_pin_schema_without_scanning_history() {
+        let path = isolated_database_path("v8-pin-schema");
+        create_version_eight_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version nine migration");
+        for (kind, name) in [
+            ("table", "room_pins"),
+            ("table", "room_pin_events"),
+            ("index", "idx_room_pin_events_target"),
+            ("index", "idx_room_pin_events_retention"),
+        ] {
+            assert!(
+                schema_object_exists(&store.connection, kind, name),
+                "missing schema-9 object {name}"
+            );
+        }
+        assert_eq!(
+            store.pin_row_counts().expect("pin row counts"),
+            (0, 0),
+            "migration must not scan or synthesize pin state"
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        for statement in [
+            "INSERT INTO room_pins(
+               room_id, target_event_id, pin_event_id, actor_user_id,
+               pinned_at, retained_bytes
+             ) VALUES (1, 0, 1, 7, 1, 32)",
+            "INSERT INTO room_pin_events(
+               room_id, target_event_id, actor_user_id, pin_action, at, retained_bytes
+             ) VALUES (1, 1, 7, 3, 1, 41)",
+            "INSERT INTO room_pin_events(
+               room_id, target_event_id, actor_user_id, pin_action, at, retained_bytes
+             ) VALUES (1, 1, 7, 1, -1, 41)",
+        ] {
+            assert!(
+                store.connection.execute(statement, []).is_err(),
+                "schema constraint must reject {statement}"
+            );
+        }
+
+        let backup_path = migration_backup_path(&path, 8);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version eight migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            8
+        );
+        assert!(!schema_object_exists(&backup, "table", "room_pins"));
+        assert!(!schema_object_exists(&backup, "table", "room_pin_events"));
+        assert!(schema_object_exists(&backup, "table", "room_history_usage"));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_pin_schema_fault_boundary_rolls_back_to_version_eight() {
+        for boundary in [
+            PinMigrationBoundary::BeforeTables,
+            PinMigrationBoundary::BetweenTables,
+            PinMigrationBoundary::BeforeIndexes,
+            PinMigrationBoundary::BeforeVersionUpdate,
+            PinMigrationBoundary::BeforeCommit,
+        ] {
+            let path = isolated_database_path(&format!("v9-fault-{boundary:?}"));
+            create_version_eight_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_pin_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected pin migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected pin migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                8
+            );
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_pins"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_pin_events"
+            ));
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_history_usage"
+            ));
+
+            let backup_path = migration_backup_path(&path, 8);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version eight rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                8
+            );
+            assert!(!schema_object_exists(&backup, "table", "room_pins"));
 
             drop(backup);
             drop(store);

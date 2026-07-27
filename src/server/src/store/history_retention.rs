@@ -28,6 +28,8 @@ pub struct RoomHistoryCompaction {
     pub removed_reaction_audit: usize,
     pub removed_revision_state: usize,
     pub removed_revision_audit: usize,
+    pub removed_pin_state: usize,
+    pub removed_pin_audit: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -61,6 +63,8 @@ struct DependencyCounts {
     reaction_audit: usize,
     revision_state: usize,
     revision_audit: usize,
+    pin_state: usize,
+    pin_audit: usize,
 }
 
 impl DependencyCounts {
@@ -70,6 +74,8 @@ impl DependencyCounts {
             .saturating_add(self.reaction_audit)
             .saturating_add(self.revision_state)
             .saturating_add(self.revision_audit)
+            .saturating_add(self.pin_state)
+            .saturating_add(self.pin_audit)
     }
 }
 
@@ -78,6 +84,7 @@ enum CompactionBoundary {
     ReplyCleanup,
     ReactionCleanup,
     RevisionCleanup,
+    PinCleanup,
     EventDelete,
     LedgerUpdate,
     Commit,
@@ -296,6 +303,15 @@ where
         )));
     }
     hook(CompactionBoundary::RevisionCleanup)?;
+    let removed_pin_state = delete_target_rows(transaction, "room_pins", room_id, &event_ids)?;
+    let removed_pin_audit =
+        delete_target_rows(transaction, "room_pin_events", room_id, &event_ids)?;
+    if removed_pin_state != dependencies.pin_state || removed_pin_audit != dependencies.pin_audit {
+        return Err(ServerError::Message(format!(
+            "room {room_id} pin projections changed during compaction"
+        )));
+    }
+    hook(CompactionBoundary::PinCleanup)?;
     let removed_events = delete_events(transaction, room_id, &event_ids)?;
     if removed_events != candidates.len() {
         return Err(ServerError::Message(format!(
@@ -332,6 +348,8 @@ where
         removed_reaction_audit,
         removed_revision_state,
         removed_revision_audit,
+        removed_pin_state,
+        removed_pin_audit,
     })
 }
 
@@ -544,6 +562,8 @@ fn dependency_counts(
             room_id,
             event_ids,
         )?,
+        pin_state: count_target_rows(transaction, "room_pins", room_id, event_ids)?,
+        pin_audit: count_target_rows(transaction, "room_pin_events", room_id, event_ids)?,
     })
 }
 
@@ -572,6 +592,8 @@ fn count_target_rows(
             | "room_reaction_events"
             | "room_message_revision_state"
             | "room_message_revision_events"
+            | "room_pins"
+            | "room_pin_events"
     ));
     let sql = format!(
         "SELECT COUNT(*) FROM {table}
@@ -639,6 +661,8 @@ fn delete_target_rows(
             | "room_reaction_events"
             | "room_message_revision_state"
             | "room_message_revision_events"
+            | "room_pins"
+            | "room_pin_events"
     ));
     let sql = format!(
         "DELETE FROM {table}
@@ -990,7 +1014,15 @@ mod tests {
                    room_id, revision_event_id, target_event_id, actor_user_id,
                    revision_action, replacement_body, revision_number, at,
                    retained_bytes
-                 ) VALUES ({room_id}, 1, 1, 7, 1, X'656469746564', 1, 1, 62);"
+                 ) VALUES ({room_id}, 1, 1, 7, 1, X'656469746564', 1, 1, 62);
+                 INSERT INTO room_pin_events(
+                   pin_event_id, room_id, target_event_id, actor_user_id,
+                   pin_action, at, retained_bytes
+                 ) VALUES (1, {room_id}, 1, 7, 1, 1, 41);
+                 INSERT INTO room_pins(
+                   room_id, target_event_id, pin_event_id, actor_user_id,
+                   pinned_at, retained_bytes
+                 ) VALUES ({room_id}, 1, 1, 7, 1, 32);"
             ))
             .expect("dependent projections");
     }
@@ -1037,6 +1069,8 @@ mod tests {
                 removed_reaction_audit: 1,
                 removed_revision_state: 1,
                 removed_revision_audit: 1,
+                removed_pin_state: 1,
+                removed_pin_audit: 1,
             }
         );
         let history = store.latest_events(room_id, 10).expect("history");
@@ -1050,6 +1084,8 @@ mod tests {
             "room_reaction_events",
             "room_message_revision_state",
             "room_message_revision_events",
+            "room_pins",
+            "room_pin_events",
         ] {
             assert_eq!(
                 store
@@ -1212,6 +1248,7 @@ mod tests {
             CompactionBoundary::ReplyCleanup,
             CompactionBoundary::ReactionCleanup,
             CompactionBoundary::RevisionCleanup,
+            CompactionBoundary::PinCleanup,
             CompactionBoundary::EventDelete,
             CompactionBoundary::LedgerUpdate,
             CompactionBoundary::Commit,
@@ -1248,6 +1285,8 @@ mod tests {
                 "room_reaction_events",
                 "room_message_revision_state",
                 "room_message_revision_events",
+                "room_pins",
+                "room_pin_events",
             ] {
                 assert_eq!(
                     store
