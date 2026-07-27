@@ -216,17 +216,15 @@ The desktop maintains a separate bounded pin projection in its
 identity-scoped `chat.sqlite`. It may retain pin rows across restart, but those
 rows are explicitly stale until a negotiated exact-target snapshot or delta
 restores authority. The timeline labels this distinction as `📌 pinned` versus
-`📌 pinned · cached`. This is read-only dormant plumbing: the production
-desktop does not request `room-pins-v1`, so it exposes no pin/unpin control in
-a production session.
+`📌 pinned · cached`. The production client requests `room-pins-v1` only with
+its persistent durable identity, and controls remain hidden unless the current
+Link accepts it and current role/target authority permits the action.
 
-The codebase also contains test-only pin/unpin controls for deterministic
-qualification. They require current moderator/administrator role, joined-room
+Pin/unpin controls require current moderator/administrator role, joined-room
 membership, retained target eligibility, exact-target authority, durable
 identity, and both negotiated capabilities. Intent is persisted before send;
 an ACK is presented only as accepted pending an authoritative room update.
-These controls cannot appear in a production session because the desktop does
-not request—and omenchatd does not accept—`room-pins-v1`.
+Older, base-only, downgraded, or unsolicited peers cannot activate them.
 
 An offline non-destructive schema-7 downgrade artifact can be created with
 `omenchatd database export-schema7-copy --to <new-path> --confirm --home

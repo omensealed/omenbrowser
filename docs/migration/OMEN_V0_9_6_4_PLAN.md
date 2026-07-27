@@ -1407,6 +1407,15 @@ hardware-specific thresholds. Evidence is in
 `docs/audits/omenchat-pins-qualification.md`; production activation and the
 two-client process smoke remain separate.
 
+The seventh slice reversibly activates `room-pins-v1` at the existing durable
+negotiation boundary. The client requests it only with its persistent
+identity-scoped client instance and durable base request; omenchatd accepts it
+only alongside that valid durable request. Unsolicited acceptance, pin-only
+requests, downgrade, capability loss, identity replacement, and Link
+retirement remain fail closed. No operation, schema, limit, queue, worker,
+timer, retry, or ordinary protocol-v1 frame changed. Isolated current/current
+process qualification remains required before the release gate is complete.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

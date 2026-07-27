@@ -8,14 +8,14 @@ Toolchain: rustc 1.97.0, cargo 1.97.0
 
 ## Scope and verdict
 
-This audit qualifies the dormant `room-pins-v1` implementation before any
-production capability activation. It changes no operation assignment, schema,
-retention limit, production client request, or server acceptance default.
+This audit first qualified the dormant `room-pins-v1` implementation before
+production capability activation. A subsequent separately reversible slice
+enabled client request and server acceptance together without changing an
+operation assignment, schema, retention limit, queue, worker, timer, or retry.
 
-Verdict: deterministic gates are ready for a separate activation review.
-Release qualification is not complete. Production still does not negotiate the
-capability, so a real current/current two-client pin/unpin/restart smoke is not
-yet possible and was not claimed.
+Verdict: deterministic and activation gates pass; release qualification is not
+complete. A real current/current two-client pin/unpin/restart smoke remains
+pending and is not claimed.
 
 ## Deterministic evidence
 
@@ -36,7 +36,7 @@ The root pin filter covers:
 The standalone server pin filter covers:
 
 - the independent byte-exact wire fixture;
-- dormant capability rejection;
+- durable-dependent explicit capability acceptance and pin-only rejection;
 - moderator/administrator, membership, target, tombstone, and room policy;
 - atomic state/audit/replay commit, exact restart replay, changed-content
   conflict, and semantic no-op;
@@ -54,9 +54,9 @@ The standalone server pin filter covers:
 
 Adjacent ordinary traffic remains byte-exact against the existing `0.6.0-1`
 and `0.9.6-3` fixtures in the independent client and server codecs. The
-production session-open regression proves the client omits
-`room-pins-v1`, and the standalone session regression proves the server refuses
-it.
+production session-open regression proves the client requests
+`room-pins-v1` only with its persistent durable identity. Client unsolicited
+acceptance/downgrade and server pin-only-request regressions remain fail closed.
 
 ## Isolated measurement
 
@@ -100,8 +100,8 @@ packaging commands remain documented in `docs/TESTING.md`.
 
 ## Remaining evidence and activation boundary
 
-- Review client request and server acceptance activation as one separately
-  reversible risk class.
+- Client request and server acceptance were enabled together in one separately
+  reversible risk class; deterministic negotiation regressions pass.
 - Preserve fail-closed unsolicited acceptance, base-only peer, downgrade,
   identity replacement, capability loss, and Link retirement behavior.
 - After activation, run an isolated current/current two-client smoke covering

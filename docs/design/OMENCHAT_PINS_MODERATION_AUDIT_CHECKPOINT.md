@@ -1,8 +1,9 @@
 # OMENchat pins and moderation-audit checkpoint
 
-Status: dormant pin protocol, server storage/execution, desktop projection, and
-test-only durable controls implemented; production capability
-request/acceptance remains disabled; moderation-audit work remains design-only
+Status: pin protocol, bounded storage/execution, desktop projection, durable
+controls, deterministic qualification, and reversible production negotiation
+implemented; isolated current/current process qualification remains pending;
+moderation-audit work remains design-only
 
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`
 
@@ -19,8 +20,10 @@ They have different authorization, mutation, retention, and privacy contracts:
 - moderation history is read-only to clients and records committed policy
   changes, not operator logs or claimed network side effects;
 - neither feature changes protocol version 1 or ordinary legacy traffic;
-- both remain dormant until their independent deterministic, mixed-version,
-  migration, resource, and live gates pass.
+- each remains disabled until its independent deterministic, mixed-version,
+  migration, resource, and activation review passes. Pins have now passed that
+  deterministic review and are enabled for the still-required live process
+  gate; moderation audit remains dormant.
 
 This checkpoint authorizes design and staged implementation only. It does not
 authorize production capability negotiation.
@@ -431,13 +434,19 @@ The presentation must distinguish:
    evidence is recorded in
    `docs/audits/omenchat-pins-qualification.md`; production activation and its
    required current/current process smoke remain a separate review.
-7. Add shared dormant moderation-audit types and operations 52–55. Keep
+7. **Complete (2026-07-27):** enable client request and server acceptance
+   together at the existing durable capability boundary. Unsolicited
+   acceptance, pin-only requests, downgrade, capability loss, identity
+   replacement, and Link retirement remain fail closed. No operation, schema,
+   bound, queue, worker, timer, or retry changed. Live current/current process
+   qualification remains required before release readiness is claimed.
+8. Add shared dormant moderation-audit types and operations 52–55. Keep
    negotiation unchanged.
-8. Add schema-10 constrained audit storage and transactionally couple only
+9. Add schema-10 constrained audit storage and transactionally couple only
    proven moderation paths; provide schema-9/schema-8 copies.
-9. Add authorized bounded inline/Resource paging and ephemeral client
+10. Add authorized bounded inline/Resource paging and ephemeral client
    presentation behind test-only negotiated state.
-10. Qualify role loss, pagination, replay, restart, malformed/oversized,
+11. Qualify role loss, pagination, replay, restart, malformed/oversized,
     mixed-version, privacy/redaction, and measurements; then separately review
     activation.
 

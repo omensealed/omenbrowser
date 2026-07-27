@@ -57,7 +57,7 @@ const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
 const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
 const REACTIONS_SERVER_ENABLED: bool = true;
 const MESSAGE_REVISIONS_SERVER_ENABLED: bool = true;
-const ROOM_PINS_SERVER_ENABLED: bool = false;
+const ROOM_PINS_SERVER_ENABLED: bool = true;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -5694,7 +5694,7 @@ mod tests {
     }
 
     #[test]
-    fn dormant_pin_capability_is_not_accepted() {
+    fn pin_capability_requires_explicit_durable_request() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(
             FrameBody::Text("Alice".into()),
@@ -5714,8 +5714,27 @@ mod tests {
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(Some(crate::protocol::SessionAcceptNegotiation {
-                accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
+                accepted_capabilities: vec![
+                    crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                    crate::protocol::ROOM_PINS_CAPABILITY.into(),
+                ],
             }))
+        );
+
+        let pin_only = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![crate::protocol::ROOM_PINS_CAPABILITY.into()],
+                client_instance_id: Some(crate::protocol::ClientInstanceId::new([16; 16])),
+            },
+        )
+        .expect("pin-only capability request");
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 3, None, pin_only))
+            .expect("pin-only session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(None)
         );
     }
 

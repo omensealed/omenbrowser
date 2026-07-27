@@ -72,6 +72,7 @@ pub struct LiveChatClientState {
     reaction_sessions: BTreeSet<ChatSessionId>,
     message_revision_requests: BTreeSet<ChatSessionId>,
     message_revision_sessions: BTreeSet<ChatSessionId>,
+    pin_requests: BTreeSet<ChatSessionId>,
     pin_sessions: BTreeSet<ChatSessionId>,
     local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
@@ -427,6 +428,7 @@ impl LiveChatClientState {
         self.reaction_sessions.remove(&session_id);
         self.message_revision_requests.remove(&session_id);
         self.message_revision_sessions.remove(&session_id);
+        self.pin_requests.remove(&session_id);
         self.pin_sessions.remove(&session_id);
         self.local_user_ids.remove(&session_id);
         retired_echoes
@@ -776,6 +778,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.reaction_sessions.remove(&session_id);
     state.message_revision_requests.remove(&session_id);
     state.message_revision_sessions.remove(&session_id);
+    state.pin_requests.remove(&session_id);
     state.pin_sessions.remove(&session_id);
     state
         .pending_pin_confirmations
@@ -803,6 +806,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
                     REPLY_MENTIONS_CAPABILITY.into(),
                     REACTIONS_CAPABILITY.into(),
                     super::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
+                    super::protocol::ROOM_PINS_CAPABILITY.into(),
                 ],
                 client_instance_id: Some(client_instance_id),
             },
@@ -837,6 +841,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         state.reply_mentions_requests.insert(session_id);
         state.reaction_requests.insert(session_id);
         state.message_revision_requests.insert(session_id);
+        state.pin_requests.insert(session_id);
     }
 
     let room_name = client
@@ -2540,6 +2545,9 @@ fn apply_frame_with_state(
             let message_revisions_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == super::protocol::MESSAGE_REVISIONS_CAPABILITY);
+            let pins_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == super::protocol::ROOM_PINS_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
                 state.pin_sessions.remove(&session_id);
                 state
@@ -2551,6 +2559,7 @@ fn apply_frame_with_state(
                 let reactions_requested = state.reaction_requests.remove(&session_id);
                 let message_revisions_requested =
                     state.message_revision_requests.remove(&session_id);
+                let pins_requested = state.pin_requests.remove(&session_id);
                 let already_accepted = state.durable_sessions.contains(&session_id);
                 if durable_accepted
                     && state.client_instance_id.is_some()
@@ -2578,12 +2587,18 @@ fn apply_frame_with_state(
                     } else {
                         state.message_revision_sessions.remove(&session_id);
                     }
+                    if pins_requested && pins_accepted {
+                        state.pin_sessions.insert(session_id);
+                    } else {
+                        state.pin_sessions.remove(&session_id);
+                    }
                 } else {
                     state.durable_sessions.remove(&session_id);
                     state.durable_notice_ack_sessions.remove(&session_id);
                     state.reply_mentions_sessions.remove(&session_id);
                     state.reaction_sessions.remove(&session_id);
                     state.message_revision_sessions.remove(&session_id);
+                    state.pin_sessions.remove(&session_id);
                     state.local_user_ids.remove(&session_id);
                 }
             }
@@ -5453,7 +5468,7 @@ mod tests {
             .requested_capabilities
             .iter()
             .any(|capability| capability == crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY));
-        assert!(!negotiation
+        assert!(negotiation
             .requested_capabilities
             .iter()
             .any(|capability| capability == crate::chat::protocol::ROOM_PINS_CAPABILITY));
@@ -5466,6 +5481,7 @@ mod tests {
                     REPLY_MENTIONS_CAPABILITY.into(),
                     REACTIONS_CAPABILITY.into(),
                     crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
+                    crate::chat::protocol::ROOM_PINS_CAPABILITY.into(),
                 ],
                 client_instance_id: Some(client_instance_id),
             }))
@@ -5474,6 +5490,7 @@ mod tests {
         assert!(state.reply_mentions_requests.contains(&1));
         assert!(state.reaction_requests.contains(&1));
         assert!(state.message_revision_requests.contains(&1));
+        assert!(state.pin_requests.contains(&1));
         assert!(!state.durable_mutations_negotiated(1));
         assert!(!state.reply_mentions_negotiated(1));
         assert!(!state.reactions_negotiated(1));
@@ -5514,6 +5531,7 @@ mod tests {
                     DURABLE_MUTATION_CAPABILITY.into(),
                     REACTIONS_CAPABILITY.into(),
                     crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
+                    crate::chat::protocol::ROOM_PINS_CAPABILITY.into(),
                 ],
             },
         )
@@ -5532,6 +5550,7 @@ mod tests {
         assert!(!state.reply_mentions_negotiated(session_id));
         assert!(!state.reactions_negotiated(session_id));
         assert!(!state.message_revisions_negotiated(session_id));
+        assert!(!state.pins_negotiated(session_id));
 
         state.reaction_requests.insert(session_id);
         apply_frame_with_state(
@@ -5544,6 +5563,7 @@ mod tests {
         );
         assert!(state.reactions_negotiated(session_id));
         assert!(!state.message_revisions_negotiated(session_id));
+        assert!(!state.pins_negotiated(session_id));
 
         state.message_revision_requests.insert(session_id);
         apply_frame_with_state(
@@ -5556,6 +5576,20 @@ mod tests {
         );
         assert!(!state.reactions_negotiated(session_id));
         assert!(state.message_revisions_negotiated(session_id));
+        assert!(!state.pins_negotiated(session_id));
+
+        state.pin_requests.insert(session_id);
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 4, None, accepted_body.clone()),
+            &mut events,
+        );
+        assert!(!state.reactions_negotiated(session_id));
+        assert!(!state.message_revisions_negotiated(session_id));
+        assert!(state.pins_negotiated(session_id));
 
         let notice_accepted_body = crate::chat::protocol::with_session_accept_negotiation(
             FrameBody::Fields(vec![
@@ -5575,13 +5609,14 @@ mod tests {
             Some(&mut state),
             &mut transport,
             Some(session_id),
-            Frame::new(ChatOp::SessionAccept, 4, None, notice_accepted_body),
+            Frame::new(ChatOp::SessionAccept, 5, None, notice_accepted_body),
             &mut events,
         );
         assert!(state.durable_mutations_negotiated(session_id));
         assert!(state.durable_notice_ack_negotiated(session_id));
         assert!(!state.reactions_negotiated(session_id));
         assert!(!state.message_revisions_negotiated(session_id));
+        assert!(!state.pins_negotiated(session_id));
 
         apply_frame_with_state(
             &mut client,

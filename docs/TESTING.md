@@ -4452,7 +4452,7 @@ cargo test --locked --no-default-features --features desktop-product \
 (cd src/server && cargo test --locked --no-default-features \
   --features server-headless pins_v1_fixture_is_bidirectionally_exact_and_dormant)
 (cd src/server && cargo test --locked --no-default-features \
-  --features server-headless dormant_pin_capability_is_not_accepted)
+  --features server-headless pin_capability_requires_explicit_durable_request)
 ```
 
 These tests cover exact request/ack/event/snapshot shapes, malformed and
@@ -4487,9 +4487,10 @@ snapshots, and capable-room-only fan-out use:
   --features server-headless pin_events_fan_out_only -- --nocapture)
 ```
 
-These tests bind the internal Link capability state explicitly. The production
-session negotiation test still proves that omenchatd rejects
-`room-pins-v1`; the desktop does not request it.
+These tests bind the internal Link capability state explicitly. After the
+separate activation slice, production negotiation tests prove the desktop
+requests `room-pins-v1` only with durable identity and omenchatd refuses a
+pin-only request.
 
 The dormant desktop projection, identity-scoped SQLite cache, restart-stale
 authority, inline snapshot decoding, and read-only timeline labels use:
@@ -4535,8 +4536,10 @@ mutation per target, reject mismatched ACKs, preserve uncertainty across
 restart, and keep accepted mutation evidence separate until an authoritative
 delta or exact-target snapshot arrives. Post-ACK confirmation slots share the
 existing 256-global/64-per-session mutation budget and clear on capability or
-Link loss. The final test continues to prove the production desktop does not
-request `room-pins-v1`. Server acceptance remains disabled.
+Link loss. The final test now proves the production desktop requests
+`room-pins-v1` only inside the persistent durable negotiation envelope. The
+session activation test proves unsolicited acceptance and downgrade remain
+fail closed; the standalone server test proves a pin-only request is refused.
 
 The dormant deterministic qualification filter and explicit isolated
 measurement are:
