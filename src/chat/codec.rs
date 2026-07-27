@@ -181,12 +181,12 @@ mod tests {
 
     use omenchat_protocol::fixtures::{
         announcement_rooms_v1, message_revisions_v1, moderation_audit_v1, pins_v1, reactions_v1,
-        reply_mentions_v1, v0_6_0_1, v0_9_6_3,
+        reply_mentions_v1, room_slow_mode_v1, v0_6_0_1, v0_9_6_3,
     };
     use omenchat_protocol::{
         MessageRevisionAction, MessageRevisionRequest, ModerationAuditRequest, PinAction,
         PinRequest, ReactionAction, ReactionRequest, ReactionToken, ReplyReference,
-        RichMessageBody, RoomCatalogEntry, ROOM_POLICY_ANNOUNCEMENT,
+        RichMessageBody, RoomCatalogEntry, RoomCatalogShape, ROOM_POLICY_ANNOUNCEMENT,
     };
 
     #[test]
@@ -270,6 +270,7 @@ mod tests {
             topic: Some("Operator updates".into()),
             room_revision: 3,
             policy_bits: ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 0,
         };
         for (negotiated, fixture) in [
             (false, announcement_rooms_v1::LEGACY_ROOM_DELTA),
@@ -303,6 +304,42 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn slow_mode_room_value_is_byte_exact_and_shape_scoped() {
+        let room = RoomCatalogEntry {
+            room_id: 7,
+            name: "announcements".into(),
+            topic: Some("Operator updates".into()),
+            room_revision: 3,
+            policy_bits: ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 30,
+        };
+        let room_value = room
+            .clone()
+            .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
+            .expect("bounded slow-mode room value");
+        let frame = Frame::new(
+            ChatOp::RoomDelta,
+            12,
+            None,
+            FrameBody::Fields(vec![room_value]),
+        );
+        assert_eq!(
+            encode_frame(&frame).expect("encode slow-mode room delta"),
+            room_slow_mode_v1::ROOM_DELTA
+        );
+        let decoded =
+            decode_frame(room_slow_mode_v1::ROOM_DELTA).expect("decode slow-mode room delta");
+        assert_eq!(decoded, frame);
+        let FrameBody::Fields(values) = decoded.body else {
+            panic!("room delta must have fields");
+        };
+        assert_eq!(
+            RoomCatalogEntry::from_frame_value_for_shape(&values[0], RoomCatalogShape::SlowMode),
+            Ok(room)
+        );
     }
 
     #[test]

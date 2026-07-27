@@ -217,6 +217,7 @@ pub enum ChatErrorCode {
     DurableMutationResultExpired = 1014,
     DurableMutationStoreBusy = 1015,
     RoomPolicyRestricted = 1016,
+    SlowModeActive = 1017,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -297,6 +298,11 @@ pub mod fixtures {
             b"\x96\x01\x21\x00\x0c\xc0\x91\x95\x07\xadannouncements\xb0Operator updates\x03\x01";
     }
 
+    pub mod room_slow_mode_v1 {
+        pub const ROOM_DELTA: &[u8] =
+            b"\x96\x01\x21\x00\x0c\xc0\x91\x96\x07\xadannouncements\xb0Operator updates\x03\x01\x1e";
+    }
+
     pub mod reply_mentions_v1 {
         pub const ROOM_MESSAGE: &[u8] =
             b"\x96\x01\x14\x00\x07\x07\x94\xa5hello\xb1reply-mentions-v1\x92\x07\x2a\x92\x02\x09";
@@ -344,12 +350,14 @@ mod tests {
         assert_eq!(ROOM_PINS_CAPABILITY, "room-pins-v1");
         assert_eq!(MODERATION_AUDIT_CAPABILITY, "moderation-audit-v1");
         assert_eq!(ANNOUNCEMENT_ROOMS_CAPABILITY, "announcement-rooms-v1");
+        assert_eq!(ROOM_SLOW_MODE_CAPABILITY, "room-slow-mode-v1");
         assert_eq!(DURABLE_NOTICE_ACK_CAPABILITY, "durable-room-notice-ack-v1");
         assert_eq!(ChatErrorCode::DurableMutationMalformed as u16, 1012);
         assert_eq!(ChatErrorCode::DurableMutationConflict as u16, 1013);
         assert_eq!(ChatErrorCode::DurableMutationResultExpired as u16, 1014);
         assert_eq!(ChatErrorCode::DurableMutationStoreBusy as u16, 1015);
         assert_eq!(ChatErrorCode::RoomPolicyRestricted as u16, 1016);
+        assert_eq!(ChatErrorCode::SlowModeActive as u16, 1017);
         assert_eq!(fixtures::v0_6_0_1::PROTOCOL_VERSION, PROTOCOL_VERSION);
         assert_eq!(fixtures::v0_6_0_1::PROTOCOL_NAME, PROTOCOL_NAME);
         assert_eq!(fixtures::v0_6_0_1::LINK_CONTEXT, 0x4f);

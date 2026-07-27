@@ -1,13 +1,24 @@
 use crate::{FrameValue, Revision, RoomId};
 
 pub const ANNOUNCEMENT_ROOMS_CAPABILITY: &str = "announcement-rooms-v1";
+pub const ROOM_SLOW_MODE_CAPABILITY: &str = "room-slow-mode-v1";
 pub const ROOM_POLICY_ANNOUNCEMENT: u64 = 0x01;
 pub const ROOM_POLICY_KNOWN_MASK: u64 = ROOM_POLICY_ANNOUNCEMENT;
+pub const ROOM_SLOW_MODE_MAX_SECONDS: u32 = 86_400;
 pub const ROOM_NAME_MAX_BYTES: usize = 64;
 pub const ROOM_TOPIC_MAX_BYTES: usize = 4 * 1024;
 
 const LEGACY_ROOM_VALUE_FIELDS: usize = 4;
 const POLICY_ROOM_VALUE_FIELDS: usize = 5;
+const SLOW_MODE_ROOM_VALUE_FIELDS: usize = 6;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RoomCatalogShape {
+    #[default]
+    Legacy,
+    PolicyBits,
+    SlowMode,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomCatalogEntry {
@@ -16,6 +27,7 @@ pub struct RoomCatalogEntry {
     pub topic: Option<String>,
     pub room_revision: Revision,
     pub policy_bits: u64,
+    pub slow_mode_seconds: u32,
 }
 
 impl RoomCatalogEntry {
@@ -24,11 +36,22 @@ impl RoomCatalogEntry {
     }
 
     pub fn into_frame_value(self, policy_negotiated: bool) -> Result<FrameValue, RoomPolicyError> {
-        self.validate()?;
-        let mut fields = Vec::with_capacity(if policy_negotiated {
-            POLICY_ROOM_VALUE_FIELDS
+        self.into_frame_value_for_shape(if policy_negotiated {
+            RoomCatalogShape::PolicyBits
         } else {
-            LEGACY_ROOM_VALUE_FIELDS
+            RoomCatalogShape::Legacy
+        })
+    }
+
+    pub fn into_frame_value_for_shape(
+        self,
+        shape: RoomCatalogShape,
+    ) -> Result<FrameValue, RoomPolicyError> {
+        self.validate()?;
+        let mut fields = Vec::with_capacity(match shape {
+            RoomCatalogShape::Legacy => LEGACY_ROOM_VALUE_FIELDS,
+            RoomCatalogShape::PolicyBits => POLICY_ROOM_VALUE_FIELDS,
+            RoomCatalogShape::SlowMode => SLOW_MODE_ROOM_VALUE_FIELDS,
         });
         fields.push(FrameValue::U64(u64::from(self.room_id)));
         fields.push(FrameValue::String(self.name));
@@ -38,8 +61,11 @@ impl RoomCatalogEntry {
                 .unwrap_or(FrameValue::Nil),
         );
         fields.push(FrameValue::U64(self.room_revision));
-        if policy_negotiated {
+        if shape != RoomCatalogShape::Legacy {
             fields.push(FrameValue::U64(self.policy_bits));
+        }
+        if shape == RoomCatalogShape::SlowMode {
+            fields.push(FrameValue::U64(u64::from(self.slow_mode_seconds)));
         }
         Ok(FrameValue::Array(fields))
     }
@@ -48,13 +74,27 @@ impl RoomCatalogEntry {
         value: &FrameValue,
         policy_negotiated: bool,
     ) -> Result<Self, RoomPolicyError> {
+        Self::from_frame_value_for_shape(
+            value,
+            if policy_negotiated {
+                RoomCatalogShape::PolicyBits
+            } else {
+                RoomCatalogShape::Legacy
+            },
+        )
+    }
+
+    pub fn from_frame_value_for_shape(
+        value: &FrameValue,
+        shape: RoomCatalogShape,
+    ) -> Result<Self, RoomPolicyError> {
         let FrameValue::Array(fields) = value else {
             return Err(RoomPolicyError::InvalidShape);
         };
-        let expected_fields = if policy_negotiated {
-            POLICY_ROOM_VALUE_FIELDS
-        } else {
-            LEGACY_ROOM_VALUE_FIELDS
+        let expected_fields = match shape {
+            RoomCatalogShape::Legacy => LEGACY_ROOM_VALUE_FIELDS,
+            RoomCatalogShape::PolicyBits => POLICY_ROOM_VALUE_FIELDS,
+            RoomCatalogShape::SlowMode => SLOW_MODE_ROOM_VALUE_FIELDS,
         };
         if fields.len() != expected_fields {
             return Err(RoomPolicyError::InvalidShape);
@@ -64,16 +104,17 @@ impl RoomCatalogEntry {
         else {
             return Err(RoomPolicyError::InvalidShape);
         };
-        let policy_bits = if policy_negotiated {
-            match rest {
-                [FrameValue::U64(policy_bits)] => *policy_bits,
-                _ => return Err(RoomPolicyError::InvalidShape),
-            }
-        } else {
-            if !rest.is_empty() {
-                return Err(RoomPolicyError::InvalidShape);
-            }
-            0
+        let (policy_bits, slow_mode_seconds) = match (shape, rest) {
+            (RoomCatalogShape::Legacy, []) => (0, 0),
+            (RoomCatalogShape::PolicyBits, [FrameValue::U64(policy_bits)]) => (*policy_bits, 0),
+            (
+                RoomCatalogShape::SlowMode,
+                [FrameValue::U64(policy_bits), FrameValue::U64(slow_mode_seconds)],
+            ) => (
+                *policy_bits,
+                u32::try_from(*slow_mode_seconds).map_err(|_| RoomPolicyError::InvalidSlowMode)?,
+            ),
+            _ => return Err(RoomPolicyError::InvalidShape),
         };
         let entry = Self {
             room_id: u32::try_from(*room_id).map_err(|_| RoomPolicyError::InvalidRoomId)?,
@@ -85,6 +126,7 @@ impl RoomCatalogEntry {
             },
             room_revision: *room_revision,
             policy_bits,
+            slow_mode_seconds,
         };
         entry.validate()?;
         Ok(entry)
@@ -107,6 +149,9 @@ impl RoomCatalogEntry {
         if self.policy_bits & !ROOM_POLICY_KNOWN_MASK != 0 {
             return Err(RoomPolicyError::UnknownPolicyBits(self.policy_bits));
         }
+        if self.slow_mode_seconds > ROOM_SLOW_MODE_MAX_SECONDS {
+            return Err(RoomPolicyError::InvalidSlowMode);
+        }
         Ok(())
     }
 }
@@ -123,6 +168,8 @@ pub enum RoomPolicyError {
     InvalidTopic,
     #[error("room catalog policy contains unknown bits 0x{0:x}")]
     UnknownPolicyBits(u64),
+    #[error("room catalog slow mode exceeds {ROOM_SLOW_MODE_MAX_SECONDS} seconds")]
+    InvalidSlowMode,
 }
 
 #[cfg(test)]
@@ -136,6 +183,7 @@ mod tests {
             topic: Some("Operator updates".into()),
             room_revision: 3,
             policy_bits: ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 0,
         }
     }
 
@@ -159,8 +207,41 @@ mod tests {
             RoomCatalogEntry::from_frame_value(&legacy, false),
             Ok(RoomCatalogEntry {
                 policy_bits: 0,
+                slow_mode_seconds: 0,
                 ..room
             })
+        );
+    }
+
+    #[test]
+    fn slow_mode_shape_is_explicit_bounded_and_round_trips() {
+        let room = RoomCatalogEntry {
+            slow_mode_seconds: 30,
+            ..announcement_room()
+        };
+        let value = room
+            .clone()
+            .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
+            .expect("slow-mode value");
+        assert_eq!(
+            RoomCatalogEntry::from_frame_value_for_shape(&value, RoomCatalogShape::SlowMode),
+            Ok(room.clone())
+        );
+        assert_eq!(
+            RoomCatalogEntry::from_frame_value_for_shape(&value, RoomCatalogShape::PolicyBits),
+            Err(RoomPolicyError::InvalidShape)
+        );
+
+        let FrameValue::Array(mut fields) = value else {
+            panic!("room value must be an array");
+        };
+        fields[5] = FrameValue::U64(u64::from(ROOM_SLOW_MODE_MAX_SECONDS) + 1);
+        assert_eq!(
+            RoomCatalogEntry::from_frame_value_for_shape(
+                &FrameValue::Array(fields),
+                RoomCatalogShape::SlowMode
+            ),
+            Err(RoomPolicyError::InvalidSlowMode)
         );
     }
 
@@ -198,8 +279,14 @@ mod tests {
                 topic: Some("t".repeat(ROOM_TOPIC_MAX_BYTES + 1)),
                 ..announcement_room()
             },
+            RoomCatalogEntry {
+                slow_mode_seconds: ROOM_SLOW_MODE_MAX_SECONDS + 1,
+                ..announcement_room()
+            },
         ] {
-            assert!(invalid.into_frame_value(true).is_err());
+            assert!(invalid
+                .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
+                .is_err());
         }
     }
 }

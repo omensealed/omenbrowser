@@ -1682,7 +1682,13 @@ New durable message/action admission would couple event, replay result, and
 cooldown state in one transaction, with a bounded monotonic in-process owner
 preventing active-runtime wall-clock bypass. No protocol, schema,
 configuration, negotiation, or runtime behavior changes in the checkpoint
-slice.
+slice. The first implementation slice now adds the dormant
+`room-slow-mode-v1` constant, error 1017, explicit four-/five-/six-field shape
+enum, bounded scalar codec, durable-capability dependency, and byte-exact
+fixtures in both independent MessagePack codecs. Existing production call
+sites retain the four-/five-field compatibility wrappers; no client requests
+and no server accepts the new capability. Evidence is in
+`docs/audits/omenchat-slow-mode-wire-qualification.md`.
 
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise

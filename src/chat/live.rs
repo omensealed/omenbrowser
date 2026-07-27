@@ -5216,6 +5216,7 @@ fn error_code_label(code: u64) -> Option<&'static str> {
         value if value == ChatErrorCode::RoomPolicyRestricted as u16 => {
             Some("room is read-only for members")
         }
+        value if value == ChatErrorCode::SlowModeActive as u16 => Some("slow mode active"),
         _ => None,
     }
 }
@@ -11328,6 +11329,7 @@ mod tests {
             topic: None,
             room_revision: 2,
             policy_bits: super::super::protocol::ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 0,
         }
         .into_frame_value(true)
         .expect("policy room");
@@ -11414,6 +11416,7 @@ mod tests {
                 topic: None,
                 room_revision: 2,
                 policy_bits: super::super::protocol::ROOM_POLICY_ANNOUNCEMENT,
+                slow_mode_seconds: 0,
             }
             .into_frame_value(policy_negotiated)
             .expect("room catalog entry");
@@ -11592,6 +11595,16 @@ mod tests {
         assert_eq!(
             restricted,
             "room is read-only for members: publishing messages is restricted to moderators and administrators"
+        );
+
+        let slow_mode = parse_error_text(&FrameBody::Fields(vec![
+            FrameValue::U64(ChatErrorCode::SlowModeActive as u16 as u64),
+            FrameValue::String("wait before publishing another message".into()),
+            FrameValue::U64(30),
+        ]));
+        assert_eq!(
+            slow_mode,
+            "slow mode active: wait before publishing another message"
         );
     }
 

@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use crate::{
     ClientInstanceId, FrameBody, FrameValue, DURABLE_MUTATION_CAPABILITY,
     MESSAGE_REVISIONS_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
+    ROOM_SLOW_MODE_CAPABILITY,
 };
 
 pub const SESSION_CAPABILITY_MAX_ITEMS: usize = 64;
@@ -207,6 +208,9 @@ fn validate_capability_list(capabilities: &[String]) -> Result<(), SessionNegoti
     {
         return Err(SessionNegotiationError::MissingMessageRevisionsDependency);
     }
+    if unique.contains(ROOM_SLOW_MODE_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
+        return Err(SessionNegotiationError::MissingSlowModeDependency);
+    }
     Ok(())
 }
 
@@ -250,6 +254,8 @@ pub enum SessionNegotiationError {
     MissingReactionsDependency,
     #[error("{MESSAGE_REVISIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
     MissingMessageRevisionsDependency,
+    #[error("{ROOM_SLOW_MODE_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
+    MissingSlowModeDependency,
     #[error(transparent)]
     Durable(#[from] crate::DurableMutationError),
 }
@@ -439,6 +445,27 @@ mod tests {
             accepted_capabilities: vec![
                 DURABLE_MUTATION_CAPABILITY.into(),
                 MESSAGE_REVISIONS_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("dependent capability set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn slow_mode_capability_requires_durable_mutations() {
+        let missing_base = SessionAcceptNegotiation {
+            accepted_capabilities: vec![ROOM_SLOW_MODE_CAPABILITY.into()],
+        };
+        assert_eq!(
+            with_session_accept_negotiation(current_session_accept(), &missing_base),
+            Err(SessionNegotiationError::MissingSlowModeDependency)
+        );
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                ROOM_SLOW_MODE_CAPABILITY.into(),
             ],
         };
         let body = with_session_accept_negotiation(current_session_accept(), &complete)

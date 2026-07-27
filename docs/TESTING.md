@@ -4607,6 +4607,25 @@ They do not alone claim schema 11, authorization, presentation, or process
 traffic. Evidence is in
 `docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
 
+The dormant slow-mode scalar extension is covered independently:
+
+```bash
+cargo test --locked -p omenchat-protocol -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  slow_mode_room_value_is_byte_exact_and_shape_scoped --lib -- --nocapture
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    slow_mode_room_value_is_byte_exact_and_shape_scoped --lib -- --nocapture
+)
+```
+
+These gates require exact four-/five-/six-field shape isolation, a bounded
+`slow_mode_seconds` scalar, identical desktop/server MessagePack bytes, typed
+error number 1017, and the `durable-mutations-v1` capability dependency.
+Production negotiation and schema remain inactive. Evidence is in
+`docs/audits/omenchat-slow-mode-wire-qualification.md`.
+
 Schema-11 announcement-room storage and guarded rollback are covered by:
 
 ```bash

@@ -2,8 +2,8 @@
 
 Date: 2026-07-27
 
-Status: design checkpoint only; no protocol, schema, configuration, or runtime
-behavior is activated
+Status: dormant wire contract complete; schema, configuration, negotiation,
+enforcement, and UI behavior remain inactive
 
 Baseline: `release/v0.9.6-4` at `634fa37`
 
@@ -277,7 +277,10 @@ Process/UI:
 
 ## Staged implementation order
 
-1. Add dormant protocol constants, shape enum, codec fixtures, and error type.
+1. **Complete (2026-07-27):** add dormant protocol constants, shape enum,
+   byte-exact independent codec fixtures, error type, and durable-capability
+   dependency. Evidence:
+   `docs/audits/omenchat-slow-mode-wire-qualification.md`.
 2. Add schema-12 storage, recovery, schema-11 export, and bounded admission
    ledger with fault tests.
 3. Add test-only atomic admission to durable and legacy message/action paths.
