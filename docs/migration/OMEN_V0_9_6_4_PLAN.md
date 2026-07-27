@@ -1531,6 +1531,19 @@ policy. Production capability negotiation and client policy projection remain
 dormant. Evidence is in
 `docs/audits/omenchat-announcement-rooms-authorization-qualification.md`.
 
+The client projection slice adds a bounded, session-owned policy map and
+disables member composer, upload, reaction, and revision controls only when
+the independent capability was explicitly requested and accepted. Capability
+loss clears evidence. Production negotiation remains dormant. A following
+current/current real-Link gate proves typed member rejection without a
+committed event before and after an orderly server restart, using the same
+isolated identity root and a new Link without automatic uncertain retry.
+Adjacent `v0.9.6-3` ordinary frames remain byte-exact; negotiated announcement
+traffic is not claimed for peers that cannot advertise it. Evidence is in
+`docs/audits/omenchat-announcement-rooms-client-projection-qualification.md`
+and
+`docs/audits/omenchat-announcement-rooms-process-qualification.md`.
+
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is
 indefinite and its event allocator derives the next identifier from retained

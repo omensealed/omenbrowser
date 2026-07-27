@@ -280,7 +280,15 @@ Production negotiation remains disabled until all applicable gates pass.
    omenchatd's TUI has no member composer and retains stopped-server policy
    administration during dormancy. Evidence is in
    `docs/audits/omenchat-announcement-rooms-client-projection-qualification.md`.
-5. Next: deterministic process, replacement-Link, adjacent-version, GUI
-   observation, and resource qualification plus a restart-only versus live
-   reload/fanout decision. Do not activate production negotiation before that
-   joint review.
+5. **Partial (2026-07-27):** current/current real-Link authorization now proves
+   typed member rejection with no committed event before and after an orderly
+   server restart. The same isolated identity root opens a new Link and no
+   uncertain mutation is resent automatically. Exact adjacent `v0.9.6-3`
+   ordinary fixtures remain compatible, but negotiated adjacent announcement
+   traffic is inapplicable while older peers cannot advertise the capability.
+   Evidence is in
+   `docs/audits/omenchat-announcement-rooms-process-qualification.md`.
+6. Next: negotiated current/current catalog/delta traffic, same-process
+   replacement-Link recovery, moderator and resource process cases, native GUI
+   observation, and a restart-only versus live reload/fanout decision. Do not
+   activate production negotiation before that joint review.

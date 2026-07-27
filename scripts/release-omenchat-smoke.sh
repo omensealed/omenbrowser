@@ -21,6 +21,7 @@ keep_roots=0
 multi_client=0
 restart_server=0
 continuous_client_reconnect=0
+announcement_rejection_smoke=0
 reaction_smoke=0
 revision_smoke=0
 pin_smoke=0
@@ -56,6 +57,8 @@ Options:
   --restart-server     Gracefully restart omenchatd, reuse the first browser root, and rerun smoke
   --continuous-client-reconnect
                        Keep one browser smoke process alive while omenchatd restarts
+  --announcement-rejection-smoke
+                       Configure lobby read-only and prove a member message is rejected without commit
   --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
   --revision-smoke     Exercise negotiated durable corrections, tombstones, replay, and Resource recovery
   --pin-smoke          Exercise moderator-only durable pin replay, snapshots, no-op, and unpin
@@ -142,6 +145,10 @@ while [[ $# -gt 0 ]]; do
       continuous_client_reconnect=1
       shift
       ;;
+    --announcement-rejection-smoke)
+      announcement_rejection_smoke=1
+      shift
+      ;;
     --reaction-smoke)
       reaction_smoke=1
       shift
@@ -218,6 +225,13 @@ if [[ -n "$server_large_batch_threshold_bytes" ]] \
 fi
 if [[ "$restart_server" -eq 1 && "$continuous_client_reconnect" -eq 1 ]]; then
   echo "--restart-server and --continuous-client-reconnect are separate cases" >&2
+  exit 2
+fi
+if [[ "$announcement_rejection_smoke" -eq 1 ]] \
+  && [[ "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
+    || -n "$upload_file" ]]; then
+  echo "--announcement-rejection-smoke is an isolated authorization case; combine it only with --restart-server" >&2
   exit 2
 fi
 if [[ ( "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 ) \
@@ -305,7 +319,6 @@ if [[ -z "$destination" ]]; then
   echo "could not parse OMENchat destination from omenchatd status" >&2
   exit 1
 fi
-
 echo "== Starting isolated omenchatd =="
 "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
   > "$run_dir/omenchatd-run.log" 2>&1 &
@@ -327,6 +340,56 @@ if ! grep -q 'live server ready' "$run_dir/omenchatd-run.log" 2>/dev/null; then
   echo "omenchatd did not become ready in time" >&2
   tail -n 80 "$run_dir/omenchatd-run.log" >&2 || true
   exit 1
+fi
+
+if [[ "$announcement_rejection_smoke" -eq 1 ]]; then
+  echo "== Stopping initialized omenchatd for room policy maintenance =="
+  kill "$server_pid"
+  for _ in {1..80}; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  if kill -0 "$server_pid" 2>/dev/null; then
+    echo "omenchatd did not stop before room policy maintenance" >&2
+    exit 1
+  fi
+  set +e
+  wait "$server_pid"
+  policy_stop_status=$?
+  set -e
+  case "$policy_stop_status" in
+    0|143) ;;
+    *)
+      echo "omenchatd returned unexpected policy-maintenance stop status $policy_stop_status" >&2
+      exit 1
+      ;;
+  esac
+  server_pid=""
+
+  echo "== Configuring isolated lobby as an announcement room =="
+  "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-room-policy.txt"
+
+  echo "== Restarting isolated omenchatd with announcement policy =="
+  "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+    > "$run_dir/omenchatd-run-policy-restart.log" 2>&1 &
+  server_pid="$!"
+  for _ in {1..80}; do
+    if grep -q 'live server ready' "$run_dir/omenchatd-run-policy-restart.log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "omenchatd exited after room policy maintenance" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if ! grep -q 'live server ready' "$run_dir/omenchatd-run-policy-restart.log" 2>/dev/null; then
+    echo "omenchatd did not restart after room policy maintenance" >&2
+    exit 1
+  fi
 fi
 
 echo "== Creating isolated browser identity =="
@@ -430,12 +493,17 @@ pin_args=()
 if [[ "$pin_smoke" -eq 1 ]]; then
   pin_args=(--omenchat-pin-smoke --omenchat-response-wait 30)
 fi
+announcement_rejection_args=()
+if [[ "$announcement_rejection_smoke" -eq 1 ]]; then
+  announcement_rejection_args=(--omenchat-announcement-rejection-smoke)
+fi
 "$browser_bin" \
   --omenchat-smoke "$destination" \
   "${client_interface_args[@]}" \
   --path-wait "$path_wait" \
   --app-root "$browser_root" \
   --omenchat-message "$message" \
+  "${announcement_rejection_args[@]}" \
   "${reaction_args[@]}" \
   "${revision_args[@]}" \
   "${pin_args[@]}" \
@@ -688,6 +756,7 @@ if [[ "$restart_server" -eq 1 ]]; then
     --path-wait "$path_wait" \
     --app-root "$browser_root" \
     --omenchat-message "${message} (after server restart)" \
+    "${announcement_rejection_args[@]}" \
     "${reaction_args[@]}" \
     "${revision_args[@]}" \
     "${pin_args[@]}" \
@@ -774,6 +843,7 @@ server_home: $server_home
 multi_client: $multi_client
 restart_server: $restart_server
 continuous_client_reconnect: $continuous_client_reconnect
+announcement_rejection_smoke: $announcement_rejection_smoke
 reaction_smoke: $reaction_smoke
 revision_smoke: $revision_smoke
 pin_smoke: $pin_smoke

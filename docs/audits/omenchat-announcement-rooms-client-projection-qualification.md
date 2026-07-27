@@ -107,10 +107,15 @@ policy storage remain independently safe.
 
 ## Remaining activation gates
 
-- current/current process traffic with ordinary and announcement rooms;
+Current/current legacy-client member rejection and restart persistence now pass
+in `docs/audits/omenchat-announcement-rooms-process-qualification.md`. Still
+required:
+
+- negotiated current/current process traffic with announcement room
+  catalog/delta evidence and moderator publication;
 - room delta and replacement-Link behavior in a live process;
-- adjacent-version old-client/current-server and current-client/old-server
-  traffic;
+- adjacent ordinary fixtures pass; any additional live adjacent case must not
+  pretend an older peer advertises this capability;
 - native GUI observation of member and moderator controls;
 - live server policy reload/fanout design, or a documented restart-only
   activation contract;

@@ -104,6 +104,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         destination,
         room,
         message,
+        announcement_rejection_smoke,
         reaction_smoke,
         revision_smoke,
         pin_smoke,
@@ -213,9 +214,12 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             let report = omenchat_smoke_report(
                 false,
                 "link_open",
-                &destination,
-                &room,
-                &message,
+                OmenChatSmokeReportContext {
+                    destination: &destination,
+                    room: &room,
+                    message: &message,
+                    announcement_rejection_smoke,
+                },
                 stages,
                 None,
             );
@@ -267,9 +271,12 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         let report = omenchat_smoke_report(
             false,
             "session_open",
-            &destination,
-            &room,
-            &message,
+            OmenChatSmokeReportContext {
+                destination: &destination,
+                room: &room,
+                message: &message,
+                announcement_rejection_smoke,
+            },
             stages,
             None,
         );
@@ -356,9 +363,21 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         Vec::new()
     };
     let message_seen = omenchat_session_contains_message(&client, session_id, &message);
+    let announcement_rejected =
+        omenchat_smoke_events_contain_announcement_policy_rejection(&message_events);
     stages.push(serde_json::json!({
-        "stage": "message_echo_wait",
-        "ok": message_seen,
+        "stage": if announcement_rejection_smoke {
+            "announcement_rejection_wait"
+        } else {
+            "message_echo_wait"
+        },
+        "ok": if announcement_rejection_smoke {
+            announcement_rejected && !message_seen
+        } else {
+            message_seen
+        },
+        "announcement_rejected": announcement_rejected,
+        "committed_message_seen": message_seen,
         "events": message_events,
     }));
 
@@ -666,11 +685,23 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             "status": session.status.clone(),
         })
     });
-    let outcome =
-        joined && message_seen && reaction_ok && revision_ok && pin_ok && upload_ok && reconnect_ok;
+    let message_outcome = if announcement_rejection_smoke {
+        announcement_rejected && !message_seen
+    } else {
+        message_seen
+    };
+    let outcome = joined
+        && message_outcome
+        && reaction_ok
+        && revision_ok
+        && pin_ok
+        && upload_ok
+        && reconnect_ok;
     let failed_stage = if !joined {
         "join_wait"
-    } else if !message_seen {
+    } else if !message_outcome && announcement_rejection_smoke {
+        "announcement_rejection_wait"
+    } else if !message_outcome {
         "message_echo_wait"
     } else if !reaction_ok {
         "reaction_smoke"
@@ -688,9 +719,12 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
     let report = omenchat_smoke_report(
         outcome,
         failed_stage,
-        &destination,
-        &room,
-        &message,
+        OmenChatSmokeReportContext {
+            destination: &destination,
+            room: &room,
+            message: &message,
+            announcement_rejection_smoke,
+        },
         stages,
         session_summary,
     );
@@ -751,7 +785,8 @@ async fn wait_for_omenchat_condition(
     } = options;
     let deadline = tokio::time::Instant::now() + wait;
     let mut events = Vec::new();
-    while tokio::time::Instant::now() < deadline && !condition(client) {
+    let mut terminal_client_error = false;
+    while tokio::time::Instant::now() < deadline && !condition(client) && !terminal_client_error {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let received = tokio::time::timeout(remaining, runtime_events.recv()).await;
         let event = match received {
@@ -782,6 +817,9 @@ async fn wait_for_omenchat_condition(
                     transport,
                     Some(session_id),
                 );
+                terminal_client_error = decoded.iter().any(|event| {
+                    matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. })
+                });
                 events.push(serde_json::json!({
                     "event": "link_data",
                     "bytes": bytes,
@@ -806,6 +844,9 @@ async fn wait_for_omenchat_condition(
                     transport,
                     Some(session_id),
                 );
+                terminal_client_error = decoded.iter().any(|event| {
+                    matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. })
+                });
                 events.push(serde_json::json!({
                     "event": "resource_data",
                     "bytes": bytes,
@@ -2614,6 +2655,30 @@ fn omenchat_smoke_events_contain_decoded_event(
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_smoke_events_contain_announcement_policy_rejection(
+    events: &[serde_json::Value],
+) -> bool {
+    events.iter().any(|entry| {
+        entry
+            .get("decoded")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|decoded| {
+                decoded.iter().any(|event| {
+                    event.get("event").and_then(serde_json::Value::as_str) == Some("error")
+                        && event
+                            .get("message")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|message| {
+                                message.starts_with("room is read-only for members:")
+                                    && message
+                                        .contains("restricted to moderators and administrators")
+                            })
+                })
+            })
+    })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_json::Value {
     match event {
         omenbrowser_rs::chat::ChatClientEvent::ServerOpened { session_id, server } => {
@@ -2943,21 +3008,36 @@ fn format_chat_timeline_event(event: &omenbrowser_rs::chat::ChatEvent) -> serde_
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Copy)]
+struct OmenChatSmokeReportContext<'a> {
+    destination: &'a str,
+    room: &'a str,
+    message: &'a str,
+    announcement_rejection_smoke: bool,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_smoke_report(
     ok: bool,
     stage: &str,
-    destination: &str,
-    room: &str,
-    message: &str,
+    context: OmenChatSmokeReportContext<'_>,
     stages: Vec<serde_json::Value>,
     session: Option<serde_json::Value>,
 ) -> serde_json::Value {
+    let OmenChatSmokeReportContext {
+        destination,
+        room,
+        message,
+        announcement_rejection_smoke,
+    } = context;
     serde_json::json!({
         "report": "omenchat_smoke",
         "classification": {
             "outcome": if ok { "pass" } else { "fail" },
             "stage": stage,
-            "reason": if ok {
+            "reason": if ok && announcement_rejection_smoke {
+                "OMENchat Link opened, room joined, and the server rejected member publication without committing the message"
+            } else if ok {
                 "OMENchat Link opened, room joined, and message echo was observed"
             } else {
                 "OMENchat smoke did not complete all required stages"
@@ -2971,6 +3051,7 @@ fn omenchat_smoke_report(
         "destination": destination,
         "room": room,
         "message": message,
+        "announcement_rejection_smoke": announcement_rejection_smoke,
         "stages": stages,
         "session": session,
     })
@@ -3036,7 +3117,10 @@ fn hex_bytes(bytes: &[u8]) -> String {
     any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
 ))]
 mod tests {
-    use super::create_omenchat_reconnect_ready_file;
+    use super::{
+        create_omenchat_reconnect_ready_file,
+        omenchat_smoke_events_contain_announcement_policy_rejection,
+    };
 
     #[test]
     fn reconnect_ready_marker_is_create_new_and_isolated() {
@@ -3051,5 +3135,28 @@ mod tests {
         assert_eq!(std::fs::read(&marker).expect("read marker"), b"ready\n");
         assert!(create_omenchat_reconnect_ready_file(&marker).is_err());
         std::fs::remove_dir_all(root).expect("remove isolated marker root");
+    }
+
+    #[test]
+    fn announcement_rejection_evidence_requires_the_typed_policy_error() {
+        let rejected = vec![serde_json::json!({
+            "event": "link_data",
+            "decoded": [{
+                "event": "error",
+                "message": "room is read-only for members: publishing messages is restricted to moderators and administrators in this announcement room"
+            }]
+        })];
+        assert!(omenchat_smoke_events_contain_announcement_policy_rejection(
+            &rejected
+        ));
+
+        let unrelated = vec![serde_json::json!({
+            "event": "link_data",
+            "decoded": [{
+                "event": "error",
+                "message": "permission denied: user is muted"
+            }]
+        })];
+        assert!(!omenchat_smoke_events_contain_announcement_policy_rejection(&unrelated));
     }
 }

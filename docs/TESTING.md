@@ -4672,6 +4672,32 @@ This does not claim negotiated room-policy evidence, GUI/TUI controls, process
 traffic, or adjacent-version compatibility. Evidence is in
 `docs/audits/omenchat-announcement-rooms-authorization-qualification.md`.
 
+Current/current real-Link member authorization and restart persistence are
+covered by:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out <isolated-output-root> \
+  --message "announcement policy qualification" \
+  --announcement-rejection-smoke \
+  --restart-server
+```
+
+The mode performs one normal server start before stopped-server policy
+maintenance, then requires typed policy error `1016` and no committed message
+both before and after an orderly restart. The browser reuses its isolated
+identity root and opens a new Link; each attempted message is explicit and no
+uncertain mutation is resent automatically. Production capability negotiation
+remains dormant, so this gate does not claim five-field catalog/delta traffic,
+same-process capability recovery, moderator/resource process traffic, native
+GUI observation, or adjacent-binary support for a capability older peers
+cannot advertise. Evidence is in
+`docs/audits/omenchat-announcement-rooms-process-qualification.md`.
+
 The first moderation-audit slice reserves a read-only operation range and
 bounded shared types without requesting or accepting
 `moderation-audit-v1`:
