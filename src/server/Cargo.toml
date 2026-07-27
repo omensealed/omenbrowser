@@ -21,6 +21,9 @@ live-reticulum = ["dep:rand_core", "dep:reticulum-rs", "dep:rns_transport", "dep
 tui = ["dep:crossterm", "dep:ratatui"]
 server-headless = ["live-reticulum"]
 server-full = ["server-headless", "tui"]
+# Explicit real-process qualification only. Packaged server aliases must not
+# include this before the announcement-room activation review completes.
+omenchat-announcement-qualification = []
 
 [[bin]]
 name = "omenchatd"

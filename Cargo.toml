@@ -45,6 +45,9 @@ chat-client-rns = ["chat-client-reticulum"]
 chat-client-rns-legacy = ["chat-client", "experimental-rns-net-stack"]
 chat-client-lxmf = ["chat-client", "native-lxmf-sdk"]
 chat-client-popout = ["chat-client"]
+# Explicit real-process qualification only. Canonical product aliases must
+# never include this until the announcement-room activation review completes.
+omenchat-announcement-qualification = []
 
 # Canonical build identities. Release and packaging commands must use
 # `--no-default-features --features desktop-product`; development profiles keep

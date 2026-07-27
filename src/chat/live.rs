@@ -890,17 +890,21 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         .client_instance_id
         .filter(|_| state.durable_mutation_owner_ready)
     {
+        let mut requested_capabilities = vec![
+            DURABLE_MUTATION_CAPABILITY.into(),
+            DURABLE_NOTICE_ACK_CAPABILITY.into(),
+            REPLY_MENTIONS_CAPABILITY.into(),
+            REACTIONS_CAPABILITY.into(),
+            super::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
+            super::protocol::ROOM_PINS_CAPABILITY.into(),
+        ];
+        if cfg!(feature = "omenchat-announcement-qualification") {
+            requested_capabilities.push(ANNOUNCEMENT_ROOMS_CAPABILITY.into());
+        }
         session_open_body = match with_session_open_negotiation(
             session_open_body,
             &SessionOpenNegotiation {
-                requested_capabilities: vec![
-                    DURABLE_MUTATION_CAPABILITY.into(),
-                    DURABLE_NOTICE_ACK_CAPABILITY.into(),
-                    REPLY_MENTIONS_CAPABILITY.into(),
-                    REACTIONS_CAPABILITY.into(),
-                    super::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
-                    super::protocol::ROOM_PINS_CAPABILITY.into(),
-                ],
+                requested_capabilities,
                 client_instance_id: Some(client_instance_id),
             },
         ) {
@@ -935,6 +939,9 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         state.reaction_requests.insert(session_id);
         state.message_revision_requests.insert(session_id);
         state.pin_requests.insert(session_id);
+        if cfg!(feature = "omenchat-announcement-qualification") {
+            state.announcement_room_requests.insert(session_id);
+        }
     }
 
     let room_name = client
@@ -5890,21 +5897,27 @@ mod tests {
             .requested_capabilities
             .iter()
             .any(|capability| capability == crate::chat::protocol::ROOM_PINS_CAPABILITY));
-        assert!(!negotiation
-            .requested_capabilities
-            .iter()
-            .any(|capability| capability == crate::chat::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY));
+        assert_eq!(
+            negotiation.requested_capabilities.iter().any(
+                |capability| capability == crate::chat::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY
+            ),
+            cfg!(feature = "omenchat-announcement-qualification")
+        );
+        let mut expected_capabilities = vec![
+            DURABLE_MUTATION_CAPABILITY.into(),
+            DURABLE_NOTICE_ACK_CAPABILITY.into(),
+            REPLY_MENTIONS_CAPABILITY.into(),
+            REACTIONS_CAPABILITY.into(),
+            crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
+            crate::chat::protocol::ROOM_PINS_CAPABILITY.into(),
+        ];
+        if cfg!(feature = "omenchat-announcement-qualification") {
+            expected_capabilities.push(crate::chat::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY.into());
+        }
         assert_eq!(
             crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
             Ok(Some(SessionOpenNegotiation {
-                requested_capabilities: vec![
-                    DURABLE_MUTATION_CAPABILITY.into(),
-                    DURABLE_NOTICE_ACK_CAPABILITY.into(),
-                    REPLY_MENTIONS_CAPABILITY.into(),
-                    REACTIONS_CAPABILITY.into(),
-                    crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
-                    crate::chat::protocol::ROOM_PINS_CAPABILITY.into(),
-                ],
+                requested_capabilities: expected_capabilities,
                 client_instance_id: Some(client_instance_id),
             }))
         );
@@ -5919,6 +5932,10 @@ mod tests {
         assert!(!state.message_revisions_negotiated(1));
         assert!(!state.pins_negotiated(1));
         assert!(!state.moderation_audit_negotiated(1));
+        assert_eq!(
+            state.announcement_room_requests.contains(&1),
+            cfg!(feature = "omenchat-announcement-qualification")
+        );
     }
 
     #[test]

@@ -2,11 +2,12 @@
 
 Date: 2026-07-27
 
-Baseline: `release/v0.9.6-4` through `5250d52`, plus this dormant server
-catalog-negotiation unit
+Baseline: `release/v0.9.6-4` through `00f7236`, plus this explicit
+qualification-feature unit
 
-Verdict: dormant shared wire contract and test-enabled server catalog
-negotiation pass; production request/acceptance remains disabled
+Verdict: dormant shared wire contract plus explicit client/server
+qualification profiles pass; canonical product request/acceptance remains
+disabled
 
 ## Scope
 
@@ -46,6 +47,13 @@ bounded clone. Because the production server still cannot accept the
 capability, its empty binding map takes the original borrowed-frame fast path
 with no added lookup or clone.
 
+The root and standalone server now each expose a dependency-free,
+non-default `omenchat-announcement-qualification` feature. It changes only the
+explicit qualification binary identities: the client requests the capability
+and retains the pending request; the server enables its already-qualified
+acceptance boundary. Canonical aliases remain unchanged, and the machine
+product-feature assertion treats qualification leakage as an error.
+
 ## Wire invariants
 
 - Legacy room values remain exactly
@@ -82,6 +90,14 @@ cargo test --locked --no-default-features --features desktop-product \
   --features server-headless \
   test_enabled_announcement_rooms_shape_join_and_delta_per_authenticated_link \
   --lib -- --nocapture)
+cargo test --locked --no-default-features \
+  --features desktop-product,omenchat-announcement-qualification \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity \
+  --lib -- --nocapture
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless,omenchat-announcement-qualification \
+  announcement_room --lib -- --nocapture)
+bash scripts/verify-product-features.sh
 ```
 
 Focused results:
@@ -95,6 +111,12 @@ Focused results:
 - test-enabled server catalog negotiation plus normal server dormancy: 2
   passed;
 - mixed legacy/negotiated authenticated Link shaping: 1 passed;
+- qualification client vector: 1 passed;
+- qualification server policy tests: 6 passed;
+- canonical animated/static desktop and headless server feature assertion:
+  passed with qualification excluded;
+- qualification desktop/server all-target strict Clippy: passed with
+  `-D warnings`;
 - standalone server-headless all-target strict Clippy: passed with
   `-D warnings`.
 

@@ -4774,6 +4774,26 @@ does not. The test requires five-field JoinAccept/RoomDelta values only on the
 negotiated Link, four-field values on the legacy Link, and binding removal on
 identity replacement. Production acceptance remains disabled.
 
+Explicit qualification feature identities are checked with:
+
+```bash
+cargo test --locked --no-default-features \
+  --features desktop-product,omenchat-announcement-qualification \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity \
+  --lib -- --nocapture
+
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features \
+  --features server-headless,omenchat-announcement-qualification \
+  announcement_room --lib -- --nocapture
+
+bash scripts/verify-product-features.sh
+```
+
+The first two commands require request/accept behavior only in explicit
+qualification builds. The product assertion requires canonical animated,
+static-media, and headless server graphs to exclude that feature.
+
 Standard-member upload rejection before server acceptance or allocation is
 covered by:
 

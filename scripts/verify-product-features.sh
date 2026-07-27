@@ -15,7 +15,7 @@ for feature in "${required[@]}"; do
   fi
 done
 
-forbidden=(mock-runtime desktop-dev desktop-test desktop-ui-test native-rns-net experimental-rns-net-stack legacy-live-rns-net chat-client-rns-legacy)
+forbidden=(mock-runtime desktop-dev desktop-test desktop-ui-test native-rns-net experimental-rns-net-stack legacy-live-rns-net chat-client-rns-legacy omenchat-announcement-qualification)
 for feature in "${forbidden[@]}"; do
   if grep -q "omenbrowser_rs feature \"$feature\"" <<<"$tree"; then
     echo "product feature verification failed: forbidden feature '$feature' is active" >&2
@@ -53,6 +53,11 @@ done
 
 static_media_dependencies="$(cargo tree --locked -e features --no-default-features --features desktop-product-static-media)"
 static_media_features="$(cargo tree --locked -e features --no-default-features --features desktop-product-static-media -i omenbrowser_rs)"
+if grep -q 'omenbrowser_rs feature "omenchat-announcement-qualification"' \
+  <<<"$static_media_features"; then
+  echo "product feature verification failed: static-media product activates announcement qualification" >&2
+  exit 1
+fi
 if grep -Eq '(^|[[:space:]])iced_gif v' <<<"$static_media_dependencies"; then
   echo "product feature verification failed: static-media product includes iced_gif" >&2
   exit 1
@@ -208,6 +213,18 @@ widget_tree="$(cargo tree --locked -e features --no-default-features --features 
 for font_feature in lucide nerd codicon; do
   if grep -qF "iced_fonts feature \"$font_feature\"" <<<"$widget_tree"; then
     echo "product feature verification failed: desktop-widgets includes unused iced_fonts/$font_feature" >&2
+    exit 1
+  fi
+done
+
+for server_profile in server-headless server-full; do
+  server_features="$(
+    cargo tree --locked --manifest-path src/server/Cargo.toml -e features \
+      --no-default-features --features "$server_profile" -i omenchatd
+  )"
+  if grep -q 'omenchatd feature "omenchat-announcement-qualification"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile activates announcement qualification" >&2
     exit 1
   fi
 done

@@ -316,6 +316,11 @@ Production negotiation remains disabled until all applicable gates pass.
     negotiated test peer and unchanged four-field values to a simultaneous
     legacy peer; identity/link retirement clears the bounded binding. The
     normal server constructor remains dormant.
-11. Next: current/current and mixed replacement-Link process traffic plus
-    native GUI observation. Do not activate production negotiation before that
-    joint review.
+11. **Partial (2026-07-27):** independent, dependency-free, non-default
+    qualification features let explicit client/server binaries request and
+    accept the capability. Canonical desktop/static-media/server aliases are
+    unchanged, and the product graph assertion rejects leakage. Real
+    current/current and mixed replacement-Link process traffic remains.
+12. Next: run current/current and mixed replacement-Link qualification
+    binaries, then native GUI observation. Do not activate production aliases
+    before that joint review.

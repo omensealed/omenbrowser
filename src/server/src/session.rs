@@ -366,7 +366,7 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
-            announcement_rooms_enabled: false,
+            announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-qualification"),
         }
     }
 
@@ -379,7 +379,7 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
-            announcement_rooms_enabled: false,
+            announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-qualification"),
         }
     }
 
@@ -399,7 +399,7 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
-            announcement_rooms_enabled: false,
+            announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-qualification"),
         }
     }
 
@@ -6218,6 +6218,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "omenchat-announcement-qualification"))]
     fn announcement_rooms_capability_remains_dormant() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(
@@ -6260,6 +6261,13 @@ mod tests {
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(None)
         );
+    }
+
+    #[test]
+    #[cfg(feature = "omenchat-announcement-qualification")]
+    fn announcement_room_qualification_feature_enables_the_normal_engine() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        assert!(engine.announcement_rooms_enabled);
     }
 
     #[test]

@@ -1573,6 +1573,11 @@ five fields while simultaneous legacy peers retain four. Every identity/link
 retirement path clears the binding, and the production-dormant fast path adds
 no lookup or clone. Current/current and mixed replacement-Link process traffic
 must still pass before production activation.
+Independent root/server `omenchat-announcement-qualification` features now
+enable those dormant request/accept paths only for deliberately built
+qualification binaries. They add no dependency and remain outside every
+canonical release alias; the product-feature script rejects leakage. These
+binaries are the next real-Link process inputs, not release artifacts.
 
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is
