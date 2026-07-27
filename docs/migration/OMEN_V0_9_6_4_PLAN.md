@@ -1473,6 +1473,16 @@ reproducible commands are recorded in the paging qualification audit.
 Current/current process restart, adjacent-binary live traffic, and active
 Resource cancellation remain separate pre-activation gates.
 
+The subsequent cancellation review ran the existing real loopback Reticulum
+gate successfully: sender cancellation crosses the physical wire and the
+production bounded bridge while both Link ends remain active. This does not
+complete the moderation-audit client gate. The locked
+`reticulum-rs-transport 0.9.6` API exposes cancellation for an outbound
+Resource, but no public receiver-side cancellation operation for an inbound
+Resource. Production moderation-audit negotiation remains disabled; OMEN does
+not fork upstream, fabricate cancellation evidence, or close an otherwise
+healthy chat Link to hide the limitation.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

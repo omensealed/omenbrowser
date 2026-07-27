@@ -4633,6 +4633,23 @@ They exercise the configured client and per-room server ceilings using
 temporary isolated state, print host observations, and remove their files.
 They are not hardware-independent latency thresholds.
 
+The moderation-audit cancellation assessment reuses the real loopback
+Reticulum sender-cancel gate:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    reticulum_loopback_resource_cancel_crosses_wire_and_production_bridge \
+    -- --ignored --nocapture
+)
+```
+
+It proves outbound initiator cancellation and production bridge cleanup, not
+receiver-side cancellation of an inbound audit page. The locked
+`reticulum-rs-transport 0.9.6` API has no public receiver-cancel operation.
+Keep that distinction in test and release claims.
+
 Focused schema/storage gates:
 
 ```bash

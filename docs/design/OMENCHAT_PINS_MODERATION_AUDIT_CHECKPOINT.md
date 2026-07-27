@@ -498,9 +498,12 @@ The presentation must distinguish:
     metadata/size rejection, ordinary v0.9.6-3 fixture stability, dormant
     production negotiation, and privacy by construction. Invalid client pages
     clear the ephemeral projection. Current/current process restart,
-    adjacent-binary live traffic, and cancellation during an active Reticulum
-    Resource remain explicit pre-activation gates. Isolated bounded
-    server-store and client-projection measurements passed on 2026-07-27.
+    adjacent-binary live traffic, and receiver-side cancellation during an
+    active Reticulum Resource remain explicit pre-activation gates. Isolated
+    bounded server-store and client-projection measurements passed on
+    2026-07-27. The real 0.9.6 loopback sender-cancel path also passes, but the
+    locked upstream transport exposes no public receiver-cancel method; this
+    must not be described as client cancellation.
 13. Separately review activation only after the remaining process and
     measurement gates pass.
 

@@ -2,7 +2,7 @@
 
 Date: 2026-07-27
 
-Baseline: `release/v0.9.6-4` at `227e403`, plus this measurement unit.
+Baseline: `release/v0.9.6-4` at `e0780c7`, plus this cancellation assessment.
 
 ## Scope and activation state
 
@@ -69,6 +69,10 @@ cargo test --locked --no-default-features --features desktop-product \
 (cd src/server && cargo test --locked --no-default-features \
   --features server-headless moderation_audit_retention_measurement \
   --lib -- --ignored --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless \
+  reticulum_loopback_resource_cancel_crosses_wire_and_production_bridge \
+  -- --ignored --nocapture)
 ```
 
 Focused results:
@@ -93,6 +97,30 @@ These are reproducible observations, not release thresholds. The tests use
 isolated temporary roots, enforce the configured bounds, print their results,
 and remove the database/WAL/SHM files.
 
+## Cancellation boundary
+
+The real loopback Reticulum test passed in 0.48 seconds. It establishes a Link,
+physically observes the Resource advertisement and initiator-cancel packets,
+requires the production bounded bridge to emit an outbound-cancel terminal,
+keeps both Link ends active, drains its queue, joins its worker, and removes its
+isolated roots.
+
+That evidence is sender-side only. In the exactly locked
+`reticulum-rs-transport 0.9.6` source, public
+`Transport::cancel_resource()` calls `ResourceManager::cancel_outgoing()` and
+emits `ResourceInitiatorCancel`. The resource manager recognizes
+`ResourceReceiverCancel` on the wire, but no public receiver-side cancellation
+method is exposed. An OMENbrowser client receiving a moderation-audit Resource
+therefore cannot cancel that one inbound transfer through the upstream API
+without closing the entire Link.
+
+The client-side cancellation gate remains unmet. This project does not add a
+private upstream fork, synthesize a false terminal, lower protocol limits, or
+silently close a healthy OMENchat Link to claim otherwise. The bounded
+512-KiB/256-record per-session projection and existing hard compressed and
+decompressed payload limits remain the containment boundary while production
+negotiation is disabled.
+
 Full local results:
 
 - root tests: all executed tests passed (1,496 library tests passed, 31
@@ -112,7 +140,8 @@ soak, or release-mode measurement gates. None was converted to a pass.
 - continuation of an in-flight page across a replacement Link (the old Link
   authority is intentionally discarded);
 - adjacent-version binary live traffic;
-- cancellation during an active Reticulum Resource;
+- receiver-side cancellation during an active Reticulum Resource; this is not
+  exposed by the locked upstream transport API;
 - decompression-bomb process evidence;
 - user-facing audit presentation or production activation.
 
