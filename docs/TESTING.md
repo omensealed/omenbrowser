@@ -4585,6 +4585,27 @@ forces Resource transport for eligible history/reaction/revision batches;
 
 ## Dormant OMENchat moderation-audit contract
 
+The dormant announcement-room wire boundary is covered by:
+
+```bash
+cargo test --locked -p omenchat-protocol room_policy -- --nocapture
+cargo test --locked -p omenchat-protocol announcement_room -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  announcement_room_values_are_byte_exact_and_negotiation_scoped --lib
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    announcement_room --lib -- --nocapture
+)
+```
+
+These tests require exact legacy four-field and negotiated five-field room
+values, independent desktop/server MessagePack agreement, fixed known policy
+bits, bounds, explicit negotiation shape, and dormant production acceptance.
+They do not claim schema 11, authorization, presentation, process traffic, or
+activation. Evidence is in
+`docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
+
 The first moderation-audit slice reserves a read-only operation range and
 bounded shared types without requesting or accepting
 `moderation-audit-v1`:

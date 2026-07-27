@@ -5601,6 +5601,10 @@ mod tests {
             .requested_capabilities
             .iter()
             .any(|capability| capability == crate::chat::protocol::ROOM_PINS_CAPABILITY));
+        assert!(!negotiation
+            .requested_capabilities
+            .iter()
+            .any(|capability| capability == crate::chat::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY));
         assert_eq!(
             crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
             Ok(Some(SessionOpenNegotiation {

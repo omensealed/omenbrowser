@@ -10,6 +10,7 @@ mod negotiation;
 mod pins;
 mod reactions;
 mod rich_message;
+mod room_policy;
 
 pub use durable::*;
 pub use message_revisions::*;
@@ -18,6 +19,7 @@ pub use negotiation::*;
 pub use pins::*;
 pub use reactions::*;
 pub use rich_message::*;
+pub use room_policy::*;
 
 pub type ServerId = String;
 pub type RoomId = u32;
@@ -287,6 +289,13 @@ pub mod fixtures {
             b"\x96\x01\x34\x00\x0b\x07\x93\xb3moderation-audit-v1\x2a\x32";
     }
 
+    pub mod announcement_rooms_v1 {
+        pub const LEGACY_ROOM_DELTA: &[u8] =
+            b"\x96\x01\x21\x00\x0c\xc0\x91\x94\x07\xadannouncements\xb0Operator updates\x03";
+        pub const POLICY_ROOM_DELTA: &[u8] =
+            b"\x96\x01\x21\x00\x0c\xc0\x91\x95\x07\xadannouncements\xb0Operator updates\x03\x01";
+    }
+
     pub mod reply_mentions_v1 {
         pub const ROOM_MESSAGE: &[u8] =
             b"\x96\x01\x14\x00\x07\x07\x94\xa5hello\xb1reply-mentions-v1\x92\x07\x2a\x92\x02\x09";
@@ -333,6 +342,7 @@ mod tests {
         assert_eq!(MESSAGE_REVISIONS_CAPABILITY, "message-revisions-v1");
         assert_eq!(ROOM_PINS_CAPABILITY, "room-pins-v1");
         assert_eq!(MODERATION_AUDIT_CAPABILITY, "moderation-audit-v1");
+        assert_eq!(ANNOUNCEMENT_ROOMS_CAPABILITY, "announcement-rooms-v1");
         assert_eq!(DURABLE_NOTICE_ACK_CAPABILITY, "durable-room-notice-ack-v1");
         assert_eq!(ChatErrorCode::DurableMutationMalformed as u16, 1012);
         assert_eq!(ChatErrorCode::DurableMutationConflict as u16, 1013);

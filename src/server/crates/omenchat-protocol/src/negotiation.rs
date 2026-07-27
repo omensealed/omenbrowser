@@ -257,6 +257,7 @@ pub enum SessionNegotiationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ANNOUNCEMENT_ROOMS_CAPABILITY;
 
     fn current_session_open() -> FrameBody {
         FrameBody::Fields(vec![
@@ -443,5 +444,16 @@ mod tests {
         let body = with_session_accept_negotiation(current_session_accept(), &complete)
             .expect("dependent capability set");
         assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn announcement_room_evidence_is_an_independent_dormant_capability() {
+        let negotiation = SessionOpenNegotiation {
+            requested_capabilities: vec![ANNOUNCEMENT_ROOMS_CAPABILITY.into()],
+            client_instance_id: None,
+        };
+        let body = with_session_open_negotiation(current_session_open(), &negotiation)
+            .expect("independent announcement-room capability");
+        assert_eq!(parse_session_open_negotiation(&body), Ok(Some(negotiation)));
     }
 }

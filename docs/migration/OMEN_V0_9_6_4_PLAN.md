@@ -1503,6 +1503,15 @@ Implementation is deliberately split into dormant wire, storage/recovery,
 atomic authorization, administration, bounded presentation, qualification, and
 activation units. No behavior changes in the checkpoint slice.
 
+The first announcement-room implementation slice adds only the independent
+capability constant, fixed policy bit/mask, bounded legacy/negotiated room-value
+codec, and byte-exact fixtures shared by both independent MessagePack codecs.
+Legacy values remain four fields; negotiated values require exactly one policy
+field and reject unknown bits. Production OMENbrowser requests no capability
+and production omenchatd accepts none. Schema 10, room storage, authorization,
+configuration, client models, and presentation remain unchanged. Evidence is
+in `docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
+
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is
 indefinite and its event allocator derives the next identifier from retained

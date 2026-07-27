@@ -2,8 +2,9 @@
 
 Date: 2026-07-27
 
-Status: design checkpoint only; no schema, wire, configuration, authorization,
-client, GUI, or TUI behavior is activated
+Status: dormant shared wire constants/codecs implemented; no schema,
+configuration, authorization, client projection, GUI, TUI, or production
+negotiation is activated
 
 Baseline: `release/v0.9.6-4` at `1097a10`
 
@@ -252,3 +253,13 @@ Implementation may begin only as separate slices:
 7. joint activation review.
 
 Production negotiation remains disabled until all applicable gates pass.
+
+## Implementation record
+
+1. **Complete (2026-07-27):** add the independent capability name, fixed policy
+   bit/mask, bounded four/five-field room value codec, shared fixtures, and
+   byte-exact agreement in both independent MessagePack codecs. The production
+   client request vector and server acceptance remain unchanged. Evidence is in
+   `docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
+2. Next: schema 11, migration fault injection, and confirmation-gated schema-10
+   copy export. Do not combine it with authorization or activation.

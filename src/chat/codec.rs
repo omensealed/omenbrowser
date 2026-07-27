@@ -180,13 +180,13 @@ mod tests {
     use crate::chat::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
     use omenchat_protocol::fixtures::{
-        message_revisions_v1, moderation_audit_v1, pins_v1, reactions_v1, reply_mentions_v1,
-        v0_6_0_1, v0_9_6_3,
+        announcement_rooms_v1, message_revisions_v1, moderation_audit_v1, pins_v1, reactions_v1,
+        reply_mentions_v1, v0_6_0_1, v0_9_6_3,
     };
     use omenchat_protocol::{
         MessageRevisionAction, MessageRevisionRequest, ModerationAuditRequest, PinAction,
         PinRequest, ReactionAction, ReactionRequest, ReactionToken, ReplyReference,
-        RichMessageBody,
+        RichMessageBody, RoomCatalogEntry, ROOM_POLICY_ANNOUNCEMENT,
     };
 
     #[test]
@@ -260,6 +260,49 @@ mod tests {
         let decoded = decode_frame(&encoded).expect("decode frame");
 
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn announcement_room_values_are_byte_exact_and_negotiation_scoped() {
+        let room = RoomCatalogEntry {
+            room_id: 7,
+            name: "announcements".into(),
+            topic: Some("Operator updates".into()),
+            room_revision: 3,
+            policy_bits: ROOM_POLICY_ANNOUNCEMENT,
+        };
+        for (negotiated, fixture) in [
+            (false, announcement_rooms_v1::LEGACY_ROOM_DELTA),
+            (true, announcement_rooms_v1::POLICY_ROOM_DELTA),
+        ] {
+            let room_value = room
+                .clone()
+                .into_frame_value(negotiated)
+                .expect("bounded room value");
+            let frame = Frame::new(
+                ChatOp::RoomDelta,
+                12,
+                None,
+                FrameBody::Fields(vec![room_value]),
+            );
+            assert_eq!(encode_frame(&frame).expect("encode room delta"), fixture);
+            let decoded = decode_frame(fixture).expect("decode room delta");
+            assert_eq!(decoded, frame);
+            let FrameBody::Fields(values) = decoded.body else {
+                panic!("room delta must have fields");
+            };
+            assert_eq!(
+                RoomCatalogEntry::from_frame_value(&values[0], negotiated),
+                Ok(if negotiated {
+                    room.clone()
+                } else {
+                    RoomCatalogEntry {
+                        policy_bits: 0,
+                        ..room.clone()
+                    }
+                })
+            );
+        }
     }
 
     #[test]
