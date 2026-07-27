@@ -180,11 +180,11 @@ mod tests {
     use crate::chat::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
     use omenchat_protocol::fixtures::{
-        message_revisions_v1, reactions_v1, reply_mentions_v1, v0_6_0_1, v0_9_6_3,
+        message_revisions_v1, pins_v1, reactions_v1, reply_mentions_v1, v0_6_0_1, v0_9_6_3,
     };
     use omenchat_protocol::{
-        MessageRevisionAction, MessageRevisionRequest, ReactionAction, ReactionRequest,
-        ReactionToken, ReplyReference, RichMessageBody,
+        MessageRevisionAction, MessageRevisionRequest, PinAction, PinRequest, ReactionAction,
+        ReactionRequest, ReactionToken, ReplyReference, RichMessageBody,
     };
 
     #[test]
@@ -356,6 +356,30 @@ mod tests {
         );
         assert_eq!(
             decode_frame(message_revisions_v1::ROOM_MESSAGE_CORRECTION).expect("decode correction"),
+            frame
+        );
+    }
+
+    #[test]
+    fn pins_v1_fixture_is_bidirectionally_exact_and_dormant() {
+        let frame = Frame::new(
+            ChatOp::RoomPin,
+            10,
+            Some(7),
+            PinRequest {
+                target_event_id: 42,
+                action: PinAction::Pin,
+            }
+            .into_frame_body()
+            .expect("bounded pin"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode pin"),
+            pins_v1::ROOM_PIN_ADD
+        );
+        assert_eq!(
+            decode_frame(pins_v1::ROOM_PIN_ADD).expect("decode pin"),
             frame
         );
     }

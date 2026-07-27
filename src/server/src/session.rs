@@ -5363,6 +5363,32 @@ mod tests {
     }
 
     #[test]
+    fn dormant_pin_capability_is_not_accepted() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![
+                    crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                    crate::protocol::ROOM_PINS_CAPABILITY.into(),
+                ],
+                client_instance_id: Some(crate::protocol::ClientInstanceId::new([15; 16])),
+            },
+        )
+        .expect("dormant pin capability request");
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 2, None, request))
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
+            }))
+        );
+    }
+
+    #[test]
     fn dormant_message_revision_executor_replays_across_restart_without_refanout() {
         let path = temp_store_path("message-revision-replay");
         let (room_id, target_event_id) = {

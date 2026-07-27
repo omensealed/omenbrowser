@@ -1346,6 +1346,16 @@ dependencies, guarded downgrade copies, and staged dormant activation. No
 protocol number, schema, capability, storage, or UI behavior is changed by the
 checkpoint itself.
 
+The first dormant pin slice is complete. The shared protocol crate reserves
+operations 46–49 and defines exact request, acknowledgement, event, and
+target-scoped snapshot shapes. Snapshot input is limited to 256 explicit
+targets and 64 active pin entries, requires strictly increasing unique target
+order, and rejects entries outside the replacement set. Canonical durable
+hashing covers operation, room, target, and action. The desktop and standalone
+server codecs agree on one frozen byte fixture. Production capability request,
+acceptance, durable execution, persistence, fan-out, and UI behavior remain
+unchanged; a server regression test proves `room-pins-v1` is not accepted.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.

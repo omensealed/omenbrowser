@@ -404,8 +404,10 @@ The presentation must distinguish:
 
 ## Implementation order
 
-1. Add shared dormant pin types, operations 46–49, exact bounds, canonical hash
-   fixtures, and independent codec agreement. Keep negotiation unchanged.
+1. **Complete (2026-07-26):** add shared dormant pin types, operations 46–49,
+   exact bounds, canonical hash fixtures, and independent codec agreement.
+   Negotiation remains unchanged; the production client does not request
+   `room-pins-v1`, and omenchatd does not accept it.
 2. Add schema-9 pin state/audit, migration fault injection, recovery validation,
    bounded store operations, compaction dependencies, and schema-8 copy.
 3. Add transactional durable server execution and Link-scoped dormant

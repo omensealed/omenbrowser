@@ -4439,3 +4439,25 @@ ledger when restoring a ceiling would require more than the 64-event batch.
 The full server suite additionally exercises durable writers through the shared
 store boundary. Live mixed-version and restart/Resource smoke remain separate
 release gates.
+
+## Dormant OMENchat pin contract
+
+The first pin slice reserves the shared operations and bounded wire shapes
+without advertising or accepting `room-pins-v1`:
+
+```bash
+cargo test --locked -p omenchat-protocol
+cargo test --locked --no-default-features --features desktop-product \
+  --lib pins_v1_fixture_is_bidirectionally_exact_and_dormant
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pins_v1_fixture_is_bidirectionally_exact_and_dormant)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless dormant_pin_capability_is_not_accepted)
+```
+
+These tests cover exact request/ack/event/snapshot shapes, malformed and
+trailing values, identifier and timestamp validation, snapshot count and
+canonical-order bounds, target scoping, canonical durable hash inputs, and
+byte-exact agreement between the independent desktop and server codecs. They
+do not claim storage, authorization, replay, fan-out, client projection, UI,
+mixed-version live behavior, or capability activation.

@@ -6,12 +6,14 @@
 mod durable;
 mod message_revisions;
 mod negotiation;
+mod pins;
 mod reactions;
 mod rich_message;
 
 pub use durable::*;
 pub use message_revisions::*;
 pub use negotiation::*;
+pub use pins::*;
 pub use reactions::*;
 pub use rich_message::*;
 
@@ -69,6 +71,10 @@ pub enum ChatOp {
     HistoryEnd = 43,
     HistoryRecent = 44,
     HistoryCurrent = 45,
+    RoomPin = 46,
+    PinAck = 47,
+    PinEvent = 48,
+    PinSnapshot = 49,
     Command = 50,
     CommandResult = 51,
     ContactRequest = 60,
@@ -126,6 +132,10 @@ impl TryFrom<u64> for ChatOp {
             43 => Ok(Self::HistoryEnd),
             44 => Ok(Self::HistoryRecent),
             45 => Ok(Self::HistoryCurrent),
+            46 => Ok(Self::RoomPin),
+            47 => Ok(Self::PinAck),
+            48 => Ok(Self::PinEvent),
+            49 => Ok(Self::PinSnapshot),
             50 => Ok(Self::Command),
             51 => Ok(Self::CommandResult),
             60 => Ok(Self::ContactRequest),
@@ -258,6 +268,10 @@ pub mod fixtures {
             b"\x96\x01\x23\x00\x09\x07\x94\xb3message-revision-v1\x2a\x01\xa6edited";
     }
 
+    pub mod pins_v1 {
+        pub const ROOM_PIN_ADD: &[u8] = b"\x96\x01\x2e\x00\x0a\x07\x93\xabroom-pin-v1\x2a\x01";
+    }
+
     pub mod reply_mentions_v1 {
         pub const ROOM_MESSAGE: &[u8] =
             b"\x96\x01\x14\x00\x07\x07\x94\xa5hello\xb1reply-mentions-v1\x92\x07\x2a\x92\x02\x09";
@@ -293,11 +307,14 @@ mod tests {
         assert_eq!(ChatOp::RoomMessageRevision as u16, 35);
         assert_eq!(ChatOp::MessageRevisionSnapshotResource as u16, 39);
         assert_eq!(ChatOp::HistoryResourceOffer as u16, 42);
+        assert_eq!(ChatOp::RoomPin as u16, 46);
+        assert_eq!(ChatOp::PinSnapshot as u16, 49);
         assert_eq!(ChatErrorCode::MalformedFrame as u16, 1007);
         assert_eq!(ChatErrorCode::DurableMutationNotNegotiated as u16, 1011);
         assert_eq!(DURABLE_MUTATION_CAPABILITY, "durable-mutations-v1");
         assert_eq!(REACTIONS_CAPABILITY, "reactions-v1");
         assert_eq!(MESSAGE_REVISIONS_CAPABILITY, "message-revisions-v1");
+        assert_eq!(ROOM_PINS_CAPABILITY, "room-pins-v1");
         assert_eq!(DURABLE_NOTICE_ACK_CAPABILITY, "durable-room-notice-ack-v1");
         assert_eq!(ChatErrorCode::DurableMutationMalformed as u16, 1012);
         assert_eq!(ChatErrorCode::DurableMutationConflict as u16, 1013);
