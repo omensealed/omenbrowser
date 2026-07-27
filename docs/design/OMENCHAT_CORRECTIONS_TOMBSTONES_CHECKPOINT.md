@@ -32,7 +32,7 @@ This checkpoint does not authorize activation. Unit 6G now supplies persistent
 event-ID sequences, bounded usage accounting, dependency-aware compaction, a
 disabled-by-default policy, atomic admission integration, and explicit bounded
 ledger maintenance. That closes the structural retention prerequisite.
-The capability remains dormant until its durable desktop sender/actions and
+The capability remains dormant until its durable desktop prepare/actions and
 live current/current plus mixed-version gates pass.
 
 ## Existing boundaries verified
@@ -488,13 +488,23 @@ omenchatd state.
    An explicit-target snapshot establishes positive or negative authority; a
    validated negotiated live delta establishes authority only for its target.
    An exact delta replay re-establishes stale authority once, while stale or
-   conflicting deltas establish nothing. No sender, control, capability
-   request, timer, or retry is added.
-8. Add the bounded durable desktop sender and correction/tombstone controls
-   behind the still-dormant capability gate, then run deterministic,
+   conflicting deltas establish nothing. No control, capability request,
+   timer, or retry is added.
+8. **Bounded live sender complete and dormant.** A stored
+   `RoomMessageRevision` intent can enter the existing item-bounded
+   per-session pending mutation queue only when durable mutations and
+   `message-revisions-v1` are both negotiated. The request hash, client
+   instance, server, room, retained target, expiry, and typed body are
+   revalidated before transmission. Typed acknowledgements must match the
+   target, action, room, sequence, and authenticated local user. No optimistic
+   projection change occurs. Recovery validation and redacted operation labels
+   understand the operation, while ordinary composer drafts remain untouched.
+   Production still has no prepare action and requests no capability.
+9. Add the bounded durable desktop prepare path and correction/tombstone
+   controls behind the still-dormant capability gate, then run deterministic,
    mixed-version, retention, Resource, restart, fault, and live isolated smoke
    gates.
-9. Request and accept `message-revisions-v1` only after every gate passes.
+10. Request and accept `message-revisions-v1` only after every gate passes.
 
 Each step must leave root and standalone server builds valid and independently
 reversible. No step may introduce automatic retry.
@@ -623,6 +633,15 @@ another exact replay is idempotent. A stale or conflicting delta cannot restore
 authority, and untouched targets remain stale. Focused client and live-frame
 reducer tests cover these transitions. Production negotiation and mutation
 actions remain disabled.
+
+The bounded sender sub-slice subsequently added no new queue or retry owner.
+It reuses the existing pending mutation item limits and durable-intent
+persistence state. Focused live tests prove both-capability gating, no
+optimistic projection change, exact typed acknowledgement correlation, and
+pending-state retention after a mismatched acknowledgement. Desktop recovery
+validation rejects missing capability or malformed bodies, and recovered
+operation labels do not expose correction text. There is still no desktop
+prepare action or visible correction/tombstone control.
 
 ## Completion gate
 

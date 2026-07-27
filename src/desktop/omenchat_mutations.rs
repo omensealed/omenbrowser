@@ -9,8 +9,8 @@ use crate::chat::mutation_intents::{
     IntentTransition, OutboundMutationIntent, OutboundMutationState, OwnedPrepareOutboundMutation,
 };
 use crate::chat::protocol::{
-    ChatOp, FrameBody, MutationId, ReactionAction, ReactionRequest, ReactionToken, ReplyReference,
-    RichMessageBody,
+    ChatOp, FrameBody, MessageRevisionRequest, MutationId, ReactionAction, ReactionRequest,
+    ReactionToken, ReplyReference, RichMessageBody,
 };
 use crate::chat::{ChatClientEvent, ChatEventKind, ChatSessionId};
 
@@ -978,6 +978,24 @@ impl DesktopApp {
                 );
             }
         }
+        if intent.op == ChatOp::RoomMessageRevision {
+            if !self
+                .omenchat
+                .omenchat_live_state
+                .message_revisions_negotiated(session_id)
+            {
+                return Err(
+                    "the live OMENchat peer did not negotiate message-revisions-v1; this revision was not retried"
+                        .into(),
+                );
+            }
+            if MessageRevisionRequest::from_frame_body(&intent.body).is_err() {
+                return Err(
+                    "the recovered OMENchat message revision request is malformed; it was not sent"
+                        .into(),
+                );
+            }
+        }
         if self
             .omenchat
             .omenchat_live_state
@@ -1188,6 +1206,11 @@ impl DesktopApp {
                     .omenchat
                     .omenchat_live_state
                     .reactions_negotiated(session_id))
+            || (intent.op == ChatOp::RoomMessageRevision
+                && !self
+                    .omenchat
+                    .omenchat_live_state
+                    .message_revisions_negotiated(session_id))
             || !self
                 .omenchat
                 .omenchat_live_transports
@@ -1316,6 +1339,15 @@ impl DesktopApp {
                     session_id,
                     &intent,
                 ),
+                ChatOp::RoomMessageRevision => {
+                    crate::chat::live::send_uncertain_durable_message_revision(
+                        &mut self.omenchat.chat_client,
+                        &mut self.omenchat.omenchat_live_state,
+                        transport,
+                        session_id,
+                        &intent,
+                    )
+                }
                 ChatOp::PartRoom => crate::chat::live::send_uncertain_durable_part_room(
                     &mut self.omenchat.chat_client,
                     &mut self.omenchat.omenchat_live_state,
@@ -1375,7 +1407,7 @@ impl DesktopApp {
         let failed = events
             .iter()
             .any(|event| matches!(event, ChatClientEvent::Error { .. }));
-        if !failed && !recovered {
+        if !failed && !recovered && intent.op != ChatOp::RoomMessageRevision {
             self.omenchat.chat_drafts.insert(session_id, String::new());
             if let Ok(sent) = RichMessageBody::from_frame_body(&intent.body) {
                 let selected_reply =
@@ -1815,6 +1847,42 @@ mod tests {
         assert!(desktop
             .recovered_omenchat_retry_session_id(&recovered_reaction)
             .is_err());
+
+        let revision_body = MessageRevisionRequest {
+            target_event_id: 9,
+            action: crate::chat::protocol::MessageRevisionAction::Correct,
+            replacement: Some("corrected".into()),
+        }
+        .into_frame_body()
+        .expect("message revision body");
+        let recovered_revision = OutboundMutationIntent {
+            mutation_id: MutationId::new([0x76; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomMessageRevision,
+                Some(1),
+                &revision_body,
+            )
+            .expect("message revision request hash"),
+            op: ChatOp::RoomMessageRevision,
+            body: revision_body,
+            ..recovered.clone()
+        };
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_revision)
+            .expect_err("dormant capability must block recovered revision retry")
+            .contains("did not negotiate message-revisions-v1"));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_message_revisions_negotiated_for_test(session_id, true);
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&recovered_revision),
+            Ok(session_id)
+        );
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_message_revisions_negotiated_for_test(session_id, false);
     }
 
     #[tokio::test]

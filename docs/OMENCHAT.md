@@ -127,9 +127,10 @@ immutable room history. It is bounded per room, server, and identity-scoped
 cache by rows and stable retained bytes; strict deltas and authoritative
 explicit-target snapshots are persisted transactionally and reconciled after
 restart. Invalid snapshots retain prior rows while clearing authoritative
-evidence. The reserved durable-intent operation is storage-capable, but there
-is no sender or GUI action. Session-open still omits `message-revisions-v1`,
-and unsolicited acceptance cannot enable it.
+evidence. The reserved durable-intent operation has a bounded live sender and
+exact typed acknowledgement correlation, but there is no desktop prepare path
+or GUI action. Session-open still omits `message-revisions-v1`, and unsolicited
+acceptance cannot enable it.
 The shared Iced timeline now has dormant read-only presentation for that
 projection. It borrows only authoritative rows for retained targets:
 corrections show effective text with an edited marker, while tombstones hide
@@ -138,8 +139,10 @@ actions. Stale restored rows remain hidden until an explicit-target snapshot
 or a validated negotiated live delta re-establishes authority for that target.
 An exact live replay restores stale target evidence once without changing the
 retained row; stale or conflicting deltas restore nothing, and other targets
-remain stale. This adds no capability request, sender, control, worker, timer,
-retry, or per-redraw revision-body clone.
+remain stale. This adds no capability request, control, worker, timer, retry,
+or per-redraw revision-body clone. The dormant sender never applies revision
+state optimistically and uses the existing item-bounded per-session pending
+mutation queue.
 
 The desktop client's independent `chat.sqlite` adds a default-off
 `rooms.mute_except_mentions` preference. It is shown only when a negotiated

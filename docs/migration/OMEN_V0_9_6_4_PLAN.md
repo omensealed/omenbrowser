@@ -1248,11 +1248,10 @@ store. An additive SQLite cache replaces only explicit snapshot target sets in
 one transaction, survives restart, and rolls back saturation or malformed
 updates without partial state. Deltas are strictly ordered and exact
 duplicates are idempotent. The reserved durable-intent operation can be
-persisted and recovered, but no sender invokes it. Inline/Resource decoding
-and desktop persistence routing exist behind a test-only negotiated-state
-injection. Production requests still omit `message-revisions-v1`, unsolicited
-acceptance is ignored, and there is no GUI action, timer, retry, or capability
-activation.
+persisted and recovered. Inline/Resource decoding and desktop persistence
+routing exist behind a test-only negotiated-state injection. Production
+requests still omit `message-revisions-v1`, unsolicited acceptance is ignored,
+and there is no GUI action, timer, retry, or capability activation.
 
 The sixth dormant slice connects that project-owned projection to the shared
 Iced OMENchat timeline without adding a mutation action. Only retained targets
@@ -1272,6 +1271,17 @@ An exact replay restores stale target authority once and then remains
 idempotent. Stale/conflicting deltas restore no evidence. This makes the
 read-only projection react safely to live committed revisions without adding a
 sender, capability request, retry, timer, or room-wide inference.
+
+The eighth dormant slice adds the bounded transport sender without adding a
+desktop prepare action. It revalidates the durable request hash, client
+instance, expiry, server, room, retained target, typed body, and both negotiated
+capabilities before using the existing per-session pending mutation limit.
+Typed acknowledgements require the original sequence, room, target, action,
+and authenticated local user before completing the durable intent. A send or
+ack never changes the revision projection optimistically. Recovered-intent
+validation and redacted labels understand the operation, and revision sends do
+not clear an unrelated ordinary composer draft. Production negotiation remains
+disabled.
 
 ### Unit 6F — pins and moderation audit history
 

@@ -893,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn dormant_message_revision_intent_kind_is_restart_safe_without_a_sender() {
+    fn dormant_message_revision_intent_kind_is_restart_safe_without_capability_activation() {
         let root = isolated_root("message-revision-restart");
         let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
         let body = crate::chat::protocol::MessageRevisionRequest {

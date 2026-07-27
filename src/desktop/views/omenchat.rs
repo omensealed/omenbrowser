@@ -27,6 +27,15 @@ fn recovered_mutation_operation(
             },
             Err(_) => "reaction",
         },
+        ChatOp::RoomMessageRevision => {
+            match crate::chat::protocol::MessageRevisionRequest::from_frame_body(body) {
+                Ok(request) => match request.action {
+                    crate::chat::protocol::MessageRevisionAction::Correct => "message correction",
+                    crate::chat::protocol::MessageRevisionAction::Tombstone => "message deletion",
+                },
+                Err(_) => "message revision",
+            }
+        }
         ChatOp::PartRoom => "leave room",
         ChatOp::Command => match body {
             FrameBody::Text(command) => match command.split_whitespace().next() {
@@ -1061,6 +1070,21 @@ mod accessibility_tests {
         assert_eq!(
             recovered_mutation_operation(ChatOp::RoomReaction, &reaction),
             "add reaction"
+        );
+        let correction = crate::chat::protocol::MessageRevisionRequest {
+            target_event_id: 7,
+            action: crate::chat::protocol::MessageRevisionAction::Correct,
+            replacement: Some("private corrected body".into()),
+        }
+        .into_frame_body()
+        .expect("message revision body");
+        assert_eq!(
+            recovered_mutation_operation(ChatOp::RoomMessageRevision, &correction),
+            "message correction"
+        );
+        assert!(
+            !recovered_mutation_operation(ChatOp::RoomMessageRevision, &correction)
+                .contains("private corrected body")
         );
         assert!(!recovered_mutation_operation(ChatOp::Command, &secret_body)
             .contains("private-target-name"));
