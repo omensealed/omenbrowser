@@ -1583,8 +1583,12 @@ announcement policy, emits the exact local preflight error, queues no
 publication frame, and observes no committed message. The canonical
 non-negotiated process case separately still receives typed server rejection
 `1016`, so qualification does not weaken server enforcement. Native GUI
-observation and an explicit activation review remain; qualification binaries
-are not release artifacts.
+observation now also passes under isolated Linux Xvfb/i3: the Iced pane shows
+the policy banner, retains a local draft, and leaves member Send/Attach inert,
+while the server remains at `chat:0`. Windows/macOS presentation remains a
+later release-candidate gate. The explicit production activation patch and
+full local product matrices remain; qualification binaries are not release
+artifacts.
 
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is

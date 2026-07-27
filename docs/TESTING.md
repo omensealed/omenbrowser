@@ -4816,6 +4816,14 @@ server rejection. Run the ordinary `--announcement-rejection-smoke` against
 canonical binaries separately to preserve typed server-error `1016`
 enforcement evidence.
 
+Native Linux GUI presentation was additionally observed with those
+qualification binaries against an isolated loopback server under Xvfb/i3.
+The connected Iced pane must show the announcement-room banner, retain a local
+draft, and leave member Send/Attach actions inert. After an attempted Send,
+the isolated server's shutdown counters must still report `chat:0`. Exact
+setup, evidence boundaries, and limitations are recorded in
+`docs/audits/omenchat-announcement-rooms-gui-qualification.md`.
+
 Standard-member upload rejection before server acceptance or allocation is
 covered by:
 

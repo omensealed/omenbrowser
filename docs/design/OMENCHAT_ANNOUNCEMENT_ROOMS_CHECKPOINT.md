@@ -2,9 +2,10 @@
 
 Date: 2026-07-27
 
-Status: dormant shared wire constants/codecs and schema-11 recovery storage
-implemented; no configuration, authorization, client projection, GUI, TUI, or
-production negotiation is activated
+Status: wire, schema-11 recovery, authorization, administration, client
+projection, process, restart, Resource, and native Linux GUI qualification
+complete; production negotiation remains disabled pending the explicit
+activation patch
 
 Baseline: `release/v0.9.6-4` at `1097a10`
 
@@ -324,5 +325,12 @@ Production negotiation remains disabled until all applicable gates pass.
     unchanged, and the product graph assertion rejects leakage. Current/current
     and replacement-Link process qualification passes with authoritative
     policy preflight and no queued publication frame.
-12. Next: perform native GUI observation and joint activation review. Do not
-    activate production aliases solely from the headless qualification result.
+12. **Complete (2026-07-27):** a native Linux Iced session under isolated
+    Xvfb/i3 connected through a real Link, displayed the announcement banner,
+    preserved a local draft, and left Send/Attach inert. Server counters
+    remained at `chat:0` after the attempted click, and desktop shutdown
+    drained normally. Evidence is in
+    `docs/audits/omenchat-announcement-rooms-gui-qualification.md`.
+13. Next: perform the explicit production activation patch and full local
+    product matrices. Windows/macOS native presentation remains a release-
+    candidate gate, not evidence supplied by the Linux observation.
