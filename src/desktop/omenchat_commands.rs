@@ -123,6 +123,19 @@ impl DesktopApp {
         session_id: ChatSessionId,
         path: &Path,
     ) -> OmenChatDraftCommandResult {
+        let room_id = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.active_room.room_id);
+        if room_id.is_some_and(|room_id| !self.omenchat_room_publish_available(session_id, room_id))
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "room is read-only for members; upload was not opened".into(),
+            );
+            return OmenChatDraftCommandResult::HandledKeep;
+        }
         if path.as_os_str().is_empty() {
             self.set_omenchat_session_status(session_id, "usage: /upload <path>".into());
             return OmenChatDraftCommandResult::HandledKeep;

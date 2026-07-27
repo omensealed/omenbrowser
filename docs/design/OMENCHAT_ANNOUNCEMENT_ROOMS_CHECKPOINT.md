@@ -273,6 +273,14 @@ Production negotiation remains disabled until all applicable gates pass.
    listings report effective policy. Production negotiation remains dormant.
    Evidence is in
    `docs/audits/omenchat-announcement-rooms-authorization-qualification.md`.
-4. Next: bounded client model projection, negotiated catalog/delta decoding,
-   capability-loss clearing, and GUI/TUI controls. Do not activate server
-   negotiation until process and adjacent-version qualification passes.
+4. **Complete (2026-07-27):** a bounded, session-owned client projection now
+   decodes exact negotiated room catalogs/deltas, clears evidence on capability
+   loss, rechecks live/durable mutations, and disables member desktop composer,
+   attachment, reaction, and revision controls. No client persistence changed.
+   omenchatd's TUI has no member composer and retains stopped-server policy
+   administration during dormancy. Evidence is in
+   `docs/audits/omenchat-announcement-rooms-client-projection-qualification.md`.
+5. Next: deterministic process, replacement-Link, adjacent-version, GUI
+   observation, and resource qualification plus a restart-only versus live
+   reload/fanout decision. Do not activate production negotiation before that
+   joint review.

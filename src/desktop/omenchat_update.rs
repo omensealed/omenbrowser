@@ -419,6 +419,16 @@ impl DesktopApp {
         }
     }
 
+    pub(in crate::desktop) fn omenchat_room_publish_available(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) -> bool {
+        self.omenchat
+            .chat_client
+            .local_user_can_publish_to_room(session_id, room_id)
+    }
+
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) fn omenchat_message_revision_action_available(
         &self,
@@ -427,6 +437,9 @@ impl DesktopApp {
         event_id: u64,
         action: MessageRevisionAction,
     ) -> bool {
+        if !self.omenchat_room_publish_available(session_id, room_id) {
+            return false;
+        }
         let (corrections, deletions) =
             self.omenchat_message_revision_action_targets(session_id, room_id);
         match action {

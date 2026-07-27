@@ -21,9 +21,10 @@ use super::protocol::{
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MessageRevisionAck,
     MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot, ModerationAuditPage,
     MutationId, PinAck, PinAction, PinEvent, PinRequest, PinSnapshot, ReactionAck, ReactionEvent,
-    ReactionRequest, ReactionSnapshot, RichMessageBody, RoomId, SessionOpenNegotiation,
-    DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY,
-    MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
+    ReactionRequest, ReactionSnapshot, RichMessageBody, RoomCatalogEntry, RoomId,
+    SessionOpenNegotiation, ANNOUNCEMENT_ROOMS_CAPABILITY, DEFAULT_JOIN_BACKLOG_EVENTS,
+    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, MODERATION_AUDIT_CAPABILITY,
+    PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -76,6 +77,8 @@ pub struct LiveChatClientState {
     pin_sessions: BTreeSet<ChatSessionId>,
     moderation_audit_requests: BTreeSet<ChatSessionId>,
     moderation_audit_sessions: BTreeSet<ChatSessionId>,
+    announcement_room_requests: BTreeSet<ChatSessionId>,
+    announcement_room_sessions: BTreeSet<ChatSessionId>,
     local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
@@ -201,6 +204,24 @@ impl LiveChatClientState {
 
     pub fn moderation_audit_negotiated(&self, session_id: ChatSessionId) -> bool {
         self.moderation_audit_sessions.contains(&session_id)
+    }
+
+    pub fn announcement_rooms_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.announcement_room_sessions.contains(&session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_announcement_rooms_requested_for_test(
+        &mut self,
+        session_id: ChatSessionId,
+        requested: bool,
+    ) {
+        if requested {
+            self.announcement_room_requests.insert(session_id);
+        } else {
+            self.announcement_room_requests.remove(&session_id);
+            self.announcement_room_sessions.remove(&session_id);
+        }
     }
 
     #[cfg(test)]
@@ -451,6 +472,8 @@ impl LiveChatClientState {
         self.message_revision_sessions.remove(&session_id);
         self.pin_requests.remove(&session_id);
         self.pin_sessions.remove(&session_id);
+        self.announcement_room_requests.remove(&session_id);
+        self.announcement_room_sessions.remove(&session_id);
         self.local_user_ids.remove(&session_id);
         retired_echoes
     }
@@ -481,6 +504,31 @@ pub fn handle_live_request<T: ChatLinkTransport>(
     transport: &mut T,
     request: ChatClientRequest,
 ) -> Vec<ChatClientEvent> {
+    if let Some((session_id, room_name)) = publish_target(&request) {
+        let room_id = client.session(session_id).and_then(|session| {
+            session
+                .rooms
+                .iter()
+                .find(|room| room.name.eq_ignore_ascii_case(room_name))
+                .map(|room| room.room_id)
+                .or_else(|| {
+                    session
+                        .active_room
+                        .name
+                        .eq_ignore_ascii_case(room_name)
+                        .then_some(session.active_room.room_id)
+                })
+        });
+        if room_id
+            .is_some_and(|room_id| !client.local_user_can_publish_to_room(session_id, room_id))
+        {
+            return vec![ChatClientEvent::Error {
+                session_id: Some(session_id),
+                message: "room is read-only for members; only moderators and admins can publish"
+                    .into(),
+            }];
+        }
+    }
     let mut events = match request {
         ChatClientRequest::OpenServer(descriptor) => {
             open_live_server(client, state, transport, descriptor)
@@ -598,6 +646,24 @@ pub fn handle_live_request<T: ChatLinkTransport>(
     client.enforce_status_bounds();
     enforce_client_event_presentation_bounds(&mut events);
     events
+}
+
+fn publish_target(request: &ChatClientRequest) -> Option<(ChatSessionId, &str)> {
+    match request {
+        ChatClientRequest::SendMessage {
+            session_id, room, ..
+        }
+        | ChatClientRequest::SendAction {
+            session_id, room, ..
+        }
+        | ChatClientRequest::SendNotice {
+            session_id, room, ..
+        }
+        | ChatClientRequest::SendUpload {
+            session_id, room, ..
+        } => Some((*session_id, room)),
+        _ => None,
+    }
 }
 
 pub fn reconnect_live_server<T: ChatLinkTransport>(
@@ -803,6 +869,9 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.pin_sessions.remove(&session_id);
     state.moderation_audit_requests.remove(&session_id);
     state.moderation_audit_sessions.remove(&session_id);
+    state.announcement_room_requests.remove(&session_id);
+    state.announcement_room_sessions.remove(&session_id);
+    client.clear_room_policies(session_id);
     client.clear_moderation_audit(session_id);
     state
         .pending_pin_confirmations
@@ -954,6 +1023,12 @@ fn send_live_room_text<T: ChatLinkTransport>(
             message: "OMENchat live session is not available".into(),
         }];
     };
+    if !client.local_user_can_publish_to_room(session_id, room_id) {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "room is read-only for members; message was not sent".into(),
+        }];
+    }
     let tracks_server_acceptance = matches!(op, ChatOp::RoomMessage | ChatOp::RoomAction);
     if tracks_server_acceptance
         && (state.pending_mutation_items() >= LIVE_PENDING_LOCAL_ECHO_MAX_ITEMS
@@ -1050,6 +1125,9 @@ pub fn send_uncertain_durable_room_text<T: ChatLinkTransport>(
     let room_id = session.active_room.room_id;
     if intent.room_id != Some(room_id) {
         return error("durable OMENchat mutation belongs to a different room");
+    }
+    if !client.local_user_can_publish_to_room(session_id, room_id) {
+        return error("room is read-only for members; durable mutation was not sent");
     }
     if !matches!(
         intent.op,
@@ -1187,6 +1265,9 @@ pub fn send_uncertain_durable_reaction<T: ChatLinkTransport>(
         || !session.rooms.iter().any(|room| room.room_id == room_id)
     {
         return error("durable OMENchat reaction belongs to a different server or room");
+    }
+    if !client.local_user_can_publish_to_room(session_id, room_id) {
+        return error("room is read-only for members; durable reaction was not sent");
     }
     let request = match ReactionRequest::from_frame_body(&intent.body) {
         Ok(request) => request,
@@ -1404,6 +1485,9 @@ pub fn send_uncertain_durable_message_revision<T: ChatLinkTransport>(
         || !session.rooms.iter().any(|room| room.room_id == room_id)
     {
         return error("durable OMENchat message revision belongs to a different server or room");
+    }
+    if !client.local_user_can_publish_to_room(session_id, room_id) {
+        return error("room is read-only for members; durable message revision was not sent");
     }
     let request = match MessageRevisionRequest::from_frame_body(&intent.body) {
         Ok(request) => request,
@@ -2027,6 +2111,12 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
             message: "OMENchat live session is not available".into(),
         }];
     };
+    if !client.local_user_can_publish_to_room(session_id, room_id) {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "room is read-only for members; upload was not sent".into(),
+        }];
+    }
     let filename = filename.trim().to_owned();
     if filename.is_empty() || bytes.is_empty() {
         return vec![ChatClientEvent::Error {
@@ -2581,7 +2671,10 @@ fn apply_frame_with_state(
             let moderation_audit_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == MODERATION_AUDIT_CAPABILITY);
-            if let (Some(session_id), Some(state)) = (preferred_session_id, state) {
+            let announcement_rooms_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == ANNOUNCEMENT_ROOMS_CAPABILITY);
+            if let (Some(session_id), Some(state)) = (preferred_session_id, state.as_deref_mut()) {
                 state.pin_sessions.remove(&session_id);
                 state
                     .pending_pin_confirmations
@@ -2595,6 +2688,8 @@ fn apply_frame_with_state(
                 let pins_requested = state.pin_requests.remove(&session_id);
                 let moderation_audit_requested =
                     state.moderation_audit_requests.remove(&session_id);
+                let announcement_rooms_requested =
+                    state.announcement_room_requests.remove(&session_id);
                 let already_accepted = state.durable_sessions.contains(&session_id);
                 if durable_accepted
                     && state.client_instance_id.is_some()
@@ -2642,7 +2737,18 @@ fn apply_frame_with_state(
                     state.moderation_audit_sessions.remove(&session_id);
                     client.clear_moderation_audit(session_id);
                 }
+                client.clear_room_policies(session_id);
+                if announcement_rooms_requested && announcement_rooms_accepted {
+                    state.announcement_room_sessions.insert(session_id);
+                } else {
+                    state.announcement_room_sessions.remove(&session_id);
+                }
             }
+            let announcement_rooms_negotiated = preferred_session_id.is_some_and(|session_id| {
+                state
+                    .as_deref()
+                    .is_some_and(|state| state.announcement_rooms_negotiated(session_id))
+            });
             let policy = body_values(&frame.body).map(|values| {
                 let upload_quota_bytes = values.get(3)?.as_u64()?;
                 let ping_interval_seconds = values.get(4)?.as_u64()?.clamp(5, 600);
@@ -2662,17 +2768,32 @@ fn apply_frame_with_state(
                 .map(str::trim)
                 .filter(|motd| !motd.is_empty())
                 .map(|motd| bounded_chat_text(motd, CHAT_MOTD_MAX_BYTES));
-            let mut rooms = body_values(&frame.body)
+            let parsed_rooms = body_values(&frame.body)
                 .and_then(|values| values.get(1))
                 .and_then(FrameValueExt::as_array)
-                .map(|values| {
+                .and_then(|values| {
                     let server_id = preferred_session_id
                         .and_then(|id| client.session(id))
                         .map(|session| session.server.server_id.clone())
                         .unwrap_or_default();
                     values
                         .iter()
-                        .filter_map(|value| parse_room(value, server_id.clone(), false))
+                        .map(|value| {
+                            parse_room_policy(
+                                value,
+                                server_id.clone(),
+                                false,
+                                announcement_rooms_negotiated,
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()
+                });
+            let mut rooms = parsed_rooms
+                .as_ref()
+                .map(|rooms| {
+                    rooms
+                        .iter()
+                        .map(|room| room.summary.clone())
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -2681,6 +2802,23 @@ fn apply_frame_with_state(
                 .map(|session| session.active_room.room_id)
                 .unwrap_or(1);
             let room_catalog_dropped = enforce_room_catalog_bounds(&mut rooms, active_room_id);
+            let retained_room_ids = rooms
+                .iter()
+                .map(|room| room.room_id)
+                .collect::<BTreeSet<_>>();
+            let room_policies = parsed_rooms
+                .as_ref()
+                .map(|parsed| {
+                    parsed
+                        .iter()
+                        .filter(|room| retained_room_ids.contains(&room.summary.room_id))
+                        .filter_map(|room| {
+                            room.policy_bits
+                                .map(|policy_bits| (room.summary.room_id, policy_bits))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             if let Some(session_id) = preferred_session_id {
                 if let Some(motd) = motd {
                     events.push(ChatClientEvent::ServerMotd { session_id, motd });
@@ -2690,7 +2828,23 @@ fn apply_frame_with_state(
                         session.rooms = merge_rooms(session.rooms.clone(), rooms.clone());
                         session.enforce_catalog_bounds();
                     }
+                    if announcement_rooms_negotiated
+                        && !client.replace_room_policies(session_id, &room_policies)
+                    {
+                        client.clear_room_policies(session_id);
+                        events.push(ChatClientEvent::Error {
+                            session_id: Some(session_id),
+                            message: "ignored OMENchat room policies that exceeded client bounds"
+                                .into(),
+                        });
+                    }
                     events.push(ChatClientEvent::RoomsUpdated { session_id, rooms });
+                } else if announcement_rooms_negotiated && parsed_rooms.is_none() {
+                    client.clear_room_policies(session_id);
+                    events.push(ChatClientEvent::Error {
+                        session_id: Some(session_id),
+                        message: "ignored malformed negotiated OMENchat room policy catalog".into(),
+                    });
                 }
                 if let Some(Some((
                     upload_quota_bytes,
@@ -2720,6 +2874,9 @@ fn apply_frame_with_state(
             let Some(session_id) = preferred_session_id else {
                 return;
             };
+            let announcement_rooms_negotiated = state
+                .as_deref()
+                .is_some_and(|state| state.announcement_rooms_negotiated(session_id));
             let Some(room_value) = body_values(&frame.body).and_then(|values| values.first())
             else {
                 events.push(ChatClientEvent::Error {
@@ -2728,13 +2885,14 @@ fn apply_frame_with_state(
                 });
                 return;
             };
-            let Some(room) = parse_room(
+            let Some(parsed_room) = parse_room_policy(
                 room_value,
                 client
                     .session(session_id)
                     .map(|s| s.server.server_id.clone())
                     .unwrap_or_default(),
                 true,
+                announcement_rooms_negotiated,
             ) else {
                 events.push(ChatClientEvent::Error {
                     session_id: Some(session_id),
@@ -2742,6 +2900,8 @@ fn apply_frame_with_state(
                 });
                 return;
             };
+            let room = parsed_room.summary;
+            let room_policy_bits = parsed_room.policy_bits;
             let mut local_user_id = None;
             if let Some(state) = state.as_deref_mut() {
                 if state.reply_mentions_sessions.contains(&session_id)
@@ -2788,6 +2948,15 @@ fn apply_frame_with_state(
                 session.users.clear();
                 session.enforce_catalog_bounds();
                 session.status = "joined live room".into();
+            }
+            if let Some(policy_bits) = room_policy_bits {
+                if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+                    client.clear_room_policies(session_id);
+                    events.push(ChatClientEvent::Error {
+                        session_id: Some(session_id),
+                        message: "ignored OMENchat room policy outside client bounds".into(),
+                    });
+                }
             }
             if let Some(user_id) = local_user_id {
                 if client.bind_local_user_id(session_id, user_id) {
@@ -3068,12 +3237,29 @@ fn apply_frame_with_state(
             }
         }
         ChatOp::CommandResult => {
+            let policy_negotiated = preferred_session_id.is_some_and(|session_id| {
+                state
+                    .as_deref()
+                    .is_some_and(|state| state.announcement_rooms_negotiated(session_id))
+            });
             let durable_command_match = state.as_deref().and_then(|state| {
-                durable_command_result_match(client, state, preferred_session_id, &frame)
+                durable_command_result_match(
+                    client,
+                    state,
+                    preferred_session_id,
+                    &frame,
+                    policy_negotiated,
+                )
             });
             match durable_command_match {
                 Some(Ok(mutation_id)) => {
-                    apply_command_result(client, preferred_session_id, &frame.body, events);
+                    apply_command_result(
+                        client,
+                        preferred_session_id,
+                        &frame.body,
+                        policy_negotiated,
+                        events,
+                    );
                     if let (Some(session_id), Some(state)) =
                         (preferred_session_id, state.as_deref_mut())
                     {
@@ -3091,12 +3277,29 @@ fn apply_frame_with_state(
                     });
                 }
                 None => {
-                    apply_command_result(client, preferred_session_id, &frame.body, events);
+                    apply_command_result(
+                        client,
+                        preferred_session_id,
+                        &frame.body,
+                        policy_negotiated,
+                        events,
+                    );
                 }
             }
         }
         ChatOp::RoomDelta => {
-            apply_room_delta(client, preferred_session_id, &frame.body, events);
+            let policy_negotiated = preferred_session_id.is_some_and(|session_id| {
+                state
+                    .as_deref()
+                    .is_some_and(|state| state.announcement_rooms_negotiated(session_id))
+            });
+            apply_room_delta(
+                client,
+                preferred_session_id,
+                &frame.body,
+                policy_negotiated,
+                events,
+            );
         }
         ChatOp::UserDelta => {
             apply_user_delta(client, preferred_session_id, &frame.body, events);
@@ -3704,6 +3907,7 @@ fn durable_command_result_match(
     state: &LiveChatClientState,
     preferred_session_id: Option<ChatSessionId>,
     frame: &Frame,
+    policy_negotiated: bool,
 ) -> Option<Result<MutationId, ()>> {
     let session_id = preferred_session_id?;
     let pending = state.pending_local_echoes.get(&(session_id, frame.seq))?;
@@ -3752,7 +3956,8 @@ fn durable_command_result_match(
                 .unwrap_or_default();
             let Some(room) = values
                 .get(1)
-                .and_then(|value| parse_room(value, server_id, false))
+                .and_then(|value| parse_room_policy(value, server_id, false, policy_negotiated))
+                .map(|room| room.summary)
             else {
                 return Some(Err(()));
             };
@@ -4009,6 +4214,7 @@ fn apply_room_delta(
     client: &mut ChatClient,
     preferred_session_id: Option<ChatSessionId>,
     body: &FrameBody,
+    policy_negotiated: bool,
     events: &mut Vec<ChatClientEvent>,
 ) {
     let Some(session_id) = preferred_session_id else {
@@ -4018,15 +4224,17 @@ fn apply_room_delta(
         .session(session_id)
         .map(|session| session.server.server_id.clone())
         .unwrap_or_default();
-    let Some(mut room) = body_values(body)
+    let Some(parsed_room) = body_values(body)
         .and_then(|values| values.first())
-        .and_then(|value| parse_room(value, server_id, false))
+        .and_then(|value| parse_room_policy(value, server_id, false, policy_negotiated))
     else {
         if let Some(session) = client.session_mut(session_id) {
             session.status = "server returned an invalid room update".into();
         }
         return;
     };
+    let mut room = parsed_room.summary;
+    let room_policy_bits = parsed_room.policy_bits;
     if let Some(session) = client.session_mut(session_id) {
         if let Some(current) = session
             .rooms
@@ -4050,6 +4258,16 @@ fn apply_room_delta(
             ));
         }
     }
+    if let Some(policy_bits) = room_policy_bits {
+        if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+            client.clear_room_policies(session_id);
+            events.push(ChatClientEvent::Error {
+                session_id: Some(session_id),
+                message: "ignored OMENchat room policy update outside client bounds".into(),
+            });
+            return;
+        }
+    }
     events.push(ChatClientEvent::RoomsUpdated {
         session_id,
         rooms: vec![room],
@@ -4060,6 +4278,7 @@ fn apply_command_result(
     client: &mut ChatClient,
     preferred_session_id: Option<ChatSessionId>,
     body: &FrameBody,
+    policy_negotiated: bool,
     events: &mut Vec<ChatClientEvent>,
 ) {
     let Some(session_id) = preferred_session_id else {
@@ -4077,13 +4296,23 @@ fn apply_command_result(
         .unwrap_or_default();
     match command {
         "rooms" => {
-            let mut rooms = values
+            let parsed_rooms = values
                 .get(1)
                 .and_then(FrameValueExt::as_array)
-                .map(|values| {
+                .and_then(|values| {
                     values
                         .iter()
-                        .filter_map(|value| parse_room(value, server_id.clone(), false))
+                        .map(|value| {
+                            parse_room_policy(value, server_id.clone(), false, policy_negotiated)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                });
+            let mut rooms = parsed_rooms
+                .as_ref()
+                .map(|rooms| {
+                    rooms
+                        .iter()
+                        .map(|room| room.summary.clone())
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -4092,9 +4321,30 @@ fn apply_command_result(
                 .map(|session| session.active_room.room_id)
                 .unwrap_or(1);
             let room_catalog_dropped = enforce_room_catalog_bounds(&mut rooms, active_room_id);
+            let retained_room_ids = rooms
+                .iter()
+                .map(|room| room.room_id)
+                .collect::<BTreeSet<_>>();
+            let room_policies = parsed_rooms
+                .as_ref()
+                .map(|parsed| {
+                    parsed
+                        .iter()
+                        .filter(|room| retained_room_ids.contains(&room.summary.room_id))
+                        .filter_map(|room| {
+                            room.policy_bits
+                                .map(|policy_bits| (room.summary.room_id, policy_bits))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             if rooms.is_empty() {
                 if let Some(session) = client.session_mut(session_id) {
-                    session.status = "server returned no rooms".into();
+                    session.status = if policy_negotiated && parsed_rooms.is_none() {
+                        "server returned an invalid negotiated room catalog".into()
+                    } else {
+                        "server returned no rooms".into()
+                    };
                 }
                 return;
             }
@@ -4111,18 +4361,28 @@ fn apply_command_result(
                     )
                 };
             }
+            if policy_negotiated && !client.replace_room_policies(session_id, &room_policies) {
+                client.clear_room_policies(session_id);
+                events.push(ChatClientEvent::Error {
+                    session_id: Some(session_id),
+                    message: "ignored OMENchat room policies that exceeded client bounds".into(),
+                });
+                return;
+            }
             events.push(ChatClientEvent::RoomsUpdated { session_id, rooms });
         }
         "topic" => {
-            let Some(room) = values
+            let Some(parsed_room) = values
                 .get(1)
-                .and_then(|value| parse_room(value, server_id, true))
+                .and_then(|value| parse_room_policy(value, server_id, true, policy_negotiated))
             else {
                 if let Some(session) = client.session_mut(session_id) {
                     session.status = "server returned an invalid topic update".into();
                 }
                 return;
             };
+            let room = parsed_room.summary;
+            let room_policy_bits = parsed_room.policy_bits;
             if let Some(session) = client.session_mut(session_id) {
                 let active = session.active_room.room_id == room.room_id;
                 session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
@@ -4141,21 +4401,29 @@ fn apply_command_result(
                     ));
                 }
             }
+            if let Some(policy_bits) = room_policy_bits {
+                if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+                    client.clear_room_policies(session_id);
+                    return;
+                }
+            }
             events.push(ChatClientEvent::RoomsUpdated {
                 session_id,
                 rooms: vec![room],
             });
         }
         "create" => {
-            let Some(room) = values
+            let Some(parsed_room) = values
                 .get(1)
-                .and_then(|value| parse_room(value, server_id, false))
+                .and_then(|value| parse_room_policy(value, server_id, false, policy_negotiated))
             else {
                 if let Some(session) = client.session_mut(session_id) {
                     session.status = "server returned an invalid room create result".into();
                 }
                 return;
             };
+            let room = parsed_room.summary;
+            let room_policy_bits = parsed_room.policy_bits;
             if let Some(session) = client.session_mut(session_id) {
                 session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
                 session.status = format!("room created: #{}", room.name);
@@ -4166,21 +4434,29 @@ fn apply_command_result(
                     ));
                 }
             }
+            if let Some(policy_bits) = room_policy_bits {
+                if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+                    client.clear_room_policies(session_id);
+                    return;
+                }
+            }
             events.push(ChatClientEvent::RoomsUpdated {
                 session_id,
                 rooms: vec![room],
             });
         }
         "part" => {
-            let Some(room) = values
+            let Some(parsed_room) = values
                 .get(1)
-                .and_then(|value| parse_room(value, server_id, false))
+                .and_then(|value| parse_room_policy(value, server_id, false, policy_negotiated))
             else {
                 if let Some(session) = client.session_mut(session_id) {
                     session.status = "server returned an invalid room part result".into();
                 }
                 return;
             };
+            let room = parsed_room.summary;
+            let room_policy_bits = parsed_room.policy_bits;
             client.mark_pin_room_stale(session_id, room.room_id);
             if let Some(session) = client.session_mut(session_id) {
                 let active = session.active_room.room_id == room.room_id;
@@ -4208,6 +4484,12 @@ fn apply_command_result(
                     session.status = format!("left #{}", room.name);
                 }
                 session.enforce_catalog_bounds();
+            }
+            if let Some(policy_bits) = room_policy_bits {
+                if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+                    client.clear_room_policies(session_id);
+                    return;
+                }
             }
             events.push(ChatClientEvent::RoomsUpdated {
                 session_id,
@@ -4755,29 +5037,33 @@ fn increment_room_unread(session: &mut ChatSessionView, room_id: u32) {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedRoom {
+    summary: ChatRoomSummary,
+    policy_bits: Option<u64>,
+}
+
 fn parse_room(value: &FrameValue, server_id: String, joined: bool) -> Option<ChatRoomSummary> {
-    let fields = value.as_array()?;
-    let name = fields.get(1)?.as_str()?.trim();
-    if name.is_empty() || !chat_text_fits(name, CHAT_ROOM_NAME_MAX_BYTES) {
-        return None;
-    }
-    let topic = match fields.get(2) {
-        Some(FrameValue::String(topic)) if !topic.trim().is_empty() => {
-            let topic = topic.trim();
-            if !chat_text_fits(topic, CHAT_ROOM_TOPIC_MAX_BYTES) {
-                return None;
-            }
-            Some(topic.to_owned())
-        }
-        _ => None,
-    };
-    Some(ChatRoomSummary {
-        server_id,
-        room_id: fields.first()?.as_u64()? as u32,
-        name: name.to_owned(),
-        topic,
-        unread: 0,
-        joined,
+    parse_room_policy(value, server_id, joined, false).map(|room| room.summary)
+}
+
+fn parse_room_policy(
+    value: &FrameValue,
+    server_id: String,
+    joined: bool,
+    policy_negotiated: bool,
+) -> Option<ParsedRoom> {
+    let room = RoomCatalogEntry::from_frame_value(value, policy_negotiated).ok()?;
+    Some(ParsedRoom {
+        summary: ChatRoomSummary {
+            server_id,
+            room_id: room.room_id,
+            name: room.name,
+            topic: room.topic,
+            unread: 0,
+            joined,
+        },
+        policy_bits: policy_negotiated.then_some(room.policy_bits),
     })
 }
 
@@ -9265,6 +9551,7 @@ mod tests {
                 FrameValue::String("rooms".into()),
                 FrameValue::Array(room_values),
             ]),
+            false,
             &mut events,
         );
 
@@ -10987,6 +11274,114 @@ mod tests {
         assert!(!state.reply_mentions_negotiated(session_id));
         assert_eq!(state.local_user_id(session_id), None);
         assert_eq!(client.local_user_id(session_id), Some(7));
+    }
+
+    #[test]
+    fn dormant_announcement_policy_projects_only_when_requested_and_clears_on_loss() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: vec![ChatUserSummary {
+                server_id: "abcd".into(),
+                user_id: 7,
+                display_name: "Alice".into(),
+                role_bits: CHAT_ROLE_TRUSTED,
+                status_bits: 0,
+                lxmf_available: false,
+            }],
+            events: Vec::new(),
+            status: "opening".into(),
+        }));
+        assert!(client.bind_local_user_id(session_id, 7));
+        let mut state = LiveChatClientState::default();
+        state.set_announcement_rooms_requested_for_test(session_id, true);
+        let mut transport = CapturedChatTransport::default();
+        let mut events = Vec::new();
+        let policy_room = RoomCatalogEntry {
+            room_id: 1,
+            name: "lobby".into(),
+            topic: None,
+            room_revision: 2,
+            policy_bits: super::super::protocol::ROOM_POLICY_ANNOUNCEMENT,
+        }
+        .into_frame_value(true)
+        .expect("policy room");
+        let accepted_body = crate::chat::protocol::with_session_accept_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::Array(vec![policy_room]),
+            ]),
+            &crate::chat::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![ANNOUNCEMENT_ROOMS_CAPABILITY.into()],
+            },
+        )
+        .expect("negotiated accept");
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 1, None, accepted_body),
+            &mut events,
+        );
+
+        assert!(state.announcement_rooms_negotiated(session_id));
+        assert_eq!(
+            client.room_policy_bits(session_id, 1),
+            Some(super::super::protocol::ROOM_POLICY_ANNOUNCEMENT)
+        );
+        assert!(!client.local_user_can_publish_to_room(session_id, 1));
+        let rejected = handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendMessage {
+                session_id,
+                room: "lobby".into(),
+                body: "must not leave".into(),
+            },
+        );
+        assert!(matches!(
+            rejected.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("read-only for members")
+        ));
+        assert!(transport.sent_frames.is_empty());
+        client.session_mut(session_id).expect("session").users[0].role_bits = CHAT_ROLE_MODERATOR;
+        assert!(client.local_user_can_publish_to_room(session_id, 1));
+
+        state.set_announcement_rooms_requested_for_test(session_id, true);
+        let legacy_accept = crate::chat::protocol::with_session_accept_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::Array(vec![room_value(1, "lobby")]),
+            ]),
+            &crate::chat::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: Vec::new(),
+            },
+        )
+        .expect("legacy accept");
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(ChatOp::SessionAccept, 2, None, legacy_accept),
+            &mut events,
+        );
+
+        assert!(!state.announcement_rooms_negotiated(session_id));
+        assert_eq!(client.room_policy_bits(session_id, 1), None);
+        assert!(client.local_user_can_publish_to_room(session_id, 1));
     }
 
     #[test]

@@ -408,6 +408,9 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         .omenchat
         .chat_client
         .local_user_id(session.session_id);
+    let active_room_id = session.active_room.room_id;
+    let publish_allowed =
+        desktop.omenchat_room_publish_available(session.session_id, active_room_id);
     let authoritative_reaction_targets = desktop
         .omenchat
         .chat_client
@@ -612,7 +615,8 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             if let Some(event_id) = body.reaction_target.filter(|event_id| {
-                desktop.omenchat_reactions_available(session.session_id)
+                publish_allowed
+                    && desktop.omenchat_reactions_available(session.session_id)
                     && desktop.omenchat.chat_client.reaction_snapshot_complete(
                         session.session_id,
                         session.active_room.room_id,
@@ -706,7 +710,40 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         .map(String::as_str)
         .unwrap_or_default();
     let session_id = session.session_id;
-    let active_room_id = session.active_room.room_id;
+    let attach_button = button(centered_toolbar_icon(ICON_ATTACH))
+        .padding(0)
+        .width(Length::Fixed(toolbar_icon_button_side()))
+        .height(Length::Fixed(toolbar_icon_button_side()))
+        .style(subtle_button_style);
+    let attach_button = if publish_allowed {
+        attach_button.on_press(Message::OmenChat(OmenChatMessage::PickUpload(
+            session.session_id,
+        )))
+    } else {
+        attach_button
+    };
+    let message_input = text_input(&format!("Message #{}", session.active_room.name), draft)
+        .size(ui_size(14))
+        .padding(8)
+        .width(Length::Fill)
+        .on_input(move |value| {
+            Message::OmenChat(OmenChatMessage::DraftChanged { session_id, value })
+        });
+    let message_input = if publish_allowed {
+        message_input.on_submit(Message::OmenChat(OmenChatMessage::SendDraft(
+            session.session_id,
+        )))
+    } else {
+        message_input
+    };
+    let send_button = button(text("Send")).style(omen_button_style);
+    let send_button = if publish_allowed {
+        send_button.on_press(Message::OmenChat(OmenChatMessage::SendDraft(
+            session.session_id,
+        )))
+    } else {
+        send_button
+    };
     let composer = row![
         tooltip_button(
             button(centered_toolbar_icon(ICON_MENU))
@@ -718,15 +755,12 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             "Rooms"
         ),
         tooltip_button(
-            button(centered_toolbar_icon(ICON_ATTACH))
-                .on_press(Message::OmenChat(OmenChatMessage::PickUpload(
-                    session.session_id,
-                )))
-                .padding(0)
-                .width(Length::Fixed(toolbar_icon_button_side()))
-                .height(Length::Fixed(toolbar_icon_button_side()))
-                .style(subtle_button_style),
-            "Attach file"
+            attach_button,
+            if publish_allowed {
+                "Attach file"
+            } else {
+                "Read-only announcement room"
+            }
         ),
         tooltip_button(
             button(centered_toolbar_icon(ICON_SHARE))
@@ -751,23 +785,22 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 .style(subtle_button_style),
             "Show invitation QR"
         ),
-        text_input(&format!("Message #{}", session.active_room.name), draft)
-            .size(ui_size(14))
-            .padding(8)
-            .width(Length::Fill)
-            .on_input(move |value| {
-                Message::OmenChat(OmenChatMessage::DraftChanged { session_id, value })
-            })
-            .on_submit(Message::OmenChat(OmenChatMessage::SendDraft(
-                session.session_id,
-            ))),
-        omen_button(
-            "Send",
-            Message::OmenChat(OmenChatMessage::SendDraft(session.session_id)),
-        ),
+        message_input,
+        send_button,
     ]
     .spacing(8);
     let mut composer_panel = column![].spacing(6).width(Length::Fill);
+    if !publish_allowed {
+        composer_panel = composer_panel.push(
+            container(
+                text("Announcement room · only moderators and admins can publish")
+                    .size(ui_size(12)),
+            )
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(status_container_style),
+        );
+    }
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     if let Some(revision) = desktop
         .omenchat

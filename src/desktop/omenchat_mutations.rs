@@ -32,6 +32,13 @@ impl DesktopApp {
         event_id: u64,
         token: ReactionToken,
     ) -> Task<Message> {
+        if !self.omenchat_room_publish_available(session_id, room_id) {
+            self.set_omenchat_session_status(
+                session_id,
+                "room is read-only for members; reaction was not sent".into(),
+            );
+            return Task::none();
+        }
         if !self.omenchat_reactions_available(session_id) {
             self.set_omenchat_session_status(
                 session_id,

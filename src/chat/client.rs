@@ -480,6 +480,7 @@ pub struct ChatClient {
     pin_event_cursors: BTreeMap<(ServerId, RoomId, EventId), EventId>,
     authoritative_pin_targets: BTreeMap<ServerId, BTreeSet<(RoomId, EventId)>>,
     moderation_audit_pages: BTreeMap<(ServerId, RoomId), ModerationAuditPage>,
+    room_policy_bits: BTreeMap<(ChatSessionId, RoomId), u64>,
 }
 
 impl ChatClient {
@@ -497,6 +498,7 @@ impl ChatClient {
             pin_event_cursors: BTreeMap::new(),
             authoritative_pin_targets: BTreeMap::new(),
             moderation_audit_pages: BTreeMap::new(),
+            room_policy_bits: BTreeMap::new(),
         }
     }
 
@@ -544,6 +546,106 @@ impl ChatClient {
         self.session(session_id)
             .and_then(|session| self.local_user_ids.get(&session.server.server_id))
             .copied()
+    }
+
+    pub fn room_policy_bits(&self, session_id: ChatSessionId, room_id: RoomId) -> Option<u64> {
+        self.session(session_id)?;
+        self.room_policy_bits.get(&(session_id, room_id)).copied()
+    }
+
+    pub fn room_is_announcement_only(&self, session_id: ChatSessionId, room_id: RoomId) -> bool {
+        self.room_policy_bits(session_id, room_id)
+            .is_some_and(|bits| bits & super::protocol::ROOM_POLICY_ANNOUNCEMENT != 0)
+    }
+
+    pub fn local_user_can_publish_to_room(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) -> bool {
+        if !self.room_is_announcement_only(session_id, room_id) {
+            return true;
+        }
+        let Some(local_user_id) = self.local_user_id(session_id) else {
+            return false;
+        };
+        self.session(session_id).is_some_and(|session| {
+            session.users.iter().any(|user| {
+                user.user_id == local_user_id
+                    && user.role_bits
+                        & (super::model::CHAT_ROLE_MODERATOR | super::model::CHAT_ROLE_ADMIN)
+                        != 0
+            })
+        })
+    }
+
+    pub(crate) fn replace_room_policies(
+        &mut self,
+        session_id: ChatSessionId,
+        policies: &[(RoomId, u64)],
+    ) -> bool {
+        let Some(session) = self.session(session_id) else {
+            return false;
+        };
+        let known_rooms = session
+            .rooms
+            .iter()
+            .map(|room| room.room_id)
+            .chain(std::iter::once(session.active_room.room_id))
+            .collect::<BTreeSet<_>>();
+        if policies.len() > CHAT_SESSION_MAX_ROOMS
+            || policies
+                .iter()
+                .any(|(room_id, _)| !known_rooms.contains(room_id))
+        {
+            return false;
+        }
+        self.room_policy_bits
+            .retain(|(stored_session, _), _| *stored_session != session_id);
+        self.room_policy_bits.extend(
+            policies
+                .iter()
+                .copied()
+                .map(|(room_id, bits)| ((session_id, room_id), bits)),
+        );
+        true
+    }
+
+    pub(crate) fn update_room_policy(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        policy_bits: u64,
+    ) -> bool {
+        let Some(session) = self.session(session_id) else {
+            return false;
+        };
+        if session.active_room.room_id != room_id
+            && !session.rooms.iter().any(|room| room.room_id == room_id)
+        {
+            return false;
+        }
+        let session_policy_count = self
+            .room_policy_bits
+            .keys()
+            .filter(|(stored_session, _)| *stored_session == session_id)
+            .count();
+        let key = (session_id, room_id);
+        if !self.room_policy_bits.contains_key(&key)
+            && session_policy_count >= CHAT_SESSION_MAX_ROOMS
+        {
+            return false;
+        }
+        self.room_policy_bits.insert(key, policy_bits);
+        true
+    }
+
+    pub(crate) fn clear_room_policies(&mut self, session_id: ChatSessionId) {
+        if self.session(session_id).is_none() {
+            return;
+        }
+        self.room_policy_bits
+            .retain(|(stored_session, _), _| *stored_session != session_id);
     }
 
     pub fn moderation_audit_page(
@@ -1433,6 +1535,8 @@ impl ChatClient {
             self.prune_message_revision_state_for_server(&removed.server.server_id);
             self.prune_pin_state_for_server(&removed.server.server_id);
         }
+        self.room_policy_bits
+            .retain(|(stored_session, _), _| *stored_session != session_id);
         Some(removed)
     }
 
