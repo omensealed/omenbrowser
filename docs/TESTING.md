@@ -4584,9 +4584,9 @@ resend uncertain mutations. The server's small large-batch threshold still
 forces Resource transport for eligible history/reaction/revision batches;
 `PinSnapshot` is intentionally a separately bounded compressed inline frame.
 
-## Dormant OMENchat moderation-audit contract
+## OMENchat announcement-room contract
 
-The dormant announcement-room wire boundary is covered by:
+The announcement-room wire boundary is covered by:
 
 ```bash
 cargo test --locked -p omenchat-protocol room_policy -- --nocapture
@@ -4602,9 +4602,9 @@ cargo test --locked --no-default-features --features desktop-product \
 
 These tests require exact legacy four-field and negotiated five-field room
 values, independent desktop/server MessagePack agreement, fixed known policy
-bits, bounds, explicit negotiation shape, and dormant production acceptance.
-They do not claim schema 11, authorization, presentation, process traffic, or
-activation. Evidence is in
+bits, bounds, explicit negotiation shape, and production capability acceptance.
+They do not alone claim schema 11, authorization, presentation, or process
+traffic. Evidence is in
 `docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
 
 Schema-11 announcement-room storage and guarded rollback are covered by:
@@ -4731,22 +4731,21 @@ restriction. It must continue collecting after unrelated operation errors; the
 normal headless `--pin-smoke` process case is the regression gate for that
 shared wait behavior.
 
-Replacement-Link policy ownership is covered without production capability
-activation:
+Replacement-Link policy ownership is covered through the production lifecycle:
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
-  dormant_announcement_policy_clears_on_replacement_link_and_requires_renegotiation \
+  announcement_policy_clears_on_replacement_link_and_requires_renegotiation \
   --lib -- --nocapture
 ```
 
 This drives the production reconnect/retirement function with a captured
 transport. It proves stale policy is cleared before reopening, is not inherited
 from a replacement that does not accept the capability, and is restored only
-after a fresh explicit request/accept. It is not real-Link negotiated process
-evidence.
+after a fresh explicit request/accept. Real-Link replacement evidence is
+recorded separately in the process qualification audit.
 
-The dormant server acceptance and initial-catalog encoder boundary is covered
+Server acceptance and the initial-catalog encoder boundary are covered
 independently:
 
 ```bash
@@ -4755,10 +4754,9 @@ cargo test --locked --manifest-path src/server/Cargo.toml \
   announcement_rooms --lib -- --nocapture
 ```
 
-The normal engine must continue omitting acceptance. The test-enabled engine
-must accept only an explicit request and encode authoritative policy through
-the five-field shared room value. That focused engine case does not itself
-cover join/delta fanout or activate the production server.
+The production engine accepts only an explicit request and encodes
+authoritative policy through the five-field shared room value. The test helper
+keeps the same boundary independently controllable.
 
 Per-Link mixed-format shaping is covered separately:
 
@@ -4769,33 +4767,33 @@ cargo test --locked --manifest-path src/server/Cargo.toml \
   --lib -- --nocapture
 ```
 
-One authenticated test Link negotiates policy while a simultaneous legacy Link
+One authenticated Link negotiates policy while a simultaneous legacy Link
 does not. The test requires five-field JoinAccept/RoomDelta values only on the
 negotiated Link, four-field values on the legacy Link, and binding removal on
-identity replacement. Production acceptance remains disabled.
+identity replacement.
 
-Explicit qualification feature identities are checked with:
+Production announcement-room feature identities are checked with:
 
 ```bash
 cargo test --locked --no-default-features \
-  --features desktop-product,omenchat-announcement-qualification \
+  --features desktop-product \
   live_open_requests_supported_durable_extensions_with_persistent_client_identity \
   --lib -- --nocapture
 
 cargo test --locked --manifest-path src/server/Cargo.toml \
   --no-default-features \
-  --features server-headless,omenchat-announcement-qualification \
+  --features server-headless \
   announcement_room --lib -- --nocapture
 
 bash scripts/verify-product-features.sh
 ```
 
-The first two commands require request/accept behavior only in explicit
-qualification builds. The product assertion requires canonical animated,
-static-media, and headless server graphs to exclude that feature.
+The first two commands require request/accept behavior in canonical builds.
+The product assertion requires canonical animated, static-media, headless, and
+full server graphs to include `omenchat-announcement-rooms`.
 
-Real-Link negotiation and replacement-Link qualification uses those same
-explicit binaries:
+Real-Link negotiation and replacement-Link qualification uses those canonical
+binaries:
 
 ```bash
 bash scripts/release-omenchat-smoke.sh \

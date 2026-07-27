@@ -45,15 +45,15 @@ chat-client-rns = ["chat-client-reticulum"]
 chat-client-rns-legacy = ["chat-client", "experimental-rns-net-stack"]
 chat-client-lxmf = ["chat-client", "native-lxmf-sdk"]
 chat-client-popout = ["chat-client"]
-# Explicit real-process qualification only. Canonical product aliases must
-# never include this until the announcement-room activation review completes.
-omenchat-announcement-qualification = []
+# Capability-negotiated room policy projection. Server authorization remains
+# unconditional, while legacy peers retain byte-exact four-field room values.
+omenchat-announcement-rooms = []
 
 # Canonical build identities. Release and packaging commands must use
 # `--no-default-features --features desktop-product`; development profiles keep
 # mock support explicit so it cannot leak into distributed binaries.
-desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr"]
-desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr"]
+desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms"]
+desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms"]
 desktop-dev = ["desktop-product", "mock-runtime"]
 desktop-test = ["desktop-dev", "desktop-ui-test"]
 

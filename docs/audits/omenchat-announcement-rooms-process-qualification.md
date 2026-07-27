@@ -40,8 +40,9 @@ unrelated message wait. The wait remains bounded by the existing response
 deadline and does not add a worker, channel, timer, retry, cache, or retained
 history.
 
-The separate `--announcement-negotiation-smoke` case uses binaries built with
-the independent `omenchat-announcement-qualification` feature. It configures
+The separate `--announcement-negotiation-smoke` case originally used binaries
+built with the independent qualification feature, since promoted to the
+canonical `omenchat-announcement-rooms` feature. It configures
 the same isolated announcement room, then additionally requires:
 
 - explicit `announcement-rooms-v1` negotiation;
@@ -110,11 +111,11 @@ including an orderly server restart and replacement Link:
 
 ```bash
 cargo build --locked --no-default-features \
-  --features desktop-product,omenchat-announcement-qualification \
+  --features desktop-product \
   --bin omenbrowser_rs
 cargo build --locked --manifest-path src/server/Cargo.toml \
   --no-default-features \
-  --features server-headless,omenchat-announcement-qualification \
+  --features server-headless \
   --bin omenchatd
 bash scripts/release-omenchat-smoke.sh \
   --browser-bin target/debug/omenbrowser_rs \
@@ -238,13 +239,13 @@ Focused tests passed:
 
 ```text
 cargo test --locked --no-default-features --features desktop-product \
-  dormant_announcement_policy_clears_on_replacement_link_and_requires_renegotiation \
+  announcement_policy_clears_on_replacement_link_and_requires_renegotiation \
   --lib -- --nocapture
 cargo test --locked --no-default-features --features desktop-product \
   announcement_rejection_evidence_requires_the_typed_policy_error \
   --bin omenbrowser_rs -- --nocapture
 cargo test --locked --no-default-features --features desktop-product \
-  dormant_announcement_policy_projects_only_when_requested_and_clears_on_loss \
+  announcement_policy_projects_only_when_requested_and_clears_on_loss \
   --lib -- --nocapture
 cargo test --locked --no-default-features --features desktop-product \
   v0_9_6_3_ordinary_message_remains_byte_exact --lib -- --nocapture

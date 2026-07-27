@@ -1573,11 +1573,11 @@ five fields while simultaneous legacy peers retain four. Every identity/link
 retirement path clears the binding, and the production-dormant fast path adds
 no lookup or clone. Current/current and mixed replacement-Link process traffic
 must still pass before production activation.
-Independent root/server `omenchat-announcement-qualification` features now
-enable those dormant request/accept paths only for deliberately built
-qualification binaries. They add no dependency and remain outside every
-canonical release alias; the product-feature script rejects leakage. Those
-binaries now pass current/current real-Link negotiation before and after an
+The independent root/server qualification feature has been promoted to the
+dependency-free production identity `omenchat-announcement-rooms`, included by
+canonical desktop/static-media/headless/full aliases. The product-feature
+script now requires it in every applicable graph. The previously explicit
+qualification binaries pass current/current real-Link negotiation before and after an
 orderly server restart and replacement Link. The client observes authoritative
 announcement policy, emits the exact local preflight error, queues no
 publication frame, and observes no committed message. The canonical
@@ -1586,9 +1586,8 @@ non-negotiated process case separately still receives typed server rejection
 observation now also passes under isolated Linux Xvfb/i3: the Iced pane shows
 the policy banner, retains a local draft, and leaves member Send/Attach inert,
 while the server remains at `chat:0`. Windows/macOS presentation remains a
-later release-candidate gate. The explicit production activation patch and
-full local product matrices remain; qualification binaries are not release
-artifacts.
+later release-candidate gate. Full local product matrices and the final hosted
+release-candidate gates remain.
 
 The first Unit 6G checkpoint is recorded in
 `docs/design/OMENCHAT_ROOM_RETENTION_CHECKPOINT.md`. Current history is

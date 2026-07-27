@@ -15,11 +15,11 @@ The root and standalone server were built independently:
 
 ```bash
 cargo build --locked --no-default-features \
-  --features desktop-product,omenchat-announcement-qualification \
+  --features desktop-product \
   --bin omenbrowser_rs
 cargo build --locked --manifest-path src/server/Cargo.toml \
   --no-default-features \
-  --features server-headless,omenchat-announcement-qualification \
+  --features server-headless \
   --bin omenchatd
 ```
 
@@ -87,8 +87,8 @@ tools.
   observation.
 
 All local wire, storage, authorization, client projection, restart,
-replacement-Link, Resource, and Linux GUI gates now pass. The next coherent
-unit is the explicit production activation review: give the capability a
-production feature identity, include it in canonical client/server aliases,
-retain per-Link legacy shaping, and rerun the full local product matrices
-before hosted/native release qualification.
+replacement-Link, Resource, and Linux GUI gates passed. The following
+activation unit promoted the capability to the production
+`omenchat-announcement-rooms` feature, retained per-Link legacy shaping, and
+passed the full local product matrices. Its evidence is in
+`docs/audits/omenchat-announcement-rooms-activation.md`.

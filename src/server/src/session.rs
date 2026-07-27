@@ -366,7 +366,7 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
-            announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-qualification"),
+            announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
     }
 
@@ -379,7 +379,7 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
-            announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-qualification"),
+            announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
     }
 
@@ -399,7 +399,7 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
-            announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-qualification"),
+            announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
     }
 
@@ -6218,8 +6218,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "omenchat-announcement-qualification"))]
-    fn announcement_rooms_capability_remains_dormant() {
+    #[cfg(not(feature = "omenchat-announcement-rooms"))]
+    fn announcement_rooms_capability_remains_inactive_without_feature() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(
             FrameBody::Text("Alice".into()),
@@ -6231,7 +6231,7 @@ mod tests {
                 client_instance_id: Some(crate::protocol::ClientInstanceId::new([18; 16])),
             },
         )
-        .expect("dormant announcement-room capability request");
+        .expect("inactive announcement-room capability request");
 
         let response = engine
             .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 6, None, request))
@@ -6264,8 +6264,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "omenchat-announcement-qualification")]
-    fn announcement_room_qualification_feature_enables_the_normal_engine() {
+    #[cfg(feature = "omenchat-announcement-rooms")]
+    fn announcement_room_product_feature_enables_the_normal_engine() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         assert!(engine.announcement_rooms_enabled);
     }

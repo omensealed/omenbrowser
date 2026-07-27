@@ -2,10 +2,9 @@
 
 Date: 2026-07-27
 
-Status: wire, schema-11 recovery, authorization, administration, client
-projection, process, restart, Resource, and native Linux GUI qualification
-complete; production negotiation remains disabled pending the explicit
-activation patch
+Status: production activation complete after wire, schema-11 recovery,
+authorization, administration, client projection, process, restart, Resource,
+and native Linux GUI qualification
 
 Baseline: `release/v0.9.6-4` at `1097a10`
 
@@ -318,7 +317,8 @@ Production negotiation remains disabled until all applicable gates pass.
     per-Link shaping sends five-field JoinAccept/RoomDelta values to a
     negotiated test peer and unchanged four-field values to a simultaneous
     legacy peer; identity/link retirement clears the bounded binding. The
-    normal server constructor remains dormant.
+    normal server constructor remained dormant at that qualification
+    checkpoint.
 11. **Complete (2026-07-27):** independent, dependency-free, non-default
     qualification features let explicit client/server binaries request and
     accept the capability. Canonical desktop/static-media/server aliases are
@@ -331,6 +331,12 @@ Production negotiation remains disabled until all applicable gates pass.
     remained at `chat:0` after the attempted click, and desktop shutdown
     drained normally. Evidence is in
     `docs/audits/omenchat-announcement-rooms-gui-qualification.md`.
-13. Next: perform the explicit production activation patch and full local
-    product matrices. Windows/macOS native presentation remains a release-
-    candidate gate, not evidence supplied by the Linux observation.
+13. **Complete (2026-07-27):** canonical desktop/static-media/headless/full
+    aliases include the dependency-free `omenchat-announcement-rooms` feature.
+    Product graphs require it, canonical real-Link negotiation/restart passes,
+    explicit non-capable component builds retain legacy behavior, and full
+    local root/server/release-quick gates pass. Evidence is in
+    `docs/audits/omenchat-announcement-rooms-activation.md`.
+14. Windows/macOS native presentation, Python interoperability, and packaging
+    remain batched release-candidate gates rather than local activation
+    blockers.

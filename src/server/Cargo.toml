@@ -19,11 +19,11 @@ default = []
 live-rns-net = []
 live-reticulum = ["dep:rand_core", "dep:reticulum-rs", "dep:rns_transport", "dep:tokio", "dep:tokio-util", "dep:omen-ifac-tcp", "dep:sha2"]
 tui = ["dep:crossterm", "dep:ratatui"]
-server-headless = ["live-reticulum"]
+server-headless = ["live-reticulum", "omenchat-announcement-rooms"]
 server-full = ["server-headless", "tui"]
-# Explicit real-process qualification only. Packaged server aliases must not
-# include this before the announcement-room activation review completes.
-omenchat-announcement-qualification = []
+# Capability-negotiated room policy projection. Authorization remains active
+# for every peer, including legacy peers that receive four-field room values.
+omenchat-announcement-rooms = []
 
 [[bin]]
 name = "omenchatd"

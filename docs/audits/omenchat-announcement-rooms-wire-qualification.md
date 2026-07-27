@@ -47,12 +47,12 @@ bounded clone. Because the production server still cannot accept the
 capability, its empty binding map takes the original borrowed-frame fast path
 with no added lookup or clone.
 
-The root and standalone server now each expose a dependency-free,
-non-default `omenchat-announcement-qualification` feature. It changes only the
-explicit qualification binary identities: the client requests the capability
-and retains the pending request; the server enables its already-qualified
-acceptance boundary. Canonical aliases remain unchanged, and the machine
-product-feature assertion treats qualification leakage as an error.
+At qualification time, the root and standalone server exposed a dependency-
+free, non-default qualification feature. The activation unit promoted that
+same boundary to `omenchat-announcement-rooms`: the client requests the
+capability and retains the pending request, and the server enables its
+already-qualified acceptance boundary. Canonical aliases now include the
+production feature and the machine assertion requires it.
 
 ## Wire invariants
 
@@ -91,11 +91,11 @@ cargo test --locked --no-default-features --features desktop-product \
   test_enabled_announcement_rooms_shape_join_and_delta_per_authenticated_link \
   --lib -- --nocapture)
 cargo test --locked --no-default-features \
-  --features desktop-product,omenchat-announcement-qualification \
+  --features desktop-product \
   live_open_requests_supported_durable_extensions_with_persistent_client_identity \
   --lib -- --nocapture
 (cd src/server && cargo test --locked --no-default-features \
-  --features server-headless,omenchat-announcement-qualification \
+  --features server-headless \
   announcement_room --lib -- --nocapture)
 bash scripts/verify-product-features.sh
 ```

@@ -75,7 +75,7 @@ Passed locally:
 ```text
 cargo check --locked --no-default-features --features desktop-product
 cargo test --locked --no-default-features --features desktop-product \
-  dormant_announcement_policy_projects_only_when_requested_and_clears_on_loss \
+  announcement_policy_projects_only_when_requested_and_clears_on_loss \
   -- --nocapture
 cargo test --locked --no-default-features --features desktop-product \
   announcement_room --lib -- --nocapture

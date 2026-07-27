@@ -898,7 +898,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
             super::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
             super::protocol::ROOM_PINS_CAPABILITY.into(),
         ];
-        if cfg!(feature = "omenchat-announcement-qualification") {
+        if cfg!(feature = "omenchat-announcement-rooms") {
             requested_capabilities.push(ANNOUNCEMENT_ROOMS_CAPABILITY.into());
         }
         session_open_body = match with_session_open_negotiation(
@@ -939,7 +939,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         state.reaction_requests.insert(session_id);
         state.message_revision_requests.insert(session_id);
         state.pin_requests.insert(session_id);
-        if cfg!(feature = "omenchat-announcement-qualification") {
+        if cfg!(feature = "omenchat-announcement-rooms") {
             state.announcement_room_requests.insert(session_id);
         }
     }
@@ -5901,7 +5901,7 @@ mod tests {
             negotiation.requested_capabilities.iter().any(
                 |capability| capability == crate::chat::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY
             ),
-            cfg!(feature = "omenchat-announcement-qualification")
+            cfg!(feature = "omenchat-announcement-rooms")
         );
         let mut expected_capabilities = vec![
             DURABLE_MUTATION_CAPABILITY.into(),
@@ -5911,7 +5911,7 @@ mod tests {
             crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
             crate::chat::protocol::ROOM_PINS_CAPABILITY.into(),
         ];
-        if cfg!(feature = "omenchat-announcement-qualification") {
+        if cfg!(feature = "omenchat-announcement-rooms") {
             expected_capabilities.push(crate::chat::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY.into());
         }
         assert_eq!(
@@ -5934,7 +5934,7 @@ mod tests {
         assert!(!state.moderation_audit_negotiated(1));
         assert_eq!(
             state.announcement_room_requests.contains(&1),
-            cfg!(feature = "omenchat-announcement-qualification")
+            cfg!(feature = "omenchat-announcement-rooms")
         );
     }
 
@@ -11294,7 +11294,7 @@ mod tests {
     }
 
     #[test]
-    fn dormant_announcement_policy_projects_only_when_requested_and_clears_on_loss() {
+    fn announcement_policy_projects_only_when_requested_and_clears_on_loss() {
         let mut client = ChatClient::new();
         let session_id = client.reserve_session_id();
         assert!(client.push_session(ChatSessionView {
@@ -11402,7 +11402,7 @@ mod tests {
     }
 
     #[test]
-    fn dormant_announcement_policy_clears_on_replacement_link_and_requires_renegotiation() {
+    fn announcement_policy_clears_on_replacement_link_and_requires_renegotiation() {
         let (mut client, session_id) = live_test_client();
         let mut state = LiveChatClientState::default();
         let mut transport = CapturedChatTransport::default();

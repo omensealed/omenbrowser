@@ -44,21 +44,19 @@ The optional local LXMF SDK/RPC endpoint provides only the explicitly
 negotiated SDK functions and bounded event stream. It is not treated as a full
 Reticulum transport, interface, NomadNet, OMENchat, or shared-instance backend.
 
-## OMENchat qualification feature identities
+## OMENchat announcement-room feature identity
 
-`omenchat-announcement-qualification` exists independently in the root
-OMENbrowser and standalone `src/server` manifests. It is non-default,
-dependency-free, and intended only for explicit real-process compatibility
-qualification. A matching client requests `announcement-rooms-v1`; a matching
-server may accept it. The canonical `desktop-product`,
-`desktop-product-static-media`, `server-headless`, and `server-full` aliases do
-not include it.
+`omenchat-announcement-rooms` exists independently in the root OMENbrowser and
+standalone `src/server` manifests. It is dependency-free and is included by
+the canonical `desktop-product`, `desktop-product-static-media`,
+`server-headless`, and `server-full` aliases. A capable client requests
+`announcement-rooms-v1`; a capable server accepts it and shapes room values
+per authenticated Link.
 
-`scripts/verify-product-features.sh` fails if the qualification feature leaks
-into a canonical product graph. Qualification binaries must therefore be built
-deliberately with `--no-default-features` and both the normal product alias and
-the extra feature. They are not release artifacts and must not replace the
-ordinary mixed-version or package gates.
+Legacy or non-negotiating peers continue receiving byte-exact four-field room
+values. Server authorization is unconditional and does not depend on this
+feature or negotiation. `scripts/verify-product-features.sh` fails if any
+canonical client/server graph omits the production feature.
 
 ## Security and ownership requirements
 
