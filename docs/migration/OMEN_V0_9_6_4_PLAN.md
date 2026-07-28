@@ -1743,6 +1743,19 @@ historical baseline are interpreted conservatively in
 `docs/audits/omenchat-slow-mode-resource-qualification.md`; physical GPU and
 long-duration growth are not claimed.
 
+The activation slice is now complete. The dependency-free
+`omenchat-slow-mode` feature is required by both desktop products and both
+standalone server products. Canonical clients request the capability and
+canonical servers accept/enforce it only with durable mutations; legacy and
+non-negotiating peers keep their exact prior room shapes and behavior.
+`omenchat-slow-mode-qualification` depends on the product feature but remains
+forbidden in release graphs because it owns only deterministic harness hooks.
+CLI/TUI status derives from the production enforcement gate. A rollback can
+remove `omenchat-slow-mode` from the product aliases without changing schema
+12 or deleting admission/history/identity state; the guarded schema-11 copy
+remains available for a full storage downgrade. Evidence:
+`docs/audits/omenchat-slow-mode-activation.md`.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

@@ -393,8 +393,8 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
-            slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
-            slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
+            slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode"),
+            slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -409,8 +409,8 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
-            slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
-            slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
+            slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode"),
+            slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -432,8 +432,8 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
-            slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
-            slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
+            slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode"),
+            slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -6586,7 +6586,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enabled_slow_mode_requires_durable_mutations_and_encodes_exact_shape() {
+    fn slow_mode_product_feature_requires_durable_mutations_and_encodes_exact_shape() {
         let engine = SessionEngine::with_test_slow_mode(OmenchatStore::in_memory().expect("store"));
         engine
             .store
@@ -6670,7 +6670,7 @@ mod tests {
                 .accepted_capabilities
                 .iter()
                 .any(|capability| capability == crate::protocol::ROOM_SLOW_MODE_CAPABILITY),
-            cfg!(feature = "omenchat-slow-mode-qualification")
+            cfg!(feature = "omenchat-slow-mode")
         );
         let FrameBody::Fields(fields) = &response[0].body else {
             panic!("session acceptance fields");
@@ -6678,7 +6678,7 @@ mod tests {
         let Some(FrameValue::Array(rooms)) = fields.get(1) else {
             panic!("room catalog");
         };
-        let expected_shape = if cfg!(feature = "omenchat-slow-mode-qualification") {
+        let expected_shape = if cfg!(feature = "omenchat-slow-mode") {
             crate::protocol::RoomCatalogShape::SlowMode
         } else {
             crate::protocol::RoomCatalogShape::Legacy
@@ -9608,7 +9608,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "omenchat-slow-mode-qualification"))]
+    #[cfg(not(feature = "omenchat-slow-mode"))]
     fn dormant_slow_mode_setting_does_not_change_production_session_behavior() {
         let store = OmenchatStore::in_memory().expect("store");
         let room = store

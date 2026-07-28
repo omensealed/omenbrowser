@@ -22,6 +22,12 @@ mod tui_layout;
 mod tui_text;
 pub mod upload;
 
+pub(crate) const SLOW_MODE_ENFORCEMENT_STATUS: &str = if cfg!(feature = "omenchat-slow-mode") {
+    "active"
+} else {
+    "inactive"
+};
+
 use error::ServerResult;
 use std::io::Read;
 use std::path::PathBuf;
@@ -262,7 +268,10 @@ impl Omenchatd {
                 Ok(())
             }
             CliCommand::Run(options) => {
-                #[cfg(feature = "omenchat-slow-mode-qualification")]
+                #[cfg(all(
+                    feature = "live-reticulum",
+                    feature = "omenchat-slow-mode-qualification"
+                ))]
                 let qualification_slow_mode_transition_seconds =
                     std::env::var("OMENCHATD_QUALIFICATION_SLOW_MODE_TRANSITION")
                         .ok()
@@ -275,8 +284,11 @@ impl Omenchatd {
                             })
                         })
                         .transpose()?;
-                #[cfg(not(feature = "omenchat-slow-mode-qualification"))]
-                let qualification_slow_mode_transition_seconds = None;
+                #[cfg(all(
+                    feature = "live-reticulum",
+                    not(feature = "omenchat-slow-mode-qualification")
+                ))]
+                let qualification_slow_mode_transition_seconds: Option<u32> = None;
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
                 if let Some(tcp_server) = options.tcp_server.as_ref() {
@@ -653,12 +665,13 @@ impl Omenchatd {
                     .map_err(|_| error::ServerError::Message("room not found".into()))?;
                 let update = database.set_room_slow_mode_seconds(room_id, room.seconds)?;
                 println!(
-                    "room slow mode stored: id={} previous={} configured={} revision={} changed={} enforcement=inactive",
+                    "room slow mode stored: id={} previous={} configured={} revision={} changed={} enforcement={}",
                     update.room.room_id,
                     slow_mode_label(update.previous_seconds),
                     slow_mode_label(update.room.slow_mode_seconds),
                     update.room.room_revision,
-                    update.previous_seconds != update.room.slow_mode_seconds
+                    update.previous_seconds != update.room.slow_mode_seconds,
+                    SLOW_MODE_ENFORCEMENT_STATUS
                 );
                 Ok(())
             }
@@ -1397,7 +1410,7 @@ fn slow_mode_label(seconds: u32) -> String {
 
 fn room_status_line(room: &store::ServerRoom) -> String {
     format!(
-        "#{name}\troom_id={room_id}\tpolicy={policy}\tslow_mode_config={slow_mode}\tslow_mode_enforcement=inactive\trevision={revision}\ttopic={topic}",
+        "#{name}\troom_id={room_id}\tpolicy={policy}\tslow_mode_config={slow_mode}\tslow_mode_enforcement={enforcement}\trevision={revision}\ttopic={topic}",
         name = room.name,
         room_id = room.room_id,
         policy = if room.policy_bits == 0 {
@@ -1406,6 +1419,7 @@ fn room_status_line(room: &store::ServerRoom) -> String {
             "announcement"
         },
         slow_mode = slow_mode_label(room.slow_mode_seconds),
+        enforcement = SLOW_MODE_ENFORCEMENT_STATUS,
         revision = room.room_revision,
         topic = room.topic.as_deref().unwrap_or_default()
     )
@@ -1426,7 +1440,7 @@ fn room_status_json(rooms: &[store::ServerRoom]) -> serde_json::Value {
                 },
                 "policy_bits": room.policy_bits,
                 "slow_mode_seconds": room.slow_mode_seconds,
-                "slow_mode_enforcement": "inactive",
+                "slow_mode_enforcement": SLOW_MODE_ENFORCEMENT_STATUS,
                 "room_revision": room.room_revision,
             })
         })
@@ -2871,12 +2885,17 @@ mod tests {
         let human = room_status_line(&room);
         assert!(human.contains("policy=announcement"));
         assert!(human.contains("slow_mode_config=30s"));
-        assert!(human.contains("slow_mode_enforcement=inactive"));
+        assert!(human.contains(&format!(
+            "slow_mode_enforcement={SLOW_MODE_ENFORCEMENT_STATUS}"
+        )));
         assert!(human.contains("revision=4"));
         let json = room_status_json(&[room]);
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["rooms"][0]["slow_mode_seconds"], 30);
-        assert_eq!(json["rooms"][0]["slow_mode_enforcement"], "inactive");
+        assert_eq!(
+            json["rooms"][0]["slow_mode_enforcement"],
+            SLOW_MODE_ENFORCEMENT_STATUS
+        );
         assert_eq!(json["rooms"][0]["policy"], "announcement");
         assert!(json.to_string().len() < 1_024);
     }

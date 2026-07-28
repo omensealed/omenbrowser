@@ -58,6 +58,20 @@ values. Server authorization is unconditional and does not depend on this
 feature or negotiation. `scripts/verify-product-features.sh` fails if any
 canonical client/server graph omits the production feature.
 
+## OMENchat slow-mode feature identity
+
+`omenchat-slow-mode` is dependency-free and included by the canonical
+`desktop-product`, `desktop-product-static-media`, `server-headless`, and
+`server-full` aliases. Client and server negotiate `room-slow-mode-v1` only
+with `durable-mutations-v1`; exact legacy four-field and announcement-only
+five-field room values remain unchanged for peers that do not negotiate it.
+
+`omenchat-slow-mode-qualification` depends on the product feature but remains
+excluded from every product alias. It owns only deterministic process-test
+hooks such as the isolated room-policy transition and GUI auto-open behavior.
+The product verifier requires the production feature and rejects the
+qualification feature in release graphs.
+
 ## Security and ownership requirements
 
 A future external backend must be explicit opt-in, prefer a restrictive local

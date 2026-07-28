@@ -48,15 +48,17 @@ chat-client-popout = ["chat-client"]
 # Capability-negotiated room policy projection. Server authorization remains
 # unconditional, while legacy peers retain byte-exact four-field room values.
 omenchat-announcement-rooms = []
-# Non-product interoperability gate for the dormant room slow-mode extension.
-# Release aliases intentionally do not include this feature.
-omenchat-slow-mode-qualification = []
+# Capability-negotiated durable room slow-mode enforcement. Legacy peers retain
+# byte-exact four-field room values and never receive implicit enforcement.
+omenchat-slow-mode = []
+# Non-product interoperability hooks for deterministic live qualification.
+omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
 
 # Canonical build identities. Release and packaging commands must use
 # `--no-default-features --features desktop-product`; development profiles keep
 # mock support explicit so it cannot leak into distributed binaries.
-desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms"]
-desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms"]
+desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode"]
+desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode"]
 desktop-dev = ["desktop-product", "mock-runtime"]
 desktop-test = ["desktop-dev", "desktop-ui-test"]
 

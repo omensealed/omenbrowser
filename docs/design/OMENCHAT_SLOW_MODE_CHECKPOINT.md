@@ -302,9 +302,15 @@ Process/UI:
    configured/inactive evidence. The legacy root Ratatui frontend has no
    OMENchat session surface. Evidence:
    `docs/audits/omenchat-slow-mode-client-projection-qualification.md`.
-6. Run current/current, restart, mixed-version, resource, and measurement
-   gates.
-7. Activate negotiation only after every gate passes.
+6. **Complete (2026-07-28):** current/current, restart, adjacent-version,
+   Resource, GUI, and bounded resource-measurement gates passed. Evidence:
+   `docs/audits/omenchat-slow-mode-real-link-qualification.md`,
+   `docs/audits/omenchat-slow-mode-gui-qualification.md`, and
+   `docs/audits/omenchat-slow-mode-resource-qualification.md`.
+7. **Complete (2026-07-28):** activate capability negotiation and admission in
+   canonical desktop/server profiles while retaining qualification-only hooks
+   behind a separate non-product feature. Evidence:
+   `docs/audits/omenchat-slow-mode-activation.md`.
 
 Rollback before activation is a code revert plus schema-11 copy restore.
 Rollback after activation disables the capability first, preserves admission

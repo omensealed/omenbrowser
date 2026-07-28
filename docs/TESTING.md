@@ -4607,7 +4607,7 @@ They do not alone claim schema 11, authorization, presentation, or process
 traffic. Evidence is in
 `docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
 
-The dormant slow-mode scalar extension is covered independently:
+The slow-mode scalar and production wire extension are covered independently:
 
 ```bash
 cargo test --locked -p omenchat-protocol -- --nocapture
@@ -4623,8 +4623,8 @@ cargo test --locked --no-default-features --features desktop-product \
 These gates require exact four-/five-/six-field shape isolation, a bounded
 `slow_mode_seconds` scalar, identical desktop/server MessagePack bytes, typed
 error number 1017, and the `durable-mutations-v1` capability dependency.
-Production negotiation and enforcement remain inactive. Schema qualification
-is covered separately below. Evidence is in
+Canonical products negotiate and enforce the extension; shape and codec
+qualification remains independently covered below. Evidence is in
 `docs/audits/omenchat-slow-mode-wire-qualification.md`.
 
 Schema-12 slow-mode storage and guarded schema-11 rollback are covered by:
@@ -4653,13 +4653,12 @@ omenchatd database export-schema11-copy \
 ```
 
 The staged copy removes only `slow_mode_seconds`,
-`room_slow_mode_admissions`, and its expiry index. Negotiation and runtime
-enforcement remain inactive. Evidence is in
+`room_slow_mode_admissions`, and its expiry index. Evidence is in
 `docs/audits/omenchat-slow-mode-storage-qualification.md`.
 
-The third slow-mode slice is exercised only through
-`SessionEngine::with_test_slow_mode`; normal constructors keep capability
-negotiation and enforcement inactive:
+The admission matrix retains `SessionEngine::with_test_slow_mode` for isolated
+boundary control; canonical constructors enable capability negotiation and
+enforcement through `omenchat-slow-mode`:
 
 ```bash
 cargo test --locked --manifest-path src/server/Cargo.toml \
@@ -4673,9 +4672,9 @@ protected. Announcement-policy, malformed-body, and role rejections consume no
 cooldown. The in-process owner has no worker or timer and is separately tested
 for bounded pruning, fail-closed capacity, competing reservation
 serialization, rollback-on-drop, and backward monotonic observations. A
-dormancy regression sets a nonzero scalar and proves normal production session
-constructors retain prior behavior without creating admission state. Evidence
-is in
+dormancy regression omits the production feature, sets a nonzero scalar, and
+proves an explicitly feature-disabled build retains prior behavior without
+creating admission state. Evidence is in
 `docs/audits/omenchat-slow-mode-admission-qualification.md`.
 
 The stopped-server scalar administration/status slice is covered by:
@@ -4702,9 +4701,9 @@ omenchatd rooms set-slow-mode <room-id> off|<1..=86400> \
 Tests require missing confirmation/invalid bounds to fail, an active writer to
 block the command, and a stopped-server update to report and persist its prior
 and configured values. A no-op keeps the room revision; enable/disable changes
-increment it once. Human and JSON room status expose the scalar while
-explicitly reporting enforcement as inactive. No live capability or runtime
-behavior is activated by this slice. Evidence is in
+increment it once. Human and JSON room status expose the scalar and report
+enforcement from the selected build identity (`active` in canonical server
+profiles). Evidence for the pre-activation administration slice is in
 `docs/audits/omenchat-slow-mode-administration-qualification.md`.
 
 The bounded shared policy/client presentation slice is covered by:
@@ -4724,12 +4723,12 @@ cargo test --locked --manifest-path src/server/Cargo.toml \
 The shared DTO rejects unknown policy bits and values above 86,400 seconds.
 Client projection is keyed by session/room, capped by the existing 256-room
 session ceiling, cleared on session removal/capability loss, and retains no
-strings or payloads. Explicit dormant parsing proves the six-field value can be
-projected, while production legacy and announcement-only parsers still reject
-that shape. Iced renders only a static label; omenchatd TUI status says
-configured but inactive. No worker, timer, polling subscription, retry, wire
-request, capability acceptance, or production enforcement is introduced.
-Evidence is in
+strings or payloads. The six-field value is accepted only for a negotiated
+slow-mode session; legacy and announcement-only parsers still reject that
+shape. Iced renders only a static label and omenchatd TUI reports the selected
+build's enforcement status. Activation adds no worker, timer, polling
+subscription, retry, queue, cache, or dependency. Pre-activation projection
+evidence is in
 `docs/audits/omenchat-slow-mode-client-projection-qualification.md`.
 
 Native Linux Iced projection, admission, typed rejection, and exact draft
@@ -4764,6 +4763,27 @@ and clean server worker/queue drain. It emits raw per-process samples,
 process/runtime summaries, both structured logs, shutdown latency, screenshots,
 the SQLite observation, and the exact rejected draft. See
 `docs/audits/omenchat-slow-mode-resource-qualification.md`.
+
+Canonical product activation and the feature-disabled rollback boundary are
+checked by:
+
+```bash
+bash scripts/verify-product-features.sh
+cargo test --locked --no-default-features --features desktop-product \
+  slow_mode_projection_is_bounded_and_follows_product_capability
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    slow_mode_product_feature_requires_durable_mutations_and_encodes_exact_shape
+  cargo test --locked --no-default-features \
+    dormant_slow_mode_setting_does_not_change_production_session_behavior
+)
+```
+
+The verifier requires `omenchat-slow-mode` in all four canonical products and
+rejects `omenchat-slow-mode-qualification`. The latter depends on the product
+feature but owns only deterministic process-test hooks. See
+`docs/audits/omenchat-slow-mode-activation.md`.
 
 Schema-11 announcement-room storage and guarded rollback are covered by:
 

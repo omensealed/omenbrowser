@@ -248,11 +248,13 @@ omenchatd rooms set-slow-mode 1 off --confirm --home ~/.omenchatd
 Numeric intervals are whole seconds in `1..=86400`; `off` stores zero. The
 scalar and room revision change in one immediate transaction, while a no-op
 retains the revision. Output reports the prior and configured values and
-explicitly reports `enforcement=inactive`. Room listings use
+reports `enforcement=active` in canonical server builds. Room listings use
 `slow_mode_config`/`slow_mode_seconds` plus
-`slow_mode_enforcement=inactive`. This administration slice does not request or
-accept `room-slow-mode-v1` and does not enforce the configured interval in a
-normal server session yet.
+`slow_mode_enforcement=active`. A capable server accepts
+`room-slow-mode-v1` only when the client also negotiates durable mutations;
+legacy or non-negotiating sessions retain their prior room shape and behavior.
+Builds that deliberately omit `omenchat-slow-mode` preserve the stored scalar
+but report enforcement inactive.
 
 To prepare a
 separate schema-11-compatible rollback copy while retaining the active

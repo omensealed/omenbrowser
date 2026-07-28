@@ -324,14 +324,16 @@ In `omenchatd tui`, use **Announce Now** after the live server is running to
 send the OMENchat and NomadNet portal announces immediately. This is useful for
 testing discovery without waiting for the configured announce interval.
 
-The dormant slow-mode frontend boundary uses one validated protocol-owned
-policy projection for both applications. A negotiated desktop session will
-eventually show a static `Slow mode · Ns` indicator; it does not run a
-countdown or treat elapsed client time as permission to send. The omenchatd TUI
-shows its stored room publication policy and slow-mode interval, explicitly
-labelled `enforcement inactive` until production negotiation and server
-admission are activated. The legacy root Ratatui frontend does not currently
-host OMENchat sessions, so it has no duplicate OMENchat policy state machine.
+Canonical desktop and server products negotiate `room-slow-mode-v1` only
+alongside durable mutations. A negotiated desktop session shows a static
+`Slow mode · Ns` indicator; it does not run a countdown or treat elapsed
+client time as permission to send. omenchatd atomically admits a new room
+message/action with its durable event and replay result, while moderators
+bypass the interval. Legacy and non-negotiating peers retain byte-exact
+four-/five-field room values and prior behavior. The omenchatd CLI and TUI
+report `enforcement active` in canonical server builds. The legacy root
+Ratatui frontend does not host OMENchat sessions, so it has no duplicate
+OMENchat policy state machine.
 
 ## Interface Recovery
 

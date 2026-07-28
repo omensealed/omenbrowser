@@ -6365,7 +6365,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enabled_slow_mode_is_link_scoped_and_shapes_session_and_join_catalogs() {
+    fn slow_mode_product_feature_is_link_scoped_and_shapes_session_and_join_catalogs() {
         let store = OmenchatStore::in_memory().expect("store");
         store.set_room_slow_mode_seconds(1, 30).expect("slow mode");
         let engine = SessionEngine::with_test_slow_mode(store);

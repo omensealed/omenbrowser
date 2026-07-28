@@ -207,7 +207,8 @@ fn room_policy_status(policy: RoomPolicyProjection) -> String {
         "off".into()
     };
     format!(
-        "Publication policy: {publication}\nSlow mode: {slow_mode} configured · enforcement inactive"
+        "Publication policy: {publication}\nSlow mode: {slow_mode} configured · enforcement {}",
+        crate::SLOW_MODE_ENFORCEMENT_STATUS
     )
 }
 
@@ -5686,7 +5687,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_room_projection_reports_configured_policy_as_inactive() {
+    fn dashboard_room_projection_reports_configured_policy_and_enforcement() {
         let (rows, truncated) = bounded_admin_room_rows(vec![ServerRoom {
             room_id: 7,
             name: "field".into(),
@@ -5701,11 +5702,17 @@ mod tests {
         assert_eq!(room.policy.slow_mode_seconds(), 30);
         assert_eq!(
             room_policy_status(room.policy),
-            "Publication policy: announcement\nSlow mode: 30s configured · enforcement inactive"
+            format!(
+                "Publication policy: announcement\nSlow mode: 30s configured · enforcement {}",
+                crate::SLOW_MODE_ENFORCEMENT_STATUS
+            )
         );
         let console = rooms_text_from_rows(&rows);
         assert!(console.contains("Publication policy: announcement"));
-        assert!(console.contains("Slow mode: 30s configured · enforcement inactive"));
+        assert!(console.contains(&format!(
+            "Slow mode: 30s configured · enforcement {}",
+            crate::SLOW_MODE_ENFORCEMENT_STATUS
+        )));
         assert!(console.len() < 1_024);
 
         let (invalid, truncated) = bounded_admin_room_rows(vec![ServerRoom {

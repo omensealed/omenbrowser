@@ -19,14 +19,16 @@ default = []
 live-rns-net = []
 live-reticulum = ["dep:rand_core", "dep:reticulum-rs", "dep:rns_transport", "dep:tokio", "dep:tokio-util", "dep:omen-ifac-tcp", "dep:sha2"]
 tui = ["dep:crossterm", "dep:ratatui"]
-server-headless = ["live-reticulum", "omenchat-announcement-rooms"]
+server-headless = ["live-reticulum", "omenchat-announcement-rooms", "omenchat-slow-mode"]
 server-full = ["server-headless", "tui"]
 # Capability-negotiated room policy projection. Authorization remains active
 # for every peer, including legacy peers that receive four-field room values.
 omenchat-announcement-rooms = []
-# Non-product interoperability gate for the dormant room slow-mode extension.
-# Canonical server aliases intentionally do not include this feature.
-omenchat-slow-mode-qualification = []
+# Capability-negotiated durable room slow-mode enforcement. Legacy peers retain
+# byte-exact four-field room values and never receive implicit enforcement.
+omenchat-slow-mode = []
+# Non-product interoperability hooks for deterministic live qualification.
+omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
 
 [[bin]]
 name = "omenchatd"

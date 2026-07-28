@@ -130,5 +130,6 @@ documentation. No state migration is involved.
 - No hosted CI, Python interoperability, package, public-network, or hardware
   result is claimed.
 
-The remaining slow-mode gate is the explicit product activation and rollback
-decision, followed by the normal batched release-candidate matrix.
+The explicit product activation and rollback decision is recorded in
+`docs/audits/omenchat-slow-mode-activation.md`. The normal batched
+release-candidate matrix remains outside this measurement unit.

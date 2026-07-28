@@ -938,7 +938,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         if cfg!(feature = "omenchat-announcement-rooms") {
             requested_capabilities.push(ANNOUNCEMENT_ROOMS_CAPABILITY.into());
         }
-        if cfg!(feature = "omenchat-slow-mode-qualification") || slow_mode_requested_for_test {
+        if cfg!(feature = "omenchat-slow-mode") || slow_mode_requested_for_test {
             requested_capabilities.push(ROOM_SLOW_MODE_CAPABILITY.into());
         }
         session_open_body = match with_session_open_negotiation(
@@ -982,7 +982,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         if cfg!(feature = "omenchat-announcement-rooms") {
             state.announcement_room_requests.insert(session_id);
         }
-        if cfg!(feature = "omenchat-slow-mode-qualification") || slow_mode_requested_for_test {
+        if cfg!(feature = "omenchat-slow-mode") || slow_mode_requested_for_test {
             state.slow_mode_requests.insert(session_id);
         }
     }
@@ -6010,8 +6010,8 @@ mod tests {
                 .requested_capabilities
                 .iter()
                 .any(|capability| capability == crate::chat::protocol::ROOM_SLOW_MODE_CAPABILITY),
-            cfg!(feature = "omenchat-slow-mode-qualification"),
-            "only the explicit qualification build may request slow mode"
+            cfg!(feature = "omenchat-slow-mode"),
+            "only a slow-mode-capable build may request slow mode"
         );
         let mut expected_capabilities = vec![
             DURABLE_MUTATION_CAPABILITY.into(),
@@ -6024,7 +6024,7 @@ mod tests {
         if cfg!(feature = "omenchat-announcement-rooms") {
             expected_capabilities.push(crate::chat::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY.into());
         }
-        if cfg!(feature = "omenchat-slow-mode-qualification") {
+        if cfg!(feature = "omenchat-slow-mode") {
             expected_capabilities.push(crate::chat::protocol::ROOM_SLOW_MODE_CAPABILITY.into());
         }
         assert_eq!(
@@ -6051,7 +6051,7 @@ mod tests {
         );
         assert_eq!(
             state.slow_mode_requests.contains(&1),
-            cfg!(feature = "omenchat-slow-mode-qualification")
+            cfg!(feature = "omenchat-slow-mode")
         );
     }
 
@@ -11583,7 +11583,7 @@ mod tests {
     }
 
     #[test]
-    fn slow_mode_projection_is_bounded_but_runtime_negotiation_remains_dormant() {
+    fn slow_mode_projection_is_bounded_and_follows_product_capability() {
         let (mut client, session_id) = live_test_client();
         let room_value = RoomCatalogEntry {
             room_id: 1,
