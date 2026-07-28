@@ -194,6 +194,7 @@ async fn async_main() -> anyhow::Result<()> {
             message,
             announcement_rejection_smoke,
             announcement_upload_rejection_smoke,
+            slow_mode_rejection_smoke,
             reaction_smoke,
             revision_smoke,
             pin_smoke,
@@ -215,6 +216,7 @@ async fn async_main() -> anyhow::Result<()> {
                 message,
                 announcement_rejection_smoke,
                 announcement_upload_rejection_smoke,
+                slow_mode_rejection_smoke,
                 reaction_smoke,
                 revision_smoke,
                 pin_smoke,
@@ -364,6 +366,7 @@ enum CliCommand {
         message: String,
         announcement_rejection_smoke: bool,
         announcement_upload_rejection_smoke: bool,
+        slow_mode_rejection_smoke: bool,
         reaction_smoke: bool,
         revision_smoke: bool,
         pin_smoke: bool,
@@ -434,6 +437,7 @@ struct OmenChatSmokeCommandInput {
     message: String,
     announcement_rejection_smoke: bool,
     announcement_upload_rejection_smoke: bool,
+    slow_mode_rejection_smoke: bool,
     reaction_smoke: bool,
     revision_smoke: bool,
     pin_smoke: bool,
@@ -525,6 +529,7 @@ impl CliCommand {
         let mut omenchat_message = "OMENchat smoke test from OMENbrowser_rs".to_string();
         let mut omenchat_announcement_rejection_smoke = false;
         let mut omenchat_announcement_upload_rejection_smoke = false;
+        let mut omenchat_slow_mode_rejection_smoke = false;
         let mut omenchat_reaction_smoke = false;
         let mut omenchat_revision_smoke = false;
         let mut omenchat_pin_smoke = false;
@@ -618,6 +623,9 @@ impl CliCommand {
                 }
                 "--omenchat-announcement-upload-rejection-smoke" => {
                     omenchat_announcement_upload_rejection_smoke = true;
+                }
+                "--omenchat-slow-mode-rejection-smoke" => {
+                    omenchat_slow_mode_rejection_smoke = true;
                 }
                 "--omenchat-reaction-smoke" => {
                     omenchat_reaction_smoke = true;
@@ -881,6 +889,20 @@ impl CliCommand {
                     "choose only one OMENchat announcement rejection smoke mode"
                 ));
             }
+            if omenchat_slow_mode_rejection_smoke
+                && (omenchat_announcement_rejection_smoke
+                    || omenchat_announcement_upload_rejection_smoke
+                    || omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_some()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-slow-mode-rejection-smoke is an isolated qualification case"
+                ));
+            }
             if omenchat_announcement_rejection_smoke
                 && (omenchat_reaction_smoke
                     || omenchat_revision_smoke
@@ -912,6 +934,7 @@ impl CliCommand {
                 message: omenchat_message,
                 announcement_rejection_smoke: omenchat_announcement_rejection_smoke,
                 announcement_upload_rejection_smoke: omenchat_announcement_upload_rejection_smoke,
+                slow_mode_rejection_smoke: omenchat_slow_mode_rejection_smoke,
                 reaction_smoke: omenchat_reaction_smoke,
                 revision_smoke: omenchat_revision_smoke,
                 pin_smoke: omenchat_pin_smoke,
@@ -3704,6 +3727,7 @@ mod tests {
                 message: "hello smoke".into(),
                 announcement_rejection_smoke: false,
                 announcement_upload_rejection_smoke: false,
+                slow_mode_rejection_smoke: false,
                 reaction_smoke: true,
                 revision_smoke: true,
                 pin_smoke: true,
@@ -3784,6 +3808,32 @@ mod tests {
         assert!(error
             .to_string()
             .contains("is an isolated authorization case"));
+    }
+
+    #[test]
+    fn cli_keeps_slow_mode_rejection_smoke_isolated() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-slow-mode-rejection-smoke".to_string(),
+        ])
+        .expect("parse slow-mode rejection smoke");
+        assert!(matches!(
+            parsed,
+            CliCommand::OmenChatSmoke {
+                slow_mode_rejection_smoke: true,
+                ..
+            }
+        ));
+
+        let error = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-slow-mode-rejection-smoke".to_string(),
+            "--omenchat-reaction-smoke".to_string(),
+        ])
+        .expect_err("mixed slow-mode and reaction smoke must fail");
+        assert!(error.to_string().contains("isolated qualification case"));
     }
 
     #[test]

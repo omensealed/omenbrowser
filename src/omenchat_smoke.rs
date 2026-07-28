@@ -106,6 +106,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         message,
         announcement_rejection_smoke,
         announcement_upload_rejection_smoke,
+        slow_mode_rejection_smoke,
         reaction_smoke,
         revision_smoke,
         pin_smoke,
@@ -221,6 +222,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                     message: &message,
                     announcement_rejection_smoke,
                     announcement_upload_rejection_smoke,
+                    slow_mode_rejection_smoke,
                 },
                 stages,
                 None,
@@ -279,6 +281,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                 message: &message,
                 announcement_rejection_smoke,
                 announcement_upload_rejection_smoke,
+                slow_mode_rejection_smoke,
             },
             stages,
             None,
@@ -315,6 +318,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         .session(session_id)
         .map(|session| session.active_room.room_id);
     let announcement_rooms_negotiated = live_state.announcement_rooms_negotiated(session_id);
+    let slow_mode_negotiated = live_state.slow_mode_negotiated(session_id);
     let announcement_policy_bits =
         active_room_id.and_then(|room_id| client.room_policy_bits(session_id, room_id));
     let announcement_policy_observed = announcement_rooms_negotiated
@@ -338,6 +342,9 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "announcement_rooms_negotiated": announcement_rooms_negotiated,
         "announcement_policy_bits": announcement_policy_bits,
         "announcement_policy_observed": announcement_policy_observed,
+        "slow_mode_negotiated": slow_mode_negotiated,
+        "slow_mode_seconds": active_room_id
+            .and_then(|room_id| client.room_slow_mode_seconds(session_id, room_id)),
         "local_user_id_bound": live_state.local_user_id(session_id).is_some(),
     }));
 
@@ -395,19 +402,26 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
     let message_seen = omenchat_session_contains_message(&client, session_id, &message);
     let announcement_rejected =
         omenchat_smoke_events_contain_announcement_policy_rejection(&message_events);
+    let slow_mode_rejected = omenchat_smoke_events_contain_slow_mode_rejection(&message_events);
     let announcement_publication_blocked =
         announcement_rejected || announcement_local_policy_blocked;
     stages.push(serde_json::json!({
-        "stage": if announcement_rejection_smoke {
+        "stage": if slow_mode_rejection_smoke {
+            "slow_mode_rejection_wait"
+        } else if announcement_rejection_smoke {
             "announcement_rejection_wait"
         } else {
             "message_echo_wait"
         },
-        "ok": if announcement_rejection_smoke {
+        "ok": if slow_mode_rejection_smoke {
+            slow_mode_negotiated && slow_mode_rejected && !message_seen
+        } else if announcement_rejection_smoke {
             announcement_publication_blocked && !message_seen
         } else {
             message_seen
         },
+        "slow_mode_negotiated": slow_mode_negotiated,
+        "slow_mode_rejected": slow_mode_rejected,
         "announcement_rejected": announcement_rejected,
         "announcement_local_policy_blocked": announcement_local_policy_blocked,
         "announcement_publication_blocked": announcement_publication_blocked,
@@ -805,6 +819,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
     });
     let message_outcome = if announcement_upload_rejection_smoke {
         announcement_upload_rejection_ok
+    } else if slow_mode_rejection_smoke {
+        slow_mode_negotiated && slow_mode_rejected && !message_seen
     } else if announcement_rejection_smoke {
         announcement_publication_blocked && !message_seen
     } else {
@@ -823,6 +839,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "announcement_upload_rejection_wait"
     } else if !message_outcome && announcement_rejection_smoke {
         "announcement_rejection_wait"
+    } else if !message_outcome && slow_mode_rejection_smoke {
+        "slow_mode_rejection_wait"
     } else if !message_outcome {
         "message_echo_wait"
     } else if !reaction_ok {
@@ -847,6 +865,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             message: &message,
             announcement_rejection_smoke,
             announcement_upload_rejection_smoke,
+            slow_mode_rejection_smoke,
         },
         stages,
         session_summary,
@@ -908,10 +927,8 @@ async fn wait_for_omenchat_condition(
     } = options;
     let deadline = tokio::time::Instant::now() + wait;
     let mut events = Vec::new();
-    let mut announcement_policy_rejected = false;
-    while tokio::time::Instant::now() < deadline
-        && !condition(client)
-        && !announcement_policy_rejected
+    let mut expected_policy_rejected = false;
+    while tokio::time::Instant::now() < deadline && !condition(client) && !expected_policy_rejected
     {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let received = tokio::time::timeout(remaining, runtime_events.recv()).await;
@@ -943,8 +960,10 @@ async fn wait_for_omenchat_condition(
                     transport,
                     Some(session_id),
                 );
-                announcement_policy_rejected =
-                    decoded.iter().any(is_announcement_policy_rejection_event);
+                expected_policy_rejected = decoded.iter().any(|event| {
+                    is_announcement_policy_rejection_event(event)
+                        || is_slow_mode_rejection_event(event)
+                });
                 events.push(serde_json::json!({
                     "event": "link_data",
                     "bytes": bytes,
@@ -969,8 +988,10 @@ async fn wait_for_omenchat_condition(
                     transport,
                     Some(session_id),
                 );
-                announcement_policy_rejected =
-                    decoded.iter().any(is_announcement_policy_rejection_event);
+                expected_policy_rejected = decoded.iter().any(|event| {
+                    is_announcement_policy_rejection_event(event)
+                        || is_slow_mode_rejection_event(event)
+                });
                 events.push(serde_json::json!({
                     "event": "resource_data",
                     "bytes": bytes,
@@ -2799,12 +2820,44 @@ fn omenchat_smoke_events_contain_announcement_policy_rejection(
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_smoke_events_contain_slow_mode_rejection(events: &[serde_json::Value]) -> bool {
+    events.iter().any(|entry| {
+        entry
+            .get("decoded")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|decoded| {
+                decoded.iter().any(|event| {
+                    event.get("event").and_then(serde_json::Value::as_str) == Some("error")
+                        && event
+                            .get("message")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(is_slow_mode_rejection_message)
+                })
+            })
+    })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn is_announcement_policy_rejection_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> bool {
     matches!(
         event,
         omenbrowser_rs::chat::ChatClientEvent::Error { message, .. }
             if is_announcement_policy_rejection_message(message)
     )
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn is_slow_mode_rejection_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> bool {
+    matches!(
+        event,
+        omenbrowser_rs::chat::ChatClientEvent::Error { message, .. }
+            if is_slow_mode_rejection_message(message)
+    )
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn is_slow_mode_rejection_message(message: &str) -> bool {
+    message.starts_with("slow mode active:") && message.contains("retry in")
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -3179,6 +3232,7 @@ struct OmenChatSmokeReportContext<'a> {
     message: &'a str,
     announcement_rejection_smoke: bool,
     announcement_upload_rejection_smoke: bool,
+    slow_mode_rejection_smoke: bool,
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -3195,6 +3249,7 @@ fn omenchat_smoke_report(
         message,
         announcement_rejection_smoke,
         announcement_upload_rejection_smoke,
+        slow_mode_rejection_smoke,
     } = context;
     serde_json::json!({
         "report": "omenchat_smoke",
@@ -3205,6 +3260,8 @@ fn omenchat_smoke_report(
                 "OMENchat Link opened, room joined, and the server rejected the member upload before acceptance or commit"
             } else if ok && announcement_rejection_smoke {
                 "OMENchat Link opened, room joined, and authoritative policy blocked member publication without committing the message"
+            } else if ok && slow_mode_rejection_smoke {
+                "OMENchat Link opened, slow mode was negotiated, and the server rejected a second publication without committing it"
             } else if ok {
                 "OMENchat Link opened, room joined, and message echo was observed"
             } else {
@@ -3221,6 +3278,7 @@ fn omenchat_smoke_report(
         "message": message,
         "announcement_rejection_smoke": announcement_rejection_smoke,
         "announcement_upload_rejection_smoke": announcement_upload_rejection_smoke,
+        "slow_mode_rejection_smoke": slow_mode_rejection_smoke,
         "stages": stages,
         "session": session,
     })
@@ -3289,6 +3347,7 @@ mod tests {
     use super::{
         create_omenchat_reconnect_ready_file, omenchat_local_announcement_policy_blocked,
         omenchat_smoke_events_contain_announcement_policy_rejection,
+        omenchat_smoke_events_contain_slow_mode_rejection,
     };
     use omenbrowser_rs::chat::ChatClientEvent;
 
@@ -3328,6 +3387,29 @@ mod tests {
             }]
         })];
         assert!(!omenchat_smoke_events_contain_announcement_policy_rejection(&unrelated));
+    }
+
+    #[test]
+    fn slow_mode_rejection_evidence_requires_typed_retry_context() {
+        let rejected = vec![serde_json::json!({
+            "event": "link_data",
+            "decoded": [{
+                "event": "error",
+                "message": "slow mode active: room slow mode is active; retry in 29s"
+            }]
+        })];
+        assert!(omenchat_smoke_events_contain_slow_mode_rejection(&rejected));
+
+        let unrelated = vec![serde_json::json!({
+            "event": "link_data",
+            "decoded": [{
+                "event": "error",
+                "message": "slow mode active"
+            }]
+        })];
+        assert!(!omenchat_smoke_events_contain_slow_mode_rejection(
+            &unrelated
+        ));
     }
 
     #[test]

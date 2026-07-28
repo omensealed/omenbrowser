@@ -25,6 +25,8 @@ announcement_rejection_smoke=0
 announcement_negotiation_smoke=0
 announcement_upload_rejection_smoke=0
 announcement_moderator_smoke=0
+slow_mode_rejection_smoke=0
+slow_mode_seconds=30
 live_policy_maintenance_refused="not-run"
 reaction_smoke=0
 revision_smoke=0
@@ -69,6 +71,8 @@ Options:
                        Configure lobby read-only and prove a member upload is rejected before acceptance
   --announcement-moderator-smoke
                        Promote the isolated client, configure lobby read-only, and prove moderator publication
+  --slow-mode-rejection-smoke
+                       Qualification build only: commit once, restart, and prove typed slow-mode rejection
   --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
   --revision-smoke     Exercise negotiated durable corrections, tombstones, replay, and Resource recovery
   --pin-smoke          Exercise moderator-only durable pin replay, snapshots, no-op, and unpin
@@ -172,6 +176,11 @@ while [[ $# -gt 0 ]]; do
       announcement_moderator_smoke=1
       shift
       ;;
+    --slow-mode-rejection-smoke)
+      slow_mode_rejection_smoke=1
+      restart_server=1
+      shift
+      ;;
     --reaction-smoke)
       reaction_smoke=1
       shift
@@ -271,6 +280,16 @@ if [[ "$announcement_moderator_smoke" -eq 1 ]] \
     || "$multi_client" -eq 1 || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 \
     || "$pin_smoke" -eq 1 ]]; then
   echo "--announcement-moderator-smoke is an isolated authorization case; combine it only with --upload-file and/or --restart-server" >&2
+  exit 2
+fi
+if [[ "$slow_mode_rejection_smoke" -eq 1 ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 \
+    || "$announcement_upload_rejection_smoke" -eq 1 \
+    || "$announcement_moderator_smoke" -eq 1 \
+    || "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
+    || -n "$upload_file" ]]; then
+  echo "--slow-mode-rejection-smoke is an isolated qualification case" >&2
   exit 2
 fi
 if [[ ( "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 ) \
@@ -379,6 +398,41 @@ if blocked.get("committed_message_seen") is not False:
 PY
 }
 
+verify_slow_mode_qualification_report() {
+  local report="$1"
+  local expect_rejection="$2"
+  local expected_seconds="$3"
+  python3 - "$report" "$expect_rejection" "$expected_seconds" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expect_rejection = sys.argv[2] == "1"
+expected_seconds = int(sys.argv[3])
+stages = {
+    stage.get("stage"): stage
+    for stage in report.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+capabilities = stages.get("capability_observation", {})
+if capabilities.get("slow_mode_negotiated") is not True:
+    raise SystemExit("room-slow-mode-v1 was not negotiated")
+if capabilities.get("slow_mode_seconds") != expected_seconds:
+    raise SystemExit("the six-field room catalog did not project configured slow mode")
+if expect_rejection:
+    rejection = stages.get("slow_mode_rejection_wait", {})
+    if rejection.get("slow_mode_rejected") is not True:
+        raise SystemExit("typed slow-mode rejection was not observed")
+    if rejection.get("committed_message_seen") is not False:
+        raise SystemExit("slow-mode rejected message was committed")
+else:
+    message = stages.get("message_echo_wait", {})
+    if message.get("committed_message_seen") is not True:
+        raise SystemExit("initial slow-mode admission was not committed")
+PY
+}
+
 echo "== Initializing isolated omenchatd =="
 "$server_bin" init --home "$server_home" "${server_interface_args[@]}" \
   > "$run_dir/omenchatd-init.txt"
@@ -430,12 +484,19 @@ fi
 
 if [[ "$announcement_rejection_smoke" -eq 1 \
   || "$announcement_upload_rejection_smoke" -eq 1 \
-  || "$announcement_moderator_smoke" -eq 1 ]]; then
+  || "$announcement_moderator_smoke" -eq 1 \
+  || "$slow_mode_rejection_smoke" -eq 1 ]]; then
   echo "== Proving live room policy maintenance is refused =="
   set +e
-  "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
-    > "$run_dir/omenchatd-live-room-policy.stdout" \
-    2> "$run_dir/omenchatd-live-room-policy.stderr"
+  if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+    "$server_bin" rooms set-slow-mode 1 "$slow_mode_seconds" --confirm --home "$server_home" \
+      > "$run_dir/omenchatd-live-room-policy.stdout" \
+      2> "$run_dir/omenchatd-live-room-policy.stderr"
+  else
+    "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+      > "$run_dir/omenchatd-live-room-policy.stdout" \
+      2> "$run_dir/omenchatd-live-room-policy.stderr"
+  fi
   live_policy_status=$?
   set -e
   if [[ "$live_policy_status" -eq 0 ]]; then
@@ -452,7 +513,9 @@ if [[ "$announcement_rejection_smoke" -eq 1 \
   live_policy_maintenance_refused=1
 fi
 
-if [[ "$announcement_rejection_smoke" -eq 1 || "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+if [[ "$announcement_rejection_smoke" -eq 1 \
+  || "$announcement_upload_rejection_smoke" -eq 1 \
+  || "$slow_mode_rejection_smoke" -eq 1 ]]; then
   echo "== Stopping initialized omenchatd for room policy maintenance =="
   kill "$server_pid"
   for _ in {1..80}; do
@@ -478,11 +541,17 @@ if [[ "$announcement_rejection_smoke" -eq 1 || "$announcement_upload_rejection_s
   esac
   server_pid=""
 
-  echo "== Configuring isolated lobby as an announcement room =="
-  "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
-    > "$run_dir/omenchatd-room-policy.txt"
+  if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+    echo "== Configuring isolated lobby with ${slow_mode_seconds}-second slow mode =="
+    "$server_bin" rooms set-slow-mode 1 "$slow_mode_seconds" --confirm --home "$server_home" \
+      > "$run_dir/omenchatd-room-policy.txt"
+  else
+    echo "== Configuring isolated lobby as an announcement room =="
+    "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+      > "$run_dir/omenchatd-room-policy.txt"
+  fi
 
-  echo "== Restarting isolated omenchatd with announcement policy =="
+  echo "== Restarting isolated omenchatd with qualified room policy =="
   "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
     > "$run_dir/omenchatd-run-policy-restart.log" 2>&1 &
   server_pid="$!"
@@ -623,6 +692,10 @@ if [[ "$announcement_rejection_smoke" -eq 1 ]]; then
 elif [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
   announcement_rejection_args=(--omenchat-announcement-upload-rejection-smoke)
 fi
+slow_mode_rejection_args=()
+if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+  slow_mode_rejection_args=(--omenchat-slow-mode-rejection-smoke)
+fi
 "$browser_bin" \
   --omenchat-smoke "$destination" \
   "${client_interface_args[@]}" \
@@ -732,6 +805,10 @@ if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke.json"; then
 fi
 if [[ "$announcement_negotiation_smoke" -eq 1 ]]; then
   verify_announcement_negotiation_report "$run_dir/omenchat-smoke.json"
+fi
+if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+  verify_slow_mode_qualification_report \
+    "$run_dir/omenchat-smoke.json" 0 "$slow_mode_seconds"
 fi
 server_upload_rejection_clean="not-run"
 if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
@@ -891,6 +968,7 @@ if [[ "$restart_server" -eq 1 ]]; then
     --app-root "$browser_root" \
     --omenchat-message "${message} (after server restart)" \
     "${announcement_rejection_args[@]}" \
+    "${slow_mode_rejection_args[@]}" \
     "${reaction_args[@]}" \
     "${revision_args[@]}" \
     "${pin_args[@]}" \
@@ -909,6 +987,29 @@ if [[ "$restart_server" -eq 1 ]]; then
   fi
   if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
     verify_empty_server_upload_state "restart"
+  fi
+  if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+    verify_slow_mode_qualification_report \
+      "$run_dir/omenchat-smoke-restart.json" 1 "$slow_mode_seconds"
+
+    echo "== Waiting for bounded slow-mode expiry =="
+    sleep "$((slow_mode_seconds + 1))"
+    "$browser_bin" \
+      --omenchat-smoke "$restart_destination" \
+      "${client_interface_args[@]}" \
+      --path-wait "$path_wait" \
+      --app-root "$browser_root" \
+      --omenchat-message "${message} (after slow-mode expiry)" \
+      --output "$run_dir/omenchat-smoke-expiry.json" \
+      > "$run_dir/omenchat-smoke-expiry.stdout" \
+      2> "$run_dir/omenchat-smoke-expiry.stderr"
+    if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke-expiry.json"; then
+      echo "post-expiry OMENchat smoke did not report pass" >&2
+      cat "$run_dir/omenchat-smoke-expiry.stderr" >&2
+      exit 1
+    fi
+    verify_slow_mode_qualification_report \
+      "$run_dir/omenchat-smoke-expiry.json" 0 "$slow_mode_seconds"
   fi
 fi
 
@@ -988,6 +1089,8 @@ announcement_rejection_smoke: $announcement_rejection_smoke
 announcement_negotiation_smoke: $announcement_negotiation_smoke
 announcement_upload_rejection_smoke: $announcement_upload_rejection_smoke
 announcement_moderator_smoke: $announcement_moderator_smoke
+slow_mode_rejection_smoke: $slow_mode_rejection_smoke
+slow_mode_seconds: $([[ "$slow_mode_rejection_smoke" -eq 1 ]] && printf '%s' "$slow_mode_seconds" || printf 'not-run')
 live_policy_maintenance_refused: $live_policy_maintenance_refused
 reaction_smoke: $reaction_smoke
 revision_smoke: $revision_smoke

@@ -5,9 +5,9 @@ Date: 2026-07-28
 Baseline: `release/v0.9.6-4` at `737d6ac`; dormant activation-gate follow-up
 began at `0970abc`
 
-Status: bounded shared policy, frontend projection, and deterministic
-request/accept/link-lifecycle gate complete; production capability negotiation
-and enforcement remain inactive
+Status: bounded shared policy, frontend projection, deterministic lifecycle,
+and qualification-only current/current real-Link gate complete; production
+capability negotiation and enforcement remain inactive
 
 ## Scope
 
@@ -56,9 +56,12 @@ selection still supplies only `Legacy` or `PolicyBits`, based on the already
 active announcement-room negotiation. A six-field room value is rejected by
 both production selections.
 
-The client does not request `room-slow-mode-v1`; the server does not accept it;
-normal `SessionEngine` constructors keep enforcement disabled. Existing
-four-/five-field traffic and announcement-room behavior remain unchanged.
+Canonical product builds do not request or accept `room-slow-mode-v1`; normal
+product behavior keeps enforcement disabled. Existing four-/five-field traffic
+and announcement-room behavior remain unchanged. The explicit non-product
+`omenchat-slow-mode-qualification` feature activates both sides only for the
+isolated process gate documented in
+`omenchat-slow-mode-real-link-qualification.md`.
 
 The follow-up activation gate adds link-scoped request and acceptance state
 behind test-only entry points. Exact acceptance requires the durable-mutation
@@ -220,7 +223,8 @@ Before production activation:
 
 - [x] implement deterministic request/accept/loss and replacement-Link state
   for `room-slow-mode-v1` without production advertisement;
-- prove current/current real-Link catalog/delta/rejection/expiry/restart;
+- [x] prove current/current real-Link catalog/rejection/expiry/restart;
+- prove real-Link room-delta projection after an administrative policy change;
 - prove adjacent four-/five-field mixed-version behavior;
 - add typed rejection and draft-retention evidence;
 - run GUI observation and server/client resource measurements; and

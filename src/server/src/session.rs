@@ -393,8 +393,8 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
-            slow_mode_enforcement_enabled: false,
-            slow_mode_capability_enabled: false,
+            slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
+            slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -409,8 +409,8 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
-            slow_mode_enforcement_enabled: false,
-            slow_mode_capability_enabled: false,
+            slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
+            slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -432,8 +432,8 @@ impl SessionEngine {
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
-            slow_mode_enforcement_enabled: false,
-            slow_mode_capability_enabled: false,
+            slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
+            slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode-qualification"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -2053,7 +2053,7 @@ impl SessionEngine {
                                 result_frame: self.encode_durable_result(self.error_frame(
                                     seq,
                                     Some(room_id),
-                                    ChatErrorCode::RateLimited,
+                                    ChatErrorCode::SlowModeActive,
                                     &format!(
                                         "room slow mode is active; retry in {retry_after_seconds}s"
                                     ),
@@ -2065,7 +2065,7 @@ impl SessionEngine {
                                 result_frame: self.encode_durable_result(self.error_frame(
                                     seq,
                                     Some(room_id),
-                                    ChatErrorCode::RateLimited,
+                                    ChatErrorCode::SlowModeActive,
                                     "room slow-mode admission is saturated",
                                 ))?,
                             })
@@ -2086,7 +2086,7 @@ impl SessionEngine {
                                 result_frame: self.encode_durable_result(self.error_frame(
                                     seq,
                                     Some(room_id),
-                                    ChatErrorCode::RateLimited,
+                                    ChatErrorCode::SlowModeActive,
                                     &format!(
                                         "room slow mode is active; retry in {retry_after_seconds}s"
                                     ),
@@ -2108,7 +2108,7 @@ impl SessionEngine {
                                 result_frame: self.encode_durable_result(self.error_frame(
                                     seq,
                                     Some(room_id),
-                                    ChatErrorCode::RateLimited,
+                                    ChatErrorCode::SlowModeActive,
                                     "room slow-mode admission is saturated",
                                 ))?,
                             })
@@ -3855,7 +3855,7 @@ impl SessionEngine {
                 return Ok(vec![self.error_frame(
                     seq,
                     Some(room_id),
-                    ChatErrorCode::RateLimited,
+                    ChatErrorCode::SlowModeActive,
                     &format!("room slow mode is active; retry in {retry_after_seconds}s"),
                 )])
             }
@@ -3863,7 +3863,7 @@ impl SessionEngine {
                 return Ok(vec![self.error_frame(
                     seq,
                     Some(room_id),
-                    ChatErrorCode::RateLimited,
+                    ChatErrorCode::SlowModeActive,
                     "room slow-mode admission is saturated",
                 )])
             }
@@ -3896,7 +3896,7 @@ impl SessionEngine {
             } => Ok(vec![self.error_frame(
                 seq,
                 Some(room_id),
-                ChatErrorCode::RateLimited,
+                ChatErrorCode::SlowModeActive,
                 &format!("room slow mode is active; retry in {retry_after_seconds}s"),
             )]),
             SlowModeRoomPublication::RoomNotFound => Ok(vec![self.error_frame(
@@ -3908,7 +3908,7 @@ impl SessionEngine {
             SlowModeRoomPublication::Saturated => Ok(vec![self.error_frame(
                 seq,
                 Some(room_id),
-                ChatErrorCode::RateLimited,
+                ChatErrorCode::SlowModeActive,
                 "room slow-mode admission is saturated",
             )]),
         }
@@ -6619,8 +6619,8 @@ mod tests {
         .expect("six-field slow-mode room");
         assert_eq!(room.slow_mode_seconds, 30);
 
-        let dormant_engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
-        let rejected = dormant_engine
+        let configured_engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let response = configured_engine
             .handle_frame(
                 &peer(),
                 Frame::new(
@@ -6636,24 +6636,33 @@ mod tests {
                     ),
                 ),
             )
-            .expect("session open with dormant capability");
+            .expect("session open with configured capability");
+        let negotiation = crate::protocol::parse_session_accept_negotiation(&response[0].body)
+            .expect("session acceptance negotiation")
+            .expect("explicit negotiation");
         assert_eq!(
-            crate::protocol::parse_session_accept_negotiation(&rejected[0].body),
-            Ok(Some(crate::protocol::SessionAcceptNegotiation {
-                accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
-            }))
+            negotiation
+                .accepted_capabilities
+                .iter()
+                .any(|capability| capability == crate::protocol::ROOM_SLOW_MODE_CAPABILITY),
+            cfg!(feature = "omenchat-slow-mode-qualification")
         );
-        let FrameBody::Fields(fields) = &rejected[0].body else {
-            panic!("legacy session acceptance fields");
+        let FrameBody::Fields(fields) = &response[0].body else {
+            panic!("session acceptance fields");
         };
         let Some(FrameValue::Array(rooms)) = fields.get(1) else {
-            panic!("legacy room catalog");
+            panic!("room catalog");
+        };
+        let expected_shape = if cfg!(feature = "omenchat-slow-mode-qualification") {
+            crate::protocol::RoomCatalogShape::SlowMode
+        } else {
+            crate::protocol::RoomCatalogShape::Legacy
         };
         crate::protocol::RoomCatalogEntry::from_frame_value_for_shape(
             rooms.first().expect("lobby"),
-            crate::protocol::RoomCatalogShape::Legacy,
+            expected_shape,
         )
-        .expect("four-field legacy room");
+        .expect("feature-selected room shape");
     }
 
     #[test]
@@ -9398,7 +9407,7 @@ mod tests {
             .expect("cooldown rejection");
         assert_eq!(
             frame_error_code(&rejected.origin),
-            Some(ChatErrorCode::RateLimited as u16 as u64)
+            Some(ChatErrorCode::SlowModeActive as u16 as u64)
         );
         assert!(rejected.broadcasts.is_empty());
         assert_eq!(
@@ -9425,7 +9434,7 @@ mod tests {
             .expect("restart rejection");
         assert_eq!(
             frame_error_code(&after_restart.origin),
-            Some(ChatErrorCode::RateLimited as u16 as u64)
+            Some(ChatErrorCode::SlowModeActive as u16 as u64)
         );
         assert_eq!(
             restarted
@@ -9531,7 +9540,7 @@ mod tests {
             .expect("legacy second");
         assert_eq!(
             frame_error_code(&second[0]),
-            Some(ChatErrorCode::RateLimited as u16 as u64)
+            Some(ChatErrorCode::SlowModeActive as u16 as u64)
         );
 
         drop(engine);
@@ -9574,6 +9583,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "omenchat-slow-mode-qualification"))]
     fn dormant_slow_mode_setting_does_not_change_production_session_behavior() {
         let store = OmenchatStore::in_memory().expect("store");
         let room = store
@@ -9663,7 +9673,7 @@ mod tests {
             .expect("reenabled rejection");
         assert_eq!(
             frame_error_code(&reenabled.origin),
-            Some(ChatErrorCode::RateLimited as u16 as u64)
+            Some(ChatErrorCode::SlowModeActive as u16 as u64)
         );
         assert_eq!(
             engine

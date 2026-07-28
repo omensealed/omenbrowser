@@ -15,7 +15,7 @@ for feature in "${required[@]}"; do
   fi
 done
 
-forbidden=(mock-runtime desktop-dev desktop-test desktop-ui-test native-rns-net experimental-rns-net-stack legacy-live-rns-net chat-client-rns-legacy)
+forbidden=(mock-runtime desktop-dev desktop-test desktop-ui-test native-rns-net experimental-rns-net-stack legacy-live-rns-net chat-client-rns-legacy omenchat-slow-mode-qualification)
 for feature in "${forbidden[@]}"; do
   if grep -q "omenbrowser_rs feature \"$feature\"" <<<"$tree"; then
     echo "product feature verification failed: forbidden feature '$feature' is active" >&2
@@ -220,6 +220,11 @@ for server_profile in server-headless server-full; do
   if ! grep -q 'omenchatd feature "omenchat-announcement-rooms"' \
     <<<"$server_features"; then
     echo "product feature verification failed: $server_profile lacks announcement-room support" >&2
+    exit 1
+  fi
+  if grep -q 'omenchatd feature "omenchat-slow-mode-qualification"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile activates dormant slow-mode qualification" >&2
     exit 1
   fi
 done

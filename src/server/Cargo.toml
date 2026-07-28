@@ -24,6 +24,9 @@ server-full = ["server-headless", "tui"]
 # Capability-negotiated room policy projection. Authorization remains active
 # for every peer, including legacy peers that receive four-field room values.
 omenchat-announcement-rooms = []
+# Non-product interoperability gate for the dormant room slow-mode extension.
+# Canonical server aliases intentionally do not include this feature.
+omenchat-slow-mode-qualification = []
 
 [[bin]]
 name = "omenchatd"

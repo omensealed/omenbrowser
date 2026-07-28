@@ -48,6 +48,9 @@ chat-client-popout = ["chat-client"]
 # Capability-negotiated room policy projection. Server authorization remains
 # unconditional, while legacy peers retain byte-exact four-field room values.
 omenchat-announcement-rooms = []
+# Non-product interoperability gate for the dormant room slow-mode extension.
+# Release aliases intentionally do not include this feature.
+omenchat-slow-mode-qualification = []
 
 # Canonical build identities. Release and packaging commands must use
 # `--no-default-features --features desktop-product`; development profiles keep
