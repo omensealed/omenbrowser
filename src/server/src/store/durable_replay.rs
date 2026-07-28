@@ -918,6 +918,7 @@ mod tests {
     use super::*;
     use crate::protocol::codec::encode_frame;
     use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue};
+    use crate::store::slow_mode::{admit_room_publication, SlowModeAdmission};
 
     fn key_with_client<'a>(
         identity_hash: &'a [u8],
@@ -1424,6 +1425,59 @@ mod tests {
             })
             .expect("replay count");
         assert_eq!(effects, 0);
+        assert_eq!(replay_rows, 0);
+    }
+
+    #[test]
+    fn invalid_durable_result_rolls_back_event_replay_and_slow_mode_deadline() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("slow-rollback", None).expect("room");
+        store
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("slow mode");
+        let user = store
+            .ensure_user(&[12; 16], "Slow User", None)
+            .expect("user");
+        let identity = [12; 16];
+        let error = store
+            .commit_durable_room_event_result(
+                key(&identity, 12),
+                request_hash(12),
+                room.room_id,
+                |transaction| {
+                    assert!(matches!(
+                        admit_room_publication(transaction, room.room_id, user.user_id, 100)?,
+                        SlowModeAdmission::Admitted {
+                            not_before_unix: 130,
+                            ..
+                        }
+                    ));
+                    Ok(DurableRoomEventPlan::Event {
+                        actor_user_id: Some(user.user_id),
+                        kind: ServerRoomEventKind::Message {
+                            body: "must rollback".into(),
+                        },
+                        admission: (),
+                    })
+                },
+                |_| Ok(vec![0xc0]),
+            )
+            .expect_err("invalid result must roll back atomic publication");
+        assert!(error.to_string().contains("valid bounded OMENchat frame"));
+        assert_eq!(
+            store.slow_mode_admission_count().expect("admission count"),
+            0
+        );
+        assert!(store
+            .latest_events(room.room_id, 10)
+            .expect("events")
+            .is_empty());
+        let replay_rows: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM durable_mutation_results", [], |row| {
+                row.get(0)
+            })
+            .expect("replay count");
         assert_eq!(replay_rows, 0);
     }
 

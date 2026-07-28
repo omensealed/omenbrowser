@@ -1699,6 +1699,16 @@ schema-12 migration boundary rolls back to schema 11, and the
 confirmation-gated `export-schema11-copy` removes only slow-mode storage from
 a staged copy. Negotiation and runtime enforcement remain inactive. Evidence
 is in `docs/audits/omenchat-slow-mode-storage-qualification.md`.
+The third slice connects both durable and legacy room message/action paths to
+the atomic admission boundary only through a test constructor. Exact durable
+replay is resolved before the mutation callback, while a new event, replay
+result, and persistent cooldown deadline share one immediate transaction.
+`SessionEngine` owns a bounded monotonic deadline map whose rollback-on-drop
+reservation serializes competing Links without a worker or timer. Tests cover
+rollback, restart, leave/rejoin, backward monotonic observation, policy and
+malformed rejection, moderator bypass, saturation, and unchanged production
+behavior. Production negotiation and enforcement remain inactive. Evidence is
+in `docs/audits/omenchat-slow-mode-admission-qualification.md`.
 
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise

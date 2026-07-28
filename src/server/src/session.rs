@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::batch::{
@@ -31,6 +31,9 @@ use crate::store::message_revisions::{MessageRevisionActorPolicy, MessageRevisio
 use crate::store::moderation_audit::ModerationAuditAdmission;
 use crate::store::pins::PinMutationResult;
 use crate::store::reactions::ReactionMutationResult;
+use crate::store::slow_mode::{
+    admit_room_publication, room_slow_mode_seconds, SlowModeAdmission, SlowModeRoomPublication,
+};
 use crate::store::{
     normalize_room_name, OmenchatStore, RoomContentMutationAdmission, ServerRoom, ServerRoomEvent,
     ServerRoomEventKind, ServerUser,
@@ -39,6 +42,10 @@ use crate::upload::{
     plan_upload_with_index, store_upload_with_policy_indexed_and_commit, UploadPolicy,
     UploadQuotaDecision,
 };
+
+mod slow_mode;
+
+use slow_mode::{SlowModeMonotonicAdmission, SlowModeOwner, SlowModeReservation};
 
 const STATUS_BANNED: u32 = 1;
 const STATUS_MUTED: u32 = 1 << 1;
@@ -199,6 +206,8 @@ pub struct SessionEngine {
     pending_resources: Arc<Mutex<PendingResourceStore>>,
     pending_uploads: Arc<Mutex<PendingUploadStore>>,
     rate_buckets: RateBuckets,
+    slow_mode: SlowModeOwner,
+    slow_mode_enforcement_enabled: bool,
     moderation_audit_enabled: bool,
     announcement_rooms_enabled: bool,
 }
@@ -226,6 +235,22 @@ struct DurableRoomOperation {
     op: ChatOp,
     notice_ack: bool,
     reply_mentions: bool,
+}
+
+struct RoomPublicationAdmission {
+    rate: Option<RateReservation>,
+    slow_mode: Option<SlowModeReservation>,
+}
+
+impl RoomPublicationAdmission {
+    fn commit(self) {
+        if let Some(rate) = self.rate {
+            rate.commit();
+        }
+        if let Some(slow_mode) = self.slow_mode {
+            slow_mode.commit();
+        }
+    }
 }
 
 struct DurableCommandEffect {
@@ -365,6 +390,8 @@ impl SessionEngine {
             pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
+            slow_mode: SlowModeOwner::default(),
+            slow_mode_enforcement_enabled: false,
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -378,6 +405,8 @@ impl SessionEngine {
             pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
+            slow_mode: SlowModeOwner::default(),
+            slow_mode_enforcement_enabled: false,
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -398,6 +427,8 @@ impl SessionEngine {
             pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
+            slow_mode: SlowModeOwner::default(),
+            slow_mode_enforcement_enabled: false,
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -414,6 +445,13 @@ impl SessionEngine {
     pub(crate) fn with_test_announcement_rooms(store: OmenchatStore) -> Self {
         let mut engine = Self::new(store);
         engine.announcement_rooms_enabled = true;
+        engine
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_slow_mode(store: OmenchatStore) -> Self {
+        let mut engine = Self::new(store);
+        engine.slow_mode_enforcement_enabled = true;
         engine
     }
 
@@ -1947,7 +1985,7 @@ impl SessionEngine {
                         }
                     }
                 }
-                let admission = match self.reserve_rate(peer, RateKind::Message)? {
+                let rate = match self.reserve_rate(peer, RateKind::Message)? {
                     RateAdmission::Admitted(admission) => admission,
                     RateAdmission::Rejected => {
                         return Ok(DurableRoomEventPlan::Response {
@@ -1960,6 +1998,100 @@ impl SessionEngine {
                         })
                     }
                 };
+                let slow_mode = if self.slow_mode_enforcement_enabled
+                    && op != ChatOp::RoomNotice
+                    && user.role_bits & (ROLE_MODERATOR | ROLE_ADMIN) == 0
+                {
+                    let Some(seconds) = room_slow_mode_seconds(transaction, room_id)? else {
+                        return Ok(DurableRoomEventPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                Some(room_id),
+                                ChatErrorCode::RoomNotFound,
+                                "room not found",
+                            ))?,
+                        });
+                    };
+                    let reservation = match self.slow_mode.reserve(
+                        room_id,
+                        user.user_id,
+                        seconds,
+                        Instant::now(),
+                    )? {
+                        SlowModeMonotonicAdmission::Disabled => None,
+                        SlowModeMonotonicAdmission::Admitted(reservation) => Some(reservation),
+                        SlowModeMonotonicAdmission::Rejected {
+                            retry_after_seconds,
+                        } => {
+                            return Ok(DurableRoomEventPlan::Response {
+                                result_frame: self.encode_durable_result(self.error_frame(
+                                    seq,
+                                    Some(room_id),
+                                    ChatErrorCode::RateLimited,
+                                    &format!(
+                                        "room slow mode is active; retry in {retry_after_seconds}s"
+                                    ),
+                                ))?,
+                            })
+                        }
+                        SlowModeMonotonicAdmission::Saturated => {
+                            return Ok(DurableRoomEventPlan::Response {
+                                result_frame: self.encode_durable_result(self.error_frame(
+                                    seq,
+                                    Some(room_id),
+                                    ChatErrorCode::RateLimited,
+                                    "room slow-mode admission is saturated",
+                                ))?,
+                            })
+                        }
+                    };
+                    match admit_room_publication(
+                        transaction,
+                        room_id,
+                        user.user_id,
+                        i64::try_from(unix_seconds()).unwrap_or(i64::MAX),
+                    )? {
+                        SlowModeAdmission::Disabled => None,
+                        SlowModeAdmission::Admitted { .. } => reservation,
+                        SlowModeAdmission::Rejected {
+                            retry_after_seconds,
+                        } => {
+                            return Ok(DurableRoomEventPlan::Response {
+                                result_frame: self.encode_durable_result(self.error_frame(
+                                    seq,
+                                    Some(room_id),
+                                    ChatErrorCode::RateLimited,
+                                    &format!(
+                                        "room slow mode is active; retry in {retry_after_seconds}s"
+                                    ),
+                                ))?,
+                            })
+                        }
+                        SlowModeAdmission::RoomNotFound => {
+                            return Ok(DurableRoomEventPlan::Response {
+                                result_frame: self.encode_durable_result(self.error_frame(
+                                    seq,
+                                    Some(room_id),
+                                    ChatErrorCode::RoomNotFound,
+                                    "room not found",
+                                ))?,
+                            })
+                        }
+                        SlowModeAdmission::Saturated => {
+                            return Ok(DurableRoomEventPlan::Response {
+                                result_frame: self.encode_durable_result(self.error_frame(
+                                    seq,
+                                    Some(room_id),
+                                    ChatErrorCode::RateLimited,
+                                    "room slow-mode admission is saturated",
+                                ))?,
+                            })
+                        }
+                    }
+                } else {
+                    None
+                };
+                let admission = RoomPublicationAdmission { rate, slow_mode };
                 OmenchatStore::join_durable_room(transaction, room_id, user.user_id)?;
                 match metadata.clone() {
                     Some(metadata) => Ok(DurableRoomEventPlan::RichEvent {
@@ -2008,9 +2140,7 @@ impl SessionEngine {
                 admission,
                 pruned,
             } => {
-                if let Some(admission) = admission {
-                    admission.commit();
-                }
+                admission.commit();
                 Ok(DurableMutationDispatch {
                     origin: decode_durable_result(&result_frame)?,
                     broadcasts: vec![Frame::new(
@@ -3610,14 +3740,14 @@ impl SessionEngine {
                 "message has no room id",
             )]);
         };
-        if self.store.room_by_id(room_id)?.is_none() {
+        let Some(room) = self.store.room_by_id(room_id)? else {
             return Ok(vec![self.error_frame(
                 seq,
                 Some(room_id),
                 ChatErrorCode::RoomNotFound,
                 "room not found",
             )]);
-        }
+        };
         let Some(body) = body_string(&body).filter(|body| !body.trim().is_empty()) else {
             return Ok(vec![self.error_frame(
                 seq,
@@ -3655,21 +3785,107 @@ impl SessionEngine {
         {
             return Ok(vec![error]);
         }
-        if let Some(error) =
-            self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Message)?
+        if !self.slow_mode_enforcement_enabled
+            || user.role_bits & (ROLE_MODERATOR | ROLE_ADMIN) != 0
         {
-            return Ok(vec![error]);
+            if let Some(error) =
+                self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Message)?
+            {
+                return Ok(vec![error]);
+            }
+            self.store.join_room(room_id, user.user_id)?;
+            let event = self
+                .store
+                .append_event(room_id, Some(user.user_id), event_kind(body))?;
+            return Ok(vec![Frame::new(
+                ChatOp::RoomEvent,
+                seq,
+                Some(room_id),
+                FrameBody::Fields(vec![event_to_value(&event)?]),
+            )]);
         }
-        self.store.join_room(room_id, user.user_id)?;
-        let event = self
-            .store
-            .append_event(room_id, Some(user.user_id), event_kind(body))?;
-        Ok(vec![Frame::new(
-            ChatOp::RoomEvent,
-            seq,
-            Some(room_id),
-            FrameBody::Fields(vec![event_to_value(&event)?]),
-        )])
+        let rate = match self.reserve_rate(peer, RateKind::Message)? {
+            RateAdmission::Admitted(admission) => admission,
+            RateAdmission::Rejected => {
+                return Ok(vec![self.error_frame(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::RateLimited,
+                    "message rate limit exceeded",
+                )])
+            }
+        };
+        let slow_mode = match self.slow_mode.reserve(
+            room_id,
+            user.user_id,
+            room.slow_mode_seconds,
+            Instant::now(),
+        )? {
+            SlowModeMonotonicAdmission::Disabled => None,
+            SlowModeMonotonicAdmission::Admitted(reservation) => Some(reservation),
+            SlowModeMonotonicAdmission::Rejected {
+                retry_after_seconds,
+            } => {
+                return Ok(vec![self.error_frame(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::RateLimited,
+                    &format!("room slow mode is active; retry in {retry_after_seconds}s"),
+                )])
+            }
+            SlowModeMonotonicAdmission::Saturated => {
+                return Ok(vec![self.error_frame(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::RateLimited,
+                    "room slow-mode admission is saturated",
+                )])
+            }
+        };
+        let admission = RoomPublicationAdmission { rate, slow_mode };
+        match self.store.commit_room_publication_with_slow_mode(
+            room_id,
+            user.user_id,
+            event_kind(body),
+            i64::try_from(unix_seconds()).unwrap_or(i64::MAX),
+        )? {
+            SlowModeRoomPublication::Stored {
+                event,
+                admission: persisted,
+            } => {
+                if matches!(persisted, SlowModeAdmission::Admitted { .. }) {
+                    admission.commit();
+                } else if let Some(rate) = admission.rate {
+                    rate.commit();
+                }
+                Ok(vec![Frame::new(
+                    ChatOp::RoomEvent,
+                    seq,
+                    Some(room_id),
+                    FrameBody::Fields(vec![event_to_value(&event)?]),
+                )])
+            }
+            SlowModeRoomPublication::Rejected {
+                retry_after_seconds,
+            } => Ok(vec![self.error_frame(
+                seq,
+                Some(room_id),
+                ChatErrorCode::RateLimited,
+                &format!("room slow mode is active; retry in {retry_after_seconds}s"),
+            )]),
+            SlowModeRoomPublication::RoomNotFound => Ok(vec![self.error_frame(
+                seq,
+                Some(room_id),
+                ChatErrorCode::RoomNotFound,
+                "room not found",
+            )]),
+            SlowModeRoomPublication::Saturated => Ok(vec![self.error_frame(
+                seq,
+                Some(room_id),
+                ChatErrorCode::RateLimited,
+                "room slow-mode admission is saturated",
+            )]),
+        }
     }
 
     fn handle_room_notice(
@@ -8976,6 +9192,364 @@ mod tests {
                 .expect("events")
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn test_only_durable_slow_mode_replays_before_admission_and_survives_restart() {
+        let path = temp_store_path("durable-slow-mode");
+        let (room_id, user_id) = {
+            let store = OmenchatStore::open(&path).expect("store");
+            let room = store.ensure_room("lobby", None).expect("room");
+            store
+                .set_room_slow_mode_seconds(room.room_id, 30)
+                .expect("slow mode");
+            let user = store
+                .ensure_user(&peer().identity_hash, "Alice", None)
+                .expect("user");
+            (room.room_id, user.user_id)
+        };
+        let client_instance_id = ClientInstanceId::new([41; 16]);
+        let first = durable_envelope(ChatOp::RoomMessage, room_id, 41, "first");
+        let engine = SessionEngine::with_test_slow_mode(OmenchatStore::open(&path).expect("store"));
+        let stored = engine
+            .handle_durable_room_text(
+                &peer(),
+                41,
+                Some(room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                first.clone(),
+            )
+            .expect("first durable message");
+        assert_eq!(stored.origin.op, ChatOp::MessageAck);
+        assert_eq!(stored.broadcasts.len(), 1);
+        assert_eq!(
+            engine
+                .store
+                .slow_mode_admission_count()
+                .expect("admission count"),
+            1
+        );
+
+        let replayed = engine
+            .handle_durable_room_text(
+                &peer(),
+                42,
+                Some(room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                first.clone(),
+            )
+            .expect("exact replay");
+        assert_replayed_response(&replayed.origin, &stored.origin, 42);
+        assert!(replayed.broadcasts.is_empty());
+
+        let conflict = engine
+            .handle_durable_room_text(
+                &peer(),
+                43,
+                Some(room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                durable_envelope(ChatOp::RoomMessage, room_id, 41, "different"),
+            )
+            .expect("hash conflict");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+
+        engine
+            .store
+            .leave_room(room_id, user_id)
+            .expect("leave room");
+        let rejected = engine
+            .handle_durable_room_text(
+                &peer(),
+                44,
+                Some(room_id),
+                ChatOp::RoomAction,
+                client_instance_id,
+                durable_envelope(ChatOp::RoomAction, room_id, 42, "waves"),
+            )
+            .expect("cooldown rejection");
+        assert_eq!(
+            frame_error_code(&rejected.origin),
+            Some(ChatErrorCode::RateLimited as u16 as u64)
+        );
+        assert!(rejected.broadcasts.is_empty());
+        assert_eq!(
+            engine
+                .store
+                .latest_events(room_id, 10)
+                .expect("events")
+                .len(),
+            1
+        );
+        drop(engine);
+
+        let restarted =
+            SessionEngine::with_test_slow_mode(OmenchatStore::open(&path).expect("reopened store"));
+        let after_restart = restarted
+            .handle_durable_room_text(
+                &peer(),
+                45,
+                Some(room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                durable_envelope(ChatOp::RoomMessage, room_id, 43, "after restart"),
+            )
+            .expect("restart rejection");
+        assert_eq!(
+            frame_error_code(&after_restart.origin),
+            Some(ChatErrorCode::RateLimited as u16 as u64)
+        );
+        assert_eq!(
+            restarted
+                .store
+                .latest_events(room_id, 10)
+                .expect("events after restart")
+                .len(),
+            1
+        );
+        drop(restarted);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[test]
+    fn test_only_slow_mode_rejections_do_not_consume_admission_and_roles_bypass() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        store
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("slow mode");
+        store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement room");
+        let mut engine = SessionEngine::with_test_slow_mode(store);
+        engine.announcement_rooms_enabled = true;
+        let client_instance_id = ClientInstanceId::new([42; 16]);
+
+        let policy_rejected = engine
+            .handle_durable_room_text(
+                &peer(),
+                50,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                durable_envelope(ChatOp::RoomMessage, room.room_id, 50, "blocked"),
+            )
+            .expect("policy rejection");
+        assert_eq!(
+            frame_error_code(&policy_rejected.origin),
+            Some(ChatErrorCode::RoomPolicyRestricted as u16 as u64)
+        );
+        assert_eq!(
+            engine
+                .store
+                .slow_mode_admission_count()
+                .expect("admission count"),
+            0
+        );
+
+        engine
+            .store
+            .set_room_announcement_policy(room.room_id, false)
+            .expect("ordinary room");
+        let malformed = engine
+            .handle_durable_room_text(
+                &peer(),
+                51,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                durable_envelope(ChatOp::RoomMessage, room.room_id, 51, ""),
+            )
+            .expect("malformed message");
+        assert_eq!(
+            frame_error_code(&malformed.origin),
+            Some(ChatErrorCode::DurableMutationMalformed as u16 as u64)
+        );
+        assert_eq!(
+            engine
+                .store
+                .slow_mode_admission_count()
+                .expect("admission count"),
+            0
+        );
+
+        let first = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::RoomMessage,
+                    52,
+                    Some(room.room_id),
+                    FrameBody::Text("legacy first".into()),
+                ),
+            )
+            .expect("legacy first");
+        assert_eq!(first[0].op, ChatOp::RoomEvent);
+        let second = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::RoomAction,
+                    53,
+                    Some(room.room_id),
+                    FrameBody::Text("legacy second".into()),
+                ),
+            )
+            .expect("legacy second");
+        assert_eq!(
+            frame_error_code(&second[0]),
+            Some(ChatErrorCode::RateLimited as u16 as u64)
+        );
+
+        drop(engine);
+        let store = OmenchatStore::in_memory().expect("moderator store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        store
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("slow mode");
+        let moderator = store
+            .ensure_user(&peer().identity_hash, "Alice", None)
+            .expect("moderator");
+        store
+            .set_user_role_bits(moderator.user_id, ROLE_MODERATOR)
+            .expect("moderator role");
+        let engine = SessionEngine::with_test_slow_mode(store);
+        for seq in 54..=55 {
+            let response = engine
+                .handle_frame(
+                    &peer(),
+                    Frame::new(
+                        ChatOp::RoomMessage,
+                        seq,
+                        Some(room.room_id),
+                        FrameBody::Text(format!("moderator {seq}")),
+                    ),
+                )
+                .expect("moderator message");
+            assert_eq!(response[0].op, ChatOp::RoomEvent);
+        }
+        assert_eq!(
+            engine
+                .store
+                .slow_mode_admission_count()
+                .expect("moderator admission count"),
+            0
+        );
+    }
+
+    #[test]
+    fn dormant_slow_mode_setting_does_not_change_production_session_behavior() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        store
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("dormant slow mode");
+        let engine = SessionEngine::new(store);
+        for seq in 60..=61 {
+            let response = engine
+                .handle_frame(
+                    &peer(),
+                    Frame::new(
+                        ChatOp::RoomMessage,
+                        seq,
+                        Some(room.room_id),
+                        FrameBody::Text(format!("production path {seq}")),
+                    ),
+                )
+                .expect("production message");
+            assert_eq!(response[0].op, ChatOp::RoomEvent);
+        }
+        assert_eq!(
+            engine
+                .store
+                .slow_mode_admission_count()
+                .expect("admission count"),
+            0
+        );
+    }
+
+    #[test]
+    fn test_only_disable_bypasses_and_reenable_preserves_prior_deadline() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .room_by_name("lobby")
+            .expect("room query")
+            .expect("room");
+        store
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("slow mode");
+        let engine = SessionEngine::with_test_slow_mode(store);
+        let client_instance_id = ClientInstanceId::new([43; 16]);
+        let first = engine
+            .handle_durable_room_text(
+                &peer(),
+                70,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                durable_envelope(ChatOp::RoomMessage, room.room_id, 70, "enabled"),
+            )
+            .expect("enabled message");
+        assert_eq!(first.origin.op, ChatOp::MessageAck);
+
+        engine
+            .store
+            .set_room_slow_mode_seconds(room.room_id, 0)
+            .expect("disable slow mode");
+        let disabled = engine
+            .handle_durable_room_text(
+                &peer(),
+                71,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                durable_envelope(ChatOp::RoomMessage, room.room_id, 71, "disabled"),
+            )
+            .expect("disabled message");
+        assert_eq!(disabled.origin.op, ChatOp::MessageAck);
+
+        engine
+            .store
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("reenable slow mode");
+        let reenabled = engine
+            .handle_durable_room_text(
+                &peer(),
+                72,
+                Some(room.room_id),
+                ChatOp::RoomMessage,
+                client_instance_id,
+                durable_envelope(ChatOp::RoomMessage, room.room_id, 72, "reenabled"),
+            )
+            .expect("reenabled rejection");
+        assert_eq!(
+            frame_error_code(&reenabled.origin),
+            Some(ChatErrorCode::RateLimited as u16 as u64)
+        );
+        assert_eq!(
+            engine
+                .store
+                .latest_events(room.room_id, 10)
+                .expect("events")
+                .len(),
+            2
         );
     }
 

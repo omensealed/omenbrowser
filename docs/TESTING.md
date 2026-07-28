@@ -4623,7 +4623,8 @@ cargo test --locked --no-default-features --features desktop-product \
 These gates require exact four-/five-/six-field shape isolation, a bounded
 `slow_mode_seconds` scalar, identical desktop/server MessagePack bytes, typed
 error number 1017, and the `durable-mutations-v1` capability dependency.
-Production negotiation and schema remain inactive. Evidence is in
+Production negotiation and enforcement remain inactive. Schema qualification
+is covered separately below. Evidence is in
 `docs/audits/omenchat-slow-mode-wire-qualification.md`.
 
 Schema-12 slow-mode storage and guarded schema-11 rollback are covered by:
@@ -4655,6 +4656,27 @@ The staged copy removes only `slow_mode_seconds`,
 `room_slow_mode_admissions`, and its expiry index. Negotiation and runtime
 enforcement remain inactive. Evidence is in
 `docs/audits/omenchat-slow-mode-storage-qualification.md`.
+
+The third slow-mode slice is exercised only through
+`SessionEngine::with_test_slow_mode`; normal constructors keep capability
+negotiation and enforcement inactive:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless slow_mode -- --nocapture
+```
+
+This matrix proves that exact durable replay bypasses cooldown work, a new
+event, replay result, and persisted deadline commit or roll back together,
+leave/rejoin does not clear admission, and restart remains conservatively
+protected. Announcement-policy, malformed-body, and role rejections consume no
+cooldown. The in-process owner has no worker or timer and is separately tested
+for bounded pruning, fail-closed capacity, competing reservation
+serialization, rollback-on-drop, and backward monotonic observations. A
+dormancy regression sets a nonzero scalar and proves normal production session
+constructors retain prior behavior without creating admission state. Evidence
+is in
+`docs/audits/omenchat-slow-mode-admission-qualification.md`.
 
 Schema-11 announcement-room storage and guarded rollback are covered by:
 

@@ -2,8 +2,9 @@
 
 Date: 2026-07-27
 
-Status: dormant wire contract complete; schema, configuration, negotiation,
-enforcement, and UI behavior remain inactive
+Status: dormant wire/storage contracts and test-only atomic admission complete;
+configuration, negotiation, production enforcement, and UI behavior remain
+inactive
 
 Baseline: `release/v0.9.6-4` at `634fa37`
 
@@ -180,14 +181,14 @@ expired-entry pruning. It has no task, timer, channel, or retry loop. Link
 retirement does not erase it. Process shutdown drops only the in-memory copy;
 SQLite remains authoritative for restart.
 
-For a new durable message/action:
+For a new durable message/action in the test-only admission path:
 
 1. Resolve exact replay/conflict before cooldown work.
 2. Validate membership, ban/mute state, announcement policy, body, and bounds.
-3. Reserve the in-process monotonic deadline without holding its lock across
-   SQLite work.
-4. In the existing immediate durable transaction, read the room setting and
-   persisted admission row.
+3. In the existing immediate durable transaction callback, read the current
+   room setting and reserve the in-process monotonic deadline. The owner lock is
+   released immediately; it is never held across subsequent SQLite work.
+4. Read the persisted admission row in the same transaction.
 5. Reject if either authoritative deadline is active.
 6. Append the event, update `not_before_unix`, and store the durable result in
    that same transaction.
@@ -213,8 +214,11 @@ omenchatd rooms set-slow-mode <room-id> <seconds> --confirm
 
 Updating the scalar and `room_revision` is one immediate transaction. A no-op
 does not increment the revision. Disabling slow mode makes existing admission
-rows inactive; bounded pruning removes them later. The command must refuse an
-active database writer and print the prior and effective value.
+rows inactive; bounded pruning removes them later. Re-enabling before a prior
+deadline expires conservatively makes that prior deadline authoritative again;
+traffic accepted while disabled does not create or extend a cooldown. The
+command must refuse an active database writer and print the prior and effective
+value.
 
 Negotiated clients show a compact `Slow mode · Ns` room indicator. On typed
 rejection, the pending draft remains intact and the UI reports the authoritative
@@ -285,7 +289,10 @@ Process/UI:
    admission ledger, migration/restart/fault tests, and guarded schema-11 copy
    export. Evidence:
    `docs/audits/omenchat-slow-mode-storage-qualification.md`.
-3. Add test-only atomic admission to durable and legacy message/action paths.
+3. **Complete (2026-07-28):** add test-only atomic admission to durable and
+   legacy message/action paths, a bounded rollback-on-drop monotonic owner, and
+   replay/restart/rollback/dormancy tests. Evidence:
+   `docs/audits/omenchat-slow-mode-admission-qualification.md`.
 4. Add stopped-server administration and status evidence.
 5. Add bounded client projection and shared GUI/TUI evidence.
 6. Run current/current, restart, mixed-version, resource, and measurement
