@@ -183,6 +183,8 @@ if current_client:
         raise RuntimeError("adjacent server unexpectedly negotiated announcement rooms")
     if capabilities.get("announcement_policy_bits") is not None:
         raise RuntimeError("adjacent server projected policy without capability negotiation")
+    if capabilities.get("moderation_audit_negotiated") is not False:
+        raise RuntimeError("adjacent server unexpectedly negotiated moderation audit")
 
 restart = sys.argv[7] == "1"
 if restart:
@@ -266,6 +268,7 @@ if current_client:
             "current_client_legacy_room_projection": True,
             "announcement_rooms_negotiated": False,
             "announcement_policy_bits": None,
+            "moderation_audit_negotiated": False,
         }
     )
 else:

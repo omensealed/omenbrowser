@@ -131,11 +131,17 @@ or failure.
 
 Together, the process gates prove current/current empty, non-empty inline, and
 non-empty Resource reads, a real durable moderation transaction, and restart
-persistence. They do not claim:
+persistence. The adjacent matrix also proves ordinary traffic in both
+directions with immutable `v0.9.6-3` and requires the current client to report
+that moderation audit was not negotiated. It correctly does not attempt a new
+operation against a peer that never shipped the capability. The remaining
+gates do not claim:
 
-- adjacent-binary live traffic;
 - receiver-side cancellation of an active inbound Resource;
 - production activation or GUI/TUI presentation.
+
+Adjacent evidence is recorded in
+`docs/audits/omenchat-room-shape-adjacent-qualification.md`.
 
 The locked `reticulum-rs-transport 0.9.6` still exposes no public
 receiver-side Resource cancellation method. Production negotiation remains

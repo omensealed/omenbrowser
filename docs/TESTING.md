@@ -4961,14 +4961,14 @@ bash scripts/run-omenchat-room-shape-compatibility.sh \
 ```
 
 The strict current parser requires the adjacent server's legacy four-field
-shape and records that no announcement capability or policy field was
-projected. The adjacent parser is permissive, so its successful current-server
-run is treated only as ordinary compatibility; the exact current-server
-four-field claim comes from the per-Link shaping regression above. The
-current/current process cases require negotiated five-field policy on both the
-initial and replacement Links. The harness never fabricates capability support
-for the adjacent peer. This is a long local/release-candidate gate and is not
-part of the quick release check.
+shape and records that neither announcement rooms nor moderation audit was
+negotiated and that no policy field was projected. The adjacent parser is
+permissive, so its successful current-server run is treated only as ordinary
+compatibility; the exact current-server four-field claim comes from the
+per-Link shaping regression above. The current/current process cases require
+negotiated five-field policy on both the initial and replacement Links. The
+harness never fabricates capability support for the adjacent peer. This is a
+long local/release-candidate gate and is not part of the quick release check.
 
 Production announcement-room feature identities are checked with:
 
@@ -5126,8 +5126,10 @@ Resource-delivered persisted row with a stable server destination. The gate
 found and now guards the production payload bridge's
 `ModerationAuditResource` classification. Canonical product profiles reject
 both qualification features. This proves independent-process Resource
-delivery, not receiver-side cancellation of an active inbound Resource or
-adjacent-binary interoperability.
+delivery, not receiver-side cancellation of an active inbound Resource.
+Adjacent ordinary traffic and explicit negative moderation-audit negotiation
+are covered by `scripts/run-omenchat-room-shape-compatibility.sh`; the adjacent
+peer never shipped the audit operation, so no audit request is sent to it.
 
 Focused schema/storage gates:
 

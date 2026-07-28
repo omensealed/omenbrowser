@@ -498,7 +498,8 @@ The presentation must distinguish:
     production negotiation, and privacy by construction. Invalid client pages
     clear the ephemeral projection. Current/current process restart,
     adjacent-binary live traffic, and receiver-side cancellation during an
-    active Reticulum Resource remain explicit pre-activation gates. Isolated
+    active Reticulum Resource were explicit pre-activation gates at that
+    point. Isolated
     bounded server-store and client-projection measurements passed on
     2026-07-27. The real 0.9.6 loopback sender-cancel path also passes, but the
     locked upstream transport exposes no public receiver-cancel method; this
@@ -513,9 +514,11 @@ The presentation must distinguish:
     A following narrow qualification feature forced only audit pages through
     Resource and proved the same persisted row before and after restart. That
     run found and fixed a missing production payload-bridge classification for
-    `ModerationAuditResource`; a focused regression now guards it. Adjacent
-    binaries and receiver-side Resource cancellation remain unclaimed. Evidence
-    is in
+    `ModerationAuditResource`; a focused regression now guards it. The
+    immutable `v0.9.6-3` matrix subsequently passed ordinary traffic in both
+    directions and explicitly proved the extension was not negotiated or
+    fabricated for the adjacent peer. Receiver-side Resource cancellation
+    remains unclaimed. Evidence is in
     `docs/audits/omenchat-moderation-audit-process-qualification.md`.
 13. Separately review activation only after the remaining process and
     measurement gates pass.

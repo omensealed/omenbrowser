@@ -117,6 +117,8 @@ if current_to_adjacent.get("announcement_rooms_negotiated") is not False:
     raise SystemExit("adjacent server unexpectedly negotiated announcement rooms")
 if current_to_adjacent.get("announcement_policy_bits") is not None:
     raise SystemExit("adjacent server projected announcement policy bits")
+if current_to_adjacent.get("moderation_audit_negotiated") is not False:
+    raise SystemExit("adjacent server unexpectedly negotiated moderation audit")
 
 if adjacent_to_current.get("status") != "pass":
     raise SystemExit("adjacent-client/current-server compatibility did not pass")
@@ -154,6 +156,7 @@ summary = {
     "current_current_initial_five_field": True,
     "current_current_replacement_link_five_field": True,
     "capability_fabricated_for_adjacent_peer": False,
+    "moderation_audit_fabricated_for_adjacent_peer": False,
 }
 pathlib.Path(sys.argv[5]).write_text(
     json.dumps(summary, indent=2, sort_keys=True) + "\n",

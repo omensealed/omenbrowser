@@ -1485,8 +1485,11 @@ stable. A narrow follow-up forces only moderation-audit pages through Resource
 and proves Resource delivery on both Links. It also found and fixed a server
 payload-bridge omission that sent the offer frame but never offered the
 retained Resource payload. Product profiles remain machine-guarded against
-both qualification features. This does not claim adjacent-binary live traffic
-or receiver-side Resource cancellation. Evidence is in
+both qualification features. The immutable `v0.9.6-3` process matrix then
+passed ordinary traffic in both directions and required negative
+moderation-audit negotiation evidence from the current client; it does not
+pretend the adjacent peer implements the new operation. Receiver-side Resource
+cancellation remains unclaimed. Evidence is in
 `docs/audits/omenchat-moderation-audit-process-qualification.md`.
 
 The subsequent cancellation review ran the existing real loopback Reticulum

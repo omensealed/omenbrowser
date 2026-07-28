@@ -64,7 +64,16 @@ current_server_four_and_five_field_shaping_regression: true
 current_current_initial_five_field: true
 current_current_replacement_link_five_field: true
 capability_fabricated_for_adjacent_peer: false
+moderation_audit_fabricated_for_adjacent_peer: false
 ```
+
+The matrix was rerun on 2026-07-28 after moderation-audit Resource process
+qualification. The strict current client explicitly reported
+`moderation_audit_negotiated: false` against the immutable adjacent server,
+while ordinary open, join, room publication, and echo still passed in both
+directions. This is the correct adjacent evidence: `v0.9.6-3` never shipped
+`moderation-audit-v1`, so the current product must not request, fabricate, or
+send that extension to it.
 
 All process roots, identities, Reticulum configuration, SQLite state, and TCP
 ports are temporary and isolated. The reusable adjacent Cargo target contains
@@ -100,7 +109,8 @@ result is claimed.
 No protocol, capability, database schema, configuration, identity, production
 feature, queue, worker, timer, cache, retry, or release artifact changed. The
 existing mixed-version harness now records the current client's negative
-capability evidence, but its ordinary and restart behavior is unchanged.
+announcement-room and moderation-audit capability evidence, but its ordinary
+and restart behavior is unchanged.
 
 The new wrapper is intentionally a manual release-candidate gate. It is not
 added to quick CI because it compiles an immutable desktop release and performs
