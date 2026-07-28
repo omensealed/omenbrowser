@@ -5117,19 +5117,24 @@ bash scripts/run-omenchat-moderation-audit-qualification.sh \
 
 It builds both roots with
 `omenchat-moderation-audit-resource-qualification`, which is a non-product
-extension of `omenchat-moderation-audit-qualification`. It promotes an
-isolated registered identity to moderator, keeps a second identified target
-Link active, persists and sends one durable mute, and requires the matching
-non-empty audit row, Resource transport provenance, and explicit
-`ModerationAuditEnd`. It orderly-restarts omenchatd and requires the same
-Resource-delivered persisted row with a stable server destination. The gate
-found and now guards the production payload bridge's
+extension of `omenchat-moderation-audit-qualification`; both qualification
+hooks imply the real, still-non-product `omenchat-moderation-audit` capability
+feature. It promotes an isolated registered identity to moderator, keeps a
+second identified target Link active, persists and sends one durable mute, and
+requires the matching non-empty audit row, Resource transport provenance, and
+explicit `ModerationAuditEnd`. It orderly-restarts omenchatd and requires the
+same Resource-delivered persisted row with a stable server destination. The
+gate found and now guards the production payload bridge's
 `ModerationAuditResource` classification. Canonical product profiles reject
-both qualification features. This proves independent-process Resource
-delivery, not receiver-side cancellation of an active inbound Resource.
+the real feature and both qualification hooks. This proves
+independent-process Resource delivery, not receiver-side cancellation of an
+active inbound Resource.
 Adjacent ordinary traffic and explicit negative moderation-audit negotiation
 are covered by `scripts/run-omenchat-room-shape-compatibility.sh`; the adjacent
 peer never shipped the audit operation, so no audit request is sent to it.
+
+The feature-boundary and receiver-cancellation activation decision is recorded
+in `docs/audits/omenchat-moderation-audit-activation-review.md`.
 
 Focused schema/storage gates:
 

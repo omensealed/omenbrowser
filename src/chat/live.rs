@@ -994,7 +994,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         if cfg!(feature = "omenchat-slow-mode") || slow_mode_requested_for_test {
             requested_capabilities.push(ROOM_SLOW_MODE_CAPABILITY.into());
         }
-        if cfg!(feature = "omenchat-moderation-audit-qualification") {
+        if cfg!(feature = "omenchat-moderation-audit") {
             requested_capabilities.push(MODERATION_AUDIT_CAPABILITY.into());
         }
         session_open_body = match with_session_open_negotiation(
@@ -1041,7 +1041,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         if cfg!(feature = "omenchat-slow-mode") || slow_mode_requested_for_test {
             state.slow_mode_requests.insert(session_id);
         }
-        if cfg!(feature = "omenchat-moderation-audit-qualification") {
+        if cfg!(feature = "omenchat-moderation-audit") {
             state.moderation_audit_requests.insert(session_id);
         }
     }
@@ -6086,7 +6086,7 @@ mod tests {
         if cfg!(feature = "omenchat-slow-mode") {
             expected_capabilities.push(crate::chat::protocol::ROOM_SLOW_MODE_CAPABILITY.into());
         }
-        if cfg!(feature = "omenchat-moderation-audit-qualification") {
+        if cfg!(feature = "omenchat-moderation-audit") {
             expected_capabilities.push(crate::chat::protocol::MODERATION_AUDIT_CAPABILITY.into());
         }
         assert_eq!(
@@ -6108,7 +6108,7 @@ mod tests {
         assert!(!state.pins_negotiated(1));
         assert_eq!(
             state.moderation_audit_requests.contains(&1),
-            cfg!(feature = "omenchat-moderation-audit-qualification")
+            cfg!(feature = "omenchat-moderation-audit")
         );
         assert!(!state.moderation_audit_negotiated(1));
         assert_eq!(

@@ -53,8 +53,11 @@ omenchat-announcement-rooms = []
 omenchat-slow-mode = []
 # Non-product interoperability hooks for deterministic live qualification.
 omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
-# Non-product negotiation hook for moderation-audit process qualification.
-omenchat-moderation-audit-qualification = []
+# Capability-negotiated, bounded, read-only moderation audit. This remains
+# outside product aliases until its explicit user-facing activation gate passes.
+omenchat-moderation-audit = []
+# Non-product process qualification for the real capability boundary.
+omenchat-moderation-audit-qualification = ["omenchat-moderation-audit"]
 # Non-product hook that forces only moderation-audit pages through Resource.
 omenchat-moderation-audit-resource-qualification = ["omenchat-moderation-audit-qualification"]
 

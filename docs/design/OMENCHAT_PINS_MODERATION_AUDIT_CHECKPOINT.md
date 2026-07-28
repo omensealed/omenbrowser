@@ -523,6 +523,14 @@ The presentation must distinguish:
 13. Separately review activation only after the remaining process and
     measurement gates pass.
 
+    **Complete (2026-07-28):** the real capability now has its own
+    `omenchat-moderation-audit` feature, while both qualification hooks remain
+    non-product extensions. Receiver-side Resource cancellation is unavailable
+    upstream but is not treated as evidence that never occurred. Product
+    activation remains deferred until an explicit, bounded user-facing request
+    and presentation slice passes. Decision and required gates are in
+    `docs/audits/omenchat-moderation-audit-activation-review.md`.
+
 Each step is a separate commit-ready risk class. Pin activation does not imply
 moderation-audit activation, and either feature may be deferred independently.
 

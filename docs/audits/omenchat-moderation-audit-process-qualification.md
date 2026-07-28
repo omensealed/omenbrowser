@@ -7,13 +7,15 @@ extension.
 
 ## Scope
 
-The existing non-product `omenchat-moderation-audit-qualification` feature
-makes the desktop request and omenchatd accept `moderation-audit-v1`. This
-extension adds `omenchat-moderation-audit-resource-qualification`, which
-implies the first feature and forces only moderation-audit pages through the
-existing bounded Resource path. Canonical `desktop-product`,
-`server-headless`, and `server-full` builds continue to omit both features,
-and `scripts/verify-product-features.sh` rejects accidental activation.
+The real `omenchat-moderation-audit` feature makes the desktop request and
+omenchatd accept `moderation-audit-v1`, but remains outside product aliases.
+The non-product `omenchat-moderation-audit-qualification` feature implies that
+boundary for process tests. This extension adds
+`omenchat-moderation-audit-resource-qualification`, which implies both and
+forces only moderation-audit pages through the existing bounded Resource path.
+Canonical `desktop-product`, `server-headless`, and `server-full` builds
+continue to omit all three features, and
+`scripts/verify-product-features.sh` rejects accidental activation.
 
 The client now has one bounded manual request function. It requires negotiated
 capability state, a joined room, a valid exclusive cursor, and a protocol

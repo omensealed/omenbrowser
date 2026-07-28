@@ -1502,6 +1502,15 @@ Resource. Production moderation-audit negotiation remains disabled; OMEN does
 not fork upstream, fabricate cancellation evidence, or close an otherwise
 healthy chat Link to hide the limitation.
 
+The activation review then separated the real
+`omenchat-moderation-audit` feature from both non-product qualification hooks.
+Canonical products machine-reject all three until an explicit moderator/admin
+GUI/TUI request and presentation slice passes. The missing receiver-cancel API
+is documented rather than hidden: the first UI must not offer a false Cancel
+action, add polling, or automatically retry an uncertain read. Evidence and
+the remaining activation gate are in
+`docs/audits/omenchat-moderation-audit-activation-review.md`.
+
 ### Unit 6G — room policy controls
 
 - Retention policies with explicit defaults and guarded migration.
