@@ -117,8 +117,8 @@ data needs migration or repair.
   packaging qualification.
 - This run covers one connected member and one room. Moderator bypass and
   expiry readmission remain covered by the real-Link process/session gates.
-- CPU, RSS, link, queue, and shutdown measurements remain the next local
-  slow-mode activation gate.
+- CPU, RSS, link, queue, and shutdown measurements are recorded separately in
+  `omenchat-slow-mode-resource-qualification.md`.
 
 No hosted CI, Python interoperability, package build, public-network peer,
 physical interface, or physical-GPU result is claimed by this unit.

@@ -4748,6 +4748,23 @@ observation in the selected evidence directory. It requires one admitted
 message and no second committed message. See
 `docs/audits/omenchat-slow-mode-gui-qualification.md`.
 
+The same isolated gate records optimized process and server-runtime
+measurements when given a bounded nonzero sample duration:
+
+```bash
+OMENCHAT_SLOW_MODE_WARMUP_SECONDS=10 \
+OMENCHAT_SLOW_MODE_SAMPLE_SECONDS=30 \
+  bash scripts/run-omenchat-slow-mode-gui-qualification.sh \
+  --evidence /tmp/omenchat-slow-mode-measurement
+```
+
+The measurement path currently requires Linux `/proc`. Durations of at least
+30 seconds additionally assert one active Link, empty transport/event queues,
+and clean server worker/queue drain. It emits raw per-process samples,
+process/runtime summaries, both structured logs, shutdown latency, screenshots,
+the SQLite observation, and the exact rejected draft. See
+`docs/audits/omenchat-slow-mode-resource-qualification.md`.
+
 Schema-11 announcement-room storage and guarded rollback are covered by:
 
 ```bash

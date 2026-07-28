@@ -1735,6 +1735,14 @@ preserves that rejected draft byte-for-byte. SQLite independently records
 exactly the first message. Evidence and the reproducible Xvfb/i3 command are in
 `docs/audits/omenchat-slow-mode-gui-qualification.md`.
 
+The paired-process release measurement gate is also complete. After a
+10-second warmup, the 30-second local sample held one real Link, empty bounded
+transport/event queues, zero median CPU for both processes, and normal
+186/53 ms desktop/server shutdown. The short sample and its non-equivalent
+historical baseline are interpreted conservatively in
+`docs/audits/omenchat-slow-mode-resource-qualification.md`; physical GPU and
+long-duration growth are not claimed.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

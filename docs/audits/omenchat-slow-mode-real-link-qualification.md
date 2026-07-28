@@ -106,7 +106,8 @@ Still required before product activation:
   `omenchat-slow-mode-draft-recovery-qualification.md`);
 - [x] observe the policy/rejection flow in the real GUI (see
   `omenchat-slow-mode-gui-qualification.md`);
-- record client/server CPU, RSS, link, and queue measurements; and
+- [x] record client/server CPU, RSS, link, queue, and shutdown measurements
+  (see `omenchat-slow-mode-resource-qualification.md`); and
 - make an explicit activation and rollback decision.
 
 No hosted CI, Python interoperability, package build, public network peer, or

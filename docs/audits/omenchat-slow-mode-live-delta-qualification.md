@@ -104,5 +104,6 @@ physical-interface result is claimed.
   `omenchat-room-shape-adjacent-qualification.md`).
 - [x] Observe the policy change and rejection recovery in the real Iced GUI
   (see `omenchat-slow-mode-gui-qualification.md`).
-- Record real client/server CPU, RSS, link, and queue measurements.
+- [x] Record real client/server CPU, RSS, link, queue, and shutdown
+  measurements (see `omenchat-slow-mode-resource-qualification.md`).
 - Make an explicit product activation and rollback decision.
