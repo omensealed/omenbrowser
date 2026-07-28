@@ -53,6 +53,7 @@ pub enum CliCommand {
     RoomsAdd(ServerOptions, RoomAddOptions),
     RoomsSetTopic(ServerOptions, RoomTopicOptions),
     RoomsSetPolicy(ServerOptions, RoomPolicyOptions),
+    RoomsSetSlowMode(ServerOptions, RoomSlowModeOptions),
     RoomsArchive(ServerOptions, RoomSelectOptions),
     UsersListJson(ServerOptions),
     UsersSetRole(ServerOptions, UserRoleOptions),
@@ -120,6 +121,12 @@ pub struct RoomTopicOptions {
 pub struct RoomPolicyOptions {
     pub room_id: i64,
     pub announcement_only: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomSlowModeOptions {
+    pub room_id: i64,
+    pub seconds: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -551,18 +558,7 @@ impl Omenchatd {
                 config::init_files(&config)?;
                 let database = admin_db::AdminDatabase::open(&config.database_path)?;
                 for room in database.list_rooms()? {
-                    println!(
-                        "#{name}\troom_id={room_id}\tpolicy={policy}\trevision={revision}\ttopic={topic}",
-                        name = room.name,
-                        room_id = room.room_id,
-                        policy = if room.policy_bits == 0 {
-                            "ordinary"
-                        } else {
-                            "announcement"
-                        },
-                        revision = room.room_revision,
-                        topic = room.topic.unwrap_or_default()
-                    );
+                    println!("{}", room_status_line(&room));
                 }
                 Ok(())
             }
@@ -570,31 +566,10 @@ impl Omenchatd {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
                 let database = admin_db::AdminDatabase::open(&config.database_path)?;
-                let rooms = database
-                    .list_rooms()?
-                    .into_iter()
-                    .map(|room| {
-                        serde_json::json!({
-                            "room_id": room.room_id,
-                            "name": room.name,
-                            "topic": room.topic,
-                            "policy": if room.policy_bits == 0 {
-                                "ordinary"
-                            } else {
-                                "announcement"
-                            },
-                            "policy_bits": room.policy_bits,
-                            "room_revision": room.room_revision,
-                        })
-                    })
-                    .collect::<Vec<_>>();
+                let rooms = database.list_rooms()?;
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "schema_version": 1,
-                        "rooms": rooms,
-                    }))
-                    .map_err(|error| {
+                    serde_json::to_string_pretty(&room_status_json(&rooms)).map_err(|error| {
                         crate::error::ServerError::Message(format!(
                             "room status JSON encoding failed: {error}"
                         ))
@@ -643,6 +618,29 @@ impl Omenchatd {
                         "announcement"
                     },
                     updated.room_revision
+                );
+                Ok(())
+            }
+            CliCommand::RoomsSetSlowMode(options, room) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "room slow-mode update refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let room_id = u32::try_from(room.room_id)
+                    .map_err(|_| error::ServerError::Message("room not found".into()))?;
+                let update = database.set_room_slow_mode_seconds(room_id, room.seconds)?;
+                println!(
+                    "room slow mode stored: id={} previous={} configured={} revision={} changed={} enforcement=inactive",
+                    update.room.room_id,
+                    slow_mode_label(update.previous_seconds),
+                    slow_mode_label(update.room.slow_mode_seconds),
+                    update.room.room_revision,
+                    update.previous_seconds != update.room.slow_mode_seconds
                 );
                 Ok(())
             }
@@ -988,6 +986,16 @@ fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
                 ),
             }
         }
+        "set-slow-mode" => {
+            let (options, room) = parse_room_slow_mode_options(args);
+            match room {
+                Some(room) => CliCommand::RoomsSetSlowMode(options, room),
+                None => CliCommand::Invalid(format!(
+                    "room slow mode requires <room_id> off|<1..={}> --confirm and must be run while omenchatd is stopped",
+                    crate::protocol::ROOM_SLOW_MODE_MAX_SECONDS
+                )),
+            }
+        }
         "archive" => {
             let (options, room) = parse_room_select_options(args);
             match room {
@@ -1320,6 +1328,97 @@ fn parse_room_policy_options(
     )
 }
 
+fn parse_room_slow_mode_options(
+    args: impl IntoIterator<Item = String>,
+) -> (ServerOptions, Option<RoomSlowModeOptions>) {
+    let mut options = ServerOptions::default();
+    let mut confirmed = false;
+    let mut positional = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => {
+                let Some(path) = args.next() else {
+                    return (options, None);
+                };
+                options.home = Some(PathBuf::from(path));
+            }
+            "--confirm" => confirmed = true,
+            value if !value.starts_with("--") => positional.push(value.to_owned()),
+            _ => return (options, None),
+        }
+    }
+    let [room_id, interval] = positional.as_slice() else {
+        return (options, None);
+    };
+    let room_id = room_id.parse::<i64>().ok().filter(|value| *value > 0);
+    let seconds = match interval.as_str() {
+        "off" => Some(0),
+        value => value
+            .parse::<u32>()
+            .ok()
+            .filter(|seconds| (1..=crate::protocol::ROOM_SLOW_MODE_MAX_SECONDS).contains(seconds)),
+    };
+    (
+        options,
+        confirmed
+            .then_some(())
+            .and(room_id)
+            .zip(seconds)
+            .map(|(room_id, seconds)| RoomSlowModeOptions { room_id, seconds }),
+    )
+}
+
+fn slow_mode_label(seconds: u32) -> String {
+    if seconds == 0 {
+        "off".into()
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn room_status_line(room: &store::ServerRoom) -> String {
+    format!(
+        "#{name}\troom_id={room_id}\tpolicy={policy}\tslow_mode_config={slow_mode}\tslow_mode_enforcement=inactive\trevision={revision}\ttopic={topic}",
+        name = room.name,
+        room_id = room.room_id,
+        policy = if room.policy_bits == 0 {
+            "ordinary"
+        } else {
+            "announcement"
+        },
+        slow_mode = slow_mode_label(room.slow_mode_seconds),
+        revision = room.room_revision,
+        topic = room.topic.as_deref().unwrap_or_default()
+    )
+}
+
+fn room_status_json(rooms: &[store::ServerRoom]) -> serde_json::Value {
+    let rooms = rooms
+        .iter()
+        .map(|room| {
+            serde_json::json!({
+                "room_id": room.room_id,
+                "name": room.name,
+                "topic": room.topic,
+                "policy": if room.policy_bits == 0 {
+                    "ordinary"
+                } else {
+                    "announcement"
+                },
+                "policy_bits": room.policy_bits,
+                "slow_mode_seconds": room.slow_mode_seconds,
+                "slow_mode_enforcement": "inactive",
+                "room_revision": room.room_revision,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": 1,
+        "rooms": rooms,
+    })
+}
+
 fn parse_user_role_options(
     args: impl IntoIterator<Item = String>,
 ) -> (ServerOptions, Option<UserRoleOptions>) {
@@ -1512,6 +1611,7 @@ fn print_help() {
     println!("  rooms add <name> [--topic <topic>] [--home <path>]");
     println!("  rooms topic <room_id> [--topic <topic>] [--home <path>]");
     println!("  rooms policy <room_id> ordinary|announcement --confirm [--home <path>]  # server must be stopped");
+    println!("  rooms set-slow-mode <room_id> off|<seconds> --confirm [--home <path>]  # 1..=86400; server must be stopped");
     println!("  rooms archive <room_id> [--home <path>]");
     println!("  users list --json [--home <path>]");
     println!("  users role <user_id> standard|trusted|moderator|administrator --confirm [--home <path>]  # server must be stopped");
@@ -2315,6 +2415,74 @@ mod tests {
                 }
             )
         );
+        assert!(matches!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "set-slow-mode".to_string(),
+                "7".to_string(),
+                "30".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        for invalid in ["0", "86401", "invalid"] {
+            assert!(matches!(
+                CliCommand::parse([
+                    "rooms".to_string(),
+                    "set-slow-mode".to_string(),
+                    "7".to_string(),
+                    invalid.to_string(),
+                    "--confirm".to_string(),
+                ]),
+                CliCommand::Invalid(message) if message.contains("1..=86400")
+            ));
+        }
+        for invalid_args in [
+            vec!["rooms", "set-slow-mode", "off", "7", "--confirm"],
+            vec!["rooms", "set-slow-mode", "7", "30", "--confirm", "--home"],
+        ] {
+            assert!(matches!(
+                CliCommand::parse(invalid_args.into_iter().map(str::to_owned)),
+                CliCommand::Invalid(message) if message.contains("1..=86400")
+            ));
+        }
+        assert_eq!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "set-slow-mode".to_string(),
+                "7".to_string(),
+                "30".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::RoomsSetSlowMode(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                RoomSlowModeOptions {
+                    room_id: 7,
+                    seconds: 30,
+                }
+            )
+        );
+        assert_eq!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "set-slow-mode".to_string(),
+                "7".to_string(),
+                "off".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::RoomsSetSlowMode(
+                ServerOptions::default(),
+                RoomSlowModeOptions {
+                    room_id: 7,
+                    seconds: 0,
+                }
+            )
+        );
         assert_eq!(
             CliCommand::parse([
                 "rooms".to_string(),
@@ -2670,6 +2838,29 @@ mod tests {
                 tcp_client: None,
             })
         );
+    }
+
+    #[test]
+    fn room_status_projections_report_effective_slow_mode_without_secrets() {
+        let room = crate::store::ServerRoom {
+            room_id: 7,
+            name: "field".into(),
+            topic: Some("Operations".into()),
+            room_revision: 4,
+            policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 30,
+        };
+        let human = room_status_line(&room);
+        assert!(human.contains("policy=announcement"));
+        assert!(human.contains("slow_mode_config=30s"));
+        assert!(human.contains("slow_mode_enforcement=inactive"));
+        assert!(human.contains("revision=4"));
+        let json = room_status_json(&[room]);
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["rooms"][0]["slow_mode_seconds"], 30);
+        assert_eq!(json["rooms"][0]["slow_mode_enforcement"], "inactive");
+        assert_eq!(json["rooms"][0]["policy"], "announcement");
+        assert!(json.to_string().len() < 1_024);
     }
 
     #[test]
@@ -3498,6 +3689,63 @@ mod tests {
         assert_eq!(policy_room.room_revision, 2);
         drop(database);
         Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options.clone(),
+                RoomSlowModeOptions {
+                    room_id: room.0,
+                    seconds: 30,
+                },
+            ))
+            .expect("enable room slow mode through administrative database");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open current slow-mode database");
+        let slow_room = database
+            .room_by_id(room.0 as u32)
+            .expect("slow-mode room lookup")
+            .expect("slow-mode room");
+        assert_eq!(slow_room.slow_mode_seconds, 30);
+        assert_eq!(slow_room.room_revision, 3);
+        drop(database);
+        Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options.clone(),
+                RoomSlowModeOptions {
+                    room_id: room.0,
+                    seconds: 30,
+                },
+            ))
+            .expect("idempotent room slow mode update");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open idempotent slow-mode database");
+        let unchanged = database
+            .room_by_id(room.0 as u32)
+            .expect("unchanged room lookup")
+            .expect("unchanged room");
+        assert_eq!(unchanged.slow_mode_seconds, 30);
+        assert_eq!(unchanged.room_revision, 3);
+        drop(database);
+        Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options.clone(),
+                RoomSlowModeOptions {
+                    room_id: room.0,
+                    seconds: 0,
+                },
+            ))
+            .expect("disable room slow mode");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open disabled slow-mode database");
+        let disabled = database
+            .room_by_id(room.0 as u32)
+            .expect("disabled room lookup")
+            .expect("disabled room");
+        assert_eq!(disabled.slow_mode_seconds, 0);
+        assert_eq!(disabled.room_revision, 4);
+        drop(database);
+        Omenchatd
             .run(CliCommand::RoomsArchive(
                 options,
                 RoomSelectOptions { room_id: room.0 },
@@ -3507,6 +3755,65 @@ mod tests {
             .expect("rooms after archive")
             .iter()
             .any(|(_, name, _)| name == "ops"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn slow_mode_cli_refuses_active_writer_then_updates_selected_home() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-slow-mode-exclusive-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let store = crate::store::OmenchatStore::open(&config.database_path).expect("store");
+        let room = store.ensure_room("slow-cli", None).expect("room");
+        drop(store);
+        let writer = rusqlite::Connection::open(&config.database_path).expect("writer");
+        writer
+            .execute_batch("BEGIN IMMEDIATE;")
+            .expect("active write transaction");
+        let options = ServerOptions {
+            home: Some(root.clone()),
+            ..ServerOptions::default()
+        };
+        let error = Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options.clone(),
+                RoomSlowModeOptions {
+                    room_id: i64::from(room.room_id),
+                    seconds: 30,
+                },
+            ))
+            .expect_err("active writer must block maintenance")
+            .to_string();
+        assert!(error.contains("exclusive access"));
+        writer.execute_batch("ROLLBACK;").expect("release writer");
+        drop(writer);
+
+        Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options,
+                RoomSlowModeOptions {
+                    room_id: i64::from(room.room_id),
+                    seconds: 30,
+                },
+            ))
+            .expect("stopped-server update");
+        let store =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("maintenance store");
+        let updated = store
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("room");
+        assert_eq!(updated.slow_mode_seconds, 30);
+        assert_eq!(updated.room_revision, room.room_revision + 1);
+        drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -29,6 +29,12 @@ pub struct ServerRoom {
     pub slow_mode_seconds: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomSlowModeUpdate {
+    pub previous_seconds: u32,
+    pub room: ServerRoom,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RoomContentMutationAdmission {
     Allowed,
@@ -645,6 +651,15 @@ impl OmenchatStore {
         room_id: RoomId,
         slow_mode_seconds: u32,
     ) -> ServerResult<ServerRoom> {
+        self.update_room_slow_mode_seconds(room_id, slow_mode_seconds)
+            .map(|update| update.room)
+    }
+
+    pub fn update_room_slow_mode_seconds(
+        &self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<RoomSlowModeUpdate> {
         self.set_room_slow_mode_seconds_with_hook(room_id, slow_mode_seconds, |_| Ok(()))
     }
 
@@ -653,7 +668,7 @@ impl OmenchatStore {
         room_id: RoomId,
         slow_mode_seconds: u32,
         mut hook: H,
-    ) -> ServerResult<ServerRoom>
+    ) -> ServerResult<RoomSlowModeUpdate>
     where
         H: FnMut(RoomSlowModeUpdateBoundary) -> ServerResult<()>,
     {
@@ -666,6 +681,18 @@ impl OmenchatStore {
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        let previous_seconds = transaction
+            .query_row(
+                "SELECT slow_mode_seconds
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .ok_or_else(|| crate::error::ServerError::Message("room not found".into()))?;
+        let previous_seconds = u32::try_from(previous_seconds).map_err(|_| {
+            crate::error::ServerError::Message("stored room slow-mode interval is invalid".into())
+        })?;
         let changed = transaction.execute(
             "UPDATE rooms
              SET slow_mode_seconds = ?1, room_revision = room_revision + 1
@@ -688,7 +715,10 @@ impl OmenchatStore {
         }
         hook(RoomSlowModeUpdateBoundary::BeforeCommit)?;
         transaction.commit()?;
-        Ok(room)
+        Ok(RoomSlowModeUpdate {
+            previous_seconds,
+            room,
+        })
     }
 
     pub(crate) fn room_content_mutation_admission(
@@ -4362,14 +4392,16 @@ mod tests {
         assert_eq!(room.slow_mode_seconds, 0);
 
         let enabled = store
-            .set_room_slow_mode_seconds(room.room_id, 30)
+            .update_room_slow_mode_seconds(room.room_id, 30)
             .expect("enable slow mode");
-        assert_eq!(enabled.slow_mode_seconds, 30);
-        assert_eq!(enabled.room_revision, room.room_revision + 1);
+        assert_eq!(enabled.previous_seconds, 0);
+        assert_eq!(enabled.room.slow_mode_seconds, 30);
+        assert_eq!(enabled.room.room_revision, room.room_revision + 1);
         let unchanged = store
-            .set_room_slow_mode_seconds(room.room_id, 30)
+            .update_room_slow_mode_seconds(room.room_id, 30)
             .expect("idempotent update");
-        assert_eq!(unchanged.room_revision, enabled.room_revision);
+        assert_eq!(unchanged.previous_seconds, 30);
+        assert_eq!(unchanged.room.room_revision, enabled.room.room_revision);
         assert!(store
             .set_room_slow_mode_seconds(room.room_id, ROOM_SLOW_MODE_MAX_SECONDS + 1)
             .is_err());
@@ -4381,7 +4413,7 @@ mod tests {
             .expect("room lookup")
             .expect("persisted room");
         assert_eq!(persisted.slow_mode_seconds, 30);
-        assert_eq!(persisted.room_revision, enabled.room_revision);
+        assert_eq!(persisted.room_revision, enabled.room.room_revision);
         drop(reopened);
         remove_database_files(&path);
     }

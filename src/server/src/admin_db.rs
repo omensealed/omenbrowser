@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::{RoomId, UserId};
-use crate::store::{OmenchatStore, RoomHistoryUsage, ServerAdminUser, ServerRoom, ServerUser};
+use crate::store::{
+    OmenchatStore, RoomHistoryUsage, RoomSlowModeUpdate, ServerAdminUser, ServerRoom, ServerUser,
+};
 
 const ADMIN_DATABASE_QUEUE_ITEMS: usize = 16;
 const ADMIN_DATABASE_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -178,6 +180,14 @@ impl AdminDatabase {
         announcement_only: bool,
     ) -> ServerResult<ServerRoom> {
         self.call(move |store| store.set_room_announcement_policy(room_id, announcement_only))
+    }
+
+    pub fn set_room_slow_mode_seconds(
+        &self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<RoomSlowModeUpdate> {
+        self.call(move |store| store.update_room_slow_mode_seconds(room_id, slow_mode_seconds))
     }
 
     pub fn request_update_room_topic(

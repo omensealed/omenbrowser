@@ -1709,6 +1709,14 @@ rollback, restart, leave/rejoin, backward monotonic observation, policy and
 malformed rejection, moderator bypass, saturation, and unchanged production
 behavior. Production negotiation and enforcement remain inactive. Evidence is
 in `docs/audits/omenchat-slow-mode-admission-qualification.md`.
+The fourth slice adds the confirmation-gated stopped-server
+`rooms set-slow-mode` command and read-only human/JSON room status. It accepts
+only `off` or `1..=86400`, reuses the exclusive current-schema maintenance
+boundary, reports prior/configured values and no-op revision behavior, and
+labels enforcement inactive so stored configuration is not misreported as live
+policy. No capability negotiation or production admission is activated.
+Evidence is in
+`docs/audits/omenchat-slow-mode-administration-qualification.md`.
 
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise

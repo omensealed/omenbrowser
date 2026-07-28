@@ -218,9 +218,11 @@ omenchatd rooms list --json --home ~/.omenchatd
 Only `ordinary` and `announcement` are accepted. The policy and room revision
 change in one immediate transaction. Announcement rooms remain readable by
 members, while content publication is enforced server-side for moderators and
-administrators regardless of client capability negotiation. Headless
-installations can inspect the bounded administrative user projection and make
-an explicit stopped-server role change without enabling the optional TUI:
+administrators regardless of client capability negotiation.
+
+Headless installations can inspect the bounded administrative user projection
+and make an explicit stopped-server role change without enabling the optional
+TUI:
 
 ```bash
 omenchatd users list --json --home ~/.omenchatd
@@ -230,7 +232,29 @@ omenchatd users role 7 moderator --confirm --home ~/.omenchatd
 Role vocabulary is exactly `standard`, `trusted`, `moderator`, or
 `administrator`. The JSON listing omits identity hashes and LXMF destinations.
 Role changes use the same exclusive maintenance-open boundary as room-policy
-changes and fail while omenchatd owns the database. To prepare a
+changes and fail while omenchatd owns the database.
+
+Schema 12 also stores the future per-room slow-mode interval. Configuration is
+restart-only and confirmation-gated through the same exclusive maintenance
+boundary:
+
+```bash
+# Stop omenchatd first.
+omenchatd rooms set-slow-mode 1 30 --confirm --home ~/.omenchatd
+omenchatd rooms list --json --home ~/.omenchatd
+omenchatd rooms set-slow-mode 1 off --confirm --home ~/.omenchatd
+```
+
+Numeric intervals are whole seconds in `1..=86400`; `off` stores zero. The
+scalar and room revision change in one immediate transaction, while a no-op
+retains the revision. Output reports the prior and configured values and
+explicitly reports `enforcement=inactive`. Room listings use
+`slow_mode_config`/`slow_mode_seconds` plus
+`slow_mode_enforcement=inactive`. This administration slice does not request or
+accept `room-slow-mode-v1` and does not enforce the configured interval in a
+normal server session yet.
+
+To prepare a
 separate schema-11-compatible rollback copy while retaining the active
 schema-12 database, stop the server cleanly and run:
 

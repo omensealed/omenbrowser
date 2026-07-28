@@ -293,7 +293,10 @@ Process/UI:
    legacy message/action paths, a bounded rollback-on-drop monotonic owner, and
    replay/restart/rollback/dormancy tests. Evidence:
    `docs/audits/omenchat-slow-mode-admission-qualification.md`.
-4. Add stopped-server administration and status evidence.
+4. **Complete (2026-07-28):** add confirmation-gated stopped-server
+   administration plus human/JSON configured-state evidence that explicitly
+   reports production enforcement inactive. Evidence:
+   `docs/audits/omenchat-slow-mode-administration-qualification.md`.
 5. Add bounded client projection and shared GUI/TUI evidence.
 6. Run current/current, restart, mixed-version, resource, and measurement
    gates.

@@ -4678,6 +4678,35 @@ constructors retain prior behavior without creating admission state. Evidence
 is in
 `docs/audits/omenchat-slow-mode-admission-qualification.md`.
 
+The stopped-server scalar administration/status slice is covered by:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless slow_mode -- --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  cli_parses_admin_config_and_room_commands -- --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  cli_room_mutations_use_the_initialized_administrative_database_path \
+  -- --nocapture
+```
+
+The command is:
+
+```bash
+omenchatd rooms set-slow-mode <room-id> off|<1..=86400> \
+  --confirm --home <server-home>
+```
+
+Tests require missing confirmation/invalid bounds to fail, an active writer to
+block the command, and a stopped-server update to report and persist its prior
+and configured values. A no-op keeps the room revision; enable/disable changes
+increment it once. Human and JSON room status expose the scalar while
+explicitly reporting enforcement as inactive. No live capability or runtime
+behavior is activated by this slice. Evidence is in
+`docs/audits/omenchat-slow-mode-administration-qualification.md`.
+
 Schema-11 announcement-room storage and guarded rollback are covered by:
 
 ```bash
