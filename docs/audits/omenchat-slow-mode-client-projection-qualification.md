@@ -226,6 +226,6 @@ Before production activation:
 - [x] prove current/current real-Link catalog/rejection/expiry/restart;
 - prove real-Link room-delta projection after an administrative policy change;
 - prove adjacent four-/five-field mixed-version behavior;
-- add typed rejection and draft-retention evidence;
+- [x] add typed rejection and draft-retention evidence;
 - run GUI observation and server/client resource measurements; and
 - jointly review the final capability activation and rollback.

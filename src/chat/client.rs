@@ -204,6 +204,12 @@ pub enum DurableMutationTerminalState {
     Expired,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub enum DurableMutationRejectionReason {
+    SlowMode,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatClientEvent {
     ServerOpened {
@@ -251,6 +257,12 @@ pub enum ChatClientEvent {
         session_id: ChatSessionId,
         mutation_id: super::protocol::MutationId,
         state: DurableMutationTerminalState,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    DurableMutationRejected {
+        session_id: ChatSessionId,
+        mutation_id: super::protocol::MutationId,
+        reason: DurableMutationRejectionReason,
     },
     HistoryPrepended {
         session_id: ChatSessionId,

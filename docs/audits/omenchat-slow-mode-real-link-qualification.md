@@ -97,7 +97,9 @@ gate without migrating storage.
 Still required before product activation:
 
 - run an adjacent released-binary four-/five-field process matrix;
-- preserve or restore an Iced composer draft after a typed slow-mode rejection;
+- [x] preserve the Iced composer draft after a typed slow-mode rejection without
+  overwriting newer input (see
+  `omenchat-slow-mode-draft-recovery-qualification.md`);
 - observe the policy/rejection flow in the real GUI;
 - record client/server CPU, RSS, link, and queue measurements; and
 - make an explicit activation and rollback decision.

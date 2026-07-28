@@ -30,6 +30,8 @@ pub mod live;
 pub mod lxmf;
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub use client::DurableMutationRejectionReason;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub use client::DurableMutationTerminalState;
 pub use client::{
     ChatClient, ChatClientEvent, ChatClientRequest, ChatConnectionState, ChatSessionId,

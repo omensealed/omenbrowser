@@ -6,7 +6,8 @@ use crate::chat::commands::{parse_client_command, ClientCommand};
 use crate::chat::model::{chat_text_fits, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES};
 use crate::chat::mutation_intent_worker::await_intent_worker_reply;
 use crate::chat::mutation_intents::{
-    IntentTransition, OutboundMutationIntent, OutboundMutationState, OwnedPrepareOutboundMutation,
+    IntentRemoval, IntentTransition, OutboundMutationIntent, OutboundMutationState,
+    OwnedPrepareOutboundMutation,
 };
 use crate::chat::protocol::{
     ChatOp, FrameBody, MessageRevisionRequest, MutationId, PinAction, PinRequest, ReactionAction,
@@ -819,6 +820,15 @@ impl DesktopApp {
                     next,
                     result,
                 );
+                Task::none()
+            }
+            OmenChatMutationCompletionMessage::Rejected {
+                session_id,
+                mutation_id,
+                reason,
+                result,
+            } => {
+                self.finish_omenchat_mutation_rejection(session_id, mutation_id, reason, result);
                 Task::none()
             }
             OmenChatMutationCompletionMessage::Resolved {
@@ -1734,7 +1744,7 @@ impl DesktopApp {
         let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
             return Vec::new();
         };
-        transitions
+        let mut tasks = transitions
             .filter_map(|(session_id, mutation_id, next)| {
                 let reply = match worker.try_transition(
                     mutation_id,
@@ -1774,7 +1784,44 @@ impl DesktopApp {
                     },
                 ))
             })
-            .collect()
+            .collect::<Vec<_>>();
+        tasks.extend(events.iter().filter_map(|event| {
+            let ChatClientEvent::DurableMutationRejected {
+                session_id,
+                mutation_id,
+                reason,
+            } = event
+            else {
+                return None;
+            };
+            let reply = match worker.try_remove_rejected(*mutation_id) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        ?mutation_id,
+                        %error,
+                        "durable OMENchat rejection was not admitted for persistence"
+                    );
+                    return None;
+                }
+            };
+            let (session_id, mutation_id, reason) = (*session_id, *mutation_id, *reason);
+            Some(Task::perform(
+                await_intent_worker_reply(reply),
+                move |result| {
+                    Message::OmenChatMutationCompletion(Box::new(
+                        OmenChatMutationCompletionMessage::Rejected {
+                            session_id,
+                            mutation_id,
+                            reason,
+                            result: result.map_err(|error| error.to_string()),
+                        },
+                    ))
+                },
+            ))
+        }));
+        tasks
     }
 
     fn finish_omenchat_mutation_acknowledgement(
@@ -1896,6 +1943,118 @@ impl DesktopApp {
         };
         self.set_omenchat_session_status(session_id, status.into());
     }
+
+    fn finish_omenchat_mutation_rejection(
+        &mut self,
+        session_id: ChatSessionId,
+        mutation_id: MutationId,
+        reason: crate::chat::DurableMutationRejectionReason,
+        result: Result<IntentRemoval, String>,
+    ) {
+        let intent = match result {
+            Ok(IntentRemoval::Removed(intent)) => intent,
+            Ok(IntentRemoval::StateMismatch {
+                current: OutboundMutationState::Acknowledged,
+            }) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    "durable OMENchat acknowledgement won a concurrent rejection race".into(),
+                );
+                return;
+            }
+            Ok(other) => {
+                tracing::warn!(
+                    session_id,
+                    ?mutation_id,
+                    removal = ?other,
+                    "durable OMENchat rejection did not remove its uncertain intent"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    ?mutation_id,
+                    %error,
+                    "failed to resolve a rejected durable OMENchat mutation"
+                );
+                self.set_omenchat_session_status(
+                    session_id,
+                    "server rejected the message, but local recovery state could not be updated"
+                        .into(),
+                );
+                return;
+            }
+        };
+        if intent.mutation_id != mutation_id {
+            tracing::warn!(
+                session_id,
+                ?mutation_id,
+                removed = ?intent.mutation_id,
+                "ignored mismatched rejected OMENchat mutation intent"
+            );
+            return;
+        }
+        self.omenchat
+            .omenchat_recovered_mutation_intents
+            .retain(|candidate| candidate.mutation_id != mutation_id);
+        self.remove_recovered_omenchat_operation(mutation_id);
+
+        let active_room_id = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.active_room.room_id);
+        let restored = if let Some(text) = rejected_room_message_draft(
+            &intent,
+            active_room_id,
+            self.omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+        ) {
+            self.omenchat.chat_drafts.insert(session_id, text);
+            true
+        } else {
+            false
+        };
+        let reason_text = match reason {
+            crate::chat::DurableMutationRejectionReason::SlowMode => "slow mode",
+        };
+        let status = if restored {
+            format!("server {reason_text} rejected the message; its draft was restored")
+        } else {
+            format!(
+                "server {reason_text} rejected the message; the current composer and room were left unchanged"
+            )
+        };
+        self.set_omenchat_session_status(session_id, status);
+    }
+}
+
+fn rejected_room_message_draft(
+    intent: &OutboundMutationIntent,
+    active_room_id: Option<u32>,
+    current_draft: Option<&str>,
+) -> Option<String> {
+    if intent.room_id != active_room_id || current_draft.is_some_and(|draft| !draft.is_empty()) {
+        return None;
+    }
+    let text = match intent.op {
+        ChatOp::RoomMessage => RichMessageBody::from_frame_body(&intent.body)
+            .map(|rich| rich.body)
+            .or_else(|_| match &intent.body {
+                FrameBody::Text(text) => Ok(text.clone()),
+                _ => Err("unsupported rejected message body"),
+            })
+            .ok()?,
+        ChatOp::RoomAction => match &intent.body {
+            FrameBody::Text(text) => format!("/me {text}"),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
 }
 
 fn current_unix_seconds() -> i64 {
@@ -1920,6 +2079,58 @@ mod tests {
         ChatUserSummary, OmenChatDescriptor,
     };
     use crate::desktop::DesktopOmenChatTransport;
+
+    #[test]
+    fn rejected_room_message_restores_only_an_unchanged_matching_composer() {
+        let plain = OutboundMutationIntent {
+            server_destination: "destination".into(),
+            authenticated_identity_hash: vec![1; 16],
+            client_instance_id: ClientInstanceId::new([2; 16]),
+            mutation_id: MutationId::new([3; 16]),
+            request_hash: crate::chat::protocol::RequestHash::new([4; 32]),
+            op: ChatOp::RoomMessage,
+            room_id: Some(7),
+            body: FrameBody::Text("restore me".into()),
+            state: OutboundMutationState::SentUncertain,
+            created_at: 1,
+            expires_at: 2,
+            correlation_id: None,
+        };
+
+        assert_eq!(
+            rejected_room_message_draft(&plain, Some(7), Some("")),
+            Some("restore me".into())
+        );
+        assert_eq!(
+            rejected_room_message_draft(&plain, Some(7), Some("newer text")),
+            None
+        );
+        assert_eq!(rejected_room_message_draft(&plain, Some(8), None), None);
+
+        let mut action = plain.clone();
+        action.op = ChatOp::RoomAction;
+        action.body = FrameBody::Text("waves".into());
+        assert_eq!(
+            rejected_room_message_draft(&action, Some(7), None),
+            Some("/me waves".into())
+        );
+
+        let mut rich = plain.clone();
+        rich.body = RichMessageBody {
+            body: "rich draft".into(),
+            reply_to: Some(ReplyReference {
+                room_id: 7,
+                event_id: 9,
+            }),
+            mentioned_user_ids: vec![11],
+        }
+        .into_frame_body()
+        .expect("rich body");
+        assert_eq!(
+            rejected_room_message_draft(&rich, Some(7), None),
+            Some("rich draft".into())
+        );
+    }
 
     #[test]
     fn room_message_and_reaction_composers_gate_negotiated_capabilities() {

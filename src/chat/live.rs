@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::client::{
     enforce_client_event_presentation_bounds, enforce_room_catalog_bounds,
     enforce_user_catalog_bounds, ChatClient, ChatClientEvent, ChatClientRequest, ChatSessionId,
-    ChatSessionView, DurableMutationTerminalState, CHAT_CLIENT_MAX_SESSIONS,
+    ChatSessionView, DurableMutationRejectionReason, DurableMutationTerminalState,
+    CHAT_CLIENT_MAX_SESSIONS,
 };
 use super::descriptor::OmenChatDescriptor;
 use super::model::{
@@ -3934,12 +3935,19 @@ fn apply_durable_terminal_error(
     let Some(session_id) = preferred_session_id else {
         return;
     };
-    let terminal = match frame_error_code(&frame.body) {
+    enum Outcome {
+        Terminal(DurableMutationTerminalState),
+        Rejected(DurableMutationRejectionReason),
+    }
+    let outcome = match frame_error_code(&frame.body) {
         Some(code) if code == ChatErrorCode::DurableMutationConflict as u16 => {
-            DurableMutationTerminalState::Conflict
+            Outcome::Terminal(DurableMutationTerminalState::Conflict)
         }
         Some(code) if code == ChatErrorCode::DurableMutationResultExpired as u16 => {
-            DurableMutationTerminalState::Expired
+            Outcome::Terminal(DurableMutationTerminalState::Expired)
+        }
+        Some(code) if code == ChatErrorCode::SlowModeActive as u16 => {
+            Outcome::Rejected(DurableMutationRejectionReason::SlowMode)
         }
         _ => return,
     };
@@ -3961,10 +3969,17 @@ fn apply_durable_terminal_error(
             .events
             .retain(|event| event.room_id != pending.room_id || event.event_id != temp_event_id);
     }
-    events.push(ChatClientEvent::DurableMutationTerminal {
-        session_id,
-        mutation_id,
-        state: terminal,
+    events.push(match outcome {
+        Outcome::Terminal(state) => ChatClientEvent::DurableMutationTerminal {
+            session_id,
+            mutation_id,
+            state,
+        },
+        Outcome::Rejected(reason) => ChatClientEvent::DurableMutationRejected {
+            session_id,
+            mutation_id,
+            reason,
+        },
     });
 }
 
@@ -8256,6 +8271,69 @@ mod tests {
                 .events
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn slow_mode_rejection_releases_correlated_durable_echo_for_safe_recovery() {
+        let client_instance_id = ClientInstanceId::new([44; 16]);
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            active_room: room_summary("abcd", 1, "lobby"),
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.durable_sessions.insert(session_id);
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::Error,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::U64(ChatErrorCode::SlowModeActive as u16 as u64),
+                    FrameValue::String("slow mode is active".into()),
+                ]),
+            ))
+            .expect("slow-mode response");
+        let intent =
+            durable_room_text_intent(client_instance_id, OutboundMutationState::SentUncertain);
+
+        let events = send_uncertain_durable_room_text(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::DurableMutationRejected {
+                session_id: rejected_session,
+                mutation_id,
+                reason: DurableMutationRejectionReason::SlowMode,
+            } if *rejected_session == session_id && *mutation_id == intent.mutation_id
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ChatClientEvent::Error { .. })));
+        assert!(state.pending_local_echoes.is_empty());
+        assert!(client
+            .session(session_id)
+            .expect("session")
+            .events
+            .is_empty());
     }
 
     #[test]
