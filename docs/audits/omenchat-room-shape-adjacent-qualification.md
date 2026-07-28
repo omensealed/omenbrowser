@@ -2,8 +2,10 @@
 
 Date: 2026-07-28
 
-Status: adjacent four-field and current negotiated five-field process matrix
-passed; slow-mode production activation remains off.
+Status at qualification: adjacent four-field and current negotiated five-field
+process matrix passed. Slow-mode production activation was completed later in
+`omenchat-slow-mode-activation.md`; this historical process result remains the
+adjacent compatibility evidence.
 
 ## Goal
 
@@ -108,9 +110,10 @@ avoid recompiling that release on subsequent local runs.
 Rollback removes the wrapper and report-only mixed-harness fields. No persisted
 user or server data requires migration.
 
-## Remaining slow-mode activation gates
+## Subsequent slow-mode gates
 
-- Observe live delta projection and typed rejection recovery in the real Iced
-  GUI.
-- Record real client/server CPU, RSS, active-Link, and queue measurements.
-- Make an explicit slow-mode product activation and rollback decision.
+The later live-delta, Iced draft-recovery, resource-measurement, and explicit
+product-activation gates passed. See
+`omenchat-slow-mode-gui-qualification.md`,
+`omenchat-slow-mode-resource-qualification.md`, and
+`omenchat-slow-mode-activation.md`.

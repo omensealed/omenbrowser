@@ -1848,7 +1848,8 @@ After the candidate is stable:
 - [x] v0.9.6-3 evidence and ledgers reconciled.
 - [x] Selected mechanical `src/app.rs` extractions complete and validated.
 - [x] Durable activation covers every mutation advertised by the client.
-- [ ] Legacy/mixed peers retain cautious no-automatic-retry behavior.
+- [x] Legacy/mixed peers retain cautious no-automatic-retry behavior.
+      Evidence: `docs/audits/omenchat-legacy-retry-safety-release-gate.md`.
 - [x] Shared bounded Operations/Transfers model drives GUI and TUI.
 - [x] Delivery/propagation policies have conservative migrated defaults.
 - [x] Command palette, actionable errors, workspace presets, and selected TUI
