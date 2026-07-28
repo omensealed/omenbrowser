@@ -4898,6 +4898,25 @@ does not. The test requires five-field JoinAccept/RoomDelta values only on the
 negotiated Link, four-field values on the legacy Link, and binding removal on
 identity replacement.
 
+The adjacent process matrix combines that exact shaping regression with both
+directions of immutable `v0.9.6-3` live traffic and negotiated current/current
+replacement-Link traffic:
+
+```bash
+bash scripts/run-omenchat-room-shape-compatibility.sh \
+  --report target/omenchat-room-shape-compatibility.json
+```
+
+The strict current parser requires the adjacent server's legacy four-field
+shape and records that no announcement capability or policy field was
+projected. The adjacent parser is permissive, so its successful current-server
+run is treated only as ordinary compatibility; the exact current-server
+four-field claim comes from the per-Link shaping regression above. The
+current/current process cases require negotiated five-field policy on both the
+initial and replacement Links. The harness never fabricates capability support
+for the adjacent peer. This is a long local/release-candidate gate and is not
+part of the quick release check.
+
 Production announcement-room feature identities are checked with:
 
 ```bash

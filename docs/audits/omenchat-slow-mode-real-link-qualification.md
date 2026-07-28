@@ -96,7 +96,8 @@ gate without migrating storage.
 
 Still required before product activation:
 
-- run an adjacent released-binary four-/five-field process matrix;
+- [x] run an adjacent released-binary four-/five-field process matrix (see
+  `omenchat-room-shape-adjacent-qualification.md`);
 - [x] prove a connected qualification client receives a shaped room delta after
   the live server commits a policy change (see
   `omenchat-slow-mode-live-delta-qualification.md`);

@@ -226,7 +226,8 @@ Before production activation:
 - [x] prove current/current real-Link catalog/rejection/expiry/restart;
 - [x] prove real-Link room-delta projection after an administrative policy
   change (see `omenchat-slow-mode-live-delta-qualification.md`);
-- prove adjacent four-/five-field mixed-version behavior;
+- [x] prove adjacent four-/five-field mixed-version behavior (see
+  `omenchat-room-shape-adjacent-qualification.md`);
 - [x] add typed rejection and draft-retention evidence;
 - run GUI observation and server/client resource measurements; and
 - jointly review the final capability activation and rollback.

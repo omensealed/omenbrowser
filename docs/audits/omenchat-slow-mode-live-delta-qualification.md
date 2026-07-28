@@ -100,7 +100,8 @@ physical-interface result is claimed.
 
 ## Remaining activation gates
 
-- Run adjacent released-binary four-/five-field process compatibility.
+- [x] Run adjacent released-binary four-/five-field process compatibility (see
+  `omenchat-room-shape-adjacent-qualification.md`).
 - Observe the policy change and rejection recovery in the real Iced GUI.
 - Record real client/server CPU, RSS, link, and queue measurements.
 - Make an explicit product activation and rollback decision.

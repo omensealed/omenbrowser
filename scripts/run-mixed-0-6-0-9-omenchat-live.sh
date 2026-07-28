@@ -58,8 +58,13 @@ temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/omen-mixed-omenchat.XXXXXX")
 cleanup() {
   rm -rf -- "$temporary_root"
 }
+report_error() {
+  local status=$1
+  local line=$2
+  echo "mixed OMENchat live harness failed at line $line (status $status)" >&2
+}
 trap cleanup EXIT INT TERM
-trap 'status=$?; echo "mixed OMENchat live harness failed at line $LINENO (status $status)" >&2' ERR
+trap 'report_error "$?" "$LINENO"' ERR
 
 old_source="$temporary_root/old-source"
 old_target=${OMEN_MIXED_OLD_TARGET_DIR:-$temporary_root/old-target}
@@ -142,7 +147,7 @@ fi
 summary="$temporary_root/summary.json"
 python3 - "$smoke_report" "$summary" "$old_commit" "$client_version" \
   "$server_version" "$direction" "$restart" "$restart_report" \
-  "$restart_stop" "$history_resource" "$history_report" <<'PY'
+  "$restart_stop" "$history_resource" "$history_report" "$((1 - reverse))" <<'PY'
 import json
 import pathlib
 import sys
@@ -170,6 +175,14 @@ session = report.get("session", {})
 room = session.get("room", {})
 if room.get("joined") is not True or session.get("event_count", 0) < 1:
     raise RuntimeError("mixed OMENchat live session state was incomplete")
+
+current_client = sys.argv[12] == "1"
+if current_client:
+    capabilities = stages.get("capability_observation", {})
+    if capabilities.get("announcement_rooms_negotiated") is not False:
+        raise RuntimeError("adjacent server unexpectedly negotiated announcement rooms")
+    if capabilities.get("announcement_policy_bits") is not None:
+        raise RuntimeError("adjacent server projected policy without capability negotiation")
 
 restart = sys.argv[7] == "1"
 if restart:
@@ -247,6 +260,16 @@ summary = {
     "session_event_count_positive": True,
     "isolated_loopback": True,
 }
+if current_client:
+    summary.update(
+        {
+            "current_client_legacy_room_projection": True,
+            "announcement_rooms_negotiated": False,
+            "announcement_policy_bits": None,
+        }
+    )
+else:
+    summary["adjacent_client_completed_against_current_server"] = True
 if restart:
     summary.update(
         {
