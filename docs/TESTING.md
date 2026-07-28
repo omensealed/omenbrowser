@@ -5155,11 +5155,12 @@ requested limit; it accumulates only within the existing 256-record/512-KiB
 client ceilings and stops at explicit end or the local retention ceiling. A
 full page is “complete; more may exist,” not an indefinitely receiving
 transfer. The panel never polls, automatically retries, or exposes a false
-inbound-Resource Cancel action. Canonical product aliases remain unchanged. A
-separate root TUI consumer is not fabricated: that TUI's Messages workspace is
-LXMF-only and omenchatd's TUI has no client identity. Any future OMENchat client
-TUI must reuse this projection. Product activation and release-candidate
-process/packaging gates remain later work.
+inbound-Resource Cancel action. Canonical desktop/static-media and standalone
+server products require the real capability; both process-qualification hooks
+remain forbidden. A separate root TUI consumer is not fabricated: that TUI's
+Messages workspace is LXMF-only and omenchatd's TUI has no client identity. Any
+future OMENchat client TUI must reuse this projection. Hosted native,
+interoperability, and package gates remain release-candidate work.
 
 Focused schema/storage gates:
 

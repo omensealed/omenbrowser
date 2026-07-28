@@ -4,9 +4,10 @@ Date: 2026-07-28
 
 Baseline: `release/v0.9.6-4` through `f8bf697`
 
-Decision: bounded manual first-page and exclusive-cursor desktop pagination are
-implemented behind the real non-product feature. Production activation remains
-deferred until shared TUI consumption and the activation live gates pass.
+Decision: the bounded manual desktop reader is active in the canonical desktop
+and standalone-server products after its user-facing, authority-loss, inline,
+Resource, and orderly-restart gates passed. The two qualification hooks remain
+strictly non-product.
 
 ## Evidence reviewed
 
@@ -33,9 +34,11 @@ responsibilities:
 - `omenchat-moderation-audit-resource-qualification` additionally forces only
   audit pages through Resource.
 
-All three remain forbidden in canonical desktop/server products. This is
-machine-checked. The split changes no wire number, database, product default,
-configuration, queue, worker, timer, or persisted client state.
+Canonical desktop/server products now require only
+`omenchat-moderation-audit`. Both qualification hooks remain forbidden and
+machine-checked. Activation changes capability request/acceptance for capable
+current peers, but changes no wire number, database, configuration, queue,
+worker, timer, or persisted client state.
 
 ## Receiver cancellation decision
 
@@ -61,7 +64,7 @@ the same project boundary if a public compatible API appears.
 
 ## User-facing slice status
 
-Before adding `omenchat-moderation-audit` to product aliases:
+Product-activation evidence:
 
 1. Complete: explicit moderator/admin-only “Refresh audit” for the selected
    joined room.
@@ -96,16 +99,15 @@ without fabricating completion.
 
 ## Activation gate
 
-After the user-facing slice:
+Release-candidate gates after product activation:
 
 - focused shared reduction and desktop rendering tests;
 - current moderator and immediate role-loss tests;
-- current/current inline and Resource process smoke through the product
-  feature rather than a qualification-only capability switch;
+- current/current inline and Resource process smoke;
 - immutable adjacent ordinary traffic with negative capability evidence;
 - formatting and strict Clippy for both product profiles;
-- canonical feature assertions updated atomically to require the real feature
-  and continue forbidding both qualification hooks;
+- canonical feature assertions require the real feature and continue
+  forbidding both qualification hooks;
 - normal release quick, native CI, interoperability, and packaging gates on the
   release candidate only.
 
@@ -147,26 +149,27 @@ bash scripts/run-omenchat-moderation-audit-qualification.sh \
 
 Focused results:
 
-- real-feature desktop moderation audit: 17 passed, 1 explicit measurement
+- product-feature desktop moderation audit: 18 passed, 1 explicit measurement
   ignored;
 - desktop capability-loss and active-room-change projection clearing: passed;
-- canonical desktop capability absence: 1 passed;
+- canonical desktop capability presence: passed;
 - real-feature omenchatd moderation audit: 17 passed, 1 explicit measurement
   ignored;
-- canonical omenchatd capability absence: 1 passed;
+- canonical omenchatd capability presence: passed;
 - strict Clippy: passed for both real-feature profiles;
 - qualification alias Resource/restart process gate: passed;
 - root/server Cargo feature trees: qualification implies the real feature and
   Resource qualification implies both, as designed.
+- canonical desktop/static-media and server headless/full products require the
+  real feature while excluding both qualification hooks.
 
 No hosted CI, packaging, Python interoperability, public-network peer, native
-Windows/macOS runtime, or hardware-interface test was run for this
-non-product feature-boundary unit.
+Windows/macOS runtime, or hardware-interface test was run for this local
+activation unit.
 
 ## Rollback
 
-Before activation, remove the real feature and make the qualification hook own
-the existing switch again. After activation, remove the real feature from both
-product aliases together while retaining schema-10 data for operator
-reconciliation. Qualification hooks and their isolated roots remain
-non-product.
+Remove the real feature from both desktop product aliases and
+`server-headless` together while retaining schema-10 data for operator
+reconciliation. Restore the product assertion that forbids the real feature.
+Qualification hooks and their isolated roots remain non-product.

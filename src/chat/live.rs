@@ -68,6 +68,9 @@ struct PendingModerationAuditRequest {
     room_id: RoomId,
     before_audit_id: Option<EventId>,
     limit: u16,
+    resource_deferred: bool,
+    page_applied: bool,
+    end_received: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -876,6 +879,9 @@ pub fn request_live_moderation_audit<T: ChatLinkTransport>(
             room_id,
             before_audit_id,
             limit,
+            resource_deferred: false,
+            page_applied: false,
+            end_received: false,
         },
     );
     drain_live_events(client, transport, Some(session_id))
@@ -2621,7 +2627,7 @@ fn send_frame_or_error<T: ChatLinkTransport>(
 
 fn apply_live_link_event(
     client: &mut ChatClient,
-    state: Option<&mut LiveChatClientState>,
+    mut state: Option<&mut LiveChatClientState>,
     transport: &mut dyn ChatLinkTransport,
     preferred_session_id: Option<ChatSessionId>,
     link_event: ChatLinkEvent,
@@ -2636,6 +2642,37 @@ fn apply_live_link_event(
             frame,
             events,
         ),
+        ChatLinkEvent::ResourceDeferred { seq, op, room_id } => {
+            if op != ChatOp::ModerationAuditResource {
+                return;
+            }
+            let expected = preferred_session_id.is_some_and(|session_id| {
+                state.as_deref().is_some_and(|state| {
+                    state
+                        .pending_moderation_audit_requests
+                        .get(&session_id)
+                        .is_some_and(|request| {
+                            request.seq == seq && Some(request.room_id) == room_id
+                        })
+                })
+            });
+            if !expected {
+                events.push(ChatClientEvent::Error {
+                    session_id: preferred_session_id,
+                    message:
+                        "ignored deferred OMENchat moderation audit Resource without its current request correlation"
+                            .into(),
+                });
+                return;
+            }
+            if let Some(request) = preferred_session_id.and_then(|session_id| {
+                state
+                    .as_deref_mut()
+                    .and_then(|state| state.pending_moderation_audit_requests.get_mut(&session_id))
+            }) {
+                request.resource_deferred = true;
+            }
+        }
         ChatLinkEvent::InlineBatch {
             seq,
             op,
@@ -2685,9 +2722,6 @@ fn apply_live_link_event(
                 ChatOp::ModerationAuditInline | ChatOp::ModerationAuditResource
             ) && !moderation_audit_response_expected
             {
-                if let Some(session_id) = preferred_session_id {
-                    client.clear_moderation_audit(session_id);
-                }
                 events.push(ChatClientEvent::Error {
                     session_id: preferred_session_id,
                     message:
@@ -2731,7 +2765,33 @@ fn apply_live_link_event(
                 },
                 events,
             );
+            let moderation_audit_applied = events[event_start..].iter().any(|event| {
+                matches!(
+                    event,
+                    ChatClientEvent::ModerationAuditPageApplied {
+                        session_id: applied_session,
+                        room_id: applied_room,
+                        ..
+                    } if Some(*applied_session) == preferred_session_id
+                        && Some(*applied_room) == room_id
+                )
+            });
+            let mut moderation_audit_finished = None;
             if let (Some(state), Some(session_id)) = (state, preferred_session_id) {
+                if moderation_audit_applied {
+                    let finish = state
+                        .pending_moderation_audit_requests
+                        .get_mut(&session_id)
+                        .filter(|request| request.seq == seq && Some(request.room_id) == room_id)
+                        .is_some_and(|request| {
+                            request.page_applied = true;
+                            request.end_received
+                        });
+                    if finish {
+                        state.pending_moderation_audit_requests.remove(&session_id);
+                        moderation_audit_finished = room_id.map(|room_id| (session_id, room_id));
+                    }
+                }
                 for event in &events[event_start..] {
                     if let ChatClientEvent::PinSnapshotApplied {
                         room_id, snapshot, ..
@@ -2751,6 +2811,12 @@ fn apply_live_link_event(
                         );
                     }
                 }
+            }
+            if let Some((session_id, room_id)) = moderation_audit_finished {
+                events.push(ChatClientEvent::ModerationAuditEnd {
+                    session_id,
+                    room_id,
+                });
             }
         }
         ChatLinkEvent::UploadResource {
@@ -3398,21 +3464,30 @@ fn apply_frame_with_state(
                     .as_deref()
                     .is_some_and(|state| state.moderation_audit_negotiated(session_id));
                 if negotiated {
-                    let expected = state.as_deref().is_some_and(|state| {
+                    let expected = state.as_deref().and_then(|state| {
                         state
                             .pending_moderation_audit_requests
                             .get(&session_id)
-                            .is_some_and(|request| {
+                            .filter(|request| {
                                 request.seq == frame.seq && request.room_id == room_id
                             })
+                            .copied()
                     });
-                    if !expected {
+                    let Some(expected) = expected else {
                         events.push(ChatClientEvent::Error {
                             session_id: Some(session_id),
                             message:
                                 "ignored OMENchat moderation audit end without its current request correlation"
                                     .into(),
                         });
+                        return;
+                    };
+                    if expected.resource_deferred && !expected.page_applied {
+                        if let Some(request) = state.as_deref_mut().and_then(|state| {
+                            state.pending_moderation_audit_requests.get_mut(&session_id)
+                        }) {
+                            request.end_received = true;
+                        }
                         return;
                     }
                     if let Some(state) = state.as_deref_mut() {
@@ -5553,7 +5628,8 @@ impl FrameValueExt for FrameValue {
 mod tests {
     use super::*;
     use crate::chat::codec::decode_frame;
-    use crate::chat::protocol::batch::compressed_values_body;
+    use crate::chat::protocol::batch::{compressed_values_body, ResourceOffer};
+    use crate::chat::protocol::Compression;
     use crate::chat::rns::CapturedChatTransport;
 
     fn reaction_test_client() -> (ChatClient, ChatSessionId) {
@@ -6470,6 +6546,9 @@ mod tests {
                 room_id: 1,
                 before_audit_id: Some(42),
                 limit: 50,
+                resource_deferred: false,
+                page_applied: false,
+                end_received: false,
             })
         );
     }
@@ -6675,7 +6754,7 @@ mod tests {
                 seq: expected_seq,
                 op: ChatOp::ModerationAuditInline,
                 room_id: Some(1),
-                values,
+                values: values.clone(),
             },
             &mut events,
         );
@@ -6684,6 +6763,27 @@ mod tests {
             [ChatClientEvent::ModerationAuditPageApplied { page: applied, .. }]
                 if applied == &page
         ));
+
+        events.clear();
+        apply_live_link_event(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            ChatLinkEvent::InlineBatch {
+                seq: expected_seq.saturating_add(1),
+                op: ChatOp::ModerationAuditInline,
+                room_id: Some(1),
+                values,
+            },
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("request correlation")
+        ));
+        assert_eq!(client.moderation_audit_page(session_id, 1), Some(&page));
 
         events.clear();
         apply_live_link_event(
@@ -6728,6 +6828,111 @@ mod tests {
                 session_id: ended_session,
                 room_id: 1,
             }] if ended_session == &session_id
+        ));
+        assert!(!state
+            .pending_moderation_audit_requests
+            .contains_key(&session_id));
+    }
+
+    #[test]
+    fn moderation_audit_end_waits_for_its_deferred_resource_page() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        state.set_moderation_audit_negotiated_for_test(session_id, true);
+        let mut transport = CapturedChatTransport::default();
+        assert!(request_live_moderation_audit(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            None,
+            64,
+        )
+        .is_empty());
+        let seq = state
+            .pending_moderation_audit_requests
+            .get(&session_id)
+            .expect("pending request")
+            .seq;
+        let page = ModerationAuditPage {
+            records: vec![crate::chat::protocol::ModerationAuditRecord {
+                audit_id: 1,
+                room_id: 1,
+                actor_user_id: 2,
+                actor_display_name_at_action: "Moderator".into(),
+                target_user_id: Some(3),
+                target_display_name_at_action: Some("Member".into()),
+                action: crate::chat::protocol::ModerationAuditAction::Kick,
+                committed_at_unix: 1,
+                result_role_bits: None,
+                result_status_bits: None,
+            }],
+        };
+        let values = page.clone().into_frame_values().expect("page values");
+        let mut events = Vec::new();
+
+        apply_live_link_event(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            ChatLinkEvent::ResourceDeferred {
+                seq,
+                op: ChatOp::ModerationAuditResource,
+                room_id: Some(1),
+            },
+            &mut events,
+        );
+        assert!(events.is_empty());
+
+        apply_live_link_event(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            ChatLinkEvent::Frame(Frame::new(
+                ChatOp::ModerationAuditEnd,
+                seq,
+                Some(1),
+                FrameBody::Empty,
+            )),
+            &mut events,
+        );
+        assert!(events.is_empty());
+        assert!(state
+            .pending_moderation_audit_requests
+            .get(&session_id)
+            .is_some_and(|request| request.end_received));
+
+        apply_live_link_event(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            ChatLinkEvent::ResourceBatch {
+                seq,
+                op: ChatOp::ModerationAuditResource,
+                room_id: Some(1),
+                offer: ResourceOffer {
+                    resource_id: "moderation-audit-resource".into(),
+                    compression: Compression::Bzip2,
+                    uncompressed_len: 1,
+                    compressed_len: 1,
+                    purpose: format!("moderation-audit:{seq}:newest"),
+                },
+                values,
+            },
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ChatClientEvent::ModerationAuditPageApplied { page: applied, .. },
+                ChatClientEvent::ModerationAuditEnd {
+                    session_id: ended_session,
+                    room_id: 1,
+                },
+            ] if applied == &page && ended_session == &session_id
         ));
         assert!(!state
             .pending_moderation_audit_requests

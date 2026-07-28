@@ -8,14 +8,14 @@ extension.
 ## Scope
 
 The real `omenchat-moderation-audit` feature makes the desktop request and
-omenchatd accept `moderation-audit-v1`, but remains outside product aliases.
+omenchatd accept `moderation-audit-v1`. It entered product aliases only after
+the bounded desktop presentation and authority-loss gates passed.
 The non-product `omenchat-moderation-audit-qualification` feature implies that
 boundary for process tests. This extension adds
 `omenchat-moderation-audit-resource-qualification`, which implies both and
 forces only moderation-audit pages through the existing bounded Resource path.
-Canonical `desktop-product`, `server-headless`, and `server-full` builds
-continue to omit all three features, and
-`scripts/verify-product-features.sh` rejects accidental activation.
+Canonical desktop and server products require the real feature while
+`scripts/verify-product-features.sh` rejects both qualification hooks.
 
 The client now has one bounded manual request function. It requires negotiated
 capability state, a joined room, a valid exclusive cursor, and a protocol
@@ -73,7 +73,7 @@ Observed report:
   "authorized_nonempty_read": true,
   "explicit_end_observed": true,
   "isolated_loopback": true,
-  "qualification_feature_only": true,
+  "resource_forcing_is_qualification_only": true,
   "resource_delivery": true,
   "server_destination_stable": true,
   "server_restart": true,
@@ -118,10 +118,11 @@ Focused results:
 
 ## Compatibility and resource impact
 
-There is no wire number, schema, retention bound, product default, UI, or
-stored client-state change. Old/current ordinary peers request no capability
-and see unchanged traffic. Qualification state remains attached to the
-authenticated Link and is discarded on Link retirement.
+There is no wire number, schema, or retention-bound change. Current products
+now negotiate the capability only when both authenticated peers advertise it.
+Old/current ordinary peers request no capability and see unchanged traffic.
+Qualification state remains attached to the authenticated Link and is
+discarded on Link retirement.
 
 The request path admits one protocol-bounded response at a time through the
 existing bounded transport and 1,024-record/512-KiB client projection. The
@@ -140,18 +141,18 @@ operation against a peer that never shipped the capability. The remaining
 gates do not claim:
 
 - receiver-side cancellation of an active inbound Resource;
-- production activation or GUI/TUI presentation.
 
 Adjacent evidence is recorded in
 `docs/audits/omenchat-room-shape-adjacent-qualification.md`.
 
 The locked `reticulum-rs-transport 0.9.6` still exposes no public
-receiver-side Resource cancellation method. Production negotiation remains
-disabled until the remaining activation decision is reviewed; no private fork
-or false cancellation state was introduced.
+receiver-side Resource cancellation method. Product negotiation is active
+without a false Cancel action; no private fork or false cancellation state was
+introduced.
 
 ## Rollback
 
-Remove the qualification features, bounded request function, smoke-only local
-display/target arguments, two-client shell hooks, and this audit. No database,
-protocol, configuration, or product user-state rollback is required.
+Remove the real feature from root and server product aliases together, restore
+the product assertion that forbids it, and retain schema-10 audit data for
+operator reconciliation. Qualification hooks and isolated smoke roots remain
+non-product. No protocol or configuration rollback is required.

@@ -87,7 +87,7 @@ def qualified(report):
 report = {
     "status": "pass" if all(map(qualified, reports)) else "fail",
     "isolated_loopback": True,
-    "qualification_feature_only": True,
+    "resource_forcing_is_qualification_only": True,
     "authorized_nonempty_read": all(map(qualified, reports)),
     "resource_delivery": all(map(qualified, reports)),
     "explicit_end_observed": all(map(qualified, reports)),

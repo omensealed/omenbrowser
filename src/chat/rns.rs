@@ -105,6 +105,11 @@ pub enum ChatLinkEvent {
         offer: ResourceOffer,
         values: Vec<FrameValue>,
     },
+    ResourceDeferred {
+        seq: u32,
+        op: ChatOp,
+        room_id: Option<u32>,
+    },
     UploadResource {
         room_id: Option<u32>,
         resource_id: String,
@@ -153,7 +158,15 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
             validate_resource_offer(&offer, frame.op)?;
             let Some(payload) = transport.fetch_resource(&offer.resource_id)? else {
                 transport.defer_resource_offer(&offer.resource_id, bytes)?;
-                return Ok(None);
+                return if frame.op == ChatOp::ModerationAuditResource {
+                    Ok(Some(ChatLinkEvent::ResourceDeferred {
+                        seq: frame.seq,
+                        op: frame.op,
+                        room_id: frame.room_id,
+                    }))
+                } else {
+                    Ok(None)
+                };
             };
             let values = decode_resource_batch_payload(&offer, &payload)?;
             Ok(Some(ChatLinkEvent::ResourceBatch {
@@ -631,9 +644,14 @@ mod tests {
             ))
             .expect("push deferred offer");
 
-        assert!(recv_chat_event(&mut transport)
-            .expect("resource is pending")
-            .is_none());
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("resource is pending"),
+            Some(ChatLinkEvent::ResourceDeferred {
+                seq: 3,
+                op: ChatOp::ModerationAuditResource,
+                room_id: Some(1),
+            })
+        ));
         assert_eq!(
             transport
                 .pending_resource_offers

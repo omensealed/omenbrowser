@@ -53,8 +53,7 @@ omenchat-announcement-rooms = []
 omenchat-slow-mode = []
 # Non-product interoperability hooks for deterministic live qualification.
 omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
-# Capability-negotiated, bounded, read-only moderation audit. This remains
-# outside product aliases until its explicit user-facing activation gate passes.
+# Capability-negotiated, bounded, read-only moderation audit.
 omenchat-moderation-audit = []
 # Non-product process qualification for the real capability boundary.
 omenchat-moderation-audit-qualification = ["omenchat-moderation-audit"]
@@ -64,8 +63,8 @@ omenchat-moderation-audit-resource-qualification = ["omenchat-moderation-audit-q
 # Canonical build identities. Release and packaging commands must use
 # `--no-default-features --features desktop-product`; development profiles keep
 # mock support explicit so it cannot leak into distributed binaries.
-desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode"]
-desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode"]
+desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-moderation-audit"]
+desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-moderation-audit"]
 desktop-dev = ["desktop-product", "mock-runtime"]
 desktop-test = ["desktop-dev", "desktop-ui-test"]
 

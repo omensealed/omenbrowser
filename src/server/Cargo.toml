@@ -19,7 +19,7 @@ default = []
 live-rns-net = []
 live-reticulum = ["dep:rand_core", "dep:reticulum-rs", "dep:rns_transport", "dep:tokio", "dep:tokio-util", "dep:omen-ifac-tcp", "dep:sha2"]
 tui = ["dep:crossterm", "dep:ratatui"]
-server-headless = ["live-reticulum", "omenchat-announcement-rooms", "omenchat-slow-mode"]
+server-headless = ["live-reticulum", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-moderation-audit"]
 server-full = ["server-headless", "tui"]
 # Capability-negotiated room policy projection. Authorization remains active
 # for every peer, including legacy peers that receive four-field room values.
@@ -29,8 +29,7 @@ omenchat-announcement-rooms = []
 omenchat-slow-mode = []
 # Non-product interoperability hooks for deterministic live qualification.
 omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
-# Capability-negotiated, bounded, read-only moderation audit. This remains
-# outside product aliases until its explicit user-facing activation gate passes.
+# Capability-negotiated, bounded, read-only moderation audit.
 omenchat-moderation-audit = []
 # Non-product process qualification for the real capability boundary.
 omenchat-moderation-audit-qualification = ["omenchat-moderation-audit"]

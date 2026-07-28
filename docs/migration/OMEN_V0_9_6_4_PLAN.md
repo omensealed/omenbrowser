@@ -1504,8 +1504,9 @@ healthy chat Link to hide the limitation.
 
 The activation review then separated the real
 `omenchat-moderation-audit` feature from both non-product qualification hooks.
-Canonical products machine-reject all three until an explicit moderator/admin
-request and presentation slice passes. The desktop client owns OMENchat
+After the explicit moderator/admin request, presentation, authority-loss, and
+process gates passed, canonical products require the real capability and
+machine-reject both qualification hooks. The desktop client owns OMENchat
 sessions; the root Ratatui Messages workspace remains LXMF-only and omenchatd's
 TUI is operator-only, so no disconnected OMENchat audit panel is fabricated.
 Any future OMENchat client TUI must consume the same project-owned projection.
