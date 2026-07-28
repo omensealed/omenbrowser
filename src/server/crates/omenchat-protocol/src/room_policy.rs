@@ -20,6 +20,43 @@ pub enum RoomCatalogShape {
     SlowMode,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RoomPolicyProjection {
+    policy_bits: u64,
+    slow_mode_seconds: u32,
+}
+
+impl RoomPolicyProjection {
+    pub fn new(policy_bits: u64, slow_mode_seconds: u32) -> Result<Self, RoomPolicyError> {
+        if policy_bits & !ROOM_POLICY_KNOWN_MASK != 0 {
+            return Err(RoomPolicyError::UnknownPolicyBits(policy_bits));
+        }
+        if slow_mode_seconds > ROOM_SLOW_MODE_MAX_SECONDS {
+            return Err(RoomPolicyError::InvalidSlowMode);
+        }
+        Ok(Self {
+            policy_bits,
+            slow_mode_seconds,
+        })
+    }
+
+    pub fn policy_bits(self) -> u64 {
+        self.policy_bits
+    }
+
+    pub fn slow_mode_seconds(self) -> u32 {
+        self.slow_mode_seconds
+    }
+
+    pub fn announcement_only(self) -> bool {
+        self.policy_bits & ROOM_POLICY_ANNOUNCEMENT != 0
+    }
+
+    pub fn slow_mode_enabled(self) -> bool {
+        self.slow_mode_seconds != 0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomCatalogEntry {
     pub room_id: RoomId,
@@ -33,6 +70,10 @@ pub struct RoomCatalogEntry {
 impl RoomCatalogEntry {
     pub fn announcement_only(&self) -> bool {
         self.policy_bits & ROOM_POLICY_ANNOUNCEMENT != 0
+    }
+
+    pub fn policy_projection(&self) -> Result<RoomPolicyProjection, RoomPolicyError> {
+        RoomPolicyProjection::new(self.policy_bits, self.slow_mode_seconds)
     }
 
     pub fn into_frame_value(self, policy_negotiated: bool) -> Result<FrameValue, RoomPolicyError> {
@@ -241,6 +282,41 @@ mod tests {
                 &FrameValue::Array(fields),
                 RoomCatalogShape::SlowMode
             ),
+            Err(RoomPolicyError::InvalidSlowMode)
+        );
+    }
+
+    #[test]
+    fn room_policy_projection_is_typed_bounded_and_value_only() {
+        let ordinary = RoomPolicyProjection::default();
+        assert_eq!(ordinary.policy_bits(), 0);
+        assert_eq!(ordinary.slow_mode_seconds(), 0);
+        assert!(!ordinary.announcement_only());
+        assert!(!ordinary.slow_mode_enabled());
+
+        let projected =
+            RoomPolicyProjection::new(ROOM_POLICY_ANNOUNCEMENT, 30).expect("bounded room policy");
+        assert_eq!(projected.policy_bits(), ROOM_POLICY_ANNOUNCEMENT);
+        assert_eq!(projected.slow_mode_seconds(), 30);
+        assert!(projected.announcement_only());
+        assert!(projected.slow_mode_enabled());
+        assert_eq!(
+            RoomCatalogEntry {
+                slow_mode_seconds: 30,
+                ..announcement_room()
+            }
+            .policy_projection(),
+            Ok(projected)
+        );
+
+        assert_eq!(
+            RoomPolicyProjection::new(ROOM_POLICY_KNOWN_MASK << 1, 0),
+            Err(RoomPolicyError::UnknownPolicyBits(
+                ROOM_POLICY_KNOWN_MASK << 1
+            ))
+        );
+        assert_eq!(
+            RoomPolicyProjection::new(0, ROOM_SLOW_MODE_MAX_SECONDS + 1),
             Err(RoomPolicyError::InvalidSlowMode)
         );
     }

@@ -17,7 +17,7 @@ use super::protocol::{
     EventId, MessageRevisionAction, MessageRevisionEvent, MessageRevisionSnapshot,
     MessageRevisionSnapshotEntry, ModerationAuditPage, PinAction, PinEvent, PinSnapshot,
     PinSnapshotEntry, ReactionAction, ReactionEvent, ReactionSnapshot, ReactionSnapshotEntry,
-    ReactionToken, RoomId, ServerId, MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS,
+    ReactionToken, RoomId, RoomPolicyProjection, ServerId, MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS,
     REACTION_SNAPSHOT_MAX_TARGETS, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
 };
 use super::store::ChatStore;
@@ -480,7 +480,7 @@ pub struct ChatClient {
     pin_event_cursors: BTreeMap<(ServerId, RoomId, EventId), EventId>,
     authoritative_pin_targets: BTreeMap<ServerId, BTreeSet<(RoomId, EventId)>>,
     moderation_audit_pages: BTreeMap<(ServerId, RoomId), ModerationAuditPage>,
-    room_policy_bits: BTreeMap<(ChatSessionId, RoomId), u64>,
+    room_policies: BTreeMap<(ChatSessionId, RoomId), RoomPolicyProjection>,
 }
 
 impl ChatClient {
@@ -498,7 +498,7 @@ impl ChatClient {
             pin_event_cursors: BTreeMap::new(),
             authoritative_pin_targets: BTreeMap::new(),
             moderation_audit_pages: BTreeMap::new(),
-            room_policy_bits: BTreeMap::new(),
+            room_policies: BTreeMap::new(),
         }
     }
 
@@ -548,14 +548,32 @@ impl ChatClient {
             .copied()
     }
 
-    pub fn room_policy_bits(&self, session_id: ChatSessionId, room_id: RoomId) -> Option<u64> {
+    pub fn room_policy(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) -> Option<RoomPolicyProjection> {
         self.session(session_id)?;
-        self.room_policy_bits.get(&(session_id, room_id)).copied()
+        self.room_policies.get(&(session_id, room_id)).copied()
+    }
+
+    pub fn room_policy_bits(&self, session_id: ChatSessionId, room_id: RoomId) -> Option<u64> {
+        self.room_policy(session_id, room_id)
+            .map(RoomPolicyProjection::policy_bits)
+    }
+
+    pub fn room_slow_mode_seconds(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) -> Option<u32> {
+        self.room_policy(session_id, room_id)
+            .map(RoomPolicyProjection::slow_mode_seconds)
     }
 
     pub fn room_is_announcement_only(&self, session_id: ChatSessionId, room_id: RoomId) -> bool {
-        self.room_policy_bits(session_id, room_id)
-            .is_some_and(|bits| bits & super::protocol::ROOM_POLICY_ANNOUNCEMENT != 0)
+        self.room_policy(session_id, room_id)
+            .is_some_and(RoomPolicyProjection::announcement_only)
     }
 
     pub fn local_user_can_publish_to_room(
@@ -582,7 +600,7 @@ impl ChatClient {
     pub(crate) fn replace_room_policies(
         &mut self,
         session_id: ChatSessionId,
-        policies: &[(RoomId, u64)],
+        policies: &[(RoomId, RoomPolicyProjection)],
     ) -> bool {
         let Some(session) = self.session(session_id) else {
             return false;
@@ -600,13 +618,13 @@ impl ChatClient {
         {
             return false;
         }
-        self.room_policy_bits
+        self.room_policies
             .retain(|(stored_session, _), _| *stored_session != session_id);
-        self.room_policy_bits.extend(
+        self.room_policies.extend(
             policies
                 .iter()
                 .copied()
-                .map(|(room_id, bits)| ((session_id, room_id), bits)),
+                .map(|(room_id, policy)| ((session_id, room_id), policy)),
         );
         true
     }
@@ -615,7 +633,7 @@ impl ChatClient {
         &mut self,
         session_id: ChatSessionId,
         room_id: RoomId,
-        policy_bits: u64,
+        policy: RoomPolicyProjection,
     ) -> bool {
         let Some(session) = self.session(session_id) else {
             return false;
@@ -626,17 +644,16 @@ impl ChatClient {
             return false;
         }
         let session_policy_count = self
-            .room_policy_bits
+            .room_policies
             .keys()
             .filter(|(stored_session, _)| *stored_session == session_id)
             .count();
         let key = (session_id, room_id);
-        if !self.room_policy_bits.contains_key(&key)
-            && session_policy_count >= CHAT_SESSION_MAX_ROOMS
+        if !self.room_policies.contains_key(&key) && session_policy_count >= CHAT_SESSION_MAX_ROOMS
         {
             return false;
         }
-        self.room_policy_bits.insert(key, policy_bits);
+        self.room_policies.insert(key, policy);
         true
     }
 
@@ -644,7 +661,7 @@ impl ChatClient {
         if self.session(session_id).is_none() {
             return;
         }
-        self.room_policy_bits
+        self.room_policies
             .retain(|(stored_session, _), _| *stored_session != session_id);
     }
 
@@ -1535,7 +1552,7 @@ impl ChatClient {
             self.prune_message_revision_state_for_server(&removed.server.server_id);
             self.prune_pin_state_for_server(&removed.server.server_id);
         }
-        self.room_policy_bits
+        self.room_policies
             .retain(|(stored_session, _), _| *stored_session != session_id);
         Some(removed)
     }
@@ -2371,6 +2388,28 @@ mod tests {
             events,
             status: String::new(),
         }
+    }
+
+    #[test]
+    fn room_policy_projection_is_catalog_bounded_and_session_owned() {
+        let mut client = ChatClient::new();
+        let session_id = client.reserve_session_id();
+        assert!(client.push_session(bounded_history_session(session_id, Vec::new())));
+        let policy =
+            RoomPolicyProjection::new(super::super::protocol::ROOM_POLICY_ANNOUNCEMENT, 30)
+                .expect("bounded policy");
+
+        assert!(client.update_room_policy(session_id, 1, policy));
+        assert_eq!(client.room_policy(session_id, 1), Some(policy));
+        assert_eq!(client.room_slow_mode_seconds(session_id, 1), Some(30));
+        assert!(!client.update_room_policy(session_id, 2, policy));
+
+        let oversized = vec![(1, policy); CHAT_SESSION_MAX_ROOMS + 1];
+        assert!(!client.replace_room_policies(session_id, &oversized));
+        assert_eq!(client.room_policy(session_id, 1), Some(policy));
+
+        assert!(client.remove_session(session_id).is_some());
+        assert_eq!(client.room_policy(session_id, 1), None);
     }
 
     #[test]

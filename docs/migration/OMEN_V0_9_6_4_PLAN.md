@@ -1717,6 +1717,15 @@ labels enforcement inactive so stored configuration is not misreported as live
 policy. No capability negotiation or production admission is activated.
 Evidence is in
 `docs/audits/omenchat-slow-mode-administration-qualification.md`.
+The fifth slice replaces the desktop client's raw room-policy-bit map with one
+typed, bounded, session-owned policy projection that retains both known bits
+and the slow-mode scalar. The Iced pane can render a static
+`Slow mode · Ns` indicator, while the independently packaged omenchatd TUI
+renders stored announcement/slow-mode configuration and explicitly labels
+slow-mode enforcement inactive. Production parsing still selects only the
+legacy or announcement-only shapes; it does not request or accept
+`room-slow-mode-v1`. Evidence is in
+`docs/audits/omenchat-slow-mode-client-projection-qualification.md`.
 
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise

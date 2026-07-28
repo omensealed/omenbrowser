@@ -21,10 +21,10 @@ use super::protocol::{
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MessageRevisionAck,
     MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot, ModerationAuditPage,
     MutationId, PinAck, PinAction, PinEvent, PinRequest, PinSnapshot, ReactionAck, ReactionEvent,
-    ReactionRequest, ReactionSnapshot, RichMessageBody, RoomCatalogEntry, RoomId,
-    SessionOpenNegotiation, ANNOUNCEMENT_ROOMS_CAPABILITY, DEFAULT_JOIN_BACKLOG_EVENTS,
-    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, MODERATION_AUDIT_CAPABILITY,
-    PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
+    ReactionRequest, ReactionSnapshot, RichMessageBody, RoomCatalogEntry, RoomCatalogShape, RoomId,
+    RoomPolicyProjection, SessionOpenNegotiation, ANNOUNCEMENT_ROOMS_CAPABILITY,
+    DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY,
+    MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -2819,10 +2819,7 @@ fn apply_frame_with_state(
                     parsed
                         .iter()
                         .filter(|room| retained_room_ids.contains(&room.summary.room_id))
-                        .filter_map(|room| {
-                            room.policy_bits
-                                .map(|policy_bits| (room.summary.room_id, policy_bits))
-                        })
+                        .filter_map(|room| room.policy.map(|policy| (room.summary.room_id, policy)))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -2908,7 +2905,7 @@ fn apply_frame_with_state(
                 return;
             };
             let room = parsed_room.summary;
-            let room_policy_bits = parsed_room.policy_bits;
+            let room_policy = parsed_room.policy;
             let mut local_user_id = None;
             if let Some(state) = state.as_deref_mut() {
                 if state.reply_mentions_sessions.contains(&session_id)
@@ -2956,8 +2953,8 @@ fn apply_frame_with_state(
                 session.enforce_catalog_bounds();
                 session.status = "joined live room".into();
             }
-            if let Some(policy_bits) = room_policy_bits {
-                if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+            if let Some(policy) = room_policy {
+                if !client.update_room_policy(session_id, room.room_id, policy) {
                     client.clear_room_policies(session_id);
                     events.push(ChatClientEvent::Error {
                         session_id: Some(session_id),
@@ -4241,7 +4238,7 @@ fn apply_room_delta(
         return;
     };
     let mut room = parsed_room.summary;
-    let room_policy_bits = parsed_room.policy_bits;
+    let room_policy = parsed_room.policy;
     if let Some(session) = client.session_mut(session_id) {
         if let Some(current) = session
             .rooms
@@ -4265,8 +4262,8 @@ fn apply_room_delta(
             ));
         }
     }
-    if let Some(policy_bits) = room_policy_bits {
-        if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+    if let Some(policy) = room_policy {
+        if !client.update_room_policy(session_id, room.room_id, policy) {
             client.clear_room_policies(session_id);
             events.push(ChatClientEvent::Error {
                 session_id: Some(session_id),
@@ -4338,10 +4335,7 @@ fn apply_command_result(
                     parsed
                         .iter()
                         .filter(|room| retained_room_ids.contains(&room.summary.room_id))
-                        .filter_map(|room| {
-                            room.policy_bits
-                                .map(|policy_bits| (room.summary.room_id, policy_bits))
-                        })
+                        .filter_map(|room| room.policy.map(|policy| (room.summary.room_id, policy)))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -4389,7 +4383,7 @@ fn apply_command_result(
                 return;
             };
             let room = parsed_room.summary;
-            let room_policy_bits = parsed_room.policy_bits;
+            let room_policy = parsed_room.policy;
             if let Some(session) = client.session_mut(session_id) {
                 let active = session.active_room.room_id == room.room_id;
                 session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
@@ -4408,8 +4402,8 @@ fn apply_command_result(
                     ));
                 }
             }
-            if let Some(policy_bits) = room_policy_bits {
-                if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+            if let Some(policy) = room_policy {
+                if !client.update_room_policy(session_id, room.room_id, policy) {
                     client.clear_room_policies(session_id);
                     return;
                 }
@@ -4430,7 +4424,7 @@ fn apply_command_result(
                 return;
             };
             let room = parsed_room.summary;
-            let room_policy_bits = parsed_room.policy_bits;
+            let room_policy = parsed_room.policy;
             if let Some(session) = client.session_mut(session_id) {
                 session.rooms = merge_rooms(session.rooms.clone(), vec![room.clone()]);
                 session.status = format!("room created: #{}", room.name);
@@ -4441,8 +4435,8 @@ fn apply_command_result(
                     ));
                 }
             }
-            if let Some(policy_bits) = room_policy_bits {
-                if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+            if let Some(policy) = room_policy {
+                if !client.update_room_policy(session_id, room.room_id, policy) {
                     client.clear_room_policies(session_id);
                     return;
                 }
@@ -4463,7 +4457,7 @@ fn apply_command_result(
                 return;
             };
             let room = parsed_room.summary;
-            let room_policy_bits = parsed_room.policy_bits;
+            let room_policy = parsed_room.policy;
             client.mark_pin_room_stale(session_id, room.room_id);
             if let Some(session) = client.session_mut(session_id) {
                 let active = session.active_room.room_id == room.room_id;
@@ -4492,8 +4486,8 @@ fn apply_command_result(
                 }
                 session.enforce_catalog_bounds();
             }
-            if let Some(policy_bits) = room_policy_bits {
-                if !client.update_room_policy(session_id, room.room_id, policy_bits) {
+            if let Some(policy) = room_policy {
+                if !client.update_room_policy(session_id, room.room_id, policy) {
                     client.clear_room_policies(session_id);
                     return;
                 }
@@ -5047,7 +5041,7 @@ fn increment_room_unread(session: &mut ChatSessionView, room_id: u32) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ParsedRoom {
     summary: ChatRoomSummary,
-    policy_bits: Option<u64>,
+    policy: Option<RoomPolicyProjection>,
 }
 
 fn parse_room(value: &FrameValue, server_id: String, joined: bool) -> Option<ChatRoomSummary> {
@@ -5060,7 +5054,29 @@ fn parse_room_policy(
     joined: bool,
     policy_negotiated: bool,
 ) -> Option<ParsedRoom> {
-    let room = RoomCatalogEntry::from_frame_value(value, policy_negotiated).ok()?;
+    parse_room_policy_for_shape(
+        value,
+        server_id,
+        joined,
+        if policy_negotiated {
+            RoomCatalogShape::PolicyBits
+        } else {
+            RoomCatalogShape::Legacy
+        },
+    )
+}
+
+fn parse_room_policy_for_shape(
+    value: &FrameValue,
+    server_id: String,
+    joined: bool,
+    shape: RoomCatalogShape,
+) -> Option<ParsedRoom> {
+    let room = RoomCatalogEntry::from_frame_value_for_shape(value, shape).ok()?;
+    let policy = (shape != RoomCatalogShape::Legacy)
+        .then(|| room.policy_projection())
+        .transpose()
+        .ok()?;
     Some(ParsedRoom {
         summary: ChatRoomSummary {
             server_id,
@@ -5070,7 +5086,7 @@ fn parse_room_policy(
             unread: 0,
             joined,
         },
-        policy_bits: policy_negotiated.then_some(room.policy_bits),
+        policy,
     })
 }
 
@@ -11401,6 +11417,60 @@ mod tests {
         assert!(!state.announcement_rooms_negotiated(session_id));
         assert_eq!(client.room_policy_bits(session_id, 1), None);
         assert!(client.local_user_can_publish_to_room(session_id, 1));
+    }
+
+    #[test]
+    fn slow_mode_projection_is_bounded_but_runtime_negotiation_remains_dormant() {
+        let (mut client, session_id) = live_test_client();
+        let room_value = RoomCatalogEntry {
+            room_id: 1,
+            name: "lobby".into(),
+            topic: Some("Operations".into()),
+            room_revision: 2,
+            policy_bits: super::super::protocol::ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 30,
+        }
+        .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
+        .expect("bounded slow-mode room");
+
+        assert!(
+            parse_room_policy(&room_value, "abcd".into(), true, false).is_none(),
+            "legacy runtime shape must reject six-field policy"
+        );
+        assert!(
+            parse_room_policy(&room_value, "abcd".into(), true, true).is_none(),
+            "announcement-only runtime shape must reject six-field policy"
+        );
+
+        let projected = parse_room_policy_for_shape(
+            &room_value,
+            "abcd".into(),
+            true,
+            RoomCatalogShape::SlowMode,
+        )
+        .expect("explicit dormant projection");
+        assert_eq!(projected.summary.room_id, 1);
+        let policy = projected.policy.expect("typed room policy");
+        assert_eq!(policy.slow_mode_seconds(), 30);
+        assert!(policy.announcement_only());
+        assert!(client.update_room_policy(session_id, 1, policy));
+        assert_eq!(client.room_slow_mode_seconds(session_id, 1), Some(30));
+        assert_eq!(
+            client.room_policy_bits(session_id, 1),
+            Some(super::super::protocol::ROOM_POLICY_ANNOUNCEMENT)
+        );
+
+        let malformed = RoomCatalogEntry {
+            room_id: 1,
+            name: "lobby".into(),
+            topic: None,
+            room_revision: 3,
+            policy_bits: 0,
+            slow_mode_seconds: super::super::protocol::ROOM_SLOW_MODE_MAX_SECONDS + 1,
+        };
+        assert!(malformed
+            .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
+            .is_err());
     }
 
     #[test]

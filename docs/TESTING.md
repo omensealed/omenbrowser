@@ -4707,6 +4707,31 @@ explicitly reporting enforcement as inactive. No live capability or runtime
 behavior is activated by this slice. Evidence is in
 `docs/audits/omenchat-slow-mode-administration-qualification.md`.
 
+The bounded shared policy/client presentation slice is covered by:
+
+```bash
+cargo test --locked -p omenchat-protocol room_policy -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  slow_mode_projection -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  slow_mode_indicator -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  room_policy_projection_is_catalog_bounded -- --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full dashboard_room -- --nocapture
+```
+
+The shared DTO rejects unknown policy bits and values above 86,400 seconds.
+Client projection is keyed by session/room, capped by the existing 256-room
+session ceiling, cleared on session removal/capability loss, and retains no
+strings or payloads. Explicit dormant parsing proves the six-field value can be
+projected, while production legacy and announcement-only parsers still reject
+that shape. Iced renders only a static label; omenchatd TUI status says
+configured but inactive. No worker, timer, polling subscription, retry, wire
+request, capability acceptance, or production enforcement is introduced.
+Evidence is in
+`docs/audits/omenchat-slow-mode-client-projection-qualification.md`.
+
 Schema-11 announcement-room storage and guarded rollback are covered by:
 
 ```bash

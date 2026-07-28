@@ -2,9 +2,9 @@
 
 Date: 2026-07-27
 
-Status: dormant wire/storage contracts and test-only atomic admission complete;
-configuration, negotiation, production enforcement, and UI behavior remain
-inactive
+Status: dormant wire/storage contracts, test-only atomic admission,
+stopped-server configuration, and bounded frontend projection complete;
+negotiation and production enforcement remain inactive
 
 Baseline: `release/v0.9.6-4` at `634fa37`
 
@@ -297,7 +297,11 @@ Process/UI:
    administration plus human/JSON configured-state evidence that explicitly
    reports production enforcement inactive. Evidence:
    `docs/audits/omenchat-slow-mode-administration-qualification.md`.
-5. Add bounded client projection and shared GUI/TUI evidence.
+5. **Complete (2026-07-28):** add a shared bounded policy DTO, session-owned
+   desktop client projection, static Iced indicator, and truthful omenchatd TUI
+   configured/inactive evidence. The legacy root Ratatui frontend has no
+   OMENchat session surface. Evidence:
+   `docs/audits/omenchat-slow-mode-client-projection-qualification.md`.
 6. Run current/current, restart, mixed-version, resource, and measurement
    gates.
 7. Activate negotiation only after every gate passes.

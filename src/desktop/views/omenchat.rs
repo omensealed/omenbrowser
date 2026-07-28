@@ -316,6 +316,17 @@ pub(in crate::desktop) fn omenchat_media_animation_allowed(
     pane_visible && !reduce_motion
 }
 
+fn omenchat_slow_mode_indicator(
+    client: &crate::chat::ChatClient,
+    session_id: ChatSessionId,
+    room_id: crate::chat::protocol::RoomId,
+) -> Option<String> {
+    client
+        .room_slow_mode_seconds(session_id, room_id)
+        .filter(|seconds| *seconds != 0)
+        .map(|seconds| format!("Slow mode · {seconds}s"))
+}
+
 pub(in crate::desktop) fn omenchat_view_for_session(
     desktop: &DesktopApp,
     session_id: ChatSessionId,
@@ -790,6 +801,18 @@ pub(in crate::desktop) fn omenchat_view_for_session(
     ]
     .spacing(8);
     let mut composer_panel = column![].spacing(6).width(Length::Fill);
+    if let Some(indicator) = omenchat_slow_mode_indicator(
+        &desktop.omenchat.chat_client,
+        session.session_id,
+        active_room_id,
+    ) {
+        composer_panel = composer_panel.push(
+            container(text(indicator).size(ui_size(12)))
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(status_container_style),
+        );
+    }
     if !publish_allowed {
         composer_panel = composer_panel.push(
             container(
@@ -1307,11 +1330,13 @@ fn omenchat_recovered_mutations_panel(
 mod accessibility_tests {
     use super::{
         compact_recovery_destination, omenchat_media_animation_allowed,
-        reaction_token_presentation, recovered_mutation_expiry_label, recovered_mutation_notice,
-        recovered_mutation_operation,
+        omenchat_slow_mode_indicator, reaction_token_presentation, recovered_mutation_expiry_label,
+        recovered_mutation_notice, recovered_mutation_operation,
     };
-    use crate::chat::protocol::{ChatOp, FrameBody, ReactionToken};
-    use crate::chat::ChatConnectionState;
+    use crate::chat::protocol::{
+        ChatOp, FrameBody, ReactionToken, RoomPolicyProjection, ROOM_POLICY_ANNOUNCEMENT,
+    };
+    use crate::chat::{ChatConnectionState, ChatRoomSummary, ChatServerSummary, ChatSessionView};
 
     #[test]
     fn reduced_motion_and_hidden_panes_withhold_animated_media() {
@@ -1420,5 +1445,44 @@ mod accessibility_tests {
             ]
         );
         assert_eq!(crate::desktop::ICON_REPLY, "\u{f086}");
+    }
+
+    #[test]
+    fn slow_mode_indicator_is_static_bounded_policy_evidence() {
+        let mut client = crate::chat::ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let room = ChatRoomSummary {
+            server_id: "server".into(),
+            room_id: 7,
+            name: "lobby".into(),
+            topic: None,
+            unread: 0,
+            joined: true,
+        };
+        assert!(client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "server".into(),
+                destination: "destination".into(),
+                display_name: "Test".into(),
+            },
+            rooms: vec![room.clone()],
+            active_room: room,
+            users: Vec::new(),
+            events: Vec::new(),
+            status: String::new(),
+        }));
+        assert_eq!(omenchat_slow_mode_indicator(&client, session_id, 7), None);
+        assert!(client.update_room_policy(
+            session_id,
+            7,
+            RoomPolicyProjection::new(ROOM_POLICY_ANNOUNCEMENT, 30).expect("bounded test policy"),
+        ));
+        assert_eq!(
+            omenchat_slow_mode_indicator(&client, session_id, 7).as_deref(),
+            Some("Slow mode · 30s")
+        );
+        assert_eq!(client.room_slow_mode_seconds(session_id, 7), Some(30));
+        assert!(client.room_is_announcement_only(session_id, 7));
     }
 }
