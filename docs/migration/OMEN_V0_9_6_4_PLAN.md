@@ -1727,6 +1727,14 @@ legacy or announcement-only shapes; it does not request or accept
 `room-slow-mode-v1`. Evidence is in
 `docs/audits/omenchat-slow-mode-client-projection-qualification.md`.
 
+The current/current native Linux GUI gate is also complete. An isolated
+qualification build opens the generated server only after the normal runtime
+ready event, observes the live 30-second room delta, admits the first message,
+receives typed slow-mode rejection for the immediate second message, and
+preserves that rejected draft byte-for-byte. SQLite independently records
+exactly the first message. Evidence and the reproducible Xvfb/i3 command are in
+`docs/audits/omenchat-slow-mode-gui-qualification.md`.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

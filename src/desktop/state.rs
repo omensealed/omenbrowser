@@ -28,6 +28,8 @@ pub(in crate::desktop) struct DesktopApp {
     pub(in crate::desktop) history_search: LocalHistorySearchDesktopState,
     #[cfg(feature = "chat-client")]
     pub(in crate::desktop) omenchat: OmenChatDesktopState,
+    #[cfg(feature = "omenchat-slow-mode-qualification")]
+    pub(in crate::desktop) qualification_omenchat_target: Option<String>,
 }
 
 impl DesktopApp {
@@ -76,6 +78,8 @@ impl DesktopApp {
             history_search: Default::default(),
             #[cfg(feature = "chat-client")]
             omenchat,
+            #[cfg(feature = "omenchat-slow-mode-qualification")]
+            qualification_omenchat_target: None,
         }
     }
 }

@@ -4732,6 +4732,22 @@ request, capability acceptance, or production enforcement is introduced.
 Evidence is in
 `docs/audits/omenchat-slow-mode-client-projection-qualification.md`.
 
+Native Linux Iced projection, admission, typed rejection, and exact draft
+recovery are covered by the isolated Xvfb/i3 harness:
+
+```bash
+bash scripts/run-omenchat-slow-mode-gui-qualification.sh \
+  --evidence /tmp/omenchat-slow-mode-gui-evidence
+```
+
+The harness requires Xvfb, i3, `xdotool`, `xprop`, `xclip`, ImageMagick
+`import`, `jq`, `rg`, and Python 3. It creates fresh browser/server roots and
+identities, uses only loopback Reticulum TCP, and leaves screenshots,
+structured logs, the exact copied rejected draft, and a read-only SQLite
+observation in the selected evidence directory. It requires one admitted
+message and no second committed message. See
+`docs/audits/omenchat-slow-mode-gui-qualification.md`.
+
 Schema-11 announcement-room storage and guarded rollback are covered by:
 
 ```bash

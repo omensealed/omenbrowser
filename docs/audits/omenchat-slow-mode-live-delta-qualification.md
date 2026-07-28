@@ -102,6 +102,7 @@ physical-interface result is claimed.
 
 - [x] Run adjacent released-binary four-/five-field process compatibility (see
   `omenchat-room-shape-adjacent-qualification.md`).
-- Observe the policy change and rejection recovery in the real Iced GUI.
+- [x] Observe the policy change and rejection recovery in the real Iced GUI
+  (see `omenchat-slow-mode-gui-qualification.md`).
 - Record real client/server CPU, RSS, link, and queue measurements.
 - Make an explicit product activation and rollback decision.

@@ -104,7 +104,8 @@ Still required before product activation:
 - [x] preserve the Iced composer draft after a typed slow-mode rejection without
   overwriting newer input (see
   `omenchat-slow-mode-draft-recovery-qualification.md`);
-- observe the policy/rejection flow in the real GUI;
+- [x] observe the policy/rejection flow in the real GUI (see
+  `omenchat-slow-mode-gui-qualification.md`);
 - record client/server CPU, RSS, link, and queue measurements; and
 - make an explicit activation and rollback decision.
 
