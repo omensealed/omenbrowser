@@ -609,6 +609,20 @@ impl ChatClient {
         })
     }
 
+    pub fn local_user_can_view_moderation_audit(&self, session_id: ChatSessionId) -> bool {
+        let Some(local_user_id) = self.local_user_id(session_id) else {
+            return false;
+        };
+        self.session(session_id).is_some_and(|session| {
+            session.users.iter().any(|user| {
+                user.user_id == local_user_id
+                    && user.role_bits
+                        & (super::model::CHAT_ROLE_MODERATOR | super::model::CHAT_ROLE_ADMIN)
+                        != 0
+            })
+        })
+    }
+
     pub(crate) fn replace_room_policies(
         &mut self,
         session_id: ChatSessionId,
@@ -752,6 +766,20 @@ impl ChatClient {
         };
         self.moderation_audit_pages
             .retain(|(stored_server, _), _| stored_server != &server_id);
+    }
+
+    pub(crate) fn clear_moderation_audit_room(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) {
+        let Some(server_id) = self
+            .session(session_id)
+            .map(|session| session.server.server_id.clone())
+        else {
+            return;
+        };
+        self.moderation_audit_pages.remove(&(server_id, room_id));
     }
 
     pub fn retained_mention_count(&self, session_id: ChatSessionId, room_id: RoomId) -> u32 {

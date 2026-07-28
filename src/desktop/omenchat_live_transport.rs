@@ -9,6 +9,136 @@ use super::{
 };
 
 impl DesktopApp {
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    pub(in crate::desktop) fn refresh_omenchat_moderation_audit(
+        &mut self,
+        session_id: crate::chat::ChatSessionId,
+    ) {
+        const FIRST_PAGE_LIMIT: u16 = 64;
+
+        if self
+            .omenchat
+            .omenchat_moderation_audit_requests
+            .get(&session_id)
+            .is_some_and(|request| {
+                matches!(
+                    request.state,
+                    crate::chat::ChatModerationAuditRequestState::Receiving
+                )
+            })
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit request already receiving".into(),
+            );
+            return;
+        }
+        let Some(room_id) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .filter(|session| session.active_room.joined)
+            .map(|session| session.active_room.room_id)
+        else {
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit requires a joined room".into(),
+            );
+            return;
+        };
+        if !self
+            .omenchat
+            .chat_client
+            .local_user_can_view_moderation_audit(session_id)
+        {
+            self.omenchat
+                .chat_client
+                .clear_moderation_audit_room(session_id, room_id);
+            self.omenchat
+                .omenchat_moderation_audit_requests
+                .remove(&session_id);
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit requires moderator or administrator authority".into(),
+            );
+            return;
+        }
+        let Some(owner_user_id) = self.omenchat.chat_client.local_user_id(session_id) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit requires an authenticated local user".into(),
+            );
+            return;
+        };
+        if !self
+            .omenchat
+            .omenchat_live_state
+            .moderation_audit_negotiated(session_id)
+        {
+            self.omenchat
+                .chat_client
+                .clear_moderation_audit_room(session_id, room_id);
+            self.omenchat
+                .omenchat_moderation_audit_requests
+                .remove(&session_id);
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit is unavailable because this server did not negotiate it".into(),
+            );
+            return;
+        }
+        let Some(transport) = self.omenchat.omenchat_live_transports.get_mut(&session_id) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit unavailable while OMENchat is disconnected".into(),
+            );
+            return;
+        };
+        self.omenchat.omenchat_moderation_audit_requests.insert(
+            session_id,
+            super::omenchat_desktop_state::OmenChatModerationAuditRequest {
+                room_id,
+                owner_user_id,
+                state: crate::chat::ChatModerationAuditRequestState::Receiving,
+            },
+        );
+        let (link_id, events, outgoing, resources) = {
+            let link_id = transport.link_id;
+            let events = crate::chat::live::request_live_moderation_audit(
+                &mut self.omenchat.chat_client,
+                &mut self.omenchat.omenchat_live_state,
+                transport,
+                session_id,
+                None,
+                FIRST_PAGE_LIMIT,
+            );
+            let outgoing = transport.take_outgoing_frames();
+            let resources = transport.take_outgoing_resources();
+            (link_id, events, outgoing, resources)
+        };
+        self.apply_omenchat_client_events_status(&events);
+        self.send_omenchat_outgoing_frames(link_id, outgoing);
+        self.send_omenchat_outgoing_resources(link_id, resources);
+        if matches!(
+            self.omenchat
+                .omenchat_moderation_audit_requests
+                .get(&session_id),
+            Some(super::omenchat_desktop_state::OmenChatModerationAuditRequest {
+                room_id: stored_room_id,
+                state: crate::chat::ChatModerationAuditRequestState::Receiving,
+                ..
+            }) if *stored_room_id == room_id
+        ) {
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit requested; waiting for the bounded first page".into(),
+            );
+        }
+    }
+
     #[cfg(feature = "chat-client")]
     pub(in crate::desktop) fn handle_omenchat_request(
         &mut self,

@@ -5043,8 +5043,8 @@ and bytes, and the upload root must contain no regular file. The machine
 doctor remains redacted; this local isolated harness uses the human detail
 line rather than weakening that boundary.
 
-The first moderation-audit slice reserves a read-only operation range and
-bounded shared types without requesting or accepting
+The moderation-audit foundation reserves a read-only operation range and
+bounded shared types. Canonical products still neither request nor accept
 `moderation-audit-v1`:
 
 ```bash
@@ -5069,8 +5069,8 @@ storage, durable transaction coupling,
 migration faults, and guarded schema-9/schema-8 exports are covered separately
 in `docs/audits/omenchat-moderation-audit-storage-qualification.md`. These
 commands do not claim a current/current process restart, adjacent-binary live
-interoperability, active Reticulum Resource cancellation, UI presentation,
-process Resource delivery, resource measurements, or activation. Paging
+interoperability, active Reticulum Resource cancellation, process Resource
+delivery, resource measurements, or activation. Paging
 evidence is in
 `docs/audits/omenchat-moderation-audit-paging-qualification.md`; wire evidence
 is in `docs/audits/omenchat-moderation-audit-qualification.md`.
@@ -5135,6 +5135,24 @@ peer never shipped the audit operation, so no audit request is sent to it.
 
 The feature-boundary and receiver-cancellation activation decision is recorded
 in `docs/audits/omenchat-moderation-audit-activation-review.md`.
+
+The real, still-non-product feature now has a first explicit desktop
+presentation slice:
+
+```bash
+cargo test --locked --no-default-features \
+  --features desktop-product,omenchat-moderation-audit \
+  moderation_audit --lib
+```
+
+The focused tests require moderator/admin authority, one single-flight manual
+64-record first-page request, a truthful receiving state, explicit end/empty
+completion, bounded failure text, newest-first record labels, and immediate
+evidence clearing on local role or Link-authority loss. The panel never polls,
+automatically retries, or exposes a false inbound-Resource Cancel action.
+Canonical product aliases remain unchanged. Load-older pagination, a root TUI
+consumer, product activation, and release-candidate process/packaging gates
+remain later work.
 
 Focused schema/storage gates:
 

@@ -196,6 +196,14 @@ impl DesktopApp {
                 self.update_load_older_omenchat_history(session_id);
                 Ok(Task::none())
             }
+            #[cfg(all(
+                feature = "omenchat-moderation-audit",
+                any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+            ))]
+            Message::OmenChat(OmenChatMessage::RefreshModerationAudit(session_id)) => {
+                self.refresh_omenchat_moderation_audit(session_id);
+                Ok(Task::none())
+            }
             Message::OmenChat(OmenChatMessage::CopyInvitation(session_id)) => {
                 Ok(self.update_copy_omenchat_invitation(session_id))
             }

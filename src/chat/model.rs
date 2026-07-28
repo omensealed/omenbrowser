@@ -1,4 +1,7 @@
-use super::protocol::{EventId, RoomId, ServerId, UserId};
+use super::protocol::{
+    EventId, ModerationAuditAction, ModerationAuditPage, ModerationAuditRecord, RoomId, ServerId,
+    UserId,
+};
 pub use super::protocol::{MessageRevisionAction, ReactionToken};
 
 pub const CHAT_CLIENT_MAX_SESSIONS: usize = 64;
@@ -130,6 +133,89 @@ impl ChatUserSummary {
             label.push(')');
         }
         label
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ChatModerationAuditRequestState {
+    #[default]
+    Idle,
+    Receiving,
+    Complete,
+    Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatModerationAuditView<'a> {
+    Unavailable,
+    Unauthorized,
+    Ready,
+    Receiving {
+        previous_records: &'a [ModerationAuditRecord],
+    },
+    Failed {
+        message: &'a str,
+        previous_records: &'a [ModerationAuditRecord],
+    },
+    Empty,
+    Loaded {
+        records: &'a [ModerationAuditRecord],
+    },
+}
+
+pub fn chat_moderation_audit_view<'a>(
+    authorized: bool,
+    negotiated: bool,
+    state: &'a ChatModerationAuditRequestState,
+    page: Option<&'a ModerationAuditPage>,
+) -> ChatModerationAuditView<'a> {
+    if !authorized {
+        return ChatModerationAuditView::Unauthorized;
+    }
+    if !negotiated {
+        return ChatModerationAuditView::Unavailable;
+    }
+    let records = page.map_or(&[][..], |page| page.records.as_slice());
+    match state {
+        ChatModerationAuditRequestState::Idle => ChatModerationAuditView::Ready,
+        ChatModerationAuditRequestState::Receiving => ChatModerationAuditView::Receiving {
+            previous_records: records,
+        },
+        ChatModerationAuditRequestState::Complete if records.is_empty() => {
+            ChatModerationAuditView::Empty
+        }
+        ChatModerationAuditRequestState::Complete => ChatModerationAuditView::Loaded { records },
+        ChatModerationAuditRequestState::Failed(message) => ChatModerationAuditView::Failed {
+            message,
+            previous_records: records,
+        },
+    }
+}
+
+pub fn moderation_audit_action_label(action: ModerationAuditAction) -> &'static str {
+    match action {
+        ModerationAuditAction::Kick => "kicked",
+        ModerationAuditAction::Ban => "banned",
+        ModerationAuditAction::Unban => "unbanned",
+        ModerationAuditAction::Mute => "muted",
+        ModerationAuditAction::Unmute => "unmuted",
+        ModerationAuditAction::RoleChange => "changed role for",
+    }
+}
+
+pub fn moderation_audit_result_label(record: &ModerationAuditRecord) -> String {
+    match record.action {
+        ModerationAuditAction::Kick => "removed from room".into(),
+        ModerationAuditAction::Ban => "status: banned".into(),
+        ModerationAuditAction::Unban => "status: active".into(),
+        ModerationAuditAction::Mute => "status: muted".into(),
+        ModerationAuditAction::Unmute => "status: unmuted".into(),
+        ModerationAuditAction::RoleChange => match record.result_role_bits.unwrap_or_default() {
+            bits if bits & CHAT_ROLE_ADMIN != 0 => "role: admin".into(),
+            bits if bits & CHAT_ROLE_MODERATOR != 0 => "role: moderator".into(),
+            bits if bits & CHAT_ROLE_TRUSTED != 0 => "role: trusted".into(),
+            _ => "role: member".into(),
+        },
     }
 }
 
@@ -830,5 +916,88 @@ mod tests {
             retained_local_mention_count(&events, &"server".into(), 1, None),
             0
         );
+    }
+
+    #[test]
+    fn moderation_audit_view_distinguishes_authority_progress_empty_and_failure() {
+        let record = ModerationAuditRecord {
+            audit_id: 2,
+            room_id: 1,
+            actor_user_id: 7,
+            actor_display_name_at_action: "Moderator".into(),
+            target_user_id: Some(8),
+            target_display_name_at_action: Some("Member".into()),
+            action: ModerationAuditAction::RoleChange,
+            committed_at_unix: 1_700_000_000,
+            result_role_bits: Some(CHAT_ROLE_TRUSTED),
+            result_status_bits: None,
+        };
+        let page = ModerationAuditPage {
+            records: vec![record.clone()],
+        };
+        assert_eq!(
+            chat_moderation_audit_view(
+                false,
+                true,
+                &ChatModerationAuditRequestState::Idle,
+                Some(&page),
+            ),
+            ChatModerationAuditView::Unauthorized
+        );
+        assert_eq!(
+            chat_moderation_audit_view(
+                true,
+                false,
+                &ChatModerationAuditRequestState::Idle,
+                Some(&page),
+            ),
+            ChatModerationAuditView::Unavailable
+        );
+        assert_eq!(
+            chat_moderation_audit_view(
+                true,
+                true,
+                &ChatModerationAuditRequestState::Idle,
+                Some(&page),
+            ),
+            ChatModerationAuditView::Ready
+        );
+        assert!(matches!(
+            chat_moderation_audit_view(
+                true,
+                true,
+                &ChatModerationAuditRequestState::Receiving,
+                Some(&page),
+            ),
+            ChatModerationAuditView::Receiving {
+                previous_records: [retained]
+            } if retained == &record
+        ));
+        assert_eq!(
+            chat_moderation_audit_view(
+                true,
+                true,
+                &ChatModerationAuditRequestState::Complete,
+                Some(&ModerationAuditPage { records: vec![] }),
+            ),
+            ChatModerationAuditView::Empty
+        );
+        assert!(matches!(
+            chat_moderation_audit_view(
+                true,
+                true,
+                &ChatModerationAuditRequestState::Failed("request failed".into()),
+                Some(&page),
+            ),
+            ChatModerationAuditView::Failed {
+                message: "request failed",
+                previous_records: [retained],
+            } if retained == &record
+        ));
+        assert_eq!(
+            moderation_audit_action_label(record.action),
+            "changed role for"
+        );
+        assert_eq!(moderation_audit_result_label(&record), "role: trusted");
     }
 }

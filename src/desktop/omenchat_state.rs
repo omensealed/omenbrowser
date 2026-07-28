@@ -536,13 +536,49 @@ impl DesktopApp {
                         ),
                     );
                 }
-                ChatClientEvent::UserUpdated { session_id, .. } => {
+                ChatClientEvent::UserUpdated { session_id, user } => {
+                    #[cfg(not(feature = "omenchat-moderation-audit"))]
+                    let _ = user;
+                    #[cfg(all(
+                        feature = "omenchat-moderation-audit",
+                        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                    ))]
+                    if self.omenchat.chat_client.local_user_id(*session_id) == Some(user.user_id)
+                        && !self
+                            .omenchat
+                            .chat_client
+                            .local_user_can_view_moderation_audit(*session_id)
+                    {
+                        self.omenchat
+                            .chat_client
+                            .clear_moderation_audit(*session_id);
+                        self.omenchat
+                            .omenchat_moderation_audit_requests
+                            .remove(session_id);
+                    }
                     self.persist_omenchat_session(*session_id);
                 }
                 ChatClientEvent::LocalUserBound {
                     session_id,
                     user_id,
                 } => {
+                    #[cfg(all(
+                        feature = "omenchat-moderation-audit",
+                        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                    ))]
+                    if self
+                        .omenchat
+                        .omenchat_moderation_audit_requests
+                        .get(session_id)
+                        .is_some_and(|request| request.owner_user_id != *user_id)
+                    {
+                        self.omenchat
+                            .chat_client
+                            .clear_moderation_audit(*session_id);
+                        self.omenchat
+                            .omenchat_moderation_audit_requests
+                            .remove(session_id);
+                    }
                     if self
                         .omenchat
                         .chat_client
@@ -734,6 +770,63 @@ impl DesktopApp {
                     )))]
                     let _ = (session_id, room_id);
                 }
+                #[cfg(all(
+                    feature = "omenchat-moderation-audit",
+                    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                ))]
+                ChatClientEvent::ModerationAuditPageApplied {
+                    session_id,
+                    room_id,
+                    page,
+                } => {
+                    if matches!(
+                        self.omenchat
+                            .omenchat_moderation_audit_requests
+                            .get(session_id),
+                        Some(
+                            super::omenchat_desktop_state::OmenChatModerationAuditRequest {
+                                room_id: stored_room_id,
+                                state: crate::chat::ChatModerationAuditRequestState::Receiving,
+                                ..
+                            }
+                        ) if stored_room_id == room_id
+                    ) {
+                        self.set_omenchat_session_status(
+                            *session_id,
+                            format!(
+                                "received {} moderation audit record(s); waiting for end",
+                                page.records.len()
+                            ),
+                        );
+                    }
+                }
+                #[cfg(all(
+                    feature = "omenchat-moderation-audit",
+                    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                ))]
+                ChatClientEvent::ModerationAuditEnd {
+                    session_id,
+                    room_id,
+                } => {
+                    let Some(request) = self
+                        .omenchat
+                        .omenchat_moderation_audit_requests
+                        .get_mut(session_id)
+                        .filter(|request| request.room_id == *room_id)
+                    else {
+                        continue;
+                    };
+                    request.state = crate::chat::ChatModerationAuditRequestState::Complete;
+                    let record_count = self
+                        .omenchat
+                        .chat_client
+                        .moderation_audit_page(*session_id, *room_id)
+                        .map_or(0, |page| page.records.len());
+                    self.set_omenchat_session_status(
+                        *session_id,
+                        format!("moderation audit current: {record_count} record(s)"),
+                    );
+                }
                 ChatClientEvent::UploadAccepted {
                     session_id,
                     resource_id,
@@ -831,6 +924,36 @@ impl DesktopApp {
                     session_id: Some(session_id),
                     message,
                 } => {
+                    #[cfg(all(
+                        feature = "omenchat-moderation-audit",
+                        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                    ))]
+                    if message.to_ascii_lowercase().contains("moderation audit") {
+                        let room_id = self
+                            .omenchat
+                            .omenchat_moderation_audit_requests
+                            .get(session_id)
+                            .map(|request| request.room_id)
+                            .or_else(|| {
+                                self.omenchat
+                                    .chat_client
+                                    .session(*session_id)
+                                    .map(|session| session.active_room.room_id)
+                            });
+                        if let Some(room_id) = room_id {
+                            if let Some(request) = self
+                                .omenchat
+                                .omenchat_moderation_audit_requests
+                                .get_mut(session_id)
+                                .filter(|request| request.room_id == room_id)
+                            {
+                                request.state =
+                                    crate::chat::ChatModerationAuditRequestState::Failed(
+                                        crate::chat::bounded_chat_text(message, 512),
+                                    );
+                            }
+                        }
+                    }
                     self.clear_omenchat_invitation_room_for_session(*session_id);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     if matches!(

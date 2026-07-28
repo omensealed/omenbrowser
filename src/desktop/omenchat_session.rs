@@ -16,6 +16,13 @@ impl DesktopApp {
         self.omenchat.chat_drafts.remove(&session_id);
         self.omenchat.omenchat_reply_drafts.remove(&session_id);
         self.omenchat.omenchat_selected_mentions.remove(&session_id);
+        #[cfg(all(
+            feature = "omenchat-moderation-audit",
+            any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+        ))]
+        self.omenchat
+            .omenchat_moderation_audit_requests
+            .remove(&session_id);
         #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         {
             self.omenchat.omenchat_revision_drafts.remove(&session_id);
@@ -119,6 +126,13 @@ impl DesktopApp {
         session_id: ChatSessionId,
         state: crate::chat::ChatConnectionState,
     ) {
+        #[cfg(feature = "omenchat-moderation-audit")]
+        if !matches!(state, crate::chat::ChatConnectionState::Joined) {
+            self.omenchat.chat_client.clear_moderation_audit(session_id);
+            self.omenchat
+                .omenchat_moderation_audit_requests
+                .remove(&session_id);
+        }
         if let Some(destination) = self
             .omenchat
             .chat_client

@@ -2,11 +2,11 @@
 
 Date: 2026-07-28
 
-Baseline: `release/v0.9.6-4` through `cc121cd`
+Baseline: `release/v0.9.6-4` through `1ce6066`
 
-Decision: capability implementation is ready for a user-facing activation
-slice, but production activation remains deferred until that slice and its live
-gate pass.
+Decision: the bounded manual first-page desktop slice is implemented behind
+the real non-product feature. Production activation remains deferred until
+pagination, shared TUI consumption, and the activation live gates pass.
 
 ## Evidence reviewed
 
@@ -59,23 +59,29 @@ truthfully describe a Resource page as receiving until completion, failure, or
 Link retirement. Upstream receiver cancellation can be adopted later behind
 the same project boundary if a public compatible API appears.
 
-## Required user-facing slice
+## User-facing slice status
 
 Before adding `omenchat-moderation-audit` to product aliases:
 
-1. Add an explicit moderator/admin-only “Refresh audit” action for the selected
+1. Complete: explicit moderator/admin-only “Refresh audit” for the selected
    joined room.
-2. Request a conservative first page through the existing bounded live-client
-   function; do not add a worker, recurring timer, or automatic retry.
-3. Render newest-first action, target display name, result, role/status change,
-   and committed time from the project-owned projection.
-4. Clearly distinguish empty/end, receiving, unavailable/not negotiated,
-   unauthorized, malformed, and failed states.
-5. Add explicit “Load older” pagination only after the first-page state is
-   correct; preserve the exclusive cursor.
-6. Clear the view on capability, role, room, identity, or Link authority loss.
-7. Use the same domain projection for GUI and TUI rather than independent
-   networking state machines.
+2. Complete: one single-flight 64-record first-page request through the
+   existing bounded live-client function; no worker, timer, polling, or retry.
+3. Complete: newest-first actor/action/target/result/role-or-status/time
+   presentation from the project-owned projection.
+4. Complete for the first page: ready, empty/end, receiving,
+   unavailable/not-negotiated, unauthorized, and bounded failed states.
+5. Pending: explicit “Load older” pagination with the exclusive cursor.
+6. Complete for local role and Link authority loss; capability and room changes
+   are hidden by current negotiated/active-room evidence and need focused
+   activation-gate coverage before product enablement.
+7. In progress: the reducer/projection is UI-framework-neutral and consumed by
+   the desktop GUI; a root TUI consumer is still pending.
+
+The desktop request owner is bounded to at most one room/state entry per
+existing chat session. Previous results may remain visible, explicitly marked
+as previous, while a manual refresh is receiving. An orderly end marks them
+current. Failure retains bounded prior evidence without fabricating completion.
 
 ## Activation gate
 

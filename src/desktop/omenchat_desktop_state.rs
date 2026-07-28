@@ -466,6 +466,16 @@ pub(in crate::desktop) struct OmenChatMutationResolutionConfirmation {
     pub(in crate::desktop) next: crate::chat::mutation_intents::OutboundMutationState,
 }
 
+#[cfg(all(
+    feature = "omenchat-moderation-audit",
+    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+))]
+pub(in crate::desktop) struct OmenChatModerationAuditRequest {
+    pub(in crate::desktop) room_id: RoomId,
+    pub(in crate::desktop) owner_user_id: crate::chat::protocol::UserId,
+    pub(in crate::desktop) state: crate::chat::ChatModerationAuditRequestState,
+}
+
 pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) chat_client: ChatClient,
     pub(in crate::desktop) chat_store: Option<SqliteChatStore>,
@@ -520,6 +530,12 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_transports:
         HashMap<ChatSessionId, DesktopOmenChatTransport>,
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    pub(in crate::desktop) omenchat_moderation_audit_requests:
+        HashMap<ChatSessionId, OmenChatModerationAuditRequest>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_link_sessions: HashMap<[u8; 16], ChatSessionId>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -653,6 +669,11 @@ impl OmenChatDesktopState {
             omenchat_recovered_mutations_expanded_for: None,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_transports: HashMap::new(),
+            #[cfg(all(
+                feature = "omenchat-moderation-audit",
+                any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+            ))]
+            omenchat_moderation_audit_requests: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_link_sessions: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]

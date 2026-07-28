@@ -327,6 +327,133 @@ fn omenchat_slow_mode_indicator(
         .map(|seconds| format!("Slow mode · {seconds}s"))
 }
 
+#[cfg(all(
+    feature = "omenchat-moderation-audit",
+    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+))]
+fn omenchat_moderation_audit_record_line(
+    record: &crate::chat::protocol::ModerationAuditRecord,
+) -> String {
+    let target = record
+        .target_display_name_at_action
+        .as_deref()
+        .unwrap_or("unknown target");
+    format!(
+        "{} {} {} · {} · {}",
+        record.actor_display_name_at_action,
+        crate::chat::moderation_audit_action_label(record.action),
+        target,
+        crate::chat::moderation_audit_result_label(record),
+        format_epoch_secs(record.committed_at_unix as f64),
+    )
+}
+
+#[cfg(all(
+    feature = "omenchat-moderation-audit",
+    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+))]
+fn omenchat_moderation_audit_panel<'a>(
+    desktop: &'a DesktopApp,
+    session_id: ChatSessionId,
+    room_id: crate::chat::protocol::RoomId,
+) -> Element<'a, Message> {
+    use crate::chat::{
+        chat_moderation_audit_view, ChatModerationAuditRequestState, ChatModerationAuditView,
+    };
+
+    let authorized = desktop
+        .omenchat
+        .chat_client
+        .local_user_can_view_moderation_audit(session_id);
+    let negotiated = desktop
+        .omenchat
+        .omenchat_live_state
+        .moderation_audit_negotiated(session_id);
+    let local_user_id = desktop.omenchat.chat_client.local_user_id(session_id);
+    static IDLE: ChatModerationAuditRequestState = ChatModerationAuditRequestState::Idle;
+    let request_state = desktop
+        .omenchat
+        .omenchat_moderation_audit_requests
+        .get(&session_id)
+        .filter(|request| {
+            request.room_id == room_id && Some(request.owner_user_id) == local_user_id
+        })
+        .map_or(&IDLE, |request| &request.state);
+    let page = desktop
+        .omenchat
+        .chat_client
+        .moderation_audit_page(session_id, room_id);
+    let view = chat_moderation_audit_view(authorized, negotiated, request_state, page);
+
+    let (status, records, refresh_available) = match view {
+        ChatModerationAuditView::Unavailable => (
+            "Unavailable — this server did not negotiate moderation-audit-v1.",
+            &[][..],
+            false,
+        ),
+        ChatModerationAuditView::Unauthorized => (
+            "Unavailable — moderator or administrator authority is required.",
+            &[][..],
+            false,
+        ),
+        ChatModerationAuditView::Ready => (
+            "Not loaded. Refresh requests one bounded page; nothing is polled or retried.",
+            &[][..],
+            true,
+        ),
+        ChatModerationAuditView::Receiving { previous_records } => (
+            "Receiving a bounded page. Previous results remain visible until completion.",
+            previous_records,
+            false,
+        ),
+        ChatModerationAuditView::Failed {
+            message,
+            previous_records,
+        } => (message, previous_records, true),
+        ChatModerationAuditView::Empty => (
+            "Audit is current and contains no records for this room.",
+            &[][..],
+            true,
+        ),
+        ChatModerationAuditView::Loaded { records } => (
+            "Audit page is current. Records are newest first.",
+            records,
+            true,
+        ),
+    };
+
+    let mut header = row![text("Moderation audit")
+        .size(ui_size(13))
+        .width(Length::Fill),]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    if refresh_available {
+        header = header.push(subtle_button(
+            "Refresh audit",
+            Message::OmenChat(OmenChatMessage::RefreshModerationAudit(session_id)),
+        ));
+    }
+    let mut content = column![header, text(status).size(ui_size(11))]
+        .spacing(5)
+        .width(Length::Fill);
+    if !records.is_empty() {
+        let mut record_rows = column![].spacing(4).width(Length::Fill);
+        for record in records {
+            record_rows = record_rows.push(
+                text(omenchat_moderation_audit_record_line(record))
+                    .size(ui_size(11))
+                    .width(Length::Fill),
+            );
+        }
+        content = content.push(app_scrollable(record_rows).height(Length::Fixed(144.0)));
+    }
+    container(content)
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(status_container_style)
+        .into()
+}
+
 pub(in crate::desktop) fn omenchat_view_for_session(
     desktop: &DesktopApp,
     session_id: ChatSessionId,
@@ -1020,6 +1147,17 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 .style(status_container_style),
         );
     }
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    {
+        timeline_panel = timeline_panel.push(omenchat_moderation_audit_panel(
+            desktop,
+            session.session_id,
+            active_room_id,
+        ));
+    }
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     if let Some(progress) = omenchat_session_resource_progress(desktop, session.session_id) {
         timeline_panel = timeline_panel.push(
@@ -1328,6 +1466,8 @@ fn omenchat_recovered_mutations_panel(
 
 #[cfg(test)]
 mod accessibility_tests {
+    #[cfg(feature = "omenchat-moderation-audit")]
+    use super::omenchat_moderation_audit_record_line;
     use super::{
         compact_recovery_destination, omenchat_media_animation_allowed,
         omenchat_slow_mode_indicator, reaction_token_presentation, recovered_mutation_expiry_label,
@@ -1484,5 +1624,27 @@ mod accessibility_tests {
         );
         assert_eq!(client.room_slow_mode_seconds(session_id, 7), Some(30));
         assert!(client.room_is_announcement_only(session_id, 7));
+    }
+
+    #[cfg(feature = "omenchat-moderation-audit")]
+    #[test]
+    fn moderation_audit_record_line_is_compact_truthful_and_has_no_false_cancel() {
+        let line =
+            omenchat_moderation_audit_record_line(&crate::chat::protocol::ModerationAuditRecord {
+                audit_id: 3,
+                room_id: 7,
+                actor_user_id: 1,
+                actor_display_name_at_action: "Mod".into(),
+                target_user_id: Some(2),
+                target_display_name_at_action: Some("Member".into()),
+                action: crate::chat::protocol::ModerationAuditAction::Mute,
+                committed_at_unix: 1_700_000_000,
+                result_role_bits: None,
+                result_status_bits: Some(crate::chat::CHAT_STATUS_MUTED),
+            });
+        assert!(line.contains("Mod muted Member"));
+        assert!(line.contains("status: muted"));
+        assert!(line.contains("UTC"));
+        assert!(!line.to_ascii_lowercase().contains("cancel"));
     }
 }
