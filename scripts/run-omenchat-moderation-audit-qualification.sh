@@ -74,12 +74,12 @@ def qualified(report):
         if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
     }
     capability = stages.get("capability_observation", {})
-    page = stages.get("moderation_audit_empty_read", {})
+    page = stages.get("moderation_audit_read", {})
     return (
         report.get("classification", {}).get("outcome") == "pass"
         and capability.get("moderation_audit_negotiated") is True
         and page.get("ok") is True
-        and page.get("empty_read") is True
+        and page.get("record_count", 0) >= 1
         and page.get("end_seen") is True
     )
 
@@ -87,7 +87,7 @@ report = {
     "status": "pass" if all(map(qualified, reports)) else "fail",
     "isolated_loopback": True,
     "qualification_feature_only": True,
-    "authorized_empty_read": all(map(qualified, reports)),
+    "authorized_nonempty_read": all(map(qualified, reports)),
     "explicit_end_observed": all(map(qualified, reports)),
     "server_restart": True,
     "server_destination_stable": True,

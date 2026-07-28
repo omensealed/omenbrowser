@@ -5117,11 +5117,12 @@ bash scripts/run-omenchat-moderation-audit-qualification.sh \
 
 It builds both roots with
 `omenchat-moderation-audit-qualification`, promotes an isolated registered
-identity to moderator, proves an authorized bounded empty read with explicit
-`ModerationAuditEnd`, orderly-restarts omenchatd, and repeats the read with a
-stable server destination. It does not prove a non-empty inline/Resource page
-or inbound Resource cancellation. Canonical product profiles reject this
-qualification feature.
+identity to moderator, keeps a second identified target Link active, persists
+and sends one durable mute, and requires the matching non-empty inline audit
+row plus explicit `ModerationAuditEnd`. It orderly-restarts omenchatd and reads
+the persisted row again with a stable server destination. It does not prove a
+Resource page or inbound Resource cancellation. Canonical product profiles
+reject this qualification feature.
 
 Focused schema/storage gates:
 

@@ -504,13 +504,15 @@ The presentation must distinguish:
     2026-07-27. The real 0.9.6 loopback sender-cancel path also passes, but the
     locked upstream transport exposes no public receiver-cancel method; this
     must not be described as client cancellation.
-    **Current/current empty-read process portion complete (2026-07-28):** an
+    **Current/current inline process portion complete (2026-07-28):** an
     explicit non-product qualification feature now negotiates the capability
-    over an identified Reticulum Link, performs an authorized bounded empty
-    read, observes `ModerationAuditEnd`, orderly-restarts omenchatd, preserves
-    its destination and client role, and repeats the read on a replacement
-    Link. A non-empty inline/Resource process case, adjacent binaries, and
-    receiver-side Resource cancellation remain unclaimed. Evidence is in
+    over identified Reticulum Links. The empty case observes the protocol's
+    end-only response. A second active identity then receives one real
+    transactionally durable mute; the moderator reads the exact inline audit
+    row and explicit end marker, orderly-restarts omenchatd, preserves its
+    destination and role, and reads the persisted row on a replacement Link.
+    Resource delivery, adjacent binaries, and receiver-side Resource
+    cancellation remain unclaimed. Evidence is in
     `docs/audits/omenchat-moderation-audit-process-qualification.md`.
 13. Separately review activation only after the remaining process and
     measurement gates pass.

@@ -355,10 +355,15 @@ fi
 
 server_pid=""
 client_pid=""
+moderation_target_pid=""
 cleanup() {
   if [[ -n "$client_pid" ]] && kill -0 "$client_pid" 2>/dev/null; then
     kill "$client_pid" 2>/dev/null || true
     wait "$client_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$moderation_target_pid" ]] && kill -0 "$moderation_target_pid" 2>/dev/null; then
+    kill "$moderation_target_pid" 2>/dev/null || true
+    wait "$moderation_target_pid" 2>/dev/null || true
   fi
   if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
     kill "$server_pid" 2>/dev/null || true
@@ -698,6 +703,47 @@ if [[ "$pin_smoke" -eq 1 || "$announcement_moderator_smoke" -eq 1 \
   fi
 fi
 
+moderation_audit_target=""
+if [[ "$moderation_audit_smoke" -eq 1 ]]; then
+  moderation_audit_target="OMEN audit target"
+  echo "== Starting isolated moderation-audit target identity =="
+  mkdir -p "$browser_root_2"
+  "$browser_bin" \
+    --generate-native-identity "OMENchat Moderation Audit Target" \
+    --app-root "$browser_root_2" \
+    --stdout \
+    > "$run_dir/browser-identity-2.json" \
+    2> "$run_dir/browser-identity-2.stderr"
+  "$browser_bin" \
+    --omenchat-smoke "$destination" \
+    "${client_interface_args[@]}" \
+    --path-wait "$path_wait" \
+    --app-root "$browser_root_2" \
+    --omenchat-local-display-name "$moderation_audit_target" \
+    --omenchat-message "${message} (moderation target)" \
+    --omenchat-reconnect-ready-file "$run_dir/moderation-target-ready" \
+    --omenchat-reconnect-wait 120 \
+    --output "$run_dir/omenchat-moderation-target.json" \
+    > "$run_dir/omenchat-moderation-target.stdout" \
+    2> "$run_dir/omenchat-moderation-target.stderr" &
+  moderation_target_pid="$!"
+  for _ in {1..480}; do
+    if [[ -f "$run_dir/moderation-target-ready" ]]; then
+      break
+    fi
+    if ! kill -0 "$moderation_target_pid" 2>/dev/null; then
+      echo "moderation-audit target exited before its joined Link was ready" >&2
+      cat "$run_dir/omenchat-moderation-target.stderr" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if [[ ! -f "$run_dir/moderation-target-ready" ]]; then
+    echo "moderation-audit target did not become ready in time" >&2
+    exit 1
+  fi
+fi
+
 echo "== Running OMENchat client smoke =="
 restart_destination_stable=0
 restart_stop="not-run"
@@ -730,7 +776,11 @@ if [[ "$pin_smoke" -eq 1 ]]; then
 fi
 moderation_audit_args=()
 if [[ "$moderation_audit_smoke" -eq 1 ]]; then
-  moderation_audit_args=(--omenchat-moderation-audit-smoke --omenchat-response-wait 30)
+  moderation_audit_args=(
+    --omenchat-moderation-audit-smoke
+    --omenchat-moderation-audit-target "$moderation_audit_target"
+    --omenchat-response-wait 30
+  )
 fi
 announcement_rejection_args=()
 if [[ "$announcement_rejection_smoke" -eq 1 ]]; then
@@ -886,12 +936,16 @@ import sys
 report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 stages = {stage.get("stage"): stage for stage in report.get("stages", []) if isinstance(stage, dict)}
 capability = stages.get("capability_observation", {})
-page = stages.get("moderation_audit_empty_read", {})
+page = stages.get("moderation_audit_read", {})
 if capability.get("moderation_audit_negotiated") is not True:
     raise SystemExit("moderation audit capability was not negotiated")
-if page.get("ok") is not True or page.get("empty_read") is not True or page.get("end_seen") is not True:
-    raise SystemExit("authorized moderation audit empty-read evidence was incomplete")
+if page.get("ok") is not True or page.get("expected_record") is not True or page.get("end_seen") is not True:
+    raise SystemExit("authorized non-empty moderation audit evidence was incomplete")
 PY
+  kill "$moderation_target_pid"
+  wait "$moderation_target_pid" 2>/dev/null || true
+  moderation_target_pid=""
+  moderation_audit_args=(--omenchat-moderation-audit-smoke --omenchat-response-wait 30)
 fi
 server_upload_rejection_clean="not-run"
 if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
@@ -1104,11 +1158,11 @@ import sys
 report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 stages = {stage.get("stage"): stage for stage in report.get("stages", []) if isinstance(stage, dict)}
 capability = stages.get("capability_observation", {})
-page = stages.get("moderation_audit_empty_read", {})
+page = stages.get("moderation_audit_read", {})
 if capability.get("moderation_audit_negotiated") is not True:
     raise SystemExit("post-restart moderation audit capability was not negotiated")
-if page.get("ok") is not True or page.get("empty_read") is not True or page.get("end_seen") is not True:
-    raise SystemExit("post-restart moderation audit empty-read evidence was incomplete")
+if page.get("ok") is not True or page.get("record_count", 0) < 1 or page.get("end_seen") is not True:
+    raise SystemExit("post-restart persisted moderation audit evidence was incomplete")
 PY
   fi
 fi
@@ -1180,7 +1234,7 @@ ifac: $([[ -n "$network_name$passphrase" ]] && printf 'configured' || printf 'no
 browser_bin: $browser_bin
 server_bin: $server_bin
 browser_root: $browser_root
-browser_root_2: $([[ "$multi_client" -eq 1 ]] && printf '%s' "$browser_root_2" || printf 'not-run')
+browser_root_2: $([[ "$multi_client" -eq 1 || "$moderation_audit_smoke" -eq 1 ]] && printf '%s' "$browser_root_2" || printf 'not-run')
 server_home: $server_home
 multi_client: $multi_client
 restart_server: $restart_server

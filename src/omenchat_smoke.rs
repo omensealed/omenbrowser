@@ -104,6 +104,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         destination,
         room,
         message,
+        local_display_name,
         announcement_rejection_smoke,
         announcement_upload_rejection_smoke,
         slow_mode_rejection_smoke,
@@ -112,6 +113,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         revision_smoke,
         pin_smoke,
         moderation_audit_smoke,
+        moderation_audit_target,
         upload_file,
         fetch_upload_filename,
         fetch_upload_bytes,
@@ -254,7 +256,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
     let descriptor = OmenChatDescriptor {
         server_destination: destination.clone(),
         display_name: Some("OMENchat smoke".into()),
-        local_display_name: Some("OMENbrowser_rs smoke".into()),
+        local_display_name: Some(local_display_name),
         rooms_hint: vec![room.clone()],
         ..OmenChatDescriptor::default()
     };
@@ -560,15 +562,16 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
 
     let mut reaction_ok = true;
     let mutation_identity_storage_root = app.paths.identity_storage_root();
-    let mutation_identity_hash = if reaction_smoke || revision_smoke || pin_smoke {
-        app.runtime_status
-            .active_identity
-            .as_ref()
-            .map(|identity| parse_16_byte_hex_hash(&identity.hash_hex))
-            .transpose()?
-    } else {
-        None
-    };
+    let mutation_identity_hash =
+        if reaction_smoke || revision_smoke || pin_smoke || moderation_audit_target.is_some() {
+            app.runtime_status
+                .active_identity
+                .as_ref()
+                .map(|identity| parse_16_byte_hex_hash(&identity.hash_hex))
+                .transpose()?
+        } else {
+            None
+        };
     if joined && message_seen && reaction_smoke {
         let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
             .context("OMENchat reaction smoke target message was not retained")?;
@@ -670,6 +673,31 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             .session(session_id)
             .map(|session| session.active_room.room_id)
             .unwrap_or(1);
+        let mut moderation_mutation_ok = true;
+        if let Some(target) = moderation_audit_target.as_deref() {
+            let authenticated_identity_hash = mutation_identity_hash
+                .context("OMENchat moderation audit smoke has no active identity")?;
+            let (passed, moderation_stages) = run_omenchat_moderation_smoke(
+                &*app.runtime,
+                &mut runtime_events,
+                &mut client,
+                &mut live_state,
+                &mut transport,
+                OmenChatModerationSmokeOptions {
+                    link_id: opened.link_id,
+                    session_id,
+                    room_id,
+                    target,
+                    server_destination: &destination,
+                    identity_storage_root: &mutation_identity_storage_root,
+                    authenticated_identity_hash,
+                    wait: Duration::from_secs(response_wait_secs),
+                },
+            )
+            .await?;
+            moderation_mutation_ok = passed;
+            stages.extend(moderation_stages);
+        }
         let request_events = omenbrowser_rs::chat::live::request_live_moderation_audit(
             &mut client,
             &mut live_state,
@@ -694,7 +722,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                 wait: Duration::from_secs(response_wait_secs),
             },
             (
-                |client| client.moderation_audit_page(session_id, room_id).is_some(),
+                |_| false,
                 |events| {
                     omenchat_smoke_events_contain_decoded_event(events, "moderation_audit_end")
                 },
@@ -703,15 +731,37 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         .await;
         let page = client.moderation_audit_page(session_id, room_id);
         let empty_read = page.is_none() || page.is_some_and(|page| page.records.is_empty());
+        let expected_record = moderation_audit_target.as_deref().is_some_and(|target| {
+            page.is_some_and(|page| {
+                page.records.iter().any(|record| {
+                    record.action == omenbrowser_rs::chat::protocol::ModerationAuditAction::Mute
+                        && record
+                            .target_display_name_at_action
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(target))
+                        && record
+                            .result_status_bits
+                            .is_some_and(|bits| bits & omenbrowser_rs::chat::CHAT_STATUS_MUTED != 0)
+                })
+            })
+        });
+        let expected_result = if moderation_audit_target.is_some() {
+            expected_record
+        } else {
+            true
+        };
         let end_seen =
             omenchat_smoke_events_contain_decoded_event(&page_events, "moderation_audit_end");
-        moderation_audit_ok = request_accepted && empty_read && end_seen;
+        moderation_audit_ok =
+            moderation_mutation_ok && request_accepted && expected_result && end_seen;
         stages.push(serde_json::json!({
-            "stage": "moderation_audit_empty_read",
+            "stage": "moderation_audit_read",
             "ok": moderation_audit_ok,
             "request_events": request_events.iter().map(format_chat_event).collect::<Vec<_>>(),
             "events": page_events,
             "empty_read": empty_read,
+            "expected_record": expected_record,
+            "record_count": page.map_or(0, |page| page.records.len()),
             "end_seen": end_seen,
         }));
     }
@@ -1494,6 +1544,141 @@ async fn run_omenchat_continuous_reconnect_smoke(
         Some(opened.link_id),
         stages,
     ))
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+struct OmenChatModerationSmokeOptions<'a> {
+    link_id: [u8; 16],
+    session_id: omenbrowser_rs::chat::ChatSessionId,
+    room_id: u32,
+    target: &'a str,
+    server_destination: &'a str,
+    identity_storage_root: &'a std::path::Path,
+    authenticated_identity_hash: [u8; 16],
+    wait: Duration,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn prepare_omenchat_smoke_moderation(
+    store: &omenbrowser_rs::chat::mutation_intents::MutationIntentStore,
+    options: &OmenChatModerationSmokeOptions<'_>,
+    client_instance_id: omenbrowser_rs::chat::protocol::ClientInstanceId,
+) -> anyhow::Result<omenbrowser_rs::chat::mutation_intents::OutboundMutationIntent> {
+    use omenbrowser_rs::chat::mutation_intents::{
+        IntentTransition, OutboundMutationState, PrepareOutboundMutation,
+    };
+    use omenbrowser_rs::chat::protocol::ChatOp;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default();
+    let prepared = store.persist_prepared(PrepareOutboundMutation {
+        server_destination: options.server_destination,
+        authenticated_identity_hash: &options.authenticated_identity_hash,
+        client_instance_id,
+        op: ChatOp::Command,
+        room_id: Some(options.room_id),
+        body: omenbrowser_rs::chat::protocol::FrameBody::Text(format!("mute {}", options.target)),
+        created_at: now,
+        expires_at: now.saturating_add(60 * 60),
+        correlation_id: Some("release-moderation-audit-smoke"),
+    })?;
+    match store.transition(
+        prepared.mutation_id,
+        OutboundMutationState::Prepared,
+        OutboundMutationState::SentUncertain,
+    )? {
+        IntentTransition::Updated(intent) => Ok(intent),
+        other => anyhow::bail!("OMENchat smoke moderation transition failed: {other:?}"),
+    }
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn run_omenchat_moderation_smoke(
+    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
+    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    client: &mut omenbrowser_rs::chat::ChatClient,
+    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &mut OmenChatSmokeTransport,
+    options: OmenChatModerationSmokeOptions<'_>,
+) -> anyhow::Result<(bool, Vec<serde_json::Value>)> {
+    use omenbrowser_rs::chat::mutation_intents::{MutationIntentStore, OutboundMutationState};
+
+    let mut stages = Vec::new();
+    let target_visible = client.session(options.session_id).is_some_and(|session| {
+        session
+            .users
+            .iter()
+            .any(|user| user.display_name.eq_ignore_ascii_case(options.target))
+    });
+    stages.push(serde_json::json!({
+        "stage": "moderation_audit_target_visible",
+        "ok": target_visible,
+        "target": options.target,
+    }));
+    let Some(client_instance_id) = live_state.client_instance_id() else {
+        return Ok((false, stages));
+    };
+    if !target_visible || !live_state.durable_mutations_negotiated(options.session_id) {
+        return Ok((false, stages));
+    }
+    let store = MutationIntentStore::open_for_identity_storage_root(options.identity_storage_root)
+        .context("open isolated OMENchat moderation smoke mutation store")?;
+    let intent = prepare_omenchat_smoke_moderation(&store, &options, client_instance_id)?;
+    let send_events = omenbrowser_rs::chat::live::send_uncertain_durable_user_command(
+        client,
+        live_state,
+        transport,
+        options.session_id,
+        &intent,
+    );
+    let sent = !send_events
+        .iter()
+        .any(|event| matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. }));
+    send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
+    let result_events = wait_for_omenchat_condition(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        OmenChatWaitOptions {
+            link_id: options.link_id,
+            session_id: options.session_id,
+            wait: options.wait,
+        },
+        |client| {
+            client.session(options.session_id).is_some_and(|session| {
+                session.users.iter().any(|user| {
+                    user.display_name.eq_ignore_ascii_case(options.target)
+                        && user.status_bits & omenbrowser_rs::chat::CHAT_STATUS_MUTED != 0
+                })
+            })
+        },
+    )
+    .await;
+    let committed = client.session(options.session_id).is_some_and(|session| {
+        session.users.iter().any(|user| {
+            user.display_name.eq_ignore_ascii_case(options.target)
+                && user.status_bits & omenbrowser_rs::chat::CHAT_STATUS_MUTED != 0
+        })
+    });
+    if committed {
+        let _ = store.transition(
+            intent.mutation_id,
+            OutboundMutationState::SentUncertain,
+            OutboundMutationState::Acknowledged,
+        )?;
+    }
+    stages.push(serde_json::json!({
+        "stage": "moderation_audit_durable_mute",
+        "ok": sent && committed,
+        "target": options.target,
+        "send_events": send_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+        "events": result_events,
+    }));
+    Ok((sent && committed, stages))
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -3419,7 +3604,7 @@ fn omenchat_smoke_report(
             } else if ok && slow_mode_delta_seconds.is_some() {
                 "OMENchat Link opened, a live slow-mode room delta was observed, and the first publication was committed"
             } else if ok && moderation_audit_smoke {
-                "OMENchat Link opened, moderation audit was negotiated, and an authorized empty read with explicit end evidence was observed"
+                "OMENchat Link opened, moderation audit was negotiated, and an authorized bounded read with explicit end evidence was observed"
             } else if ok {
                 "OMENchat Link opened, room joined, and message echo was observed"
             } else {

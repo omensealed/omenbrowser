@@ -2,7 +2,8 @@
 
 Date: 2026-07-28
 
-Baseline: `release/v0.9.6-4` at `906203e`, plus this qualification unit.
+Baseline: `release/v0.9.6-4` through `814f78d`, plus this non-empty process
+extension.
 
 ## Scope
 
@@ -25,27 +26,33 @@ binaries with the qualification feature and runs them against isolated
 temporary browser/server roots over a local Reticulum TCP interface. The
 harness:
 
-1. creates one isolated client identity;
+1. creates one isolated moderator identity;
 2. registers it with omenchatd;
 3. stops the server and promotes that exact user to moderator;
 4. restarts omenchatd;
-5. negotiates `moderation-audit-v1` on an identified Link;
-6. requests a bounded page from the joined room;
-7. observes the authoritative empty-read `ModerationAuditEnd`;
-8. orderly-restarts omenchatd;
-9. confirms stable server destination, preserved identity/role, replacement
-   Link negotiation, and the same authorized empty-read result.
+5. creates a second isolated identity with a unique bounded display name and
+   holds its identified, joined Link open;
+6. negotiates durable mutations and `moderation-audit-v1` on the moderator
+   Link;
+7. persists a random mutation identity and canonical hash before sending one
+   durable `mute` command for the active target;
+8. requires the exact typed user result to show the target as muted;
+9. requests a bounded audit page and requires the matching `Mute` record,
+   target display name, muted result bit, and `ModerationAuditEnd`;
+10. closes the target, orderly-restarts omenchatd, and confirms stable server
+    destination, preserved moderator identity/role, replacement Link
+    negotiation, and the same persisted non-empty page.
 
-The first implementation expected an empty inline page followed by an end
-marker. The real server correctly emitted only `ModerationAuditEnd` for an
-empty result. The harness now follows the documented protocol instead of
-fabricating an empty projection or waiting for a frame that is not required.
+The earlier empty-read gate remains valid: an empty result emits only
+`ModerationAuditEnd`. This extension also proves the non-empty inline shape.
+The initial live page and post-restart page each carried one record followed
+by the explicit end marker. No database row was seeded by the harness.
 
 Observed report:
 
 ```json
 {
-  "authorized_empty_read": true,
+  "authorized_nonempty_read": true,
   "explicit_end_observed": true,
   "isolated_loopback": true,
   "qualification_feature_only": true,
@@ -93,16 +100,17 @@ and see unchanged traffic. Qualification state remains attached to the
 authenticated Link and is discarded on Link retirement.
 
 The request path admits one protocol-bounded response at a time through the
-existing bounded transport and 1,024-record/512-KiB client projection. Empty
-reads retain no audit records. Temporary process roots are removed on success
+existing bounded transport and 1,024-record/512-KiB client projection. The
+target client is a separately owned process with an explicit termination path;
+the harness removes both isolated browser roots and the server root on success
 or failure.
 
 ## Remaining gates
 
-This process run proves a current/current authorized empty read and restart. It
-does not claim:
+This process run proves current/current empty and non-empty inline reads, a
+real durable moderation transaction, and restart persistence. It does not
+claim:
 
-- a non-empty inline audit page over independent processes;
 - an audit Resource over independent processes;
 - adjacent-binary live traffic;
 - receiver-side cancellation of an active inbound Resource;
@@ -115,6 +123,6 @@ or false cancellation state was introduced.
 
 ## Rollback
 
-Remove the qualification features, bounded request function, CLI/shell smoke
-hooks, and this audit. No database, protocol, configuration, or user-state
-rollback is required.
+Remove the qualification features, bounded request function, smoke-only local
+display/target arguments, two-client shell hooks, and this audit. No database,
+protocol, configuration, or product user-state rollback is required.

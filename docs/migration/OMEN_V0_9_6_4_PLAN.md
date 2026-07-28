@@ -1473,14 +1473,16 @@ reproducible commands are recorded in the paging qualification audit.
 Current/current process restart, adjacent-binary live traffic, and active
 Resource cancellation remain separate pre-activation gates.
 
-The next isolated qualification slice adds a non-product negotiation feature
-and completes the current/current authorized empty-read/restart boundary.
-Before and after orderly omenchatd restart, the same moderator identity
-negotiates `moderation-audit-v1`, requests a bounded page, and observes the
-protocol's explicit empty-result end marker while the server destination
-remains stable. Product profiles remain machine-guarded against the feature.
-This does not claim a non-empty inline/Resource process page, adjacent binaries,
-or receiver-side Resource cancellation. Evidence is in
+The next isolated qualification slices add a non-product negotiation feature
+and complete current/current empty and non-empty inline restart boundaries.
+Two separately identified clients remain active while the moderator persists
+and sends a durable mute for the uniquely named target. The exact typed result,
+matching audit row, muted result bit, and explicit end marker are required.
+After orderly omenchatd restart, the same moderator identity reads the
+persisted row on a replacement Link while the server destination remains
+stable. Product profiles remain machine-guarded against the feature. This does
+not claim a Resource process page, adjacent binaries, or receiver-side
+Resource cancellation. Evidence is in
 `docs/audits/omenchat-moderation-audit-process-qualification.md`.
 
 The subsequent cancellation review ran the existing real loopback Reticulum
