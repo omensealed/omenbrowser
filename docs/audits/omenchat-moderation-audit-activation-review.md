@@ -2,7 +2,7 @@
 
 Date: 2026-07-28
 
-Baseline: `release/v0.9.6-4` through `1ce6066`
+Baseline: `release/v0.9.6-4` through `f8bf697`
 
 Decision: bounded manual first-page and exclusive-cursor desktop pagination are
 implemented behind the real non-product feature. Production activation remains
@@ -76,10 +76,16 @@ Before adding `omenchat-moderation-audit` to product aliases:
    stale page/end responses, and stops at the server end marker or bounded
    client retention ceiling.
 6. Complete for local role and Link authority loss; capability and room changes
-   are hidden by current negotiated/active-room evidence and need focused
-   activation-gate coverage before product enablement.
-7. In progress: the reducer/projection is UI-framework-neutral and consumed by
-   the desktop GUI; a root TUI consumer is still pending.
+   now immediately clear the retained request and page projection, with focused
+   activation-gate coverage.
+7. Complete for the current client surfaces: the reducer/projection is
+   UI-framework-neutral and consumed by the desktop GUI. The root Ratatui
+   Messages workspace is LXMF-only and owns no OMENchat session, while
+   omenchatd's TUI is an operator surface with no client-local identity.
+   Fabricating a disconnected audit panel in either TUI would violate the
+   ownership model. Any future OMENchat client TUI must consume this same
+   projection, but it is not a prerequisite for activating the existing
+   desktop client.
 
 The desktop request owner is bounded to at most one room/state entry per
 existing chat session. Previous results may remain visible, explicitly marked
@@ -92,7 +98,7 @@ without fabricating completion.
 
 After the user-facing slice:
 
-- focused GUI/TUI reduction and rendering tests;
+- focused shared reduction and desktop rendering tests;
 - current moderator and immediate role-loss tests;
 - current/current inline and Resource process smoke through the product
   feature rather than a qualification-only capability switch;
@@ -141,8 +147,9 @@ bash scripts/run-omenchat-moderation-audit-qualification.sh \
 
 Focused results:
 
-- real-feature desktop moderation audit: 5 passed, 1 explicit measurement
+- real-feature desktop moderation audit: 17 passed, 1 explicit measurement
   ignored;
+- desktop capability-loss and active-room-change projection clearing: passed;
 - canonical desktop capability absence: 1 passed;
 - real-feature omenchatd moderation audit: 17 passed, 1 explicit measurement
   ignored;

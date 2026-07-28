@@ -1505,10 +1505,13 @@ healthy chat Link to hide the limitation.
 The activation review then separated the real
 `omenchat-moderation-audit` feature from both non-product qualification hooks.
 Canonical products machine-reject all three until an explicit moderator/admin
-GUI/TUI request and presentation slice passes. The missing receiver-cancel API
-is documented rather than hidden: the first UI must not offer a false Cancel
-action, add polling, or automatically retry an uncertain read. Evidence and
-the remaining activation gate are in
+request and presentation slice passes. The desktop client owns OMENchat
+sessions; the root Ratatui Messages workspace remains LXMF-only and omenchatd's
+TUI is operator-only, so no disconnected OMENchat audit panel is fabricated.
+Any future OMENchat client TUI must consume the same project-owned projection.
+The missing receiver-cancel API is documented rather than hidden: the first UI
+must not offer a false Cancel action, add polling, or automatically retry an
+uncertain read. Evidence and the remaining activation gate are in
 `docs/audits/omenchat-moderation-audit-activation-review.md`.
 
 ### Unit 6G — room policy controls

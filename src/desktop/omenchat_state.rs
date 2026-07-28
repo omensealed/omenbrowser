@@ -991,6 +991,49 @@ impl DesktopApp {
                 _ => {}
             }
         }
+        #[cfg(all(
+            feature = "omenchat-moderation-audit",
+            any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+        ))]
+        self.reconcile_omenchat_moderation_audit_authority();
+    }
+
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    fn reconcile_omenchat_moderation_audit_authority(&mut self) {
+        let invalid_sessions = self
+            .omenchat
+            .omenchat_moderation_audit_requests
+            .iter()
+            .filter_map(|(session_id, request)| {
+                let authority_is_current = self
+                    .omenchat
+                    .chat_client
+                    .session(*session_id)
+                    .is_some_and(|session| {
+                        session.active_room.room_id == request.room_id && session.active_room.joined
+                    })
+                    && self
+                        .omenchat
+                        .omenchat_live_state
+                        .moderation_audit_negotiated(*session_id)
+                    && self.omenchat.chat_client.local_user_id(*session_id)
+                        == Some(request.owner_user_id)
+                    && self
+                        .omenchat
+                        .chat_client
+                        .local_user_can_view_moderation_audit(*session_id);
+                (!authority_is_current).then_some(*session_id)
+            })
+            .collect::<Vec<_>>();
+        for session_id in invalid_sessions {
+            self.omenchat.chat_client.clear_moderation_audit(session_id);
+            self.omenchat
+                .omenchat_moderation_audit_requests
+                .remove(&session_id);
+        }
     }
 
     pub(in crate::desktop) fn bind_omenchat_invitation_room(

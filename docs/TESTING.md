@@ -5156,7 +5156,9 @@ client ceilings and stops at explicit end or the local retention ceiling. A
 full page is “complete; more may exist,” not an indefinitely receiving
 transfer. The panel never polls, automatically retries, or exposes a false
 inbound-Resource Cancel action. Canonical product aliases remain unchanged. A
-root TUI consumer, product activation, and release-candidate
+separate root TUI consumer is not fabricated: that TUI's Messages workspace is
+LXMF-only and omenchatd's TUI has no client identity. Any future OMENchat client
+TUI must reuse this projection. Product activation and release-candidate
 process/packaging gates remain later work.
 
 Focused schema/storage gates:

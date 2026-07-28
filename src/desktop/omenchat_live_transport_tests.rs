@@ -83,6 +83,42 @@ fn authorize_moderation_audit(desktop: &mut DesktopApp, session_id: ChatSessionI
     desktop.set_omenchat_connection_state(session_id, crate::chat::ChatConnectionState::Joined);
 }
 
+#[cfg(feature = "omenchat-moderation-audit")]
+fn retain_moderation_audit_evidence(desktop: &mut DesktopApp, session_id: ChatSessionId) {
+    desktop
+        .omenchat
+        .chat_client
+        .replace_moderation_audit_page(
+            session_id,
+            1,
+            crate::chat::protocol::ModerationAuditPage {
+                records: vec![crate::chat::protocol::ModerationAuditRecord {
+                    audit_id: 1,
+                    room_id: 1,
+                    actor_user_id: 7,
+                    actor_display_name_at_action: "Moderator".into(),
+                    target_user_id: Some(8),
+                    target_display_name_at_action: Some("Member".into()),
+                    action: crate::chat::protocol::ModerationAuditAction::Kick,
+                    committed_at_unix: 1,
+                    result_role_bits: None,
+                    result_status_bits: None,
+                }],
+            },
+        )
+        .expect("bounded page");
+    desktop.omenchat.omenchat_moderation_audit_requests.insert(
+        session_id,
+        super::super::omenchat_desktop_state::OmenChatModerationAuditRequest {
+            room_id: 1,
+            owner_user_id: 7,
+            before_audit_id: None,
+            limit: 64,
+            state: crate::chat::ChatModerationAuditRequestState::Complete { has_more: false },
+        },
+    );
+}
+
 fn enqueue_close(desktop: &mut DesktopApp, link_id: [u8; 16], reason: &str) {
     assert!(desktop
         .app
@@ -596,38 +632,7 @@ fn moderation_audit_evidence_is_cleared_on_immediate_local_role_loss() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-moderation-audit-role-loss");
     let session_id = open_connected_session(&mut desktop, [0x93; 16], "connected");
     authorize_moderation_audit(&mut desktop, session_id);
-    desktop
-        .omenchat
-        .chat_client
-        .replace_moderation_audit_page(
-            session_id,
-            1,
-            crate::chat::protocol::ModerationAuditPage {
-                records: vec![crate::chat::protocol::ModerationAuditRecord {
-                    audit_id: 1,
-                    room_id: 1,
-                    actor_user_id: 7,
-                    actor_display_name_at_action: "Moderator".into(),
-                    target_user_id: Some(8),
-                    target_display_name_at_action: Some("Member".into()),
-                    action: crate::chat::protocol::ModerationAuditAction::Kick,
-                    committed_at_unix: 1,
-                    result_role_bits: None,
-                    result_status_bits: None,
-                }],
-            },
-        )
-        .expect("bounded page");
-    desktop.omenchat.omenchat_moderation_audit_requests.insert(
-        session_id,
-        super::super::omenchat_desktop_state::OmenChatModerationAuditRequest {
-            room_id: 1,
-            owner_user_id: 7,
-            before_audit_id: None,
-            limit: 64,
-            state: crate::chat::ChatModerationAuditRequestState::Complete { has_more: false },
-        },
-    );
+    retain_moderation_audit_evidence(&mut desktop, session_id);
     let demoted_user = crate::chat::ChatUserSummary {
         role_bits: 0,
         ..desktop
@@ -649,6 +654,73 @@ fn moderation_audit_evidence_is_cleared_on_immediate_local_role_loss() {
         session_id,
         user: demoted_user,
     }]);
+
+    assert!(desktop
+        .omenchat
+        .chat_client
+        .moderation_audit_page(session_id, 1)
+        .is_none());
+    assert!(!desktop
+        .omenchat
+        .omenchat_moderation_audit_requests
+        .contains_key(&session_id));
+}
+
+#[cfg(feature = "omenchat-moderation-audit")]
+#[test]
+fn moderation_audit_evidence_is_cleared_on_capability_loss() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-moderation-audit-capability-loss");
+    let session_id = open_connected_session(&mut desktop, [0x95; 16], "connected");
+    authorize_moderation_audit(&mut desktop, session_id);
+    retain_moderation_audit_evidence(&mut desktop, session_id);
+
+    desktop
+        .omenchat
+        .omenchat_live_state
+        .set_moderation_audit_negotiated_for_test(session_id, false);
+    desktop.apply_omenchat_client_events_status(&[]);
+
+    assert!(desktop
+        .omenchat
+        .chat_client
+        .moderation_audit_page(session_id, 1)
+        .is_none());
+    assert!(!desktop
+        .omenchat
+        .omenchat_moderation_audit_requests
+        .contains_key(&session_id));
+}
+
+#[cfg(feature = "omenchat-moderation-audit")]
+#[test]
+fn moderation_audit_evidence_is_cleared_on_room_change() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-moderation-audit-room-change");
+    let session_id = open_connected_session(&mut desktop, [0x96; 16], "connected");
+    authorize_moderation_audit(&mut desktop, session_id);
+    retain_moderation_audit_evidence(&mut desktop, session_id);
+
+    let server_id = desktop
+        .omenchat
+        .chat_client
+        .session(session_id)
+        .expect("session")
+        .server
+        .server_id
+        .clone();
+    desktop
+        .omenchat
+        .chat_client
+        .session_mut(session_id)
+        .expect("session")
+        .active_room = crate::chat::ChatRoomSummary {
+        server_id,
+        room_id: 2,
+        name: "ops".into(),
+        topic: None,
+        joined: true,
+        unread: 0,
+    };
+    desktop.apply_omenchat_client_events_status(&[]);
 
     assert!(desktop
         .omenchat
