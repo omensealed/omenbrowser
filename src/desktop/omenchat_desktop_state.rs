@@ -473,6 +473,8 @@ pub(in crate::desktop) struct OmenChatMutationResolutionConfirmation {
 pub(in crate::desktop) struct OmenChatModerationAuditRequest {
     pub(in crate::desktop) room_id: RoomId,
     pub(in crate::desktop) owner_user_id: crate::chat::protocol::UserId,
+    pub(in crate::desktop) before_audit_id: Option<crate::chat::protocol::EventId>,
+    pub(in crate::desktop) limit: u16,
     pub(in crate::desktop) state: crate::chat::ChatModerationAuditRequestState,
 }
 

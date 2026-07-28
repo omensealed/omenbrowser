@@ -5148,11 +5148,16 @@ cargo test --locked --no-default-features \
 The focused tests require moderator/admin authority, one single-flight manual
 64-record first-page request, a truthful receiving state, explicit end/empty
 completion, bounded failure text, newest-first record labels, and immediate
-evidence clearing on local role or Link-authority loss. The panel never polls,
-automatically retries, or exposes a false inbound-Resource Cancel action.
-Canonical product aliases remain unchanged. Load-older pagination, a root TUI
-consumer, product activation, and release-candidate process/packaging gates
-remain later work.
+evidence clearing on local role or Link-authority loss. “Load older” uses the
+oldest retained audit ID as an exclusive cursor, rejects duplicates/cursor
+violations, stale page/end sequence correlations, and responses above the
+requested limit; it accumulates only within the existing 256-record/512-KiB
+client ceilings and stops at explicit end or the local retention ceiling. A
+full page is “complete; more may exist,” not an indefinitely receiving
+transfer. The panel never polls, automatically retries, or exposes a false
+inbound-Resource Cancel action. Canonical product aliases remain unchanged. A
+root TUI consumer, product activation, and release-candidate
+process/packaging gates remain later work.
 
 Focused schema/storage gates:
 

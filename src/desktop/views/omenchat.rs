@@ -385,41 +385,68 @@ fn omenchat_moderation_audit_panel<'a>(
         .moderation_audit_page(session_id, room_id);
     let view = chat_moderation_audit_view(authorized, negotiated, request_state, page);
 
-    let (status, records, refresh_available) = match view {
+    let (status, records, refresh_available, load_older_available) = match view {
         ChatModerationAuditView::Unavailable => (
             "Unavailable — this server did not negotiate moderation-audit-v1.",
             &[][..],
+            false,
             false,
         ),
         ChatModerationAuditView::Unauthorized => (
             "Unavailable — moderator or administrator authority is required.",
             &[][..],
             false,
+            false,
         ),
         ChatModerationAuditView::Ready => (
             "Not loaded. Refresh requests one bounded page; nothing is polled or retried.",
             &[][..],
             true,
+            false,
         ),
         ChatModerationAuditView::Receiving { previous_records } => (
             "Receiving a bounded page. Previous results remain visible until completion.",
             previous_records,
             false,
+            false,
         ),
         ChatModerationAuditView::Failed {
             message,
             previous_records,
-        } => (message, previous_records, true),
+        } => (message, previous_records, true, false),
         ChatModerationAuditView::Empty => (
             "Audit is current and contains no records for this room.",
             &[][..],
             true,
+            false,
         ),
-        ChatModerationAuditView::Loaded { records } => (
-            "Audit page is current. Records are newest first.",
-            records,
-            true,
-        ),
+        ChatModerationAuditView::Loaded { records, has_more } => {
+            if has_more
+                && records.len()
+                    < crate::chat::client::CHAT_MODERATION_AUDIT_MAX_RECORDS_PER_SESSION
+            {
+                (
+                    "Audit is current through this page. Older records may be available.",
+                    records,
+                    true,
+                    true,
+                )
+            } else if has_more {
+                (
+                    "Audit reached the bounded client retention limit.",
+                    records,
+                    true,
+                    false,
+                )
+            } else {
+                (
+                    "Audit is current through the oldest available record.",
+                    records,
+                    true,
+                    false,
+                )
+            }
+        }
     };
 
     let mut header = row![text("Moderation audit")
@@ -431,6 +458,12 @@ fn omenchat_moderation_audit_panel<'a>(
         header = header.push(subtle_button(
             "Refresh audit",
             Message::OmenChat(OmenChatMessage::RefreshModerationAudit(session_id)),
+        ));
+    }
+    if load_older_available {
+        header = header.push(subtle_button(
+            "Load older",
+            Message::OmenChat(OmenChatMessage::LoadOlderModerationAudit(session_id)),
         ));
     }
     let mut content = column![header, text(status).size(ui_size(11))]

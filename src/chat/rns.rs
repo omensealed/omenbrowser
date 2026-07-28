@@ -93,11 +93,13 @@ impl ChatLinkTransport for CapturedChatTransport {
 pub enum ChatLinkEvent {
     Frame(Frame),
     InlineBatch {
+        seq: u32,
         op: ChatOp,
         room_id: Option<u32>,
         values: Vec<FrameValue>,
     },
     ResourceBatch {
+        seq: u32,
         op: ChatOp,
         room_id: Option<u32>,
         offer: ResourceOffer,
@@ -136,6 +138,7 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
         | ChatOp::PinSnapshot => {
             let values = decode_compressed_values_body(&frame.body)?;
             Ok(Some(ChatLinkEvent::InlineBatch {
+                seq: frame.seq,
                 op: frame.op,
                 room_id: frame.room_id,
                 values,
@@ -154,6 +157,7 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
             };
             let values = decode_resource_batch_payload(&offer, &payload)?;
             Ok(Some(ChatLinkEvent::ResourceBatch {
+                seq: frame.seq,
                 op: frame.op,
                 room_id: frame.room_id,
                 offer,
@@ -573,6 +577,7 @@ mod tests {
         assert!(matches!(
             recv_chat_event(&mut transport).expect("inline"),
             Some(ChatLinkEvent::InlineBatch {
+                seq: 1,
                 op: ChatOp::ModerationAuditInline,
                 values: decoded,
                 ..
@@ -581,6 +586,7 @@ mod tests {
         assert!(matches!(
             recv_chat_event(&mut transport).expect("resource"),
             Some(ChatLinkEvent::ResourceBatch {
+                seq: 2,
                 op: ChatOp::ModerationAuditResource,
                 values: decoded,
                 ..

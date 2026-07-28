@@ -757,6 +757,37 @@ impl ChatClient {
         Ok(())
     }
 
+    pub(crate) fn append_moderation_audit_page(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        before_audit_id: EventId,
+        page: ModerationAuditPage,
+    ) -> Result<(), &'static str> {
+        page.validate_room(room_id)
+            .map_err(|_| "moderation audit page failed room validation")?;
+        let Some(current) = self.moderation_audit_page(session_id, room_id) else {
+            return Err("moderation audit older page has no retained first page");
+        };
+        if current.records.last().map(|record| record.audit_id) != Some(before_audit_id) {
+            return Err("moderation audit older page cursor does not match retained history");
+        }
+        if page
+            .records
+            .iter()
+            .any(|record| record.audit_id >= before_audit_id)
+        {
+            return Err("moderation audit older page violated its exclusive cursor");
+        }
+        let mut combined = current.clone();
+        combined.records.extend(page.records);
+        combined
+            .clone()
+            .into_frame_values()
+            .map_err(|_| "moderation audit accumulated page failed bounded ordering")?;
+        self.replace_moderation_audit_page(session_id, room_id, combined)
+    }
+
     pub(crate) fn clear_moderation_audit(&mut self, session_id: ChatSessionId) {
         let Some(server_id) = self
             .session(session_id)

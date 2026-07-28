@@ -779,24 +779,41 @@ impl DesktopApp {
                     room_id,
                     page,
                 } => {
-                    if matches!(
-                        self.omenchat
-                            .omenchat_moderation_audit_requests
-                            .get(session_id),
-                        Some(
-                            super::omenchat_desktop_state::OmenChatModerationAuditRequest {
-                                room_id: stored_room_id,
-                                state: crate::chat::ChatModerationAuditRequestState::Receiving,
-                                ..
+                    let full_page = self
+                        .omenchat
+                        .omenchat_moderation_audit_requests
+                        .get_mut(session_id)
+                        .filter(|request| {
+                            request.room_id == *room_id
+                                && matches!(
+                                    request.state,
+                                    crate::chat::ChatModerationAuditRequestState::Receiving
+                                )
+                        })
+                        .map(|request| {
+                            let full_page = page.records.len() == usize::from(request.limit);
+                            if full_page {
+                                request.state =
+                                    crate::chat::ChatModerationAuditRequestState::Complete {
+                                        has_more: true,
+                                    };
                             }
-                        ) if stored_room_id == room_id
-                    ) {
+                            full_page
+                        });
+                    if let Some(full_page) = full_page {
                         self.set_omenchat_session_status(
                             *session_id,
-                            format!(
-                                "received {} moderation audit record(s); waiting for end",
-                                page.records.len()
-                            ),
+                            if full_page {
+                                format!(
+                                    "received {} moderation audit record(s); older records may be available",
+                                    page.records.len()
+                                )
+                            } else {
+                                format!(
+                                    "received {} moderation audit record(s); waiting for end",
+                                    page.records.len()
+                                )
+                            },
                         );
                     }
                 }
@@ -816,7 +833,8 @@ impl DesktopApp {
                     else {
                         continue;
                     };
-                    request.state = crate::chat::ChatModerationAuditRequestState::Complete;
+                    request.state =
+                        crate::chat::ChatModerationAuditRequestState::Complete { has_more: false };
                     let record_count = self
                         .omenchat
                         .chat_client

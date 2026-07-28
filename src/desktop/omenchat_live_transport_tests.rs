@@ -360,6 +360,7 @@ async fn moderation_audit_refresh_is_single_flight_and_end_marks_page_current() 
             room_id: 1,
             owner_user_id: 7,
             state: crate::chat::ChatModerationAuditRequestState::Receiving,
+            ..
         })
     ));
     desktop.refresh_omenchat_moderation_audit(session_id);
@@ -385,7 +386,9 @@ async fn moderation_audit_refresh_is_single_flight_and_end_marks_page_current() 
         Some(super::super::omenchat_desktop_state::OmenChatModerationAuditRequest {
             room_id: 1,
             owner_user_id: 7,
-            state: crate::chat::ChatModerationAuditRequestState::Complete,
+            before_audit_id: None,
+            limit: 64,
+            state: crate::chat::ChatModerationAuditRequestState::Complete { has_more: false },
         })
     ));
     assert!(desktop
@@ -395,6 +398,168 @@ async fn moderation_audit_refresh_is_single_flight_and_end_marks_page_current() 
         .expect("session")
         .status
         .contains("current: 0 record(s)"));
+}
+
+#[cfg(feature = "omenchat-moderation-audit")]
+#[tokio::test]
+async fn moderation_audit_load_older_uses_oldest_exclusive_cursor_and_accumulates() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-moderation-audit-pagination");
+    let session_id = open_connected_session(&mut desktop, [0x95; 16], "connected");
+    authorize_moderation_audit(&mut desktop, session_id);
+    let record = |audit_id| crate::chat::protocol::ModerationAuditRecord {
+        audit_id,
+        room_id: 1,
+        actor_user_id: 7,
+        actor_display_name_at_action: "Moderator".into(),
+        target_user_id: Some(8),
+        target_display_name_at_action: Some("Member".into()),
+        action: crate::chat::protocol::ModerationAuditAction::Kick,
+        committed_at_unix: audit_id as i64,
+        result_role_bits: None,
+        result_status_bits: None,
+    };
+
+    desktop.refresh_omenchat_moderation_audit(session_id);
+    let first_page = crate::chat::protocol::ModerationAuditPage {
+        records: (65..=128).rev().map(&record).collect(),
+    };
+    desktop
+        .omenchat
+        .chat_client
+        .replace_moderation_audit_page(session_id, 1, first_page.clone())
+        .expect("first page");
+    desktop.apply_omenchat_client_events_status(
+        &[crate::chat::ChatClientEvent::ModerationAuditPageApplied {
+            session_id,
+            room_id: 1,
+            page: first_page,
+        }],
+    );
+    assert!(matches!(
+        desktop
+            .omenchat
+            .omenchat_moderation_audit_requests
+            .get(&session_id)
+            .map(|request| &request.state),
+        Some(crate::chat::ChatModerationAuditRequestState::Complete { has_more: true })
+    ));
+
+    desktop.load_older_omenchat_moderation_audit(session_id);
+    assert!(matches!(
+        desktop
+            .omenchat
+            .omenchat_moderation_audit_requests
+            .get(&session_id),
+        Some(super::super::omenchat_desktop_state::OmenChatModerationAuditRequest {
+            before_audit_id: Some(65),
+            state: crate::chat::ChatModerationAuditRequestState::Receiving,
+            ..
+        })
+    ));
+    let older_page = crate::chat::protocol::ModerationAuditPage {
+        records: vec![record(64), record(63)],
+    };
+    desktop
+        .omenchat
+        .chat_client
+        .append_moderation_audit_page(session_id, 1, 65, older_page.clone())
+        .expect("older page");
+    desktop.apply_omenchat_client_events_status(
+        &[crate::chat::ChatClientEvent::ModerationAuditPageApplied {
+            session_id,
+            room_id: 1,
+            page: older_page,
+        }],
+    );
+    desktop.apply_omenchat_client_events_status(
+        &[crate::chat::ChatClientEvent::ModerationAuditEnd {
+            session_id,
+            room_id: 1,
+        }],
+    );
+
+    let accumulated = desktop
+        .omenchat
+        .chat_client
+        .moderation_audit_page(session_id, 1)
+        .expect("accumulated audit");
+    assert_eq!(accumulated.records.len(), 66);
+    assert_eq!(
+        accumulated
+            .records
+            .iter()
+            .map(|record| record.audit_id)
+            .collect::<Vec<_>>(),
+        (63..=128).rev().collect::<Vec<_>>()
+    );
+    assert!(matches!(
+        desktop
+            .omenchat
+            .omenchat_moderation_audit_requests
+            .get(&session_id)
+            .map(|request| &request.state),
+        Some(crate::chat::ChatModerationAuditRequestState::Complete { has_more: false })
+    ));
+}
+
+#[cfg(feature = "omenchat-moderation-audit")]
+#[test]
+fn moderation_audit_load_older_stops_at_client_retention_ceiling() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-moderation-audit-retention-stop");
+    let session_id = open_connected_session(&mut desktop, [0x96; 16], "connected");
+    authorize_moderation_audit(&mut desktop, session_id);
+    let page = crate::chat::protocol::ModerationAuditPage {
+        records: (1..=crate::chat::client::CHAT_MODERATION_AUDIT_MAX_RECORDS_PER_SESSION as u64)
+            .rev()
+            .map(|audit_id| crate::chat::protocol::ModerationAuditRecord {
+                audit_id,
+                room_id: 1,
+                actor_user_id: 7,
+                actor_display_name_at_action: "Moderator".into(),
+                target_user_id: Some(8),
+                target_display_name_at_action: Some("Member".into()),
+                action: crate::chat::protocol::ModerationAuditAction::Kick,
+                committed_at_unix: audit_id as i64,
+                result_role_bits: None,
+                result_status_bits: None,
+            })
+            .collect(),
+    };
+    desktop
+        .omenchat
+        .chat_client
+        .replace_moderation_audit_page(session_id, 1, page)
+        .expect("maximum bounded page");
+    desktop.omenchat.omenchat_moderation_audit_requests.insert(
+        session_id,
+        super::super::omenchat_desktop_state::OmenChatModerationAuditRequest {
+            room_id: 1,
+            owner_user_id: 7,
+            before_audit_id: Some(257),
+            limit: 64,
+            state: crate::chat::ChatModerationAuditRequestState::Complete { has_more: true },
+        },
+    );
+
+    desktop.load_older_omenchat_moderation_audit(session_id);
+
+    assert_eq!(
+        desktop
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .expect("session")
+            .status,
+        "moderation audit client retention limit reached"
+    );
+    assert!(matches!(
+        desktop
+            .omenchat
+            .omenchat_moderation_audit_requests
+            .get(&session_id)
+            .map(|request| &request.state),
+        Some(crate::chat::ChatModerationAuditRequestState::Complete { has_more: true })
+    ));
 }
 
 #[cfg(feature = "omenchat-moderation-audit")]
@@ -408,7 +573,9 @@ fn moderation_audit_evidence_is_cleared_when_link_authority_is_lost() {
         super::super::omenchat_desktop_state::OmenChatModerationAuditRequest {
             room_id: 1,
             owner_user_id: 7,
-            state: crate::chat::ChatModerationAuditRequestState::Complete,
+            before_audit_id: None,
+            limit: 64,
+            state: crate::chat::ChatModerationAuditRequestState::Complete { has_more: false },
         },
     );
 
@@ -456,7 +623,9 @@ fn moderation_audit_evidence_is_cleared_on_immediate_local_role_loss() {
         super::super::omenchat_desktop_state::OmenChatModerationAuditRequest {
             room_id: 1,
             owner_user_id: 7,
-            state: crate::chat::ChatModerationAuditRequestState::Complete,
+            before_audit_id: None,
+            limit: 64,
+            state: crate::chat::ChatModerationAuditRequestState::Complete { has_more: false },
         },
     );
     let demoted_user = crate::chat::ChatUserSummary {
@@ -503,7 +672,9 @@ fn moderation_audit_evidence_is_identity_scoped() {
         super::super::omenchat_desktop_state::OmenChatModerationAuditRequest {
             room_id: 1,
             owner_user_id: 7,
-            state: crate::chat::ChatModerationAuditRequestState::Complete,
+            before_audit_id: None,
+            limit: 64,
+            state: crate::chat::ChatModerationAuditRequestState::Complete { has_more: false },
         },
     );
 

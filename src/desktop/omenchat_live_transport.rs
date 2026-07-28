@@ -17,8 +17,90 @@ impl DesktopApp {
         &mut self,
         session_id: crate::chat::ChatSessionId,
     ) {
-        const FIRST_PAGE_LIMIT: u16 = 64;
+        self.request_omenchat_moderation_audit(session_id, None, 64);
+    }
 
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    pub(in crate::desktop) fn load_older_omenchat_moderation_audit(
+        &mut self,
+        session_id: crate::chat::ChatSessionId,
+    ) {
+        let Some(request) = self
+            .omenchat
+            .omenchat_moderation_audit_requests
+            .get(&session_id)
+        else {
+            self.set_omenchat_session_status(
+                session_id,
+                "refresh moderation audit before loading older records".into(),
+            );
+            return;
+        };
+        if matches!(
+            request.state,
+            crate::chat::ChatModerationAuditRequestState::Receiving
+        ) {
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit request already receiving".into(),
+            );
+            return;
+        }
+        if !matches!(
+            request.state,
+            crate::chat::ChatModerationAuditRequestState::Complete { has_more: true }
+        ) {
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit has reached its oldest available record".into(),
+            );
+            return;
+        }
+        let room_id = request.room_id;
+        let Some(page) = self
+            .omenchat
+            .chat_client
+            .moderation_audit_page(session_id, room_id)
+        else {
+            self.set_omenchat_session_status(
+                session_id,
+                "refresh moderation audit before loading older records".into(),
+            );
+            return;
+        };
+        let remaining = crate::chat::client::CHAT_MODERATION_AUDIT_MAX_RECORDS_PER_SESSION
+            .saturating_sub(page.records.len());
+        if remaining == 0 {
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit client retention limit reached".into(),
+            );
+            return;
+        }
+        let Some(before_audit_id) = page.records.last().map(|record| record.audit_id) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "moderation audit has no cursor for an older page".into(),
+            );
+            return;
+        };
+        let limit = u16::try_from(remaining.min(64)).unwrap_or(64);
+        self.request_omenchat_moderation_audit(session_id, Some(before_audit_id), limit);
+    }
+
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    fn request_omenchat_moderation_audit(
+        &mut self,
+        session_id: crate::chat::ChatSessionId,
+        before_audit_id: Option<crate::chat::protocol::EventId>,
+        page_limit: u16,
+    ) {
         if self
             .omenchat
             .omenchat_moderation_audit_requests
@@ -102,6 +184,8 @@ impl DesktopApp {
             super::omenchat_desktop_state::OmenChatModerationAuditRequest {
                 room_id,
                 owner_user_id,
+                before_audit_id,
+                limit: page_limit,
                 state: crate::chat::ChatModerationAuditRequestState::Receiving,
             },
         );
@@ -112,8 +196,8 @@ impl DesktopApp {
                 &mut self.omenchat.omenchat_live_state,
                 transport,
                 session_id,
-                None,
-                FIRST_PAGE_LIMIT,
+                before_audit_id,
+                page_limit,
             );
             let outgoing = transport.take_outgoing_frames();
             let resources = transport.take_outgoing_resources();
@@ -134,7 +218,11 @@ impl DesktopApp {
         ) {
             self.set_omenchat_session_status(
                 session_id,
-                "moderation audit requested; waiting for the bounded first page".into(),
+                if before_audit_id.is_some() {
+                    "older moderation audit page requested; waiting for bounded results".into()
+                } else {
+                    "moderation audit requested; waiting for the bounded first page".into()
+                },
             );
         }
     }

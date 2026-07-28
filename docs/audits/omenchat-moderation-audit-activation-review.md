@@ -4,9 +4,9 @@ Date: 2026-07-28
 
 Baseline: `release/v0.9.6-4` through `1ce6066`
 
-Decision: the bounded manual first-page desktop slice is implemented behind
-the real non-product feature. Production activation remains deferred until
-pagination, shared TUI consumption, and the activation live gates pass.
+Decision: bounded manual first-page and exclusive-cursor desktop pagination are
+implemented behind the real non-product feature. Production activation remains
+deferred until shared TUI consumption and the activation live gates pass.
 
 ## Evidence reviewed
 
@@ -71,7 +71,10 @@ Before adding `omenchat-moderation-audit` to product aliases:
    presentation from the project-owned projection.
 4. Complete for the first page: ready, empty/end, receiving,
    unavailable/not-negotiated, unauthorized, and bounded failed states.
-5. Pending: explicit “Load older” pagination with the exclusive cursor.
+5. Complete: explicit “Load older” pagination uses the oldest retained ID as
+   the exclusive cursor, validates the request sequence and page limit, rejects
+   stale page/end responses, and stops at the server end marker or bounded
+   client retention ceiling.
 6. Complete for local role and Link authority loss; capability and room changes
    are hidden by current negotiated/active-room evidence and need focused
    activation-gate coverage before product enablement.
@@ -81,7 +84,9 @@ Before adding `omenchat-moderation-audit` to product aliases:
 The desktop request owner is bounded to at most one room/state entry per
 existing chat session. Previous results may remain visible, explicitly marked
 as previous, while a manual refresh is receiving. An orderly end marks them
-current. Failure retains bounded prior evidence without fabricating completion.
+current and terminal. A full page becomes current with “more may exist” rather
+than remaining falsely in-flight. Failure retains bounded prior evidence
+without fabricating completion.
 
 ## Activation gate
 

@@ -141,7 +141,9 @@ pub enum ChatModerationAuditRequestState {
     #[default]
     Idle,
     Receiving,
-    Complete,
+    Complete {
+        has_more: bool,
+    },
     Failed(String),
 }
 
@@ -160,6 +162,7 @@ pub enum ChatModerationAuditView<'a> {
     Empty,
     Loaded {
         records: &'a [ModerationAuditRecord],
+        has_more: bool,
     },
 }
 
@@ -181,10 +184,13 @@ pub fn chat_moderation_audit_view<'a>(
         ChatModerationAuditRequestState::Receiving => ChatModerationAuditView::Receiving {
             previous_records: records,
         },
-        ChatModerationAuditRequestState::Complete if records.is_empty() => {
+        ChatModerationAuditRequestState::Complete { .. } if records.is_empty() => {
             ChatModerationAuditView::Empty
         }
-        ChatModerationAuditRequestState::Complete => ChatModerationAuditView::Loaded { records },
+        ChatModerationAuditRequestState::Complete { has_more } => ChatModerationAuditView::Loaded {
+            records,
+            has_more: *has_more,
+        },
         ChatModerationAuditRequestState::Failed(message) => ChatModerationAuditView::Failed {
             message,
             previous_records: records,
@@ -973,11 +979,23 @@ mod tests {
                 previous_records: [retained]
             } if retained == &record
         ));
+        assert!(matches!(
+            chat_moderation_audit_view(
+                true,
+                true,
+                &ChatModerationAuditRequestState::Complete { has_more: true },
+                Some(&page),
+            ),
+            ChatModerationAuditView::Loaded {
+                records: [retained],
+                has_more: true,
+            } if retained == &record
+        ));
         assert_eq!(
             chat_moderation_audit_view(
                 true,
                 true,
-                &ChatModerationAuditRequestState::Complete,
+                &ChatModerationAuditRequestState::Complete { has_more: false },
                 Some(&ModerationAuditPage { records: vec![] }),
             ),
             ChatModerationAuditView::Empty
