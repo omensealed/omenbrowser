@@ -2,10 +2,12 @@
 
 Date: 2026-07-28
 
-Baseline: `release/v0.9.6-4` at `737d6ac`
+Baseline: `release/v0.9.6-4` at `737d6ac`; dormant activation-gate follow-up
+began at `0970abc`
 
-Status: bounded shared policy and frontend projection complete; production
-capability negotiation and enforcement remain inactive
+Status: bounded shared policy, frontend projection, and deterministic
+request/accept/link-lifecycle gate complete; production capability negotiation
+and enforcement remain inactive
 
 ## Scope
 
@@ -57,6 +59,18 @@ both production selections.
 The client does not request `room-slow-mode-v1`; the server does not accept it;
 normal `SessionEngine` constructors keep enforcement disabled. Existing
 four-/five-field traffic and announcement-room behavior remain unchanged.
+
+The follow-up activation gate adds link-scoped request and acceptance state
+behind test-only entry points. Exact acceptance requires the durable-mutation
+capability, selects `RoomCatalogShape::SlowMode`, and is cleared on capability
+loss, identity replacement, link close, administrative retirement, or client
+reconnect. The shared negotiation codec independently rejects a slow-mode
+capability list that omits durable mutations.
+
+The test-only server constructor now enables both the already test-only
+monotonic admission owner and slow-mode capability acceptance. Normal
+constructors leave both disabled. The normal desktop capability vector has an
+explicit regression assertion that it does not advertise slow mode.
 
 ## Resource impact
 
@@ -151,20 +165,61 @@ No hosted CI, Python interoperability, Reticulum peer, package build, physical
 interface, or live GUI observation is claimed by these deterministic dormant
 tests.
 
+The dormant activation-gate follow-up additionally passed:
+
+```text
+cargo test --locked --no-default-features --features desktop-product \
+  test_only_slow_mode_requires_durable_acceptance_and_clears_with_link_state --lib
+1 passed; 0 failed
+
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  test_enabled_slow_mode_requires_durable_mutations_and_encodes_exact_shape --lib
+1 passed; 0 failed
+
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  test_enabled_slow_mode_is_link_scoped_and_shapes_session_and_join_catalogs --lib
+1 passed; 0 failed
+
+cargo test --locked --no-default-features --features desktop-product
+root library: 1,504 passed; 0 failed; 31 ignored
+all integration and binary targets: passed; 4 additional explicit ignores
+
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full
+536 passed; 0 failed; 11 ignored
+
+cargo clippy --locked --no-default-features \
+  --features desktop-product --all-targets -- -D warnings
+passed
+
+cargo clippy --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full --all-targets -- -D warnings
+passed
+
+bash scripts/release-check.sh quick
+release check complete
+```
+
 ## Compatibility and rollback
 
 There is no protocol version, wire activation, database, configuration,
 identity, destination, history, or storage change. Reverting this unit restores
-the raw client policy-bit map and removes the two static frontend projections.
-Schema-12 storage, stopped-server administration, and dormant test-only
-admission remain independently reversible through their documented boundary.
+the prior dormant six-field parser without changing any production peer's
+capability vector. The client adds two session-id sets bounded by the existing
+64-session ceiling; the server adds one identity binding per admitted live link,
+bounded by its existing 256-link ceiling. Neither retains payload data or adds a
+worker, timer, queue, retry, filesystem write, or network request. Schema-12
+storage, stopped-server administration, and dormant test-only admission remain
+independently reversible through their documented boundary.
 
 ## Remaining activation gates
 
 Before production activation:
 
-- implement request/accept/loss and replacement-Link state for
-  `room-slow-mode-v1`;
+- [x] implement deterministic request/accept/loss and replacement-Link state
+  for `room-slow-mode-v1` without production advertisement;
 - prove current/current real-Link catalog/delta/rejection/expiry/restart;
 - prove adjacent four-/five-field mixed-version behavior;
 - add typed rejection and draft-retention evidence;

@@ -16,12 +16,13 @@ use crate::protocol::{
     ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
     MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, ModerationAuditAction,
     ModerationAuditRequest, PinAck, PinRequest, ReactionAck, ReactionRequest, ReactionSnapshot,
-    RichMessageBody, RichMessageEventMetadata, RoomCatalogEntry, RoomId, SessionAcceptNegotiation,
-    UserId, ANNOUNCEMENT_ROOMS_CAPABILITY, DURABLE_MUTATION_CAPABILITY,
+    RichMessageBody, RichMessageEventMetadata, RoomCatalogEntry, RoomCatalogShape, RoomId,
+    SessionAcceptNegotiation, UserId, ANNOUNCEMENT_ROOMS_CAPABILITY, DURABLE_MUTATION_CAPABILITY,
     DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
     MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME,
     REACTIONS_CAPABILITY, REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG,
     REPLY_MENTIONS_CAPABILITY, ROOM_PINS_CAPABILITY, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
+    ROOM_SLOW_MODE_CAPABILITY,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -208,6 +209,7 @@ pub struct SessionEngine {
     rate_buckets: RateBuckets,
     slow_mode: SlowModeOwner,
     slow_mode_enforcement_enabled: bool,
+    slow_mode_capability_enabled: bool,
     moderation_audit_enabled: bool,
     announcement_rooms_enabled: bool,
 }
@@ -392,6 +394,7 @@ impl SessionEngine {
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
             slow_mode_enforcement_enabled: false,
+            slow_mode_capability_enabled: false,
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -407,6 +410,7 @@ impl SessionEngine {
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
             slow_mode_enforcement_enabled: false,
+            slow_mode_capability_enabled: false,
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -429,6 +433,7 @@ impl SessionEngine {
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
             slow_mode_enforcement_enabled: false,
+            slow_mode_capability_enabled: false,
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
         }
@@ -452,6 +457,7 @@ impl SessionEngine {
     pub(crate) fn with_test_slow_mode(store: OmenchatStore) -> Self {
         let mut engine = Self::new(store);
         engine.slow_mode_enforcement_enabled = true;
+        engine.slow_mode_capability_enabled = true;
         engine
     }
 
@@ -463,10 +469,10 @@ impl SessionEngine {
         self.ensure_peer(peer).map(|user| user.user_id)
     }
 
-    pub(crate) fn shape_room_frame_for_capability(
+    pub(crate) fn shape_room_frame_for_catalog_shape(
         &self,
         frame: &Frame,
-        announcement_rooms_negotiated: bool,
+        room_catalog_shape: RoomCatalogShape,
     ) -> ServerResult<Frame> {
         let mut shaped = frame.clone();
         match shaped.op {
@@ -480,7 +486,7 @@ impl SessionEngine {
                 let room = fields.first_mut().ok_or_else(|| {
                     ServerError::Message(format!("{:?} response omitted its room", shaped.op))
                 })?;
-                *room = self.authoritative_room_value(room, announcement_rooms_negotiated)?;
+                *room = self.authoritative_room_value(room, room_catalog_shape)?;
             }
             ChatOp::CommandResult => {
                 let FrameBody::Fields(fields) = &mut shaped.body else {
@@ -498,8 +504,7 @@ impl SessionEngine {
                             ));
                         };
                         for room in rooms {
-                            *room =
-                                self.authoritative_room_value(room, announcement_rooms_negotiated)?;
+                            *room = self.authoritative_room_value(room, room_catalog_shape)?;
                         }
                     }
                     "create" | "topic" | "part" => {
@@ -508,8 +513,7 @@ impl SessionEngine {
                                 "{command} command result omitted its room"
                             ))
                         })?;
-                        *room =
-                            self.authoritative_room_value(room, announcement_rooms_negotiated)?;
+                        *room = self.authoritative_room_value(room, room_catalog_shape)?;
                     }
                     _ => {}
                 }
@@ -522,7 +526,7 @@ impl SessionEngine {
     fn authoritative_room_value(
         &self,
         value: &FrameValue,
-        announcement_rooms_negotiated: bool,
+        room_catalog_shape: RoomCatalogShape,
     ) -> ServerResult<FrameValue> {
         let FrameValue::Array(fields) = value else {
             return Err(ServerError::Message(
@@ -540,7 +544,7 @@ impl SessionEngine {
             .store
             .room_by_id(room_id)?
             .ok_or_else(|| ServerError::Message(format!("room {room_id} disappeared")))?;
-        room_to_value_with_policy(&room, announcement_rooms_negotiated)
+        room_to_value_for_shape(&room, room_catalog_shape)
     }
 
     pub fn handle_frame_with_active_peers(
@@ -950,6 +954,21 @@ impl SessionEngine {
                 )]);
             }
         };
+        let durable_requested = negotiation.as_ref().is_some_and(|negotiation| {
+            negotiation.client_instance_id.is_some()
+                && negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
+        });
+        let slow_mode_requested = self.slow_mode_capability_enabled
+            && durable_requested
+            && negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == ROOM_SLOW_MODE_CAPABILITY)
+            });
         let announcement_rooms_requested = self.announcement_rooms_enabled
             && negotiation.as_ref().is_some_and(|negotiation| {
                 negotiation
@@ -957,11 +976,18 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == ANNOUNCEMENT_ROOMS_CAPABILITY)
             });
+        let room_catalog_shape = if slow_mode_requested {
+            RoomCatalogShape::SlowMode
+        } else if announcement_rooms_requested {
+            RoomCatalogShape::PolicyBits
+        } else {
+            RoomCatalogShape::Legacy
+        };
         let rooms = self
             .store
             .list_rooms()?
             .into_iter()
-            .map(|room| room_to_value_with_policy(&room, announcement_rooms_requested))
+            .map(|room| room_to_value_for_shape(&room, room_catalog_shape))
             .collect::<ServerResult<Vec<_>>>()?;
         let mut response_body = FrameBody::Fields(vec![
             FrameValue::String(PROTOCOL_NAME.into()),
@@ -974,13 +1000,6 @@ impl SessionEngine {
             FrameValue::U64(self.limits.ping_interval_seconds.clamp(5, 600)),
             FrameValue::U64(self.limits.upload_max_file_bytes),
         ]);
-        let durable_requested = negotiation.as_ref().is_some_and(|negotiation| {
-            negotiation.client_instance_id.is_some()
-                && negotiation
-                    .requested_capabilities
-                    .iter()
-                    .any(|capability| capability == DURABLE_MUTATION_CAPABILITY)
-        });
         let moderation_audit_requested = self.moderation_audit_enabled
             && negotiation.as_ref().is_some_and(|negotiation| {
                 negotiation
@@ -988,13 +1007,20 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == MODERATION_AUDIT_CAPABILITY)
             });
-        if durable_requested || moderation_audit_requested || announcement_rooms_requested {
+        if durable_requested
+            || moderation_audit_requested
+            || announcement_rooms_requested
+            || slow_mode_requested
+        {
             let mut accepted_capabilities = Vec::new();
             if moderation_audit_requested {
                 accepted_capabilities.push(MODERATION_AUDIT_CAPABILITY.into());
             }
             if announcement_rooms_requested {
                 accepted_capabilities.push(ANNOUNCEMENT_ROOMS_CAPABILITY.into());
+            }
+            if slow_mode_requested {
+                accepted_capabilities.push(ROOM_SLOW_MODE_CAPABILITY.into());
             }
             if durable_requested {
                 accepted_capabilities.push(DURABLE_MUTATION_CAPABILITY.into());
@@ -5318,9 +5344,9 @@ fn room_to_value(room: &ServerRoom) -> FrameValue {
     ])
 }
 
-fn room_to_value_with_policy(
+fn room_to_value_for_shape(
     room: &ServerRoom,
-    policy_negotiated: bool,
+    room_catalog_shape: RoomCatalogShape,
 ) -> ServerResult<FrameValue> {
     RoomCatalogEntry {
         room_id: room.room_id,
@@ -5330,7 +5356,7 @@ fn room_to_value_with_policy(
         policy_bits: room.policy_bits,
         slow_mode_seconds: room.slow_mode_seconds,
     }
-    .into_frame_value(policy_negotiated)
+    .into_frame_value_for_shape(room_catalog_shape)
     .map_err(|error| ServerError::Message(format!("stored room cannot be encoded: {error}")))
 }
 
@@ -6532,6 +6558,102 @@ mod tests {
                 slow_mode_seconds: announcement_room.slow_mode_seconds,
             }
         );
+    }
+
+    #[test]
+    fn test_enabled_slow_mode_requires_durable_mutations_and_encodes_exact_shape() {
+        let engine = SessionEngine::with_test_slow_mode(OmenchatStore::in_memory().expect("store"));
+        engine
+            .store
+            .set_room_slow_mode_seconds(1, 30)
+            .expect("slow mode");
+        let request =
+            |requested_capabilities: Vec<String>,
+             client_instance_id: Option<crate::protocol::ClientInstanceId>| {
+                crate::protocol::with_session_open_negotiation(
+                    FrameBody::Text("Alice".into()),
+                    &crate::protocol::SessionOpenNegotiation {
+                        requested_capabilities,
+                        client_instance_id,
+                    },
+                )
+                .expect("capability request")
+            };
+
+        let accepted = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::SessionOpen,
+                    9,
+                    None,
+                    request(
+                        vec![
+                            crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                            crate::protocol::ROOM_SLOW_MODE_CAPABILITY.into(),
+                        ],
+                        Some(crate::protocol::ClientInstanceId::new([19; 16])),
+                    ),
+                ),
+            )
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&accepted[0].body),
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    crate::protocol::ROOM_SLOW_MODE_CAPABILITY.into(),
+                    crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                ],
+            }))
+        );
+        let FrameBody::Fields(fields) = &accepted[0].body else {
+            panic!("session acceptance fields");
+        };
+        let Some(FrameValue::Array(rooms)) = fields.get(1) else {
+            panic!("session acceptance room catalog");
+        };
+        let room = crate::protocol::RoomCatalogEntry::from_frame_value_for_shape(
+            rooms.first().expect("lobby"),
+            crate::protocol::RoomCatalogShape::SlowMode,
+        )
+        .expect("six-field slow-mode room");
+        assert_eq!(room.slow_mode_seconds, 30);
+
+        let dormant_engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let rejected = dormant_engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::SessionOpen,
+                    10,
+                    None,
+                    request(
+                        vec![
+                            crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                            crate::protocol::ROOM_SLOW_MODE_CAPABILITY.into(),
+                        ],
+                        Some(crate::protocol::ClientInstanceId::new([20; 16])),
+                    ),
+                ),
+            )
+            .expect("session open with dormant capability");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&rejected[0].body),
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
+            }))
+        );
+        let FrameBody::Fields(fields) = &rejected[0].body else {
+            panic!("legacy session acceptance fields");
+        };
+        let Some(FrameValue::Array(rooms)) = fields.get(1) else {
+            panic!("legacy room catalog");
+        };
+        crate::protocol::RoomCatalogEntry::from_frame_value_for_shape(
+            rooms.first().expect("lobby"),
+            crate::protocol::RoomCatalogShape::Legacy,
+        )
+        .expect("four-field legacy room");
     }
 
     #[test]

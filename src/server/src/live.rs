@@ -4,10 +4,11 @@ use crate::error::ServerResult;
 use crate::protocol::codec::{decode_frame, encode_frame};
 use crate::protocol::{
     parse_session_accept_negotiation, parse_session_open_negotiation, ChatErrorCode, ChatOp,
-    ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomId,
-    ANNOUNCEMENT_ROOMS_CAPABILITY, DURABLE_MUTATION_CAPABILITY, DURABLE_MUTATION_ENVELOPE_TAG,
-    DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY, MODERATION_AUDIT_CAPABILITY,
-    REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY, ROOM_PINS_CAPABILITY,
+    ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomCatalogShape,
+    RoomId, ANNOUNCEMENT_ROOMS_CAPABILITY, DURABLE_MUTATION_CAPABILITY,
+    DURABLE_MUTATION_ENVELOPE_TAG, DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
+    MODERATION_AUDIT_CAPABILITY, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
+    ROOM_PINS_CAPABILITY, ROOM_SLOW_MODE_CAPABILITY,
 };
 use crate::session::{DurableMutationPeerContext, ServerPeer, SessionEngine};
 use crate::transport::{
@@ -158,6 +159,7 @@ struct FrameDispatchOutcome {
     pins_accepted: bool,
     moderation_audit_accepted: bool,
     announcement_rooms_accepted: bool,
+    slow_mode_accepted: bool,
     part_succeeded: bool,
     moderation_disconnect_succeeded: bool,
 }
@@ -446,6 +448,7 @@ pub struct OmenchatLiveServer<T> {
     durable_sessions: BTreeMap<LinkId, DurableSessionBinding>,
     moderation_audit_links: BTreeMap<LinkId, Vec<u8>>,
     announcement_room_links: BTreeMap<LinkId, Vec<u8>>,
+    slow_mode_links: BTreeMap<LinkId, Vec<u8>>,
     recent_closed_links: VecDeque<ClosedLinkSummary>,
     replay_cache: LinkReplayCache,
     stats: LiveServerStats,
@@ -466,6 +469,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             durable_sessions: BTreeMap::new(),
             moderation_audit_links: BTreeMap::new(),
             announcement_room_links: BTreeMap::new(),
+            slow_mode_links: BTreeMap::new(),
             recent_closed_links: VecDeque::new(),
             replay_cache: LinkReplayCache::default(),
             stats: LiveServerStats::default(),
@@ -509,6 +513,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 self.durable_sessions.remove(&link_id);
                 self.moderation_audit_links.remove(&link_id);
                 self.announcement_room_links.remove(&link_id);
+                self.slow_mode_links.remove(&link_id);
                 self.identified_links.insert(link_id);
                 self.replace_duplicate_peer_links(link_id, &identified);
                 self.peers.insert(link_id, identified);
@@ -607,6 +612,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                     self.durable_sessions.remove(&link_id);
                     self.moderation_audit_links.remove(&link_id);
                     self.announcement_room_links.remove(&link_id);
+                    self.slow_mode_links.remove(&link_id);
                     if self.identified_links.contains(&link_id) {
                         if let Some(client_instance_id) = dispatch.accepted_client_instance_id {
                             self.durable_sessions.insert(
@@ -628,6 +634,10 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                         }
                         if dispatch.announcement_rooms_accepted {
                             self.announcement_room_links
+                                .insert(link_id, candidate_peer.identity_hash.clone());
+                        }
+                        if dispatch.slow_mode_accepted {
+                            self.slow_mode_links
                                 .insert(link_id, candidate_peer.identity_hash.clone());
                         }
                     }
@@ -784,6 +794,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 self.durable_sessions.remove(&link_id);
                 self.moderation_audit_links.remove(&link_id);
                 self.announcement_room_links.remove(&link_id);
+                self.slow_mode_links.remove(&link_id);
                 if let Some(room_id) = room_id {
                     self.broadcast_userlist_for_room(room_id)?;
                 }
@@ -823,6 +834,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             session_open_requests_capability(&frame, MODERATION_AUDIT_CAPABILITY);
         let announcement_rooms_requested =
             session_open_requests_capability(&frame, ANNOUNCEMENT_ROOMS_CAPABILITY);
+        let slow_mode_requested =
+            session_open_requests_capability(&frame, ROOM_SLOW_MODE_CAPABILITY);
         let replay_candidate = is_replay_guarded_request(&frame);
         let request_fingerprint = if replay_candidate {
             Some(encode_frame(&frame).map_err(|error| {
@@ -975,6 +988,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 && responses_accept_capability(&responses, MODERATION_AUDIT_CAPABILITY),
             announcement_rooms_accepted: announcement_rooms_requested
                 && responses_accept_capability(&responses, ANNOUNCEMENT_ROOMS_CAPABILITY),
+            slow_mode_accepted: slow_mode_requested
+                && responses_accept_capability(&responses, ROOM_SLOW_MODE_CAPABILITY),
             part_succeeded: request_op == ChatOp::PartRoom
                 && responses.iter().any(is_successful_part_response),
             moderation_disconnect_succeeded: request_op == ChatOp::Command
@@ -1279,12 +1294,24 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             .get(&link_id)
             .zip(self.peers.get(&link_id))
             .is_some_and(|(identity_hash, peer)| identity_hash == &peer.identity_hash);
+        let slow_mode_negotiated = self
+            .slow_mode_links
+            .get(&link_id)
+            .zip(self.peers.get(&link_id))
+            .is_some_and(|(identity_hash, peer)| identity_hash == &peer.identity_hash);
+        let room_catalog_shape = if slow_mode_negotiated {
+            RoomCatalogShape::SlowMode
+        } else if announcement_rooms_negotiated {
+            RoomCatalogShape::PolicyBits
+        } else {
+            RoomCatalogShape::Legacy
+        };
         let context = self
             .link_response_contexts
             .get(&link_id)
             .copied()
             .unwrap_or(OMENCHAT_LINK_CONTEXT);
-        if announcement_rooms_negotiated
+        if room_catalog_shape != RoomCatalogShape::Legacy
             && matches!(
                 frame.op,
                 ChatOp::JoinAccept | ChatOp::RoomDelta | ChatOp::CommandResult
@@ -1292,7 +1319,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         {
             let shaped = self
                 .engine
-                .shape_room_frame_for_capability(frame, announcement_rooms_negotiated)?;
+                .shape_room_frame_for_catalog_shape(frame, room_catalog_shape)?;
             send_response_frame_with_context(
                 &self.engine,
                 link_id,
@@ -1424,6 +1451,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             self.durable_sessions.remove(link_id);
             self.moderation_audit_links.remove(link_id);
             self.announcement_room_links.remove(link_id);
+            self.slow_mode_links.remove(link_id);
         }
         self.stats.links_closed = self.stats.links_closed.saturating_add(links.len() as u64);
         for room_id in unique_room_ids(affected_rooms) {
@@ -1604,6 +1632,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.durable_sessions.remove(&link_id);
         self.moderation_audit_links.remove(&link_id);
         self.announcement_room_links.remove(&link_id);
+        self.slow_mode_links.remove(&link_id);
     }
 
     fn retire_link(&mut self, link_id: LinkId, reason: &str) {
@@ -1632,6 +1661,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.durable_sessions.remove(&link_id);
         self.moderation_audit_links.remove(&link_id);
         self.announcement_room_links.remove(&link_id);
+        self.slow_mode_links.remove(&link_id);
     }
 
     fn discard_pending_uploads_for_identity(&mut self, identity_hash: &[u8]) -> usize {
@@ -6305,6 +6335,125 @@ mod tests {
         })
         .expect("replace identity");
         assert!(!live.announcement_room_links.contains_key(&negotiated_link));
+    }
+
+    #[test]
+    fn test_enabled_slow_mode_is_link_scoped_and_shapes_session_and_join_catalogs() {
+        let store = OmenchatStore::in_memory().expect("store");
+        store.set_room_slow_mode_seconds(1, 30).expect("slow mode");
+        let engine = SessionEngine::with_test_slow_mode(store);
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let link_id = [36u8; 16];
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: ServerPeer {
+                identity_hash: b"slow-mode-observer".to_vec(),
+                display_name: "Observer".into(),
+                lxmf_destination: None,
+            },
+        })
+        .expect("open link");
+        let open = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Observer".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    ROOM_SLOW_MODE_CAPABILITY.into(),
+                ],
+                client_instance_id: Some(ClientInstanceId::new([36; 16])),
+            },
+        )
+        .expect("slow-mode negotiation");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(ChatOp::SessionOpen, 1, None, open))
+                .expect("session open"),
+        })
+        .expect("open session");
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::JoinRoom,
+                2,
+                None,
+                FrameBody::Text("lobby".into()),
+            ))
+            .expect("join"),
+        })
+        .expect("join room");
+
+        for op in [ChatOp::SessionAccept, ChatOp::JoinAccept] {
+            let frame = live
+                .transport()
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == link_id)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .find(|frame| frame.op == op)
+                .expect("response");
+            let FrameBody::Fields(fields) = frame.body else {
+                panic!("{op:?} fields");
+            };
+            let room_value = if op == ChatOp::SessionAccept {
+                let Some(FrameValue::Array(rooms)) = fields.get(1) else {
+                    panic!("session room catalog");
+                };
+                rooms.first().expect("session lobby")
+            } else {
+                fields.first().expect("joined lobby")
+            };
+            let room = crate::protocol::RoomCatalogEntry::from_frame_value_for_shape(
+                room_value,
+                RoomCatalogShape::SlowMode,
+            )
+            .expect("six-field slow-mode room");
+            assert_eq!(room.slow_mode_seconds, 30);
+        }
+        live.handle_event(OmenchatLinkEvent::LinkData {
+            link_id,
+            context: OMENCHAT_LINK_CONTEXT,
+            data: encode_frame(&Frame::new(
+                ChatOp::Command,
+                3,
+                Some(1),
+                FrameBody::Text("rooms".into()),
+            ))
+            .expect("rooms command"),
+        })
+        .expect("rooms command");
+        let rooms_result = live
+            .transport()
+            .frames
+            .iter()
+            .filter(|captured| captured.link_id == link_id)
+            .filter_map(|captured| decode_frame(&captured.bytes).ok())
+            .find(|frame| frame.op == ChatOp::CommandResult)
+            .expect("rooms command result");
+        let FrameBody::Fields(fields) = rooms_result.body else {
+            panic!("rooms command result fields");
+        };
+        let Some(FrameValue::Array(rooms)) = fields.get(1) else {
+            panic!("rooms command result catalog");
+        };
+        let room = crate::protocol::RoomCatalogEntry::from_frame_value_for_shape(
+            rooms.first().expect("lobby"),
+            RoomCatalogShape::SlowMode,
+        )
+        .expect("six-field rooms command result");
+        assert_eq!(room.slow_mode_seconds, 30);
+        assert_eq!(
+            live.slow_mode_links.get(&link_id),
+            Some(&b"slow-mode-observer".to_vec())
+        );
+
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id,
+            reason: Some("test replacement".into()),
+        })
+        .expect("close link");
+        assert!(!live.slow_mode_links.contains_key(&link_id));
     }
 
     #[test]
