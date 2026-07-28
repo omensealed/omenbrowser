@@ -2,17 +2,18 @@
 
 Date: 2026-07-28
 
-Baseline: `release/v0.9.6-4` through `814f78d`, plus this non-empty process
+Baseline: `release/v0.9.6-4` through `cb13e85`, plus this Resource process
 extension.
 
 ## Scope
 
-This unit adds an explicit non-product
-`omenchat-moderation-audit-qualification` feature to both Rust roots. Only that
-feature makes the desktop request and omenchatd accept
-`moderation-audit-v1`. Canonical `desktop-product`, `server-headless`, and
-`server-full` builds continue to omit it, and
-`scripts/verify-product-features.sh` rejects accidental activation.
+The existing non-product `omenchat-moderation-audit-qualification` feature
+makes the desktop request and omenchatd accept `moderation-audit-v1`. This
+extension adds `omenchat-moderation-audit-resource-qualification`, which
+implies the first feature and forces only moderation-audit pages through the
+existing bounded Resource path. Canonical `desktop-product`,
+`server-headless`, and `server-full` builds continue to omit both features,
+and `scripts/verify-product-features.sh` rejects accidental activation.
 
 The client now has one bounded manual request function. It requires negotiated
 capability state, a joined room, a valid exclusive cursor, and a protocol
@@ -38,15 +39,30 @@ harness:
    durable `mute` command for the active target;
 8. requires the exact typed user result to show the target as muted;
 9. requests a bounded audit page and requires the matching `Mute` record,
-   target display name, muted result bit, and `ModerationAuditEnd`;
+   target display name, muted result bit, Resource transport provenance, and
+   `ModerationAuditEnd`;
 10. closes the target, orderly-restarts omenchatd, and confirms stable server
     destination, preserved moderator identity/role, replacement Link
     negotiation, and the same persisted non-empty page.
 
-The earlier empty-read gate remains valid: an empty result emits only
-`ModerationAuditEnd`. This extension also proves the non-empty inline shape.
-The initial live page and post-restart page each carried one record followed
-by the explicit end marker. No database row was seeded by the harness.
+The earlier empty-read and non-empty inline gates remain valid. This extension
+proves the non-empty Resource shape. The initial live page and post-restart
+page each carried one record in a Reticulum Resource followed by the explicit
+end marker. No database row was seeded by the harness.
+
+The first attempted harness used a one-byte global batch threshold. That also
+forced unrelated join/catalog snapshots through Resources and introduced
+contention that was not specific to moderation audit. It was rejected. The
+replacement feature changes only moderation-audit response selection and is
+for qualification, not a product default.
+
+This run found a real server bridge defect. `SessionEngine` emitted
+`ModerationAuditResource` and retained its payload, but the production
+transport allowlist omitted that operation. The offer frame crossed the Link
+while the payload remained pending and server counters showed no Resource
+offered. The bridge now classifies and releases moderation-audit Resources
+through the same bounded ownership path as history, user-list, reaction, and
+revision Resources. A focused regression guards the classification.
 
 Observed report:
 
@@ -56,6 +72,7 @@ Observed report:
   "explicit_end_observed": true,
   "isolated_loopback": true,
   "qualification_feature_only": true,
+  "resource_delivery": true,
   "server_destination_stable": true,
   "server_restart": true,
   "status": "pass"
@@ -68,16 +85,20 @@ Passed:
 
 ```text
 cargo test --locked --no-default-features \
-  --features desktop-product,omenchat-moderation-audit-qualification \
+  --features desktop-product,omenchat-moderation-audit-resource-qualification \
   moderation_audit --lib
 
 cargo test --locked --no-default-features \
-  --features desktop-product,omenchat-moderation-audit-qualification \
+  --features desktop-product,omenchat-moderation-audit-resource-qualification \
   --bin omenbrowser_rs cli_parses_
 
 (cd src/server && cargo test --locked --no-default-features \
-  --features server-headless,omenchat-moderation-audit-qualification \
+  --features server-headless,omenchat-moderation-audit-resource-qualification \
   moderation_audit --lib)
+
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless,omenchat-moderation-audit-resource-qualification \
+  moderation_audit_resource_uses_the_payload_bridge --lib)
 
 bash scripts/verify-product-features.sh
 
@@ -89,8 +110,9 @@ Focused results:
 
 - desktop moderation-audit: 5 passed, 1 explicit measurement ignored;
 - desktop CLI parsing: 18 passed;
-- omenchatd moderation-audit: 16 passed, 1 explicit measurement ignored;
-- current/current process qualification: passed before and after restart.
+- omenchatd moderation-audit: 17 passed, 1 explicit measurement ignored;
+- current/current Resource process qualification: passed before and after
+  restart.
 
 ## Compatibility and resource impact
 
@@ -107,11 +129,10 @@ or failure.
 
 ## Remaining gates
 
-This process run proves current/current empty and non-empty inline reads, a
-real durable moderation transaction, and restart persistence. It does not
-claim:
+Together, the process gates prove current/current empty, non-empty inline, and
+non-empty Resource reads, a real durable moderation transaction, and restart
+persistence. They do not claim:
 
-- an audit Resource over independent processes;
 - adjacent-binary live traffic;
 - receiver-side cancellation of an active inbound Resource;
 - production activation or GUI/TUI presentation.

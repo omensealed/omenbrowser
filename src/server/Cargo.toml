@@ -31,6 +31,8 @@ omenchat-slow-mode = []
 omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
 # Non-product negotiation hook for moderation-audit process qualification.
 omenchat-moderation-audit-qualification = []
+# Non-product hook that forces only moderation-audit pages through Resource.
+omenchat-moderation-audit-resource-qualification = ["omenchat-moderation-audit-qualification"]
 
 [[bin]]
 name = "omenchatd"

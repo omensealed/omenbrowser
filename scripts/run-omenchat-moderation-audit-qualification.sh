@@ -30,11 +30,11 @@ trap 'status=$?; echo "moderation-audit qualification failed at line $LINENO (st
 
 cargo build --locked --manifest-path "$repo_root/Cargo.toml" \
   --no-default-features \
-  --features desktop-product,omenchat-moderation-audit-qualification \
+  --features desktop-product,omenchat-moderation-audit-resource-qualification \
   --bin omenbrowser_rs
 cargo build --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
   --no-default-features \
-  --features server-headless,omenchat-moderation-audit-qualification \
+  --features server-headless,omenchat-moderation-audit-resource-qualification \
   --bin omenchatd
 
 browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
@@ -80,6 +80,7 @@ def qualified(report):
         and capability.get("moderation_audit_negotiated") is True
         and page.get("ok") is True
         and page.get("record_count", 0) >= 1
+        and page.get("resource_delivery") is True
         and page.get("end_seen") is True
     )
 
@@ -88,6 +89,7 @@ report = {
     "isolated_loopback": True,
     "qualification_feature_only": True,
     "authorized_nonempty_read": all(map(qualified, reports)),
+    "resource_delivery": all(map(qualified, reports)),
     "explicit_end_observed": all(map(qualified, reports)),
     "server_restart": True,
     "server_destination_stable": True,

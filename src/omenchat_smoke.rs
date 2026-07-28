@@ -58,6 +58,13 @@ impl OmenChatSmokeTransport {
     fn take_outgoing_resources(&mut self) -> Vec<(String, Vec<u8>)> {
         std::mem::take(&mut self.outgoing_resources)
     }
+
+    fn pending_resource_offer_count(&self) -> usize {
+        self.pending_resource_offers
+            .values()
+            .map(VecDeque::len)
+            .sum()
+    }
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -114,6 +121,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         pin_smoke,
         moderation_audit_smoke,
         moderation_audit_target,
+        moderation_audit_expect_record,
         upload_file,
         fetch_upload_filename,
         fetch_upload_bytes,
@@ -669,11 +677,39 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
 
     let mut moderation_audit_ok = true;
     if joined && message_seen && moderation_audit_smoke {
+        let moderation_audit_page_required =
+            moderation_audit_target.is_some() || moderation_audit_expect_record;
         let room_id = client
             .session(session_id)
             .map(|session| session.active_room.room_id)
             .unwrap_or(1);
         let mut moderation_mutation_ok = true;
+        let pending_before_drain = transport.pending_resource_offer_count();
+        if pending_before_drain > 0 {
+            let drain_events = wait_for_omenchat_condition_or_event(
+                &*app.runtime,
+                &mut runtime_events,
+                &mut client,
+                &mut live_state,
+                &mut transport,
+                OmenChatWaitOptions {
+                    link_id: opened.link_id,
+                    session_id,
+                    wait: Duration::from_secs(response_wait_secs),
+                },
+                |_, transport, _| transport.pending_resource_offer_count() == 0,
+            )
+            .await;
+            let pending_after_drain = transport.pending_resource_offer_count();
+            moderation_mutation_ok = pending_after_drain == 0;
+            stages.push(serde_json::json!({
+                "stage": "moderation_audit_prior_resource_drain",
+                "ok": moderation_mutation_ok,
+                "pending_before": pending_before_drain,
+                "pending_after": pending_after_drain,
+                "events": drain_events,
+            }));
+        }
         if let Some(target) = moderation_audit_target.as_deref() {
             let authenticated_identity_hash = mutation_identity_hash
                 .context("OMENchat moderation audit smoke has no active identity")?;
@@ -721,12 +757,11 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                 session_id,
                 wait: Duration::from_secs(response_wait_secs),
             },
-            (
-                |_| false,
-                |events| {
-                    omenchat_smoke_events_contain_decoded_event(events, "moderation_audit_end")
-                },
-            ),
+            |client, _, events| {
+                omenchat_smoke_events_contain_decoded_event(events, "moderation_audit_end")
+                    && (!moderation_audit_page_required
+                        || client.moderation_audit_page(session_id, room_id).is_some())
+            },
         )
         .await;
         let page = client.moderation_audit_page(session_id, room_id);
@@ -747,11 +782,23 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         });
         let expected_result = if moderation_audit_target.is_some() {
             expected_record
+        } else if moderation_audit_expect_record {
+            page.is_some_and(|page| !page.records.is_empty())
         } else {
             true
         };
         let end_seen =
             omenchat_smoke_events_contain_decoded_event(&page_events, "moderation_audit_end");
+        let inline_delivery = omenchat_smoke_events_contain_decoded_event_on_transport(
+            &page_events,
+            "moderation_audit_page",
+            "link_data",
+        );
+        let resource_delivery = omenchat_smoke_events_contain_decoded_event_on_transport(
+            &page_events,
+            "moderation_audit_page",
+            "resource_data",
+        );
         moderation_audit_ok =
             moderation_mutation_ok && request_accepted && expected_result && end_seen;
         stages.push(serde_json::json!({
@@ -763,6 +810,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             "expected_record": expected_record,
             "record_count": page.map_or(0, |page| page.records.len()),
             "end_seen": end_seen,
+            "inline_delivery": inline_delivery,
+            "resource_delivery": resource_delivery,
         }));
     }
 
@@ -1082,7 +1131,7 @@ async fn wait_for_omenchat_condition(
         live_state,
         transport,
         options,
-        (condition, |_| false),
+        |client, _, _| condition(client),
     )
     .await
 }
@@ -1095,12 +1144,12 @@ async fn wait_for_omenchat_condition_or_event(
     live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
     transport: &mut OmenChatSmokeTransport,
     options: OmenChatWaitOptions,
-    conditions: (
-        impl Fn(&omenbrowser_rs::chat::ChatClient) -> bool,
-        impl Fn(&[serde_json::Value]) -> bool,
-    ),
+    condition: impl Fn(
+        &omenbrowser_rs::chat::ChatClient,
+        &OmenChatSmokeTransport,
+        &[serde_json::Value],
+    ) -> bool,
 ) -> Vec<serde_json::Value> {
-    let (condition, event_condition) = conditions;
     let OmenChatWaitOptions {
         link_id,
         session_id,
@@ -1110,8 +1159,7 @@ async fn wait_for_omenchat_condition_or_event(
     let mut events = Vec::new();
     let mut expected_policy_rejected = false;
     while tokio::time::Instant::now() < deadline
-        && !condition(client)
-        && !event_condition(&events)
+        && !condition(client, transport, &events)
         && !expected_policy_rejected
     {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -3115,6 +3163,25 @@ fn omenchat_smoke_events_contain_decoded_event(
                     event.get("event").and_then(serde_json::Value::as_str) == Some(event_name)
                 })
             })
+    })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_smoke_events_contain_decoded_event_on_transport(
+    events: &[serde_json::Value],
+    event_name: &str,
+    transport_event: &str,
+) -> bool {
+    events.iter().any(|entry| {
+        entry.get("event").and_then(serde_json::Value::as_str) == Some(transport_event)
+            && entry
+                .get("decoded")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|decoded| {
+                    decoded.iter().any(|event| {
+                        event.get("event").and_then(serde_json::Value::as_str) == Some(event_name)
+                    })
+                })
     })
 }
 

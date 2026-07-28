@@ -15,7 +15,7 @@ for feature in "${required[@]}"; do
   fi
 done
 
-forbidden=(mock-runtime desktop-dev desktop-test desktop-ui-test native-rns-net experimental-rns-net-stack legacy-live-rns-net chat-client-rns-legacy omenchat-slow-mode-qualification omenchat-moderation-audit-qualification)
+forbidden=(mock-runtime desktop-dev desktop-test desktop-ui-test native-rns-net experimental-rns-net-stack legacy-live-rns-net chat-client-rns-legacy omenchat-slow-mode-qualification omenchat-moderation-audit-qualification omenchat-moderation-audit-resource-qualification)
 for feature in "${forbidden[@]}"; do
   if grep -q "omenbrowser_rs feature \"$feature\"" <<<"$tree"; then
     echo "product feature verification failed: forbidden feature '$feature' is active" >&2
@@ -235,6 +235,11 @@ for server_profile in server-headless server-full; do
   if grep -q 'omenchatd feature "omenchat-moderation-audit-qualification"' \
     <<<"$server_features"; then
     echo "product feature verification failed: $server_profile activates moderation-audit qualification" >&2
+    exit 1
+  fi
+  if grep -q 'omenchatd feature "omenchat-moderation-audit-resource-qualification"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile activates moderation-audit Resource qualification" >&2
     exit 1
   fi
 done

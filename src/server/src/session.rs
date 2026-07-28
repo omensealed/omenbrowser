@@ -721,16 +721,22 @@ impl SessionEngine {
                 .before_audit_id
                 .map_or_else(|| "newest".into(), |audit_id| audit_id.to_string());
             let purpose = format!("moderation-audit:{seq}:{cursor}");
-            responses.push(Frame::new(
-                self.batch_op(
-                    ChatOp::ModerationAuditInline,
+            let (op, body) = if cfg!(feature = "omenchat-moderation-audit-resource-qualification") {
+                (
                     ChatOp::ModerationAuditResource,
-                    &values,
-                )?,
-                seq,
-                Some(room_id),
-                self.batch_body(room_id, &purpose, &values)?,
-            ));
+                    self.resource_batch_body(room_id, &purpose, &values)?,
+                )
+            } else {
+                (
+                    self.batch_op(
+                        ChatOp::ModerationAuditInline,
+                        ChatOp::ModerationAuditResource,
+                        &values,
+                    )?,
+                    self.batch_body(room_id, &purpose, &values)?,
+                )
+            };
+            responses.push(Frame::new(op, seq, Some(room_id), body));
         }
         if reached_end {
             responses.push(Frame::new(
@@ -5547,6 +5553,31 @@ mod tests {
     use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue};
     use crate::store::OmenchatStore;
 
+    fn expected_moderation_audit_page_op() -> ChatOp {
+        if cfg!(feature = "omenchat-moderation-audit-resource-qualification") {
+            ChatOp::ModerationAuditResource
+        } else {
+            ChatOp::ModerationAuditInline
+        }
+    }
+
+    fn moderation_audit_values(engine: &SessionEngine, frame: &Frame) -> Vec<FrameValue> {
+        match frame.op {
+            ChatOp::ModerationAuditInline => {
+                decode_compressed_values_body(&frame.body).expect("inline audit values")
+            }
+            ChatOp::ModerationAuditResource => {
+                let offer = decode_resource_offer_body(&frame.body).expect("audit Resource offer");
+                let payload = engine
+                    .resource_payload(&offer.resource_id)
+                    .expect("audit Resource lookup")
+                    .expect("audit Resource payload");
+                decode_compressed_values_payload(&payload).expect("audit Resource values")
+            }
+            op => panic!("unexpected moderation audit page operation: {op:?}"),
+        }
+    }
+
     fn peer() -> ServerPeer {
         ServerPeer {
             identity_hash: b"peer-a".to_vec(),
@@ -7053,9 +7084,8 @@ mod tests {
             )
             .expect("first page");
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].op, ChatOp::ModerationAuditInline);
-        let first_values =
-            decode_compressed_values_body(&first[0].body).expect("first page values");
+        assert_eq!(first[0].op, expected_moderation_audit_page_op());
+        let first_values = moderation_audit_values(&engine, &first[0]);
         let first_page = crate::protocol::ModerationAuditPage::from_frame_values(&first_values)
             .expect("first page");
         assert_eq!(first_page.records.len(), 2);
@@ -7085,10 +7115,12 @@ mod tests {
             .expect("second page");
         assert_eq!(
             second.iter().map(|frame| frame.op).collect::<Vec<_>>(),
-            vec![ChatOp::ModerationAuditInline, ChatOp::ModerationAuditEnd]
+            vec![
+                expected_moderation_audit_page_op(),
+                ChatOp::ModerationAuditEnd,
+            ]
         );
-        let second_values =
-            decode_compressed_values_body(&second[0].body).expect("second page values");
+        let second_values = moderation_audit_values(&engine, &second[0]);
         let second_page = crate::protocol::ModerationAuditPage::from_frame_values(&second_values)
             .expect("second page");
         assert_eq!(second_page.records.len(), 1);
@@ -7211,7 +7243,7 @@ mod tests {
                 true,
             )
             .expect("inline");
-        let inline_values = decode_compressed_values_body(&inline[0].body).expect("inline values");
+        let inline_values = moderation_audit_values(&inline_engine, &inline[0]);
 
         let (resource_engine, resource_room_id) = seeded_engine(1);
         let resource = resource_engine
@@ -7373,9 +7405,12 @@ mod tests {
         assert_eq!(duplicate, first);
         assert_eq!(
             first.iter().map(|frame| frame.op).collect::<Vec<_>>(),
-            vec![ChatOp::ModerationAuditInline, ChatOp::ModerationAuditEnd]
+            vec![
+                expected_moderation_audit_page_op(),
+                ChatOp::ModerationAuditEnd,
+            ]
         );
-        let values = decode_compressed_values_body(&first[0].body).expect("page values");
+        let values = moderation_audit_values(&engine, &first[0]);
         let page = crate::protocol::ModerationAuditPage::from_frame_values(&values).expect("page");
         assert_eq!(page.records.len(), 1);
         assert_eq!(page.records[0].action, ModerationAuditAction::RoleChange);

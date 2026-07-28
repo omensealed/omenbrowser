@@ -2,9 +2,8 @@
 
 Status: pin protocol, bounded storage/execution, desktop projection, durable
 controls, deterministic qualification, reversible production negotiation, and
-isolated current/current restart/replay qualification implemented; dormant
-moderation-audit wire contract implemented; moderation-audit storage,
-execution, negotiation, and presentation remain design-only
+isolated current/current inline/Resource restart qualification implemented;
+moderation-audit production negotiation and presentation remain dormant
 
 Baseline: OMENbrowser/omenchatd `0.9.6-3`, planned `0.9.6-4`
 
@@ -511,8 +510,12 @@ The presentation must distinguish:
     transactionally durable mute; the moderator reads the exact inline audit
     row and explicit end marker, orderly-restarts omenchatd, preserves its
     destination and role, and reads the persisted row on a replacement Link.
-    Resource delivery, adjacent binaries, and receiver-side Resource
-    cancellation remain unclaimed. Evidence is in
+    A following narrow qualification feature forced only audit pages through
+    Resource and proved the same persisted row before and after restart. That
+    run found and fixed a missing production payload-bridge classification for
+    `ModerationAuditResource`; a focused regression now guards it. Adjacent
+    binaries and receiver-side Resource cancellation remain unclaimed. Evidence
+    is in
     `docs/audits/omenchat-moderation-audit-process-qualification.md`.
 13. Separately review activation only after the remaining process and
     measurement gates pass.

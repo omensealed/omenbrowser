@@ -945,7 +945,11 @@ PY
   kill "$moderation_target_pid"
   wait "$moderation_target_pid" 2>/dev/null || true
   moderation_target_pid=""
-  moderation_audit_args=(--omenchat-moderation-audit-smoke --omenchat-response-wait 30)
+  moderation_audit_args=(
+    --omenchat-moderation-audit-smoke
+    --omenchat-moderation-audit-expect-record
+    --omenchat-response-wait 30
+  )
 fi
 server_upload_rejection_clean="not-run"
 if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then

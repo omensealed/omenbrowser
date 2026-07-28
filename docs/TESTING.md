@@ -5070,7 +5070,7 @@ migration faults, and guarded schema-9/schema-8 exports are covered separately
 in `docs/audits/omenchat-moderation-audit-storage-qualification.md`. These
 commands do not claim a current/current process restart, adjacent-binary live
 interoperability, active Reticulum Resource cancellation, UI presentation,
-resource measurements, or activation. Paging
+process Resource delivery, resource measurements, or activation. Paging
 evidence is in
 `docs/audits/omenchat-moderation-audit-paging-qualification.md`; wire evidence
 is in `docs/audits/omenchat-moderation-audit-qualification.md`.
@@ -5116,13 +5116,18 @@ bash scripts/run-omenchat-moderation-audit-qualification.sh \
 ```
 
 It builds both roots with
-`omenchat-moderation-audit-qualification`, promotes an isolated registered
-identity to moderator, keeps a second identified target Link active, persists
-and sends one durable mute, and requires the matching non-empty inline audit
-row plus explicit `ModerationAuditEnd`. It orderly-restarts omenchatd and reads
-the persisted row again with a stable server destination. It does not prove a
-Resource page or inbound Resource cancellation. Canonical product profiles
-reject this qualification feature.
+`omenchat-moderation-audit-resource-qualification`, which is a non-product
+extension of `omenchat-moderation-audit-qualification`. It promotes an
+isolated registered identity to moderator, keeps a second identified target
+Link active, persists and sends one durable mute, and requires the matching
+non-empty audit row, Resource transport provenance, and explicit
+`ModerationAuditEnd`. It orderly-restarts omenchatd and requires the same
+Resource-delivered persisted row with a stable server destination. The gate
+found and now guards the production payload bridge's
+`ModerationAuditResource` classification. Canonical product profiles reject
+both qualification features. This proves independent-process Resource
+delivery, not receiver-side cancellation of an active inbound Resource or
+adjacent-binary interoperability.
 
 Focused schema/storage gates:
 

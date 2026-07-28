@@ -1471,18 +1471,22 @@ budget and the next admission failed closed; 2,048 file-backed server rows
 stayed within the per-room and global byte budgets. Exact host observations and
 reproducible commands are recorded in the paging qualification audit.
 Current/current process restart, adjacent-binary live traffic, and active
-Resource cancellation remain separate pre-activation gates.
+Resource cancellation remained separate pre-activation gates at that point.
 
-The next isolated qualification slices add a non-product negotiation feature
-and complete current/current empty and non-empty inline restart boundaries.
+The next isolated qualification slices add non-product negotiation features
+and complete current/current empty, non-empty inline, and non-empty Resource
+restart boundaries.
 Two separately identified clients remain active while the moderator persists
 and sends a durable mute for the uniquely named target. The exact typed result,
 matching audit row, muted result bit, and explicit end marker are required.
 After orderly omenchatd restart, the same moderator identity reads the
 persisted row on a replacement Link while the server destination remains
-stable. Product profiles remain machine-guarded against the feature. This does
-not claim a Resource process page, adjacent binaries, or receiver-side
-Resource cancellation. Evidence is in
+stable. A narrow follow-up forces only moderation-audit pages through Resource
+and proves Resource delivery on both Links. It also found and fixed a server
+payload-bridge omission that sent the offer frame but never offered the
+retained Resource payload. Product profiles remain machine-guarded against
+both qualification features. This does not claim adjacent-binary live traffic
+or receiver-side Resource cancellation. Evidence is in
 `docs/audits/omenchat-moderation-audit-process-qualification.md`.
 
 The subsequent cancellation review ran the existing real loopback Reticulum
