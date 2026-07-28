@@ -29,6 +29,8 @@ omenchat-announcement-rooms = []
 omenchat-slow-mode = []
 # Non-product interoperability hooks for deterministic live qualification.
 omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
+# Non-product negotiation hook for moderation-audit process qualification.
+omenchat-moderation-audit-qualification = []
 
 [[bin]]
 name = "omenchatd"

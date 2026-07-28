@@ -53,6 +53,8 @@ omenchat-announcement-rooms = []
 omenchat-slow-mode = []
 # Non-product interoperability hooks for deterministic live qualification.
 omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
+# Non-product negotiation hook for moderation-audit process qualification.
+omenchat-moderation-audit-qualification = []
 
 # Canonical build identities. Release and packaging commands must use
 # `--no-default-features --features desktop-product`; development profiles keep

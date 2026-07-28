@@ -68,7 +68,8 @@ const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
 const REACTIONS_SERVER_ENABLED: bool = true;
 const MESSAGE_REVISIONS_SERVER_ENABLED: bool = true;
 const ROOM_PINS_SERVER_ENABLED: bool = true;
-const MODERATION_AUDIT_SERVER_ENABLED: bool = false;
+const MODERATION_AUDIT_SERVER_ENABLED: bool =
+    cfg!(feature = "omenchat-moderation-audit-qualification");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPeer {
@@ -6441,7 +6442,7 @@ mod tests {
     }
 
     #[test]
-    fn moderation_audit_capability_remains_dormant() {
+    fn moderation_audit_capability_follows_qualification_feature() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(
             FrameBody::Text("Alice".into()),
@@ -6458,10 +6459,18 @@ mod tests {
         let response = engine
             .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 4, None, request))
             .expect("session open");
+        let expected = if cfg!(feature = "omenchat-moderation-audit-qualification") {
+            vec![
+                crate::protocol::MODERATION_AUDIT_CAPABILITY.into(),
+                crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+            ]
+        } else {
+            vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()]
+        };
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
             Ok(Some(crate::protocol::SessionAcceptNegotiation {
-                accepted_capabilities: vec![crate::protocol::DURABLE_MUTATION_CAPABILITY.into()],
+                accepted_capabilities: expected,
             }))
         );
 
@@ -6479,9 +6488,14 @@ mod tests {
                 Frame::new(ChatOp::SessionOpen, 5, None, audit_only),
             )
             .expect("audit-only session open");
+        let expected = cfg!(feature = "omenchat-moderation-audit-qualification").then(|| {
+            crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![crate::protocol::MODERATION_AUDIT_CAPABILITY.into()],
+            }
+        });
         assert_eq!(
             crate::protocol::parse_session_accept_negotiation(&response[0].body),
-            Ok(None)
+            Ok(expected)
         );
     }
 

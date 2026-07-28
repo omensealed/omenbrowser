@@ -5108,6 +5108,21 @@ receiver-side cancellation of an inbound audit page. The locked
 `reticulum-rs-transport 0.9.6` API has no public receiver-cancel operation.
 Keep that distinction in test and release claims.
 
+The non-product current/current moderation-audit process gate is:
+
+```bash
+bash scripts/run-omenchat-moderation-audit-qualification.sh \
+  --report /tmp/omen-moderation-audit-qualification-report.json
+```
+
+It builds both roots with
+`omenchat-moderation-audit-qualification`, promotes an isolated registered
+identity to moderator, proves an authorized bounded empty read with explicit
+`ModerationAuditEnd`, orderly-restarts omenchatd, and repeats the read with a
+stable server destination. It does not prove a non-empty inline/Resource page
+or inbound Resource cancellation. Canonical product profiles reject this
+qualification feature.
+
 Focused schema/storage gates:
 
 ```bash

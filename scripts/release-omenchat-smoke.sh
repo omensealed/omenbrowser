@@ -31,6 +31,7 @@ live_policy_maintenance_refused="not-run"
 reaction_smoke=0
 revision_smoke=0
 pin_smoke=0
+moderation_audit_smoke=0
 
 usage() {
   cat <<'USAGE'
@@ -76,6 +77,8 @@ Options:
   --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
   --revision-smoke     Exercise negotiated durable corrections, tombstones, replay, and Resource recovery
   --pin-smoke          Exercise moderator-only durable pin replay, snapshots, no-op, and unpin
+  --moderation-audit-smoke
+                       Qualification build only: perform an authorized bounded audit read
   --keep-roots         Leave generated browser/server roots in place
   -h, --help           Show this help
 
@@ -193,6 +196,11 @@ while [[ $# -gt 0 ]]; do
       pin_smoke=1
       shift
       ;;
+    --moderation-audit-smoke)
+      moderation_audit_smoke=1
+      restart_server=1
+      shift
+      ;;
     --keep-roots)
       keep_roots=1
       shift
@@ -290,6 +298,17 @@ if [[ "$slow_mode_rejection_smoke" -eq 1 ]] \
     || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
     || -n "$upload_file" ]]; then
   echo "--slow-mode-rejection-smoke is an isolated qualification case" >&2
+  exit 2
+fi
+if [[ "$moderation_audit_smoke" -eq 1 ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 \
+    || "$announcement_upload_rejection_smoke" -eq 1 \
+    || "$announcement_moderator_smoke" -eq 1 \
+    || "$slow_mode_rejection_smoke" -eq 1 \
+    || "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
+    || -n "$upload_file" ]]; then
+  echo "--moderation-audit-smoke is an isolated qualification case" >&2
   exit 2
 fi
 if [[ ( "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 ) \
@@ -599,9 +618,12 @@ echo "== Creating isolated browser identity =="
   > "$run_dir/browser-identity.json" \
   2> "$run_dir/browser-identity.stderr"
 
-if [[ "$pin_smoke" -eq 1 || "$announcement_moderator_smoke" -eq 1 ]]; then
+if [[ "$pin_smoke" -eq 1 || "$announcement_moderator_smoke" -eq 1 \
+  || "$moderation_audit_smoke" -eq 1 ]]; then
   if [[ "$pin_smoke" -eq 1 ]]; then
     moderator_mode="pin"
+  elif [[ "$moderation_audit_smoke" -eq 1 ]]; then
+    moderator_mode="moderation-audit"
   else
     moderator_mode="announcement"
   fi
@@ -706,6 +728,10 @@ pin_args=()
 if [[ "$pin_smoke" -eq 1 ]]; then
   pin_args=(--omenchat-pin-smoke --omenchat-response-wait 30)
 fi
+moderation_audit_args=()
+if [[ "$moderation_audit_smoke" -eq 1 ]]; then
+  moderation_audit_args=(--omenchat-moderation-audit-smoke --omenchat-response-wait 30)
+fi
 announcement_rejection_args=()
 if [[ "$announcement_rejection_smoke" -eq 1 ]]; then
   announcement_rejection_args=(--omenchat-announcement-rejection-smoke)
@@ -729,6 +755,7 @@ fi
   "${reaction_args[@]}" \
   "${revision_args[@]}" \
   "${pin_args[@]}" \
+  "${moderation_audit_args[@]}" \
   "${upload_args[@]}" \
   "${continuous_args[@]}" \
   --output "$run_dir/omenchat-smoke.json" \
@@ -849,6 +876,22 @@ if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
     exit 1
   fi
   live_policy_maintenance_refused=1
+fi
+if [[ "$moderation_audit_smoke" -eq 1 ]]; then
+  python3 - "$run_dir/omenchat-smoke.json" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+stages = {stage.get("stage"): stage for stage in report.get("stages", []) if isinstance(stage, dict)}
+capability = stages.get("capability_observation", {})
+page = stages.get("moderation_audit_empty_read", {})
+if capability.get("moderation_audit_negotiated") is not True:
+    raise SystemExit("moderation audit capability was not negotiated")
+if page.get("ok") is not True or page.get("empty_read") is not True or page.get("end_seen") is not True:
+    raise SystemExit("authorized moderation audit empty-read evidence was incomplete")
+PY
 fi
 server_upload_rejection_clean="not-run"
 if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
@@ -1012,6 +1055,7 @@ if [[ "$restart_server" -eq 1 ]]; then
     "${reaction_args[@]}" \
     "${revision_args[@]}" \
     "${pin_args[@]}" \
+    "${moderation_audit_args[@]}" \
     "${restart_upload_args[@]}" \
     --output "$run_dir/omenchat-smoke-restart.json" \
     > "$run_dir/omenchat-smoke-restart.stdout" \
@@ -1050,6 +1094,22 @@ if [[ "$restart_server" -eq 1 ]]; then
     fi
     verify_slow_mode_qualification_report \
       "$run_dir/omenchat-smoke-expiry.json" 0 "$slow_mode_seconds"
+  fi
+  if [[ "$moderation_audit_smoke" -eq 1 ]]; then
+    python3 - "$run_dir/omenchat-smoke-restart.json" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+stages = {stage.get("stage"): stage for stage in report.get("stages", []) if isinstance(stage, dict)}
+capability = stages.get("capability_observation", {})
+page = stages.get("moderation_audit_empty_read", {})
+if capability.get("moderation_audit_negotiated") is not True:
+    raise SystemExit("post-restart moderation audit capability was not negotiated")
+if page.get("ok") is not True or page.get("empty_read") is not True or page.get("end_seen") is not True:
+    raise SystemExit("post-restart moderation audit empty-read evidence was incomplete")
+PY
   fi
 fi
 
@@ -1135,6 +1195,7 @@ live_policy_maintenance_refused: $live_policy_maintenance_refused
 reaction_smoke: $reaction_smoke
 revision_smoke: $revision_smoke
 pin_smoke: $pin_smoke
+moderation_audit_smoke: $moderation_audit_smoke
 continuous_link_closed: $continuous_link_closed
 continuous_link_reopened: $continuous_link_reopened
 continuous_session_reconnected: $continuous_session_reconnected

@@ -111,6 +111,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         reaction_smoke,
         revision_smoke,
         pin_smoke,
+        moderation_audit_smoke,
         upload_file,
         fetch_upload_filename,
         fetch_upload_bytes,
@@ -225,6 +226,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                     announcement_upload_rejection_smoke,
                     slow_mode_rejection_smoke,
                     slow_mode_delta_seconds,
+                    moderation_audit_smoke,
                 },
                 stages,
                 None,
@@ -285,6 +287,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                 announcement_upload_rejection_smoke,
                 slow_mode_rejection_smoke,
                 slow_mode_delta_seconds,
+                moderation_audit_smoke,
             },
             stages,
             None,
@@ -380,6 +383,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "reply_mentions_negotiated": live_state.reply_mentions_negotiated(session_id),
         "reactions_negotiated": live_state.reactions_negotiated(session_id),
         "message_revisions_negotiated": live_state.message_revisions_negotiated(session_id),
+        "moderation_audit_negotiated": live_state.moderation_audit_negotiated(session_id),
         "announcement_rooms_negotiated": announcement_rooms_negotiated,
         "announcement_policy_bits": announcement_policy_bits,
         "announcement_policy_observed": announcement_policy_observed,
@@ -660,6 +664,58 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         stages.extend(pin_stages);
     }
 
+    let mut moderation_audit_ok = true;
+    if joined && message_seen && moderation_audit_smoke {
+        let room_id = client
+            .session(session_id)
+            .map(|session| session.active_room.room_id)
+            .unwrap_or(1);
+        let request_events = omenbrowser_rs::chat::live::request_live_moderation_audit(
+            &mut client,
+            &mut live_state,
+            &mut transport,
+            session_id,
+            None,
+            50,
+        );
+        let request_accepted = !request_events
+            .iter()
+            .any(|event| matches!(event, ChatClientEvent::Error { .. }));
+        send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
+        let page_events = wait_for_omenchat_condition_or_event(
+            &*app.runtime,
+            &mut runtime_events,
+            &mut client,
+            &mut live_state,
+            &mut transport,
+            OmenChatWaitOptions {
+                link_id: opened.link_id,
+                session_id,
+                wait: Duration::from_secs(response_wait_secs),
+            },
+            (
+                |client| client.moderation_audit_page(session_id, room_id).is_some(),
+                |events| {
+                    omenchat_smoke_events_contain_decoded_event(events, "moderation_audit_end")
+                },
+            ),
+        )
+        .await;
+        let page = client.moderation_audit_page(session_id, room_id);
+        let empty_read = page.is_none() || page.is_some_and(|page| page.records.is_empty());
+        let end_seen =
+            omenchat_smoke_events_contain_decoded_event(&page_events, "moderation_audit_end");
+        moderation_audit_ok = request_accepted && empty_read && end_seen;
+        stages.push(serde_json::json!({
+            "stage": "moderation_audit_empty_read",
+            "ok": moderation_audit_ok,
+            "request_events": request_events.iter().map(format_chat_event).collect::<Vec<_>>(),
+            "events": page_events,
+            "empty_read": empty_read,
+            "end_seen": end_seen,
+        }));
+    }
+
     let mut upload_ok = true;
     if joined && message_seen {
         if let Some(upload_file) = upload_file {
@@ -873,6 +929,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         && reaction_ok
         && revision_ok
         && pin_ok
+        && moderation_audit_ok
         && upload_ok
         && reconnect_ok;
     let failed_stage = if !joined {
@@ -893,6 +950,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "revision_smoke"
     } else if !pin_ok {
         "pin_smoke"
+    } else if !moderation_audit_ok {
+        "moderation_audit_smoke"
     } else if !upload_ok {
         "upload_fetch_wait"
     } else if !reconnect_ok {
@@ -911,6 +970,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             announcement_upload_rejection_smoke,
             slow_mode_rejection_smoke,
             slow_mode_delta_seconds,
+            moderation_audit_smoke,
         },
         stages,
         session_summary,
@@ -965,6 +1025,32 @@ async fn wait_for_omenchat_condition(
     options: OmenChatWaitOptions,
     condition: impl Fn(&omenbrowser_rs::chat::ChatClient) -> bool,
 ) -> Vec<serde_json::Value> {
+    wait_for_omenchat_condition_or_event(
+        runtime,
+        runtime_events,
+        client,
+        live_state,
+        transport,
+        options,
+        (condition, |_| false),
+    )
+    .await
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+async fn wait_for_omenchat_condition_or_event(
+    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
+    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
+    client: &mut omenbrowser_rs::chat::ChatClient,
+    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
+    transport: &mut OmenChatSmokeTransport,
+    options: OmenChatWaitOptions,
+    conditions: (
+        impl Fn(&omenbrowser_rs::chat::ChatClient) -> bool,
+        impl Fn(&[serde_json::Value]) -> bool,
+    ),
+) -> Vec<serde_json::Value> {
+    let (condition, event_condition) = conditions;
     let OmenChatWaitOptions {
         link_id,
         session_id,
@@ -973,7 +1059,10 @@ async fn wait_for_omenchat_condition(
     let deadline = tokio::time::Instant::now() + wait;
     let mut events = Vec::new();
     let mut expected_policy_rejected = false;
-    while tokio::time::Instant::now() < deadline && !condition(client) && !expected_policy_rejected
+    while tokio::time::Instant::now() < deadline
+        && !condition(client)
+        && !event_condition(&events)
+        && !expected_policy_rejected
     {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let received = tokio::time::timeout(remaining, runtime_events.recv()).await;
@@ -3295,6 +3384,7 @@ struct OmenChatSmokeReportContext<'a> {
     announcement_upload_rejection_smoke: bool,
     slow_mode_rejection_smoke: bool,
     slow_mode_delta_seconds: Option<u32>,
+    moderation_audit_smoke: bool,
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -3313,6 +3403,7 @@ fn omenchat_smoke_report(
         announcement_upload_rejection_smoke,
         slow_mode_rejection_smoke,
         slow_mode_delta_seconds,
+        moderation_audit_smoke,
     } = context;
     serde_json::json!({
         "report": "omenchat_smoke",
@@ -3327,6 +3418,8 @@ fn omenchat_smoke_report(
                 "OMENchat Link opened, slow mode was negotiated, and the server rejected a second publication without committing it"
             } else if ok && slow_mode_delta_seconds.is_some() {
                 "OMENchat Link opened, a live slow-mode room delta was observed, and the first publication was committed"
+            } else if ok && moderation_audit_smoke {
+                "OMENchat Link opened, moderation audit was negotiated, and an authorized empty read with explicit end evidence was observed"
             } else if ok {
                 "OMENchat Link opened, room joined, and message echo was observed"
             } else {
@@ -3345,6 +3438,7 @@ fn omenchat_smoke_report(
         "announcement_upload_rejection_smoke": announcement_upload_rejection_smoke,
         "slow_mode_rejection_smoke": slow_mode_rejection_smoke,
         "slow_mode_delta_seconds": slow_mode_delta_seconds,
+        "moderation_audit_smoke": moderation_audit_smoke,
         "stages": stages,
         "session": session,
     })

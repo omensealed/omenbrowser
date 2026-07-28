@@ -199,6 +199,7 @@ async fn async_main() -> anyhow::Result<()> {
             reaction_smoke,
             revision_smoke,
             pin_smoke,
+            moderation_audit_smoke,
             upload_file,
             fetch_upload_filename,
             fetch_upload_bytes,
@@ -222,6 +223,7 @@ async fn async_main() -> anyhow::Result<()> {
                 reaction_smoke,
                 revision_smoke,
                 pin_smoke,
+                moderation_audit_smoke,
                 upload_file,
                 fetch_upload_filename,
                 fetch_upload_bytes,
@@ -373,6 +375,7 @@ enum CliCommand {
         reaction_smoke: bool,
         revision_smoke: bool,
         pin_smoke: bool,
+        moderation_audit_smoke: bool,
         upload_file: Option<PathBuf>,
         fetch_upload_filename: Option<String>,
         fetch_upload_bytes: Option<u64>,
@@ -445,6 +448,7 @@ struct OmenChatSmokeCommandInput {
     reaction_smoke: bool,
     revision_smoke: bool,
     pin_smoke: bool,
+    moderation_audit_smoke: bool,
     upload_file: Option<PathBuf>,
     fetch_upload_filename: Option<String>,
     fetch_upload_bytes: Option<u64>,
@@ -538,6 +542,7 @@ impl CliCommand {
         let mut omenchat_reaction_smoke = false;
         let mut omenchat_revision_smoke = false;
         let mut omenchat_pin_smoke = false;
+        let mut omenchat_moderation_audit_smoke = false;
         let mut omenchat_upload_file = None;
         let mut omenchat_fetch_upload_filename = None;
         let mut omenchat_fetch_upload_bytes = None;
@@ -648,6 +653,9 @@ impl CliCommand {
                 }
                 "--omenchat-pin-smoke" => {
                     omenchat_pin_smoke = true;
+                }
+                "--omenchat-moderation-audit-smoke" => {
+                    omenchat_moderation_audit_smoke = true;
                 }
                 "--omenchat-upload-file" | "--upload-file" => {
                     let value = args
@@ -938,6 +946,22 @@ impl CliCommand {
                     "--omenchat-slow-mode-delta-smoke is an isolated qualification case"
                 ));
             }
+            if omenchat_moderation_audit_smoke
+                && (omenchat_slow_mode_rejection_smoke
+                    || omenchat_slow_mode_delta_seconds.is_some()
+                    || omenchat_announcement_rejection_smoke
+                    || omenchat_announcement_upload_rejection_smoke
+                    || omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_some()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-moderation-audit-smoke is an isolated qualification case"
+                ));
+            }
             if omenchat_announcement_rejection_smoke
                 && (omenchat_reaction_smoke
                     || omenchat_revision_smoke
@@ -974,6 +998,7 @@ impl CliCommand {
                 reaction_smoke: omenchat_reaction_smoke,
                 revision_smoke: omenchat_revision_smoke,
                 pin_smoke: omenchat_pin_smoke,
+                moderation_audit_smoke: omenchat_moderation_audit_smoke,
                 upload_file: omenchat_upload_file,
                 fetch_upload_filename: omenchat_fetch_upload_filename,
                 fetch_upload_bytes: omenchat_fetch_upload_bytes,
@@ -3768,6 +3793,7 @@ mod tests {
                 reaction_smoke: true,
                 revision_smoke: true,
                 pin_smoke: true,
+                moderation_audit_smoke: false,
                 upload_file: None,
                 fetch_upload_filename: None,
                 fetch_upload_bytes: None,
@@ -3790,6 +3816,34 @@ mod tests {
                 ),
             }
         );
+    }
+
+    #[test]
+    fn cli_parses_isolated_moderation_audit_smoke() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-moderation-audit-smoke".to_string(),
+        ])
+        .expect("parse");
+
+        assert!(matches!(
+            parsed,
+            CliCommand::OmenChatSmoke {
+                moderation_audit_smoke: true,
+                reaction_smoke: false,
+                revision_smoke: false,
+                pin_smoke: false,
+                ..
+            }
+        ));
+        assert!(CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-moderation-audit-smoke".to_string(),
+            "--omenchat-pin-smoke".to_string(),
+        ])
+        .is_err());
     }
 
     #[test]

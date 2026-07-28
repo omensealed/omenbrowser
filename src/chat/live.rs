@@ -21,12 +21,12 @@ use super::protocol::{
     parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, MessageRevisionAck,
     MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot, ModerationAuditPage,
-    MutationId, PinAck, PinAction, PinEvent, PinRequest, PinSnapshot, ReactionAck, ReactionEvent,
-    ReactionRequest, ReactionSnapshot, RichMessageBody, RoomCatalogEntry, RoomCatalogShape, RoomId,
-    RoomPolicyProjection, SessionOpenNegotiation, ANNOUNCEMENT_ROOMS_CAPABILITY,
-    DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY,
-    MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
-    ROOM_SLOW_MODE_CAPABILITY,
+    ModerationAuditRequest, MutationId, PinAck, PinAction, PinEvent, PinRequest, PinSnapshot,
+    ReactionAck, ReactionEvent, ReactionRequest, ReactionSnapshot, RichMessageBody,
+    RoomCatalogEntry, RoomCatalogShape, RoomId, RoomPolicyProjection, SessionOpenNegotiation,
+    ANNOUNCEMENT_ROOMS_CAPABILITY, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
+    DURABLE_NOTICE_ACK_CAPABILITY, MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME,
+    REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY, ROOM_SLOW_MODE_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -808,6 +808,59 @@ pub fn ping_live_session<T: ChatLinkTransport>(
     )
 }
 
+pub fn request_live_moderation_audit<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    before_audit_id: Option<u64>,
+    limit: u16,
+) -> Vec<ChatClientEvent> {
+    if !state.moderation_audit_negotiated(session_id) {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "moderation audit requires moderation-audit-v1 negotiation".into(),
+        }];
+    }
+    let Some(room_id) = client
+        .session(session_id)
+        .filter(|session| session.active_room.joined)
+        .map(|session| session.active_room.room_id)
+    else {
+        return vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "moderation audit requires a joined room".into(),
+        }];
+    };
+    let body = match (ModerationAuditRequest {
+        before_audit_id,
+        limit,
+    })
+    .into_frame_body()
+    {
+        Ok(body) => body,
+        Err(error) => {
+            return vec![ChatClientEvent::Error {
+                session_id: Some(session_id),
+                message: format!("invalid moderation audit request: {error}"),
+            }];
+        }
+    };
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
+    send_frame_or_error(
+        transport,
+        Frame::new(ChatOp::ModerationAuditBefore, seq, Some(room_id), body),
+        Some(session_id),
+    )
+    .map_or_else(
+        || drain_live_events(client, transport, Some(session_id)),
+        |event| vec![event],
+    )
+}
+
 fn open_live_server<T: ChatLinkTransport>(
     client: &mut ChatClient,
     state: &mut LiveChatClientState,
@@ -941,6 +994,9 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         if cfg!(feature = "omenchat-slow-mode") || slow_mode_requested_for_test {
             requested_capabilities.push(ROOM_SLOW_MODE_CAPABILITY.into());
         }
+        if cfg!(feature = "omenchat-moderation-audit-qualification") {
+            requested_capabilities.push(MODERATION_AUDIT_CAPABILITY.into());
+        }
         session_open_body = match with_session_open_negotiation(
             session_open_body,
             &SessionOpenNegotiation {
@@ -984,6 +1040,9 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         }
         if cfg!(feature = "omenchat-slow-mode") || slow_mode_requested_for_test {
             state.slow_mode_requests.insert(session_id);
+        }
+        if cfg!(feature = "omenchat-moderation-audit-qualification") {
+            state.moderation_audit_requests.insert(session_id);
         }
     }
 
@@ -6027,6 +6086,9 @@ mod tests {
         if cfg!(feature = "omenchat-slow-mode") {
             expected_capabilities.push(crate::chat::protocol::ROOM_SLOW_MODE_CAPABILITY.into());
         }
+        if cfg!(feature = "omenchat-moderation-audit-qualification") {
+            expected_capabilities.push(crate::chat::protocol::MODERATION_AUDIT_CAPABILITY.into());
+        }
         assert_eq!(
             crate::chat::protocol::parse_session_open_negotiation(&session_open.body),
             Ok(Some(SessionOpenNegotiation {
@@ -6044,6 +6106,10 @@ mod tests {
         assert!(!state.reactions_negotiated(1));
         assert!(!state.message_revisions_negotiated(1));
         assert!(!state.pins_negotiated(1));
+        assert_eq!(
+            state.moderation_audit_requests.contains(&1),
+            cfg!(feature = "omenchat-moderation-audit-qualification")
+        );
         assert!(!state.moderation_audit_negotiated(1));
         assert_eq!(
             state.announcement_room_requests.contains(&1),
@@ -6214,6 +6280,70 @@ mod tests {
         );
         assert!(!state.moderation_audit_negotiated(session_id));
         assert!(client.moderation_audit_page(session_id, 1).is_none());
+    }
+
+    #[test]
+    fn moderation_audit_request_requires_negotiation_join_and_protocol_bounds() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+
+        let rejected = request_live_moderation_audit(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            None,
+            50,
+        );
+        assert!(matches!(
+            rejected.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("requires moderation-audit-v1 negotiation")
+        ));
+        assert!(transport.sent_frames.is_empty());
+
+        state.set_moderation_audit_negotiated_for_test(session_id, true);
+        let invalid = request_live_moderation_audit(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            None,
+            0,
+        );
+        assert!(matches!(
+            invalid.as_slice(),
+            [ChatClientEvent::Error { message, .. }]
+                if message.contains("invalid moderation audit request")
+        ));
+        assert!(transport.sent_frames.is_empty());
+
+        let sent = request_live_moderation_audit(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            Some(42),
+            50,
+        );
+        assert!(sent.is_empty());
+        let frame = decode_frame(
+            transport
+                .sent_frames
+                .last()
+                .expect("moderation audit request frame"),
+        )
+        .expect("decode moderation audit request");
+        assert_eq!(frame.op, ChatOp::ModerationAuditBefore);
+        assert_eq!(frame.room_id, Some(1));
+        assert_eq!(
+            ModerationAuditRequest::from_frame_body(&frame.body),
+            Ok(ModerationAuditRequest {
+                before_audit_id: Some(42),
+                limit: 50,
+            })
+        );
     }
 
     #[test]
