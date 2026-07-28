@@ -5,6 +5,7 @@ use rusqlite::OptionalExtension;
 use crate::error::ServerResult;
 use crate::protocol::{
     EventId, RichMessageEventMetadata, RoomId, UserId, ROOM_POLICY_ANNOUNCEMENT,
+    ROOM_SLOW_MODE_MAX_SECONDS,
 };
 
 pub mod durable_replay;
@@ -13,6 +14,7 @@ pub mod message_revisions;
 pub mod moderation_audit;
 pub mod pins;
 pub mod reactions;
+pub mod slow_mode;
 
 pub use history_retention::RoomHistoryRetentionPolicy;
 pub use history_retention::{RoomHistoryCompaction, RoomHistoryMaintenanceStatus};
@@ -24,6 +26,7 @@ pub struct ServerRoom {
     pub topic: Option<String>,
     pub room_revision: u64,
     pub policy_bits: u64,
+    pub slow_mode_seconds: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +38,11 @@ pub(crate) enum RoomContentMutationAdmission {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RoomPolicyUpdateBoundary {
+    BeforeCommit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoomSlowModeUpdateBoundary {
     BeforeCommit,
 }
 
@@ -150,7 +158,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 11;
+pub(crate) const SCHEMA_VERSION: i64 = 12;
 const ROOM_PUBLISHER_ROLE_MASK: u64 = (1 << 1) | (1 << 2);
 const HISTORY_USAGE_BACKFILL_BATCH: usize = 256;
 const HISTORY_EVENT_FIXED_RETAINED_BYTES: u64 = 64;
@@ -536,7 +544,7 @@ impl OmenchatStore {
 
     pub fn room_by_name(&self, name: &str) -> ServerResult<Option<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision, policy_bits
+            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
              FROM rooms
              WHERE name = ?1 AND archived = 0",
         )?;
@@ -546,7 +554,7 @@ impl OmenchatStore {
 
     pub fn room_by_id(&self, room_id: RoomId) -> ServerResult<Option<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision, policy_bits
+            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
              FROM rooms
              WHERE room_id = ?1 AND archived = 0",
         )?;
@@ -556,7 +564,7 @@ impl OmenchatStore {
 
     pub fn list_rooms(&self) -> ServerResult<Vec<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision, policy_bits
+            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
              FROM rooms
              WHERE archived = 0
              ORDER BY name",
@@ -615,7 +623,7 @@ impl OmenchatStore {
         )?;
         let room = transaction
             .query_row(
-                "SELECT room_id, name, topic, room_revision, policy_bits
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
                  FROM rooms WHERE room_id = ?1 AND archived = 0",
                 [room_id],
                 room_from_row,
@@ -628,6 +636,57 @@ impl OmenchatStore {
             ));
         }
         hook(RoomPolicyUpdateBoundary::BeforeCommit)?;
+        transaction.commit()?;
+        Ok(room)
+    }
+
+    pub fn set_room_slow_mode_seconds(
+        &self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<ServerRoom> {
+        self.set_room_slow_mode_seconds_with_hook(room_id, slow_mode_seconds, |_| Ok(()))
+    }
+
+    fn set_room_slow_mode_seconds_with_hook<H>(
+        &self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+        mut hook: H,
+    ) -> ServerResult<ServerRoom>
+    where
+        H: FnMut(RoomSlowModeUpdateBoundary) -> ServerResult<()>,
+    {
+        if slow_mode_seconds > ROOM_SLOW_MODE_MAX_SECONDS {
+            return Err(crate::error::ServerError::Message(format!(
+                "room slow mode cannot exceed {ROOM_SLOW_MODE_MAX_SECONDS} seconds"
+            )));
+        }
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE rooms
+             SET slow_mode_seconds = ?1, room_revision = room_revision + 1
+             WHERE room_id = ?2 AND archived = 0 AND slow_mode_seconds != ?1",
+            (i64::from(slow_mode_seconds), room_id as i64),
+        )?;
+        let room = transaction
+            .query_row(
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                room_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| crate::error::ServerError::Message("room not found".into()))?;
+        if changed > 1 {
+            return Err(crate::error::ServerError::Message(
+                "room slow-mode update changed more than one room".into(),
+            ));
+        }
+        hook(RoomSlowModeUpdateBoundary::BeforeCommit)?;
         transaction.commit()?;
         Ok(room)
     }
@@ -1307,7 +1366,10 @@ enum ModerationAuditMigrationBoundary {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RoomPolicyMigrationBoundary {
-    Column,
+    PolicyColumn,
+    SlowModeColumn,
+    SlowModeTable,
+    SlowModeIndex,
     VersionUpdate,
     Commit,
 }
@@ -1329,7 +1391,7 @@ fn ensure_room_policy_schema_with_hook<H>(
 where
     H: FnMut(RoomPolicyMigrationBoundary) -> ServerResult<()>,
 {
-    hook(RoomPolicyMigrationBoundary::Column)?;
+    hook(RoomPolicyMigrationBoundary::PolicyColumn)?;
     let mut statement = transaction.prepare("PRAGMA table_info(rooms)")?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))?
@@ -1342,6 +1404,29 @@ where
              CHECK(policy_bits >= 0 AND policy_bits <= 1);",
         )?;
     }
+    hook(RoomPolicyMigrationBoundary::SlowModeColumn)?;
+    if !columns.contains("slow_mode_seconds") {
+        transaction.execute_batch(
+            "ALTER TABLE rooms
+             ADD COLUMN slow_mode_seconds INTEGER NOT NULL DEFAULT 0
+             CHECK(slow_mode_seconds BETWEEN 0 AND 86400);",
+        )?;
+    }
+    hook(RoomPolicyMigrationBoundary::SlowModeTable)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_slow_mode_admissions(
+           room_id INTEGER NOT NULL,
+           user_id INTEGER NOT NULL,
+           not_before_unix INTEGER NOT NULL CHECK(not_before_unix >= 0),
+           updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+           PRIMARY KEY(room_id, user_id)
+         );",
+    )?;
+    hook(RoomPolicyMigrationBoundary::SlowModeIndex)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_slow_mode_admissions_expiry
+         ON room_slow_mode_admissions(not_before_unix, room_id, user_id);",
+    )?;
     Ok(())
 }
 
@@ -2102,6 +2187,7 @@ fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRoom> {
         topic: row.get(2)?,
         room_revision: row.get::<_, i64>(3)? as u64,
         policy_bits: row.get::<_, i64>(4)? as u64,
+        slow_mode_seconds: row.get::<_, i64>(5)? as u32,
     })
 }
 
@@ -2412,6 +2498,25 @@ mod tests {
             .pragma_update(None, "user_version", 10)
             .expect("version ten marker");
         transaction.commit().expect("version ten commit");
+    }
+
+    fn create_version_eleven_fixture(path: &std::path::Path) {
+        create_version_ten_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version eleven database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version eleven transaction");
+        transaction
+            .execute_batch(
+                "ALTER TABLE rooms
+                 ADD COLUMN policy_bits INTEGER NOT NULL DEFAULT 0
+                 CHECK(policy_bits >= 0 AND policy_bits <= 1);",
+            )
+            .expect("version eleven room policy schema");
+        transaction
+            .pragma_update(None, "user_version", 11)
+            .expect("version eleven marker");
+        transaction.commit().expect("version eleven commit");
     }
 
     fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
@@ -3950,7 +4055,7 @@ mod tests {
     }
 
     #[test]
-    fn version_ten_database_adds_constrained_ordinary_room_policy() {
+    fn version_ten_database_adds_constrained_room_policy_and_slow_mode_storage() {
         let path = isolated_database_path("v10-room-policy-schema");
         create_version_ten_fixture(&path);
         {
@@ -3968,11 +4073,25 @@ mod tests {
         assert!(room_columns(&store.connection)
             .iter()
             .any(|column| column == "policy_bits"));
+        assert!(room_columns(&store.connection)
+            .iter()
+            .any(|column| column == "slow_mode_seconds"));
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_slow_mode_admissions"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "index",
+            "idx_room_slow_mode_admissions_expiry"
+        ));
         let room = store
             .room_by_name("preserved-v10-room")
             .expect("room lookup")
             .expect("preserved room");
         assert_eq!(room.policy_bits, 0);
+        assert_eq!(room.slow_mode_seconds, 0);
         assert_eq!(
             store
                 .connection
@@ -3984,6 +4103,13 @@ mod tests {
             .connection
             .execute(
                 "UPDATE rooms SET policy_bits = 2 WHERE room_id = ?1",
+                [room.room_id],
+            )
+            .is_err());
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE rooms SET slow_mode_seconds = 86401 WHERE room_id = ?1",
                 [room.room_id],
             )
             .is_err());
@@ -4003,6 +4129,9 @@ mod tests {
         assert!(!room_columns(&backup)
             .iter()
             .any(|column| column == "policy_bits"));
+        assert!(!room_columns(&backup)
+            .iter()
+            .any(|column| column == "slow_mode_seconds"));
 
         drop(backup);
         drop(store);
@@ -4013,7 +4142,10 @@ mod tests {
     #[test]
     fn every_room_policy_schema_fault_boundary_rolls_back_to_version_ten() {
         for boundary in [
-            RoomPolicyMigrationBoundary::Column,
+            RoomPolicyMigrationBoundary::PolicyColumn,
+            RoomPolicyMigrationBoundary::SlowModeColumn,
+            RoomPolicyMigrationBoundary::SlowModeTable,
+            RoomPolicyMigrationBoundary::SlowModeIndex,
             RoomPolicyMigrationBoundary::VersionUpdate,
             RoomPolicyMigrationBoundary::Commit,
         ] {
@@ -4051,6 +4183,14 @@ mod tests {
             assert!(!room_columns(&store.connection)
                 .iter()
                 .any(|column| column == "policy_bits"));
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_slow_mode_admissions"
+            ));
             assert!(schema_object_exists(
                 &store.connection,
                 "table",
@@ -4072,6 +4212,87 @@ mod tests {
             assert!(!room_columns(&backup)
                 .iter()
                 .any(|column| column == "policy_bits"));
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn every_slow_mode_schema_fault_boundary_rolls_back_to_version_eleven() {
+        for boundary in [
+            RoomPolicyMigrationBoundary::SlowModeColumn,
+            RoomPolicyMigrationBoundary::SlowModeTable,
+            RoomPolicyMigrationBoundary::SlowModeIndex,
+            RoomPolicyMigrationBoundary::VersionUpdate,
+            RoomPolicyMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v12-fault-{boundary:?}"));
+            create_version_eleven_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_room_policy_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected slow-mode migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected slow-mode migration failure")
+                .to_string();
+            assert!(error.contains("injected slow-mode migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                11
+            );
+            assert!(room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "policy_bits"));
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_slow_mode_admissions"
+            ));
+
+            let backup_path = migration_backup_path(&path, 11);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version eleven rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                11
+            );
+            assert!(room_columns(&backup)
+                .iter()
+                .any(|column| column == "policy_bits"));
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
 
             drop(backup);
             drop(store);
@@ -4130,6 +4351,60 @@ mod tests {
             .expect("room lookup")
             .expect("room");
         assert_eq!(unchanged.policy_bits, 0);
+        assert_eq!(unchanged.room_revision, room.room_revision);
+    }
+
+    #[test]
+    fn slow_mode_update_is_bounded_atomic_idempotent_and_persistent() {
+        let path = isolated_database_path("slow-mode-update");
+        let store = OmenchatStore::open(&path).expect("store");
+        let room = store.ensure_room("slow-update", None).expect("room");
+        assert_eq!(room.slow_mode_seconds, 0);
+
+        let enabled = store
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("enable slow mode");
+        assert_eq!(enabled.slow_mode_seconds, 30);
+        assert_eq!(enabled.room_revision, room.room_revision + 1);
+        let unchanged = store
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("idempotent update");
+        assert_eq!(unchanged.room_revision, enabled.room_revision);
+        assert!(store
+            .set_room_slow_mode_seconds(room.room_id, ROOM_SLOW_MODE_MAX_SECONDS + 1)
+            .is_err());
+        drop(store);
+
+        let reopened = OmenchatStore::open(&path).expect("reopened store");
+        let persisted = reopened
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("persisted room");
+        assert_eq!(persisted.slow_mode_seconds, 30);
+        assert_eq!(persisted.room_revision, enabled.room_revision);
+        drop(reopened);
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn slow_mode_update_failure_rolls_back_interval_and_revision_together() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("slow-rollback", None).expect("room");
+        let error = store
+            .set_room_slow_mode_seconds_with_hook(room.room_id, 30, |boundary| {
+                assert_eq!(boundary, RoomSlowModeUpdateBoundary::BeforeCommit);
+                Err(crate::error::ServerError::Message(
+                    "injected slow-mode update failure".into(),
+                ))
+            })
+            .expect_err("injected update failure")
+            .to_string();
+        assert!(error.contains("injected slow-mode update failure"));
+        let unchanged = store
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("room");
+        assert_eq!(unchanged.slow_mode_seconds, 0);
         assert_eq!(unchanged.room_revision, room.room_revision);
     }
 

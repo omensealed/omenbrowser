@@ -5112,7 +5112,7 @@ fn room_to_value_with_policy(
         topic: room.topic.clone(),
         room_revision: room.room_revision,
         policy_bits: room.policy_bits,
-        slow_mode_seconds: 0,
+        slow_mode_seconds: room.slow_mode_seconds,
     }
     .into_frame_value(policy_negotiated)
     .map_err(|error| ServerError::Message(format!("stored room cannot be encoded: {error}")))
@@ -6313,7 +6313,7 @@ mod tests {
                 topic: announcement_room.topic,
                 room_revision: announcement_room.room_revision,
                 policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
-                slow_mode_seconds: 0,
+                slow_mode_seconds: announcement_room.slow_mode_seconds,
             }
         );
     }

@@ -4626,13 +4626,44 @@ error number 1017, and the `durable-mutations-v1` capability dependency.
 Production negotiation and schema remain inactive. Evidence is in
 `docs/audits/omenchat-slow-mode-wire-qualification.md`.
 
+Schema-12 slow-mode storage and guarded schema-11 rollback are covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    slow_mode --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    schema_eleven --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    every_slow_mode_schema_fault_boundary --lib -- --nocapture
+)
+```
+
+These tests require disabled-by-default migration without history scans,
+transactional rollback at every schema-12 boundary, a readable pre-v12
+schema-11 backup, scalar/revision atomicity, fixed item/logical-byte bounds,
+64-row incremental expired pruning, fail-closed saturation, restart
+persistence, and publication-failure cleanup. The operator rollback command is:
+
+```bash
+omenchatd database export-schema11-copy \
+  --to <new-database-path> --confirm --home <server-home>
+```
+
+The staged copy removes only `slow_mode_seconds`,
+`room_slow_mode_admissions`, and its expiry index. Negotiation and runtime
+enforcement remain inactive. Evidence is in
+`docs/audits/omenchat-slow-mode-storage-qualification.md`.
+
 Schema-11 announcement-room storage and guarded rollback are covered by:
 
 ```bash
 (
   cd src/server
   cargo test --locked --no-default-features --features server-headless \
-    version_ten_database_adds_constrained_ordinary_room_policy --lib -- --nocapture
+    version_ten_database_adds_constrained_room_policy_and_slow_mode_storage \
+    --lib -- --nocapture
   cargo test --locked --no-default-features --features server-headless \
     room_policy_schema --lib -- --nocapture
   cargo test --locked --no-default-features --features server-headless \

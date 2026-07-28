@@ -281,8 +281,10 @@ Process/UI:
    byte-exact independent codec fixtures, error type, and durable-capability
    dependency. Evidence:
    `docs/audits/omenchat-slow-mode-wire-qualification.md`.
-2. Add schema-12 storage, recovery, schema-11 export, and bounded admission
-   ledger with fault tests.
+2. **Complete (2026-07-28):** add schema-12 disabled scalar, bounded persistent
+   admission ledger, migration/restart/fault tests, and guarded schema-11 copy
+   export. Evidence:
+   `docs/audits/omenchat-slow-mode-storage-qualification.md`.
 3. Add test-only atomic admission to durable and legacy message/action paths.
 4. Add stopped-server administration and status evidence.
 5. Add bounded client projection and shared GUI/TUI evidence.

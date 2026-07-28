@@ -44,6 +44,7 @@ pub enum CliCommand {
     DatabaseExportSchemaEight(ServerOptions, DatabaseExportOptions),
     DatabaseExportSchemaNine(ServerOptions, DatabaseExportOptions),
     DatabaseExportSchemaTen(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaEleven(ServerOptions, DatabaseExportOptions),
     DatabaseAdvanceHistoryUsage(ServerOptions, DatabaseHistoryUsageOptions),
     ConfigShow(ServerOptions),
     ConfigSet(ServerOptions, ConfigSetOptions),
@@ -463,6 +464,23 @@ impl Omenchatd {
                 );
                 Ok(())
             }
+            CliCommand::DatabaseExportSchemaEleven(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_eleven_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-11 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-11 copy: {}", report.destination.display());
+                println!(
+                    "Slow-mode settings and admission state are intentionally absent; announcement-room policy and all earlier schema layers are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
             CliCommand::DatabaseAdvanceHistoryUsage(options, history) => {
                 let config = config_from_options(&options)?;
                 if !config.database_path.is_file() {
@@ -830,6 +848,7 @@ fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand 
                         | "export-schema8-copy"
                         | "export-schema9-copy"
                         | "export-schema10-copy"
+                        | "export-schema11-copy"
                 ) =>
             {
                 path = args.next().map(PathBuf::from)
@@ -911,6 +930,12 @@ fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand 
         }
         ("export-schema10-copy", None) => {
             CliCommand::Invalid("schema-10 export requires --to <new-database-path>".into())
+        }
+        ("export-schema11-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaEleven(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema11-copy", None) => {
+            CliCommand::Invalid("schema-11 export requires --to <new-database-path>".into())
         }
         ("advance-history-usage", _) => match room_id {
             Some(room_id) => CliCommand::DatabaseAdvanceHistoryUsage(
@@ -1469,6 +1494,7 @@ fn print_help() {
     println!("  uploads repair-ledger --confirm [--home <path>]  # server must be stopped");
     println!("  database restore-migration-backup --from <path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema10-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema11-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema9-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema8-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema7-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
@@ -3005,6 +3031,48 @@ mod tests {
     }
 
     #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_eleven_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema11-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema11.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema11-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema11-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema11.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaEleven(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema11.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
     fn cli_requires_room_and_confirmation_for_history_usage_maintenance() {
         assert!(matches!(
             CliCommand::parse([
@@ -3281,6 +3349,82 @@ mod tests {
             .room_by_name("exported-cli")
             .expect("active marker")
             .is_some());
+        drop(active);
+        std::fs::remove_dir_all(root).expect("remove isolated CLI export home");
+    }
+
+    #[test]
+    fn cli_schema_eleven_export_preserves_active_source_and_room_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-schema11-export-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let current =
+            crate::store::OmenchatStore::open(&config.database_path).expect("current database");
+        let room = current
+            .ensure_room("schema11-cli", None)
+            .expect("current room");
+        current
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+        current
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("slow mode");
+        drop(current);
+
+        let destination = root.join("operator-schema11.sqlite");
+        Omenchatd
+            .run(CliCommand::DatabaseExportSchemaEleven(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseExportOptions {
+                    destination: destination.clone(),
+                },
+            ))
+            .expect("CLI schema eleven export");
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("exported database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("exported version"),
+            11
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT policy_bits FROM rooms WHERE name = 'schema11-cli'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("exported policy"),
+            1
+        );
+        drop(exported);
+
+        let active =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("active current database");
+        assert_eq!(
+            active
+                .room_by_id(room.room_id)
+                .expect("active room")
+                .expect("room")
+                .slow_mode_seconds,
+            30
+        );
         drop(active);
         std::fs::remove_dir_all(root).expect("remove isolated CLI export home");
     }

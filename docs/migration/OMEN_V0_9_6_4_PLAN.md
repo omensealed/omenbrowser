@@ -1689,6 +1689,16 @@ fixtures in both independent MessagePack codecs. Existing production call
 sites retain the four-/five-field compatibility wrappers; no client requests
 and no server accepts the new capability. Evidence is in
 `docs/audits/omenchat-slow-mode-wire-qualification.md`.
+The second slice advances omenchatd to schema 12 with a disabled-by-default
+`slow_mode_seconds` scalar and a fixed-width admission ledger capped at 4,096
+rows per room, 16,384 globally, and 512 KiB of logical retained state.
+Admission storage prunes at most 64 expired rows per attempt and fails closed
+when active rows saturate either cap. Scalar/revision updates and ledger writes
+are transactional; restart and rollback consume no partial admission. Every
+schema-12 migration boundary rolls back to schema 11, and the
+confirmation-gated `export-schema11-copy` removes only slow-mode storage from
+a staged copy. Negotiation and runtime enforcement remain inactive. Evidence
+is in `docs/audits/omenchat-slow-mode-storage-qualification.md`.
 
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise

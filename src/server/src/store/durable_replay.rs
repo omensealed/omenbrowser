@@ -177,7 +177,7 @@ impl OmenchatStore {
     ) -> ServerResult<Option<ServerRoom>> {
         transaction
             .query_row(
-                "SELECT room_id, name, topic, room_revision, policy_bits
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
                  FROM rooms WHERE room_id = ?1 AND archived = 0",
                 [room_id],
                 room_from_row,
@@ -234,7 +234,7 @@ impl OmenchatStore {
         )?;
         transaction
             .query_row(
-                "SELECT room_id, name, topic, room_revision, policy_bits
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
                  FROM rooms WHERE name = ?1 AND archived = 0",
                 [&room_name],
                 room_from_row,
