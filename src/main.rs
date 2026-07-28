@@ -195,6 +195,7 @@ async fn async_main() -> anyhow::Result<()> {
             announcement_rejection_smoke,
             announcement_upload_rejection_smoke,
             slow_mode_rejection_smoke,
+            slow_mode_delta_seconds,
             reaction_smoke,
             revision_smoke,
             pin_smoke,
@@ -217,6 +218,7 @@ async fn async_main() -> anyhow::Result<()> {
                 announcement_rejection_smoke,
                 announcement_upload_rejection_smoke,
                 slow_mode_rejection_smoke,
+                slow_mode_delta_seconds,
                 reaction_smoke,
                 revision_smoke,
                 pin_smoke,
@@ -367,6 +369,7 @@ enum CliCommand {
         announcement_rejection_smoke: bool,
         announcement_upload_rejection_smoke: bool,
         slow_mode_rejection_smoke: bool,
+        slow_mode_delta_seconds: Option<u32>,
         reaction_smoke: bool,
         revision_smoke: bool,
         pin_smoke: bool,
@@ -438,6 +441,7 @@ struct OmenChatSmokeCommandInput {
     announcement_rejection_smoke: bool,
     announcement_upload_rejection_smoke: bool,
     slow_mode_rejection_smoke: bool,
+    slow_mode_delta_seconds: Option<u32>,
     reaction_smoke: bool,
     revision_smoke: bool,
     pin_smoke: bool,
@@ -530,6 +534,7 @@ impl CliCommand {
         let mut omenchat_announcement_rejection_smoke = false;
         let mut omenchat_announcement_upload_rejection_smoke = false;
         let mut omenchat_slow_mode_rejection_smoke = false;
+        let mut omenchat_slow_mode_delta_seconds = None;
         let mut omenchat_reaction_smoke = false;
         let mut omenchat_revision_smoke = false;
         let mut omenchat_pin_smoke = false;
@@ -626,6 +631,14 @@ impl CliCommand {
                 }
                 "--omenchat-slow-mode-rejection-smoke" => {
                     omenchat_slow_mode_rejection_smoke = true;
+                }
+                "--omenchat-slow-mode-delta-smoke" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires seconds"))?;
+                    omenchat_slow_mode_delta_seconds = Some(value.parse().map_err(|_| {
+                        anyhow::anyhow!("{arg} requires an integer number of seconds")
+                    })?);
                 }
                 "--omenchat-reaction-smoke" => {
                     omenchat_reaction_smoke = true;
@@ -883,6 +896,13 @@ impl CliCommand {
                 overrides: Box::new(overrides),
             })
         } else if let Some(destination) = omenchat_smoke_destination {
+            if omenchat_slow_mode_delta_seconds.is_some_and(|seconds| {
+                !(1..=omenchat_protocol::ROOM_SLOW_MODE_MAX_SECONDS).contains(&seconds)
+            }) {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-slow-mode-delta-smoke seconds are outside protocol bounds"
+                ));
+            }
             if omenchat_announcement_rejection_smoke && omenchat_announcement_upload_rejection_smoke
             {
                 return Err(anyhow::anyhow!(
@@ -901,6 +921,21 @@ impl CliCommand {
             {
                 return Err(anyhow::anyhow!(
                     "--omenchat-slow-mode-rejection-smoke is an isolated qualification case"
+                ));
+            }
+            if omenchat_slow_mode_delta_seconds.is_some()
+                && (omenchat_slow_mode_rejection_smoke
+                    || omenchat_announcement_rejection_smoke
+                    || omenchat_announcement_upload_rejection_smoke
+                    || omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_some()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-slow-mode-delta-smoke is an isolated qualification case"
                 ));
             }
             if omenchat_announcement_rejection_smoke
@@ -935,6 +970,7 @@ impl CliCommand {
                 announcement_rejection_smoke: omenchat_announcement_rejection_smoke,
                 announcement_upload_rejection_smoke: omenchat_announcement_upload_rejection_smoke,
                 slow_mode_rejection_smoke: omenchat_slow_mode_rejection_smoke,
+                slow_mode_delta_seconds: omenchat_slow_mode_delta_seconds,
                 reaction_smoke: omenchat_reaction_smoke,
                 revision_smoke: omenchat_revision_smoke,
                 pin_smoke: omenchat_pin_smoke,
@@ -3728,6 +3764,7 @@ mod tests {
                 announcement_rejection_smoke: false,
                 announcement_upload_rejection_smoke: false,
                 slow_mode_rejection_smoke: false,
+                slow_mode_delta_seconds: None,
                 reaction_smoke: true,
                 revision_smoke: true,
                 pin_smoke: true,
@@ -3834,6 +3871,30 @@ mod tests {
         ])
         .expect_err("mixed slow-mode and reaction smoke must fail");
         assert!(error.to_string().contains("isolated qualification case"));
+
+        let delta = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-slow-mode-delta-smoke".to_string(),
+            "30".to_string(),
+        ])
+        .expect("parse slow-mode delta smoke");
+        assert!(matches!(
+            delta,
+            CliCommand::OmenChatSmoke {
+                slow_mode_delta_seconds: Some(30),
+                ..
+            }
+        ));
+        let mixed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-slow-mode-delta-smoke".to_string(),
+            "30".to_string(),
+            "--omenchat-slow-mode-rejection-smoke".to_string(),
+        ])
+        .expect_err("mixed slow-mode qualification cases must fail");
+        assert!(mixed.to_string().contains("isolated qualification case"));
     }
 
     #[test]

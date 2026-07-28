@@ -433,6 +433,33 @@ else:
 PY
 }
 
+verify_slow_mode_delta_report() {
+  local report="$1"
+  local expected_seconds="$2"
+  python3 - "$report" "$expected_seconds" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_seconds = int(sys.argv[2])
+stages = {
+    stage.get("stage"): stage
+    for stage in report.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+delta = stages.get("slow_mode_delta_wait", {})
+if delta.get("ok") is not True:
+    raise SystemExit("live slow-mode room delta was not observed")
+if delta.get("initial_seconds") != 0:
+    raise SystemExit("slow-mode transition did not start from the disabled policy")
+if delta.get("final_seconds") != expected_seconds:
+    raise SystemExit("slow-mode room delta did not project the committed interval")
+if not delta.get("events"):
+    raise SystemExit("slow-mode transition has no real-Link event evidence")
+PY
+}
+
 echo "== Initializing isolated omenchatd =="
 "$server_bin" init --home "$server_home" "${server_interface_args[@]}" \
   > "$run_dir/omenchatd-init.txt"
@@ -460,7 +487,14 @@ if [[ -z "$destination" ]]; then
   exit 1
 fi
 echo "== Starting isolated omenchatd =="
-"$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+qualification_server_env=()
+if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+  qualification_server_env=(
+    env "OMENCHATD_QUALIFICATION_SLOW_MODE_TRANSITION=$slow_mode_seconds"
+  )
+fi
+"${qualification_server_env[@]}" "$server_bin" run --home "$server_home" \
+  "${server_interface_args[@]}" \
   > "$run_dir/omenchatd-run.log" 2>&1 &
 server_pid="$!"
 
@@ -484,19 +518,12 @@ fi
 
 if [[ "$announcement_rejection_smoke" -eq 1 \
   || "$announcement_upload_rejection_smoke" -eq 1 \
-  || "$announcement_moderator_smoke" -eq 1 \
-  || "$slow_mode_rejection_smoke" -eq 1 ]]; then
+  || "$announcement_moderator_smoke" -eq 1 ]]; then
   echo "== Proving live room policy maintenance is refused =="
   set +e
-  if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
-    "$server_bin" rooms set-slow-mode 1 "$slow_mode_seconds" --confirm --home "$server_home" \
-      > "$run_dir/omenchatd-live-room-policy.stdout" \
-      2> "$run_dir/omenchatd-live-room-policy.stderr"
-  else
-    "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
-      > "$run_dir/omenchatd-live-room-policy.stdout" \
-      2> "$run_dir/omenchatd-live-room-policy.stderr"
-  fi
+  "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-live-room-policy.stdout" \
+    2> "$run_dir/omenchatd-live-room-policy.stderr"
   live_policy_status=$?
   set -e
   if [[ "$live_policy_status" -eq 0 ]]; then
@@ -514,8 +541,7 @@ if [[ "$announcement_rejection_smoke" -eq 1 \
 fi
 
 if [[ "$announcement_rejection_smoke" -eq 1 \
-  || "$announcement_upload_rejection_smoke" -eq 1 \
-  || "$slow_mode_rejection_smoke" -eq 1 ]]; then
+  || "$announcement_upload_rejection_smoke" -eq 1 ]]; then
   echo "== Stopping initialized omenchatd for room policy maintenance =="
   kill "$server_pid"
   for _ in {1..80}; do
@@ -541,15 +567,9 @@ if [[ "$announcement_rejection_smoke" -eq 1 \
   esac
   server_pid=""
 
-  if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
-    echo "== Configuring isolated lobby with ${slow_mode_seconds}-second slow mode =="
-    "$server_bin" rooms set-slow-mode 1 "$slow_mode_seconds" --confirm --home "$server_home" \
-      > "$run_dir/omenchatd-room-policy.txt"
-  else
-    echo "== Configuring isolated lobby as an announcement room =="
-    "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
-      > "$run_dir/omenchatd-room-policy.txt"
-  fi
+  echo "== Configuring isolated lobby as an announcement room =="
+  "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-room-policy.txt"
 
   echo "== Restarting isolated omenchatd with qualified room policy =="
   "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
@@ -693,8 +713,10 @@ elif [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
   announcement_rejection_args=(--omenchat-announcement-upload-rejection-smoke)
 fi
 slow_mode_rejection_args=()
+slow_mode_delta_args=()
 if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
   slow_mode_rejection_args=(--omenchat-slow-mode-rejection-smoke)
+  slow_mode_delta_args=(--omenchat-slow-mode-delta-smoke "$slow_mode_seconds")
 fi
 "$browser_bin" \
   --omenchat-smoke "$destination" \
@@ -703,6 +725,7 @@ fi
   --app-root "$browser_root" \
   --omenchat-message "$message" \
   "${announcement_rejection_args[@]}" \
+  "${slow_mode_delta_args[@]}" \
   "${reaction_args[@]}" \
   "${revision_args[@]}" \
   "${pin_args[@]}" \
@@ -809,6 +832,23 @@ fi
 if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
   verify_slow_mode_qualification_report \
     "$run_dir/omenchat-smoke.json" 0 "$slow_mode_seconds"
+  verify_slow_mode_delta_report \
+    "$run_dir/omenchat-smoke.json" "$slow_mode_seconds"
+
+  echo "== Proving external live slow-mode maintenance remains refused =="
+  set +e
+  "$server_bin" rooms set-slow-mode 1 "$slow_mode_seconds" --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-live-room-policy.stdout" \
+    2> "$run_dir/omenchatd-live-room-policy.stderr"
+  live_policy_status=$?
+  set -e
+  if [[ "$live_policy_status" -eq 0 ]] || ! grep -Fq \
+    'database maintenance could not obtain exclusive access; ensure omenchatd is stopped' \
+    "$run_dir/omenchatd-live-room-policy.stderr"; then
+    echo "external live slow-mode maintenance did not fail at the exclusive-access boundary" >&2
+    exit 1
+  fi
+  live_policy_maintenance_refused=1
 fi
 server_upload_rejection_clean="not-run"
 if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then

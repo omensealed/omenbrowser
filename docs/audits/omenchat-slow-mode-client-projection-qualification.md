@@ -224,7 +224,8 @@ Before production activation:
 - [x] implement deterministic request/accept/loss and replacement-Link state
   for `room-slow-mode-v1` without production advertisement;
 - [x] prove current/current real-Link catalog/rejection/expiry/restart;
-- prove real-Link room-delta projection after an administrative policy change;
+- [x] prove real-Link room-delta projection after an administrative policy
+  change (see `omenchat-slow-mode-live-delta-qualification.md`);
 - prove adjacent four-/five-field mixed-version behavior;
 - [x] add typed rejection and draft-retention evidence;
 - run GUI observation and server/client resource measurements; and

@@ -107,6 +107,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         announcement_rejection_smoke,
         announcement_upload_rejection_smoke,
         slow_mode_rejection_smoke,
+        slow_mode_delta_seconds,
         reaction_smoke,
         revision_smoke,
         pin_smoke,
@@ -223,6 +224,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                     announcement_rejection_smoke,
                     announcement_upload_rejection_smoke,
                     slow_mode_rejection_smoke,
+                    slow_mode_delta_seconds,
                 },
                 stages,
                 None,
@@ -282,6 +284,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                 announcement_rejection_smoke,
                 announcement_upload_rejection_smoke,
                 slow_mode_rejection_smoke,
+                slow_mode_delta_seconds,
             },
             stages,
             None,
@@ -317,8 +320,36 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
     let active_room_id = client
         .session(session_id)
         .map(|session| session.active_room.room_id);
+    let initial_slow_mode_seconds =
+        active_room_id.and_then(|room_id| client.room_slow_mode_seconds(session_id, room_id));
+    let slow_mode_delta_events =
+        if let (Some(expected), Some(room_id)) = (slow_mode_delta_seconds, active_room_id) {
+            wait_for_omenchat_condition(
+                &*app.runtime,
+                &mut runtime_events,
+                &mut client,
+                &mut live_state,
+                &mut transport,
+                OmenChatWaitOptions {
+                    link_id: opened.link_id,
+                    session_id,
+                    wait: Duration::from_secs(response_wait_secs),
+                },
+                |client| client.room_slow_mode_seconds(session_id, room_id) == Some(expected),
+            )
+            .await
+        } else {
+            Vec::new()
+        };
     let announcement_rooms_negotiated = live_state.announcement_rooms_negotiated(session_id);
     let slow_mode_negotiated = live_state.slow_mode_negotiated(session_id);
+    let final_slow_mode_seconds =
+        active_room_id.and_then(|room_id| client.room_slow_mode_seconds(session_id, room_id));
+    let slow_mode_delta_observed = slow_mode_delta_seconds.is_none_or(|expected| {
+        slow_mode_negotiated
+            && initial_slow_mode_seconds == Some(0)
+            && final_slow_mode_seconds == Some(expected)
+    });
     let announcement_policy_bits =
         active_room_id.and_then(|room_id| client.room_policy_bits(session_id, room_id));
     let announcement_policy_observed = announcement_rooms_negotiated
@@ -330,6 +361,16 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "ok": joined,
         "events": join_events,
     }));
+    if let Some(expected) = slow_mode_delta_seconds {
+        stages.push(serde_json::json!({
+            "stage": "slow_mode_delta_wait",
+            "ok": slow_mode_delta_observed,
+            "expected_seconds": expected,
+            "initial_seconds": initial_slow_mode_seconds,
+            "final_seconds": final_slow_mode_seconds,
+            "events": slow_mode_delta_events,
+        }));
+    }
     stages.push(serde_json::json!({
         "stage": "capability_observation",
         "ok": true,
@@ -343,8 +384,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "announcement_policy_bits": announcement_policy_bits,
         "announcement_policy_observed": announcement_policy_observed,
         "slow_mode_negotiated": slow_mode_negotiated,
-        "slow_mode_seconds": active_room_id
-            .and_then(|room_id| client.room_slow_mode_seconds(session_id, room_id)),
+        "slow_mode_seconds": final_slow_mode_seconds,
+        "slow_mode_delta_observed": slow_mode_delta_observed,
         "local_user_id_bound": live_state.local_user_id(session_id).is_some(),
     }));
 
@@ -827,6 +868,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         message_seen
     };
     let outcome = joined
+        && slow_mode_delta_observed
         && message_outcome
         && reaction_ok
         && revision_ok
@@ -835,6 +877,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         && reconnect_ok;
     let failed_stage = if !joined {
         "join_wait"
+    } else if !slow_mode_delta_observed {
+        "slow_mode_delta_wait"
     } else if !message_outcome && announcement_upload_rejection_smoke {
         "announcement_upload_rejection_wait"
     } else if !message_outcome && announcement_rejection_smoke {
@@ -866,6 +910,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             announcement_rejection_smoke,
             announcement_upload_rejection_smoke,
             slow_mode_rejection_smoke,
+            slow_mode_delta_seconds,
         },
         stages,
         session_summary,
@@ -3249,6 +3294,7 @@ struct OmenChatSmokeReportContext<'a> {
     announcement_rejection_smoke: bool,
     announcement_upload_rejection_smoke: bool,
     slow_mode_rejection_smoke: bool,
+    slow_mode_delta_seconds: Option<u32>,
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -3266,6 +3312,7 @@ fn omenchat_smoke_report(
         announcement_rejection_smoke,
         announcement_upload_rejection_smoke,
         slow_mode_rejection_smoke,
+        slow_mode_delta_seconds,
     } = context;
     serde_json::json!({
         "report": "omenchat_smoke",
@@ -3278,6 +3325,8 @@ fn omenchat_smoke_report(
                 "OMENchat Link opened, room joined, and authoritative policy blocked member publication without committing the message"
             } else if ok && slow_mode_rejection_smoke {
                 "OMENchat Link opened, slow mode was negotiated, and the server rejected a second publication without committing it"
+            } else if ok && slow_mode_delta_seconds.is_some() {
+                "OMENchat Link opened, a live slow-mode room delta was observed, and the first publication was committed"
             } else if ok {
                 "OMENchat Link opened, room joined, and message echo was observed"
             } else {
@@ -3295,6 +3344,7 @@ fn omenchat_smoke_report(
         "announcement_rejection_smoke": announcement_rejection_smoke,
         "announcement_upload_rejection_smoke": announcement_upload_rejection_smoke,
         "slow_mode_rejection_smoke": slow_mode_rejection_smoke,
+        "slow_mode_delta_seconds": slow_mode_delta_seconds,
         "stages": stages,
         "session": session,
     })

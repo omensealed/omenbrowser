@@ -401,6 +401,43 @@ where
         result
     }
 
+    #[cfg(feature = "omenchat-slow-mode-qualification")]
+    pub async fn transition_slow_mode_for_qualification(
+        &self,
+        room_id: u32,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<bool> {
+        let permit = self.permit.clone().try_acquire_owned().map_err(|_| {
+            self.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+            ServerError::Message("live-server worker is busy".into())
+        })?;
+        let server = self.server.clone();
+        let metrics = self.metrics.clone();
+        metrics.in_flight.store(1, Ordering::Release);
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let started = Instant::now();
+            let result = match server.lock() {
+                Ok(mut server) => {
+                    server.transition_slow_mode_for_qualification(room_id, slow_mode_seconds)
+                }
+                Err(_) => Err(ServerError::Message(
+                    "live-server worker lock poisoned".into(),
+                )),
+            };
+            let elapsed = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
+            (result, elapsed)
+        })
+        .await;
+        metrics.in_flight.store(0, Ordering::Release);
+        let (result, elapsed) = task
+            .map_err(|error| ServerError::Message(format!("live-server worker failed: {error}")))?;
+        metrics.total_micros.fetch_add(elapsed, Ordering::Relaxed);
+        metrics.max_micros.fetch_max(elapsed, Ordering::Relaxed);
+        metrics.completed.fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
     pub fn worker_metrics(&self) -> LiveServerWorkerMetricsSnapshot {
         let completed = self.metrics.completed.load(Ordering::Relaxed);
         let total_micros = self.metrics.total_micros.load(Ordering::Relaxed);
@@ -908,15 +945,24 @@ pub fn configured_destination_status(config: &ServerConfig) -> ServerResult<Stri
     ))
 }
 
-pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
+pub fn run_live_server(
+    config: ServerConfig,
+    qualification_slow_mode_transition_seconds: Option<u32>,
+) -> ServerResult<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| ServerError::Message(format!("tokio runtime failed: {error}")))?;
-    runtime.block_on(run_live_server_async(config))
+    runtime.block_on(run_live_server_async(
+        config,
+        qualification_slow_mode_transition_seconds,
+    ))
 }
 
-async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
+async fn run_live_server_async(
+    config: ServerConfig,
+    qualification_slow_mode_transition_seconds: Option<u32>,
+) -> ServerResult<()> {
     append_server_log(
         &config,
         format!(
@@ -933,6 +979,10 @@ async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
     let mut next_announce = Instant::now() + announce_interval;
     let mut next_stats = Instant::now() + stats_interval;
     let mut next_handshake_sweep = Instant::now() + handshake_sweep_interval;
+    #[cfg(feature = "omenchat-slow-mode-qualification")]
+    let mut qualification_slow_mode_transition_seconds = qualification_slow_mode_transition_seconds;
+    #[cfg(not(feature = "omenchat-slow-mode-qualification"))]
+    let _ = qualification_slow_mode_transition_seconds;
     let shutdown_signal = wait_for_shutdown_signal();
     tokio::pin!(shutdown_signal);
 
@@ -980,6 +1030,35 @@ async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
                     &config,
                     format!("reticulum-rs live event failed: {error}"),
                 );
+            }
+        }
+
+        #[cfg(feature = "omenchat-slow-mode-qualification")]
+        if let Some(seconds) = qualification_slow_mode_transition_seconds {
+            if !(1..=crate::protocol::ROOM_SLOW_MODE_MAX_SECONDS).contains(&seconds) {
+                break Err(ServerError::Message(
+                    "qualification slow-mode transition is outside protocol bounds".into(),
+                ));
+            }
+            match runtime
+                .live_server
+                .transition_slow_mode_for_qualification(1, seconds)
+                .await
+            {
+                Ok(true) => {
+                    println!(
+                        "omenchatd qualification slow-mode transition committed: room=1 seconds={seconds}"
+                    );
+                    qualification_slow_mode_transition_seconds = None;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    append_server_log_error(
+                        &config,
+                        format!("slow-mode transition qualification failed: {error}"),
+                    );
+                    break Err(error);
+                }
             }
         }
 

@@ -262,6 +262,21 @@ impl Omenchatd {
                 Ok(())
             }
             CliCommand::Run(options) => {
+                #[cfg(feature = "omenchat-slow-mode-qualification")]
+                let qualification_slow_mode_transition_seconds =
+                    std::env::var("OMENCHATD_QUALIFICATION_SLOW_MODE_TRANSITION")
+                        .ok()
+                        .map(|value| {
+                            value.parse::<u32>().map_err(|_| {
+                                error::ServerError::Message(
+                                    "qualification slow-mode transition must be integer seconds"
+                                        .into(),
+                                )
+                            })
+                        })
+                        .transpose()?;
+                #[cfg(not(feature = "omenchat-slow-mode-qualification"))]
+                let qualification_slow_mode_transition_seconds = None;
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
                 if let Some(tcp_server) = options.tcp_server.as_ref() {
@@ -272,7 +287,10 @@ impl Omenchatd {
                 }
                 #[cfg(feature = "live-reticulum")]
                 {
-                    reticulum_live::run_live_server(config)
+                    reticulum_live::run_live_server(
+                        config,
+                        qualification_slow_mode_transition_seconds,
+                    )
                 }
                 #[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
                 {

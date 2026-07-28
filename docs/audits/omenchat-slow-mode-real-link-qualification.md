@@ -97,6 +97,9 @@ gate without migrating storage.
 Still required before product activation:
 
 - run an adjacent released-binary four-/five-field process matrix;
+- [x] prove a connected qualification client receives a shaped room delta after
+  the live server commits a policy change (see
+  `omenchat-slow-mode-live-delta-qualification.md`);
 - [x] preserve the Iced composer draft after a typed slow-mode rejection without
   overwriting newer input (see
   `omenchat-slow-mode-draft-recovery-qualification.md`);

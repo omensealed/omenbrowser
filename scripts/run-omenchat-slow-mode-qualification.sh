@@ -66,12 +66,24 @@ run_dir = pathlib.Path(sys.argv[1])
 initial = json.loads((run_dir / "omenchat-smoke.json").read_text(encoding="utf-8"))
 rejected = json.loads((run_dir / "omenchat-smoke-restart.json").read_text(encoding="utf-8"))
 expired = json.loads((run_dir / "omenchat-smoke-expiry.json").read_text(encoding="utf-8"))
+initial_stages = {
+    stage.get("stage"): stage
+    for stage in initial.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+delta = initial_stages.get("slow_mode_delta_wait", {})
 report = {
     "status": "pass",
     "isolated_loopback": True,
     "qualification_feature_only": True,
     "slow_mode_seconds": 30,
     "initial_commit": initial["classification"]["outcome"] == "pass",
+    "connected_room_delta": (
+        delta.get("ok") is True
+        and delta.get("initial_seconds") == 0
+        and delta.get("final_seconds") == 30
+        and bool(delta.get("events"))
+    ),
     "replacement_link_typed_rejection": rejected["classification"]["outcome"] == "pass",
     "expiry_readmission": expired["classification"]["outcome"] == "pass",
     "server_restart": True,

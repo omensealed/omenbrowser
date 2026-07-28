@@ -523,6 +523,31 @@ impl SessionEngine {
         Ok(shaped)
     }
 
+    #[cfg(feature = "omenchat-slow-mode-qualification")]
+    pub(crate) fn set_slow_mode_for_qualification(
+        &self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<Option<Frame>> {
+        let update = self
+            .store
+            .update_room_slow_mode_seconds(room_id, slow_mode_seconds)?;
+        if update.previous_seconds == update.room.slow_mode_seconds {
+            return Ok(None);
+        }
+        let seq = u32::try_from(update.room.room_revision).map_err(|_| {
+            ServerError::Message(
+                "room revision exceeds the qualification frame sequence boundary".into(),
+            )
+        })?;
+        Ok(Some(Frame::new(
+            ChatOp::RoomDelta,
+            seq,
+            Some(room_id),
+            FrameBody::Fields(vec![room_to_value(&update.room)]),
+        )))
+    }
+
     fn authoritative_room_value(
         &self,
         value: &FrameValue,

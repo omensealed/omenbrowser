@@ -804,6 +804,33 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         }
     }
 
+    #[cfg(feature = "omenchat-slow-mode-qualification")]
+    pub fn transition_slow_mode_for_qualification(
+        &mut self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<bool> {
+        let ready = self.slow_mode_links.keys().any(|link_id| {
+            self.session_open_links.contains(link_id)
+                && self.link_rooms.get(link_id) == Some(&room_id)
+        });
+        if !ready {
+            return Ok(false);
+        }
+        let Some(frame) = self
+            .engine
+            .set_slow_mode_for_qualification(room_id, slow_mode_seconds)?
+        else {
+            return Ok(true);
+        };
+        let link_ids = self.session_open_links.iter().copied().collect::<Vec<_>>();
+        for link_id in link_ids {
+            self.stats.count_outbound_op(&frame);
+            self.send_response_frame(link_id, &frame)?;
+        }
+        Ok(true)
+    }
+
     fn handle_decoded_frame(
         &mut self,
         link_id: LinkId,
@@ -6343,6 +6370,10 @@ mod tests {
         store.set_room_slow_mode_seconds(1, 30).expect("slow mode");
         let engine = SessionEngine::with_test_slow_mode(store);
         let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        #[cfg(feature = "omenchat-slow-mode-qualification")]
+        assert!(!live
+            .transition_slow_mode_for_qualification(1, 60)
+            .expect("pre-session qualification remains pending"));
         let link_id = [36u8; 16];
         live.handle_event(OmenchatLinkEvent::LinkOpened {
             link_id,
@@ -6447,6 +6478,37 @@ mod tests {
             live.slow_mode_links.get(&link_id),
             Some(&b"slow-mode-observer".to_vec())
         );
+
+        #[cfg(feature = "omenchat-slow-mode-qualification")]
+        {
+            let before_transition = live.transport().frames.len();
+            assert!(live
+                .transition_slow_mode_for_qualification(1, 60)
+                .expect("qualification transition"));
+            let delta = live
+                .transport()
+                .frames
+                .iter()
+                .skip(before_transition)
+                .filter(|captured| captured.link_id == link_id)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .find(|frame| frame.op == ChatOp::RoomDelta)
+                .expect("qualification room delta");
+            let FrameBody::Fields(fields) = delta.body else {
+                panic!("room delta fields");
+            };
+            let room = crate::protocol::RoomCatalogEntry::from_frame_value_for_shape(
+                fields.first().expect("updated lobby"),
+                RoomCatalogShape::SlowMode,
+            )
+            .expect("six-field transition room");
+            assert_eq!(room.slow_mode_seconds, 60);
+            let after_transition = live.transport().frames.len();
+            assert!(live
+                .transition_slow_mode_for_qualification(1, 60)
+                .expect("idempotent qualification transition"));
+            assert_eq!(live.transport().frames.len(), after_transition);
+        }
 
         live.handle_event(OmenchatLinkEvent::LinkClosed {
             link_id,
