@@ -1788,6 +1788,21 @@ remove `omenchat-slow-mode` from the product aliases without changing schema
 remains available for a full storage downgrade. Evidence:
 `docs/audits/omenchat-slow-mode-activation.md`.
 
+The final planned mutating feature family, per-room media policy, now has a
+review checkpoint in
+`docs/design/OMENCHAT_ROOM_MEDIA_POLICY_CHECKPOINT.md`. Repository inspection
+found that current uploads already have bounded offers/resources, a global
+per-identity quota and per-file ceiling, announcement-room authorization at
+offer and publication, and durable same-filesystem replacement. The missing
+user story is narrower: a room may inherit the global file ceiling, disable
+uploads, or impose a smaller per-file ceiling. The checkpoint deliberately
+does not add per-room eviction quotas, MIME trust, automatic downloads,
+workers, timers, or polling. It proposes a negotiated cumulative seven-field
+room shape, a nullable schema-13 scalar, stopped-server administration, and a
+guarded schema-12 copy. This checkpoint changes no protocol, schema,
+configuration, feature graph, or runtime behavior. Implementation remains
+staged behind explicit wire/storage review and qualification gates.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an
