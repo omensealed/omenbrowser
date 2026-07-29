@@ -265,6 +265,17 @@ mod tests {
     use crate::browser::{BrowserPage, PageSource};
     use iced::keyboard::key::Named;
 
+    fn command_modifier() -> keyboard::Modifiers {
+        #[cfg(target_os = "macos")]
+        {
+            keyboard::Modifiers::LOGO
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            keyboard::Modifiers::CTRL
+        }
+    }
+
     fn desktop_with_temp_root(name: &str) -> DesktopApp {
         let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -297,10 +308,7 @@ mod tests {
     #[test]
     fn command_palette_shortcuts_are_explicit_and_do_not_reuse_browser_actions() {
         assert!(matches!(
-            map_key_press(
-                keyboard::Key::Character("k".into()),
-                keyboard::Modifiers::CTRL
-            ),
+            map_key_press(keyboard::Key::Character("k".into()), command_modifier()),
             Some(Message::Shell(ShellMessage::OpenCommandPalette))
         ));
         assert!(matches!(
@@ -312,7 +320,7 @@ mod tests {
         ));
         assert!(map_command_palette_key_press(
             keyboard::Key::Character("t".into()),
-            keyboard::Modifiers::CTRL
+            command_modifier()
         )
         .is_none());
     }
