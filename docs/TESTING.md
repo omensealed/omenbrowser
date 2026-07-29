@@ -5136,6 +5136,33 @@ peer never shipped the audit operation, so no audit request is sent to it.
 The feature-boundary and receiver-cancellation activation decision is recorded
 in `docs/audits/omenchat-moderation-audit-activation-review.md`.
 
+Schema-13 dormant room media-policy storage and the guarded schema-12 copy are
+covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    version_twelve_database_adds_nullable_constrained_room_upload_policy \
+    --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    every_media_policy_schema_fault_boundary_rolls_back_to_version_twelve \
+    --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    schema_twelve_export --lib -- --nocapture
+)
+```
+
+The migration tests preserve representative announcement policy, slow-mode
+admission, and upload-ledger rows; prove `NULL`, zero, and the inclusive 10-MiB
+ceiling; reject negative and excessive values; and inject failures before the
+schema change, version update, and commit. The export tests require a new
+destination, explicit confirmation at the CLI boundary, atomic publication,
+cleanup after injected publication failure, and a schema-12 copy that omits
+only `upload_max_file_bytes`. The active schema-13 database is not modified.
+Production negotiation and upload enforcement remain inactive. Evidence is in
+`docs/audits/omenchat-room-media-policy-storage-qualification.md`.
+
 The real, still-non-product feature now has a first explicit desktop
 presentation slice:
 

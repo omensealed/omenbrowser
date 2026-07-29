@@ -27,6 +27,7 @@ pub struct ServerRoom {
     pub room_revision: u64,
     pub policy_bits: u64,
     pub slow_mode_seconds: u32,
+    pub upload_max_file_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,7 +165,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 12;
+pub(crate) const SCHEMA_VERSION: i64 = 13;
 const ROOM_PUBLISHER_ROLE_MASK: u64 = (1 << 1) | (1 << 2);
 const HISTORY_USAGE_BACKFILL_BATCH: usize = 256;
 const HISTORY_EVENT_FIXED_RETAINED_BYTES: u64 = 64;
@@ -550,7 +551,8 @@ impl OmenchatStore {
 
     pub fn room_by_name(&self, name: &str) -> ServerResult<Option<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
+            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                    upload_max_file_bytes
              FROM rooms
              WHERE name = ?1 AND archived = 0",
         )?;
@@ -560,7 +562,8 @@ impl OmenchatStore {
 
     pub fn room_by_id(&self, room_id: RoomId) -> ServerResult<Option<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
+            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                    upload_max_file_bytes
              FROM rooms
              WHERE room_id = ?1 AND archived = 0",
         )?;
@@ -570,7 +573,8 @@ impl OmenchatStore {
 
     pub fn list_rooms(&self) -> ServerResult<Vec<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
+            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                    upload_max_file_bytes
              FROM rooms
              WHERE archived = 0
              ORDER BY name",
@@ -629,7 +633,8 @@ impl OmenchatStore {
         )?;
         let room = transaction
             .query_row(
-                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                        upload_max_file_bytes
                  FROM rooms WHERE room_id = ?1 AND archived = 0",
                 [room_id],
                 room_from_row,
@@ -701,7 +706,8 @@ impl OmenchatStore {
         )?;
         let room = transaction
             .query_row(
-                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                        upload_max_file_bytes
                  FROM rooms WHERE room_id = ?1 AND archived = 0",
                 [room_id],
                 room_from_row,
@@ -1400,6 +1406,7 @@ enum RoomPolicyMigrationBoundary {
     SlowModeColumn,
     SlowModeTable,
     SlowModeIndex,
+    MediaPolicyColumn,
     VersionUpdate,
     Commit,
 }
@@ -1457,6 +1464,17 @@ where
         "CREATE INDEX IF NOT EXISTS idx_room_slow_mode_admissions_expiry
          ON room_slow_mode_admissions(not_before_unix, room_id, user_id);",
     )?;
+    hook(RoomPolicyMigrationBoundary::MediaPolicyColumn)?;
+    if !columns.contains("upload_max_file_bytes") {
+        transaction.execute_batch(
+            "ALTER TABLE rooms
+             ADD COLUMN upload_max_file_bytes INTEGER DEFAULT NULL
+             CHECK(
+               upload_max_file_bytes IS NULL OR
+               upload_max_file_bytes BETWEEN 0 AND 10485760
+             );",
+        )?;
+    }
     Ok(())
 }
 
@@ -2218,6 +2236,7 @@ fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRoom> {
         room_revision: row.get::<_, i64>(3)? as u64,
         policy_bits: row.get::<_, i64>(4)? as u64,
         slow_mode_seconds: row.get::<_, i64>(5)? as u32,
+        upload_max_file_bytes: row.get(6)?,
     })
 }
 
@@ -2547,6 +2566,34 @@ mod tests {
             .pragma_update(None, "user_version", 11)
             .expect("version eleven marker");
         transaction.commit().expect("version eleven commit");
+    }
+
+    fn create_version_twelve_fixture(path: &std::path::Path) {
+        create_version_eleven_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version twelve database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version twelve transaction");
+        transaction
+            .execute_batch(
+                "ALTER TABLE rooms
+                 ADD COLUMN slow_mode_seconds INTEGER NOT NULL DEFAULT 0
+                 CHECK(slow_mode_seconds BETWEEN 0 AND 86400);
+                 CREATE TABLE room_slow_mode_admissions(
+                   room_id INTEGER NOT NULL,
+                   user_id INTEGER NOT NULL,
+                   not_before_unix INTEGER NOT NULL CHECK(not_before_unix >= 0),
+                   updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+                   PRIMARY KEY(room_id, user_id)
+                 );
+                 CREATE INDEX idx_room_slow_mode_admissions_expiry
+                 ON room_slow_mode_admissions(not_before_unix, room_id, user_id);",
+            )
+            .expect("version twelve slow-mode schema");
+        transaction
+            .pragma_update(None, "user_version", 12)
+            .expect("version twelve marker");
+        transaction.commit().expect("version twelve commit");
     }
 
     fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
@@ -4122,6 +4169,7 @@ mod tests {
             .expect("preserved room");
         assert_eq!(room.policy_bits, 0);
         assert_eq!(room.slow_mode_seconds, 0);
+        assert_eq!(room.upload_max_file_bytes, None);
         assert_eq!(
             store
                 .connection
@@ -4176,6 +4224,7 @@ mod tests {
             RoomPolicyMigrationBoundary::SlowModeColumn,
             RoomPolicyMigrationBoundary::SlowModeTable,
             RoomPolicyMigrationBoundary::SlowModeIndex,
+            RoomPolicyMigrationBoundary::MediaPolicyColumn,
             RoomPolicyMigrationBoundary::VersionUpdate,
             RoomPolicyMigrationBoundary::Commit,
         ] {
@@ -4216,6 +4265,9 @@ mod tests {
             assert!(!room_columns(&store.connection)
                 .iter()
                 .any(|column| column == "slow_mode_seconds"));
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
             assert!(!schema_object_exists(
                 &store.connection,
                 "table",
@@ -4245,6 +4297,9 @@ mod tests {
             assert!(!room_columns(&backup)
                 .iter()
                 .any(|column| column == "slow_mode_seconds"));
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
 
             drop(backup);
             drop(store);
@@ -4304,6 +4359,9 @@ mod tests {
                 "table",
                 "room_slow_mode_admissions"
             ));
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
 
             let backup_path = migration_backup_path(&path, 11);
             let backup = rusqlite::Connection::open_with_flags(
@@ -4321,6 +4379,222 @@ mod tests {
                 .iter()
                 .any(|column| column == "policy_bits"));
             assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_twelve_database_adds_nullable_constrained_room_upload_policy() {
+        let path = isolated_database_path("v12-room-media-policy-schema");
+        create_version_twelve_fixture(&path);
+        {
+            let connection = rusqlite::Connection::open(&path).expect("version twelve fixture");
+            connection
+                .execute(
+                    "UPDATE rooms
+                     SET policy_bits = 1, slow_mode_seconds = 30
+                     WHERE room_id = 1",
+                    [],
+                )
+                .expect("preserved room policy");
+            connection
+                .execute(
+                    "INSERT INTO room_slow_mode_admissions(
+                       room_id, user_id, not_before_unix, updated_at
+                     ) VALUES (1, 7, 130, 100)",
+                    [],
+                )
+                .expect("preserved slow-mode admission");
+            connection
+                .execute(
+                    "INSERT INTO upload_files(
+                       resource_id, room_id, actor_user_id, filename,
+                       content_type, byte_len, path, created_at
+                     ) VALUES (
+                       'preserved-v12-upload', 1, 7, 'fixture.bin',
+                       'application/octet-stream', 3, '/isolated/fixture.bin', 1
+                     )",
+                    [],
+                )
+                .expect("preserved upload ledger");
+        }
+
+        let store = OmenchatStore::open(&path).expect("version thirteen migration");
+        let room = store.room_by_id(1).expect("room lookup").expect("room");
+        assert_eq!(room.policy_bits, ROOM_POLICY_ANNOUNCEMENT);
+        assert_eq!(room.slow_mode_seconds, 30);
+        assert_eq!(room.upload_max_file_bytes, None);
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+        for invalid in [-1_i64, 10 * 1024 * 1024 + 1] {
+            assert!(store
+                .connection
+                .execute(
+                    "UPDATE rooms SET upload_max_file_bytes = ?1 WHERE room_id = 1",
+                    [invalid],
+                )
+                .is_err());
+        }
+        for valid in [0_i64, 1, 10 * 1024 * 1024] {
+            store
+                .connection
+                .execute(
+                    "UPDATE rooms SET upload_max_file_bytes = ?1 WHERE room_id = 1",
+                    [valid],
+                )
+                .expect("valid room upload ceiling");
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE rooms SET upload_max_file_bytes = NULL WHERE room_id = 1",
+                [],
+            )
+            .expect("inherited room upload ceiling");
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM room_slow_mode_admissions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("slow-mode row count"),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM upload_files", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("upload row count"),
+            1
+        );
+
+        let backup_path = migration_backup_path(&path, 12);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version twelve migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            12
+        );
+        assert!(!room_columns(&backup)
+            .iter()
+            .any(|column| column == "upload_max_file_bytes"));
+        assert!(room_columns(&backup)
+            .iter()
+            .any(|column| column == "slow_mode_seconds"));
+        assert_eq!(
+            backup
+                .query_row(
+                    "SELECT policy_bits, slow_mode_seconds FROM rooms WHERE room_id = 1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("preserved room policy"),
+            (1, 30)
+        );
+        assert_eq!(
+            backup
+                .query_row("SELECT COUNT(*) FROM upload_files", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved upload count"),
+            1
+        );
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_media_policy_schema_fault_boundary_rolls_back_to_version_twelve() {
+        for boundary in [
+            RoomPolicyMigrationBoundary::MediaPolicyColumn,
+            RoomPolicyMigrationBoundary::VersionUpdate,
+            RoomPolicyMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v13-fault-{boundary:?}"));
+            create_version_twelve_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_room_policy_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected media-policy migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected media-policy migration failure")
+                .to_string();
+            assert!(error.contains("injected media-policy migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                12
+            );
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
+            assert!(room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_slow_mode_admissions"
+            ));
+
+            let backup_path = migration_backup_path(&path, 12);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version twelve rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                12
+            );
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
+            assert!(room_columns(&backup)
                 .iter()
                 .any(|column| column == "slow_mode_seconds"));
 

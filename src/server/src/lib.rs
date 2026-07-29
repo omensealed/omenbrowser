@@ -51,6 +51,7 @@ pub enum CliCommand {
     DatabaseExportSchemaNine(ServerOptions, DatabaseExportOptions),
     DatabaseExportSchemaTen(ServerOptions, DatabaseExportOptions),
     DatabaseExportSchemaEleven(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaTwelve(ServerOptions, DatabaseExportOptions),
     DatabaseAdvanceHistoryUsage(ServerOptions, DatabaseHistoryUsageOptions),
     ConfigShow(ServerOptions),
     ConfigSet(ServerOptions, ConfigSetOptions),
@@ -518,6 +519,23 @@ impl Omenchatd {
                 );
                 Ok(())
             }
+            CliCommand::DatabaseExportSchemaTwelve(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_twelve_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-12 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-12 copy: {}", report.destination.display());
+                println!(
+                    "Room media-policy settings are intentionally absent; slow-mode state and all earlier schema layers are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
             CliCommand::DatabaseAdvanceHistoryUsage(options, history) => {
                 let config = config_from_options(&options)?;
                 if !config.database_path.is_file() {
@@ -878,6 +896,7 @@ fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand 
                         | "export-schema9-copy"
                         | "export-schema10-copy"
                         | "export-schema11-copy"
+                        | "export-schema12-copy"
                 ) =>
             {
                 path = args.next().map(PathBuf::from)
@@ -965,6 +984,12 @@ fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand 
         }
         ("export-schema11-copy", None) => {
             CliCommand::Invalid("schema-11 export requires --to <new-database-path>".into())
+        }
+        ("export-schema12-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaTwelve(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema12-copy", None) => {
+            CliCommand::Invalid("schema-12 export requires --to <new-database-path>".into())
         }
         ("advance-history-usage", _) => match room_id {
             Some(room_id) => CliCommand::DatabaseAdvanceHistoryUsage(
@@ -1626,6 +1651,7 @@ fn print_help() {
     println!("  database restore-migration-backup --from <path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema10-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema11-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema12-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema9-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema8-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
     println!("  database export-schema7-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
@@ -2881,6 +2907,7 @@ mod tests {
             room_revision: 4,
             policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
             slow_mode_seconds: 30,
+            upload_max_file_bytes: None,
         };
         let human = room_status_line(&room);
         assert!(human.contains("policy=announcement"));
@@ -3301,6 +3328,48 @@ mod tests {
     }
 
     #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_twelve_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema12-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema12.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema12-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema12-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema12.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaTwelve(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema12.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
     fn cli_requires_room_and_confirmation_for_history_usage_maintenance() {
         assert!(matches!(
             CliCommand::parse([
@@ -3653,6 +3722,108 @@ mod tests {
                 .slow_mode_seconds,
             30
         );
+        drop(active);
+        std::fs::remove_dir_all(root).expect("remove isolated CLI export home");
+    }
+
+    #[test]
+    fn cli_schema_twelve_export_preserves_slow_mode_and_active_media_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-schema12-export-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let current =
+            crate::store::OmenchatStore::open(&config.database_path).expect("current database");
+        let room = current
+            .ensure_room("schema12-cli", None)
+            .expect("current room");
+        current
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+        current
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("slow mode");
+        drop(current);
+        let connection =
+            rusqlite::Connection::open(&config.database_path).expect("media-policy fixture");
+        connection
+            .execute(
+                "UPDATE rooms
+                 SET upload_max_file_bytes = 262144,
+                     room_revision = room_revision + 1
+                 WHERE room_id = ?1",
+                [room.room_id],
+            )
+            .expect("dormant media policy");
+        drop(connection);
+
+        let destination = root.join("operator-schema12.sqlite");
+        Omenchatd
+            .run(CliCommand::DatabaseExportSchemaTwelve(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseExportOptions {
+                    destination: destination.clone(),
+                },
+            ))
+            .expect("CLI schema twelve export");
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("exported database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("exported version"),
+            12
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT policy_bits, slow_mode_seconds
+                     FROM rooms WHERE name = 'schema12-cli'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                )
+                .expect("exported policies"),
+            (1, 30)
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('rooms')
+                     WHERE name = 'upload_max_file_bytes'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("media-policy column"),
+            0
+        );
+        drop(exported);
+
+        let active =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("active current database");
+        let active_room = active
+            .room_by_id(room.room_id)
+            .expect("active room lookup")
+            .expect("active room");
+        assert_eq!(
+            active_room.policy_bits,
+            crate::protocol::ROOM_POLICY_ANNOUNCEMENT
+        );
+        assert_eq!(active_room.slow_mode_seconds, 30);
+        assert_eq!(active_room.upload_max_file_bytes, Some(262_144));
         drop(active);
         std::fs::remove_dir_all(root).expect("remove isolated CLI export home");
     }

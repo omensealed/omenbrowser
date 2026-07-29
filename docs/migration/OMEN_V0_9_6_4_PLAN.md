@@ -1814,6 +1814,18 @@ Production request/acceptance state, Cargo features, schema 12, configuration,
 upload admission, workers, timers, and UI are unchanged. Evidence:
 `docs/audits/omenchat-room-media-policy-wire-qualification.md`.
 
+The second media-policy implementation slice is complete. omenchatd schema 13
+adds only the nullable, 0..=10-MiB-constrained
+`rooms.upload_max_file_bytes` scalar. Migration preserves announcement policy,
+slow-mode state/admissions, uploads, history, identities, and durable replay,
+and injected failures at the schema, version, and commit boundaries leave the
+schema-12 source intact with its retained pre-migration backup. The
+confirmation-gated `export-schema12-copy` path publishes a separate validated
+copy that removes only the new scalar. Capability request/acceptance,
+configuration, administration, upload admission/publication, workers, timers,
+and UI remain inactive. Evidence:
+`docs/audits/omenchat-room-media-policy-storage-qualification.md`.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

@@ -5386,7 +5386,7 @@ fn room_to_value_for_shape(
         room_revision: room.room_revision,
         policy_bits: room.policy_bits,
         slow_mode_seconds: room.slow_mode_seconds,
-        upload_max_file_bytes: None,
+        upload_max_file_bytes: room.upload_max_file_bytes,
     }
     .into_frame_value_for_shape(room_catalog_shape)
     .map_err(|error| ServerError::Message(format!("stored room cannot be encoded: {error}")))

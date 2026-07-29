@@ -256,9 +256,31 @@ legacy or non-negotiating sessions retain their prior room shape and behavior.
 Builds that deliberately omit `omenchat-slow-mode` preserve the stored scalar
 but report enforcement inactive.
 
+Schema 13 stores a nullable per-room upload file ceiling for the staged
+`room-media-policy-v1` work. `NULL` inherits the global server file ceiling,
+zero will disable room uploads, and positive values are constrained to at most
+10 MiB. This slice is storage-only: canonical clients do not request the
+capability, omenchatd does not accept it, no administration command changes
+the value, and upload admission still uses the existing global policy.
+
+To prepare a separate schema-12-compatible rollback copy while retaining the
+active schema-13 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema12-copy \
+  --to ~/.omenchatd/omenchat-schema12.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes only the dormant
+`upload_max_file_bytes` room column from a private staged copy. It retains
+slow-mode settings and admissions, announcement policy, the upload ledger,
+history, identities, and every earlier schema layer. It never edits the active
+database.
+
 To prepare a
 separate schema-11-compatible rollback copy while retaining the active
-schema-12 database, stop the server cleanly and run:
+schema-13 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema11-copy \
@@ -272,7 +294,7 @@ policy, moderation audit, and every earlier layer.
 
 To prepare a
 separate schema-10-compatible rollback copy while retaining the active
-schema-12 database, stop the server cleanly and run:
+schema-13 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema10-copy \
@@ -285,7 +307,7 @@ storage and the schema-11 policy column from a staged copy, while preserving
 moderation-audit and every earlier layer.
 
 To prepare a separate schema-9-compatible rollback copy while retaining the
-active schema-12 database, stop the server cleanly and run:
+active schema-13 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema9-copy \
@@ -300,7 +322,7 @@ room, and upload layer. The capability remains dormant, so this stored audit
 is operator-recoverable state rather than active client-visible traffic.
 
 To prepare a separate schema-8-compatible rollback copy while retaining the
-active schema-12 database, stop the server cleanly and run:
+active schema-13 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema8-copy \
@@ -320,7 +342,7 @@ moderator/administrator, membership, retained-target, replay, and bounded
 storage checks remain authoritative for every mutation.
 
 To prepare a separate schema-7-compatible rollback copy while retaining the
-active schema-12 database, stop the server cleanly and run:
+active schema-13 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema7-copy \
@@ -333,7 +355,7 @@ usage metadata from a staged copy and preserves event sequences, message
 revisions, reactions, and ordinary history.
 
 To prepare a separate schema-6-compatible rollback copy while retaining the
-active schema-12 database, stop the server cleanly and run:
+active schema-13 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema6-copy \
@@ -349,7 +371,7 @@ database are preserved. Retention is not active, so exporting the accounting
 metadata cannot conceal prior compaction.
 
 To prepare a separate schema-5-compatible rollback copy while retaining the
-active schema-12 database, stop the server cleanly and run:
+active schema-13 database, stop the server cleanly and run:
 
 ```bash
 omenchatd database export-schema5-copy \
@@ -617,7 +639,7 @@ priority survival, graceful drain, RSS/FD stability, and the 32 MiB per-writer
 retention cap. The delay is a reproducible slow-disk simulation, not a benchmark
 of a particular storage device.
 
-The schema currently uses SQLite `user_version = 8`. Version 2 added the upload
+The schema currently uses SQLite `user_version = 13`. Version 2 added the upload
 ledger actor/time index used by quota planning. Version 3 adds the
 bounded-shape durable-mutation replay table, client-instance retirement table,
 and their indexes. Version 4 adds nullable reply-event and bounded mention-ID
@@ -657,6 +679,12 @@ transaction, while legacy rows advance by at most 256 per append or explicit
 maintenance call. The backfill cursor survives restart and retention remains
 disabled until accounting is complete. Accounting failure rolls back event
 insertion and sequence advancement.
+Versions 9 and 10 add bounded pin and moderation-audit storage. Version 11 adds
+the constrained announcement-room policy scalar, and version 12 adds the
+bounded slow-mode scalar plus its admission table and expiry index. Version 13
+adds only nullable, constrained `upload_max_file_bytes` room storage. The
+schema-13 value is dormant until capability negotiation and upload enforcement
+are activated together in a later qualified slice.
 The store also contains an explicit compaction primitive. It requires complete
 accounting, removes no more than 64 original events per immediate transaction,
 bounds dependent reply/reaction/revision work to 20,000 rows, and updates all
@@ -720,7 +748,7 @@ transactionally. Files with
 a newer schema version are rejected without modification; run the matching or
 newer omenchatd rather than forcing the version backward.
 Migration of a non-empty older database first retains an online SQLite backup
-at `omenchat.sqlite.pre-v12-from-v<old>.bak`. The backup is owner-only on
+at `omenchat.sqlite.pre-v13-from-v<old>.bak`. The backup is owner-only on
 Unix and is never overwritten. If that path already exists or backup creation
 fails, startup aborts before changing the source database.
 Migration schema work and its version update are transactional. On failure the
@@ -729,6 +757,9 @@ and the completed pre-migration backup remains available.
 The confirmation-gated restore command described above validates and migrates
 that retained artifact through a staging database before replacement, and
 preserves the prior active database for rollback.
+The separate `export-schema12-copy` command removes only dormant per-room
+upload-ceiling storage while preserving slow-mode state and every earlier
+layer.
 The separate `export-schema11-copy` command removes only slow-mode settings and
 admission state while preserving announcement-room policy and every earlier
 layer.
@@ -745,7 +776,7 @@ provides a non-destructive downgrade artifact without usage or sequence
 metadata while preserving revisions, reactions, and history.
 `export-schema5-copy` omits revision state while preserving reactions.
 The deeper `export-schema4-copy` artifact omits both reactions and revisions.
-No export command edits the active schema-12 database.
+No export command edits the active schema-13 database.
 
 The SQLite store can compare its upload ledger with an identity directory and
 report missing, byte-mismatched, orphaned, and out-of-root paths without

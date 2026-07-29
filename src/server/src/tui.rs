@@ -5668,6 +5668,7 @@ mod tests {
                 room_revision: 0,
                 policy_bits: 0,
                 slow_mode_seconds: 0,
+                upload_max_file_bytes: None,
             })
             .collect();
         let (rows, truncated) = bounded_admin_room_rows(rooms);
@@ -5681,6 +5682,7 @@ mod tests {
             room_revision: 0,
             policy_bits: 0,
             slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
         }]);
         assert!(truncated);
         assert!(rows.is_empty());
@@ -5695,6 +5697,7 @@ mod tests {
             room_revision: 4,
             policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
             slow_mode_seconds: 30,
+            upload_max_file_bytes: None,
         }]);
         assert!(!truncated);
         let room = rows.first().expect("projected room");
@@ -5722,6 +5725,7 @@ mod tests {
             room_revision: 1,
             policy_bits: crate::protocol::ROOM_POLICY_KNOWN_MASK << 1,
             slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
         }]);
         assert!(truncated);
         assert!(invalid.is_empty());

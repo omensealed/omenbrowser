@@ -59,6 +59,12 @@ pub struct DatabaseSchemaElevenExportReport {
     pub destination: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseSchemaTwelveExportReport {
+    pub source_version: i64,
+    pub destination: PathBuf,
+}
+
 pub fn restore_migration_backup(
     database: &Path,
     backup: &Path,
@@ -266,6 +272,28 @@ pub fn export_schema_eleven_copy(
     export_schema_eleven_copy_with_publish(database, destination, atomic_replace)
 }
 
+pub fn export_schema_twelve_copy(
+    database: &Path,
+    destination: &Path,
+) -> ServerResult<DatabaseSchemaTwelveExportReport> {
+    export_schema_twelve_copy_with_publish(database, destination, atomic_replace)
+}
+
+fn export_schema_twelve_copy_with_publish<F>(
+    database: &Path,
+    destination: &Path,
+    mut publish: F,
+) -> ServerResult<DatabaseSchemaTwelveExportReport>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    export_downgrade_copy_with_publish(database, destination, 12, &mut publish)?;
+    Ok(DatabaseSchemaTwelveExportReport {
+        source_version: SCHEMA_VERSION,
+        destination: destination.to_path_buf(),
+    })
+}
+
 fn export_schema_eleven_copy_with_publish<F>(
     database: &Path,
     destination: &Path,
@@ -320,7 +348,7 @@ fn export_downgrade_copy_with_publish<F>(
 where
     F: FnMut(&Path, &Path) -> std::io::Result<()>,
 {
-    debug_assert!(matches!(target_version, 4..=11));
+    debug_assert!(matches!(target_version, 4..=12));
     let schema_label = format!("schema-{target_version}");
     validate_regular_file(database, "active database")?;
     if database == destination {
@@ -390,11 +418,14 @@ where
             &connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        transaction.execute_batch(
-            "DROP INDEX IF EXISTS idx_room_slow_mode_admissions_expiry;
-             DROP TABLE IF EXISTS room_slow_mode_admissions;
-             ALTER TABLE rooms DROP COLUMN slow_mode_seconds;",
-        )?;
+        transaction.execute_batch("ALTER TABLE rooms DROP COLUMN upload_max_file_bytes;")?;
+        if target_version <= 11 {
+            transaction.execute_batch(
+                "DROP INDEX IF EXISTS idx_room_slow_mode_admissions_expiry;
+                 DROP TABLE IF EXISTS room_slow_mode_admissions;
+                 ALTER TABLE rooms DROP COLUMN slow_mode_seconds;",
+            )?;
+        }
         if target_version <= 10 {
             transaction.execute_batch("ALTER TABLE rooms DROP COLUMN policy_bits;")?;
         }
@@ -629,11 +660,22 @@ fn validate_current_database(path: &Path) -> ServerResult<()> {
             "restored database is missing schema-12 slow-mode storage; column={slow_mode_columns} objects={slow_mode_objects}/2"
         )));
     }
+    let media_policy_columns: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('rooms')
+         WHERE name = 'upload_max_file_bytes'",
+        [],
+        |row| row.get(0),
+    )?;
+    if media_policy_columns != 1 {
+        return Err(ServerError::Message(
+            "restored database is missing schema-13 room media-policy storage".into(),
+        ));
+    }
     Ok(())
 }
 
 fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()> {
-    debug_assert!(matches!(target_version, 4..=11));
+    debug_assert!(matches!(target_version, 4..=12));
     let schema_label = format!("schema-{target_version}");
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -783,10 +825,10 @@ fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()>
             "{schema_label} export retained schema-11 room policy storage"
         )));
     }
-    if target_version == 11 && policy_columns != 1 {
-        return Err(ServerError::Message(
-            "schema-11 export did not retain room policy storage".into(),
-        ));
+    if target_version >= 11 && policy_columns != 1 {
+        return Err(ServerError::Message(format!(
+            "{schema_label} export did not retain room policy storage"
+        )));
     }
     let slow_mode_columns: i64 = connection.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('rooms')
@@ -803,9 +845,25 @@ fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()>
         [],
         |row| row.get(0),
     )?;
-    if slow_mode_columns != 0 || slow_mode_objects != 0 {
+    if target_version <= 11 && (slow_mode_columns != 0 || slow_mode_objects != 0) {
         return Err(ServerError::Message(format!(
             "{schema_label} export retained schema-12 slow-mode storage"
+        )));
+    }
+    if target_version == 12 && (slow_mode_columns != 1 || slow_mode_objects != 2) {
+        return Err(ServerError::Message(format!(
+            "schema-12 export did not retain complete slow-mode storage; column={slow_mode_columns} objects={slow_mode_objects}/2"
+        )));
+    }
+    let media_policy_columns: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('rooms')
+         WHERE name = 'upload_max_file_bytes'",
+        [],
+        |row| row.get(0),
+    )?;
+    if media_policy_columns != 0 {
+        return Err(ServerError::Message(format!(
+            "{schema_label} export retained schema-13 room media-policy storage"
         )));
     }
     Ok(())
@@ -1954,6 +2012,154 @@ mod tests {
         .expect_err("publish failure")
         .to_string();
         assert!(error.contains("injected schema-eleven publish failure"));
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::metadata(&database)
+                .expect("preserved source metadata")
+                .len(),
+            original_len
+        );
+        let source = OmenchatStore::open_existing_for_maintenance(&database)
+            .expect("source remains current and readable");
+        drop(source);
+
+        std::fs::remove_dir_all(root).expect("remove publish-failure root");
+    }
+
+    #[test]
+    fn schema_twelve_export_omits_only_room_media_policy() {
+        let (root, database, _) = setup_current_for_schema_four_export("schema12-success");
+        {
+            let connection = rusqlite::Connection::open(&database).expect("active database");
+            connection
+                .execute(
+                    "UPDATE rooms
+                     SET policy_bits = 1, slow_mode_seconds = 30,
+                         upload_max_file_bytes = 262144,
+                         room_revision = room_revision + 1
+                     WHERE room_id = 1",
+                    [],
+                )
+                .expect("media-policy room fixture");
+            connection
+                .execute(
+                    "INSERT INTO room_slow_mode_admissions(
+                       room_id, user_id, not_before_unix, updated_at
+                     ) VALUES (1, 1, 130, 100)",
+                    [],
+                )
+                .expect("slow-mode admission fixture");
+            connection
+                .execute(
+                    "INSERT INTO upload_files(
+                       resource_id, room_id, actor_user_id, filename,
+                       content_type, byte_len, path, created_at
+                     ) VALUES (
+                       'preserved-schema12-upload', 1, 1, 'fixture.bin',
+                       'application/octet-stream', 3, '/isolated/fixture.bin', 1
+                     )",
+                    [],
+                )
+                .expect("upload ledger fixture");
+        }
+        let destination = root.join("omenchat-schema12.sqlite");
+        let report =
+            export_schema_twelve_copy(&database, &destination).expect("schema twelve export");
+        assert_eq!(report.source_version, SCHEMA_VERSION);
+        assert_eq!(report.destination, destination);
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("schema twelve database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("export version"),
+            12
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT policy_bits, slow_mode_seconds, room_revision
+                     FROM rooms WHERE room_id = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .expect("room policy"),
+            (1, 30, 1)
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('rooms')
+                     WHERE name = 'upload_max_file_bytes'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("media-policy column lookup"),
+            0
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM room_slow_mode_admissions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("slow-mode admission count"),
+            1
+        );
+        assert_eq!(
+            exported
+                .query_row("SELECT COUNT(*) FROM upload_files", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("upload ledger count"),
+            1
+        );
+
+        let active = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("active database");
+        assert_eq!(
+            active
+                .query_row(
+                    "SELECT upload_max_file_bytes FROM rooms WHERE room_id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("active room media policy"),
+            262_144
+        );
+
+        drop(active);
+        drop(exported);
+        std::fs::remove_dir_all(root).expect("remove schema-twelve export root");
+    }
+
+    #[test]
+    fn schema_twelve_export_publish_failure_preserves_source_and_reservation_boundary() {
+        let (root, database, destination) =
+            setup_current_for_schema_four_export("schema12-publish-failure");
+        let original_len = std::fs::metadata(&database).expect("source metadata").len();
+        let error = export_schema_twelve_copy_with_publish(&database, &destination, |_, _| {
+            Err(std::io::Error::other(
+                "injected schema-twelve publish failure",
+            ))
+        })
+        .expect_err("publish failure")
+        .to_string();
+        assert!(error.contains("injected schema-twelve publish failure"));
         assert!(!destination.exists());
         assert_eq!(
             std::fs::metadata(&database)

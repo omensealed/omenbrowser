@@ -388,8 +388,10 @@ Do not invent measurements.
    seven-field room delta and typed upload-rejection fixtures. Production
    clients do not request and servers do not accept the capability. Evidence:
    `docs/audits/omenchat-room-media-policy-wire-qualification.md`.
-2. Schema-13 nullable scalar, migration/fault/restart tests, and guarded
-   schema-12 copy export. Runtime enforcement remains inactive.
+2. **Complete (2026-07-28):** schema-13 nullable scalar, migration/fault/restart
+   tests, and guarded schema-12 copy export. Runtime enforcement remains
+   inactive. Evidence:
+   `docs/audits/omenchat-room-media-policy-storage-qualification.md`.
 3. Store-owned effective-policy resolver plus test-only offer/publication
    enforcement using existing quota and durable file boundaries.
 4. Confirmation-gated stopped-server administration and bounded human/JSON
@@ -409,8 +411,8 @@ schema introduction, production negotiation, and activation in one patch.
 
 ## Rollback
 
-Before activation, revert code while retaining the nullable schema-13 column,
-or use the validated schema-12 copy for an older binary.
+Before activation, the nullable schema-13 column can remain harmlessly dormant,
+or an operator can use the validated schema-12 copy with an older binary.
 
 After activation:
 

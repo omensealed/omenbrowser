@@ -210,8 +210,9 @@ The final scalar is `nil` for inherited server policy, zero for disabled room
 uploads, or at most 10 MiB. The dormant typed upload-rejection extension keeps
 the existing reason/quota/incoming fields and appends a numeric reason code.
 Exact fixtures pass in both independent codecs, but production clients do not
-request the capability, servers do not accept it, and schema/runtime upload
-behavior remains unchanged.
+request the capability and servers do not accept it. omenchatd schema 13 stores
+the dormant nullable room ceiling and provides a guarded schema-12 copy export,
+but runtime upload admission remains unchanged.
 
 The browser persists the client-instance value under its active identity-scoped
 application storage and retains it in live client state. Invalid, unsafe, or
