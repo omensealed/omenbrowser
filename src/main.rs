@@ -195,6 +195,7 @@ async fn async_main() -> anyhow::Result<()> {
             local_display_name,
             announcement_rejection_smoke,
             announcement_upload_rejection_smoke,
+            room_media_policy_upload_rejection_smoke,
             slow_mode_rejection_smoke,
             slow_mode_delta_seconds,
             reaction_smoke,
@@ -222,6 +223,7 @@ async fn async_main() -> anyhow::Result<()> {
                 local_display_name,
                 announcement_rejection_smoke,
                 announcement_upload_rejection_smoke,
+                room_media_policy_upload_rejection_smoke,
                 slow_mode_rejection_smoke,
                 slow_mode_delta_seconds,
                 reaction_smoke,
@@ -377,6 +379,7 @@ enum CliCommand {
         local_display_name: String,
         announcement_rejection_smoke: bool,
         announcement_upload_rejection_smoke: bool,
+        room_media_policy_upload_rejection_smoke: bool,
         slow_mode_rejection_smoke: bool,
         slow_mode_delta_seconds: Option<u32>,
         reaction_smoke: bool,
@@ -453,6 +456,7 @@ struct OmenChatSmokeCommandInput {
     local_display_name: String,
     announcement_rejection_smoke: bool,
     announcement_upload_rejection_smoke: bool,
+    room_media_policy_upload_rejection_smoke: bool,
     slow_mode_rejection_smoke: bool,
     slow_mode_delta_seconds: Option<u32>,
     reaction_smoke: bool,
@@ -550,6 +554,7 @@ impl CliCommand {
         let mut omenchat_local_display_name = "OMENbrowser_rs smoke".to_string();
         let mut omenchat_announcement_rejection_smoke = false;
         let mut omenchat_announcement_upload_rejection_smoke = false;
+        let mut omenchat_room_media_policy_upload_rejection_smoke = false;
         let mut omenchat_slow_mode_rejection_smoke = false;
         let mut omenchat_slow_mode_delta_seconds = None;
         let mut omenchat_reaction_smoke = false;
@@ -653,6 +658,9 @@ impl CliCommand {
                 }
                 "--omenchat-announcement-upload-rejection-smoke" => {
                     omenchat_announcement_upload_rejection_smoke = true;
+                }
+                "--omenchat-room-media-policy-upload-rejection-smoke" => {
+                    omenchat_room_media_policy_upload_rejection_smoke = true;
                 }
                 "--omenchat-slow-mode-rejection-smoke" => {
                     omenchat_slow_mode_rejection_smoke = true;
@@ -945,6 +953,23 @@ impl CliCommand {
                     "choose only one OMENchat announcement rejection smoke mode"
                 ));
             }
+            if omenchat_room_media_policy_upload_rejection_smoke
+                && (omenchat_announcement_rejection_smoke
+                    || omenchat_announcement_upload_rejection_smoke
+                    || omenchat_slow_mode_rejection_smoke
+                    || omenchat_slow_mode_delta_seconds.is_some()
+                    || omenchat_moderation_audit_smoke
+                    || omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_none()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-room-media-policy-upload-rejection-smoke requires one upload file and is an isolated qualification case"
+                ));
+            }
             if omenchat_slow_mode_rejection_smoke
                 && (omenchat_announcement_rejection_smoke
                     || omenchat_announcement_upload_rejection_smoke
@@ -1032,6 +1057,8 @@ impl CliCommand {
                 local_display_name: omenchat_local_display_name,
                 announcement_rejection_smoke: omenchat_announcement_rejection_smoke,
                 announcement_upload_rejection_smoke: omenchat_announcement_upload_rejection_smoke,
+                room_media_policy_upload_rejection_smoke:
+                    omenchat_room_media_policy_upload_rejection_smoke,
                 slow_mode_rejection_smoke: omenchat_slow_mode_rejection_smoke,
                 slow_mode_delta_seconds: omenchat_slow_mode_delta_seconds,
                 reaction_smoke: omenchat_reaction_smoke,
@@ -3830,6 +3857,7 @@ mod tests {
                 local_display_name: "OMENbrowser_rs smoke".into(),
                 announcement_rejection_smoke: false,
                 announcement_upload_rejection_smoke: false,
+                room_media_policy_upload_rejection_smoke: false,
                 slow_mode_rejection_smoke: false,
                 slow_mode_delta_seconds: None,
                 reaction_smoke: true,
@@ -4034,6 +4062,51 @@ mod tests {
         ])
         .expect_err("missing upload must fail");
         assert!(error.to_string().contains("requires one upload file"));
+    }
+
+    #[test]
+    fn cli_keeps_room_media_policy_upload_rejection_isolated() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-room-media-policy-upload-rejection-smoke".to_string(),
+            "--omenchat-upload-file".to_string(),
+            "/tmp/rejected.bin".to_string(),
+        ])
+        .expect("parse room media-policy upload rejection");
+        assert!(matches!(
+            parsed,
+            CliCommand::OmenChatSmoke {
+                room_media_policy_upload_rejection_smoke: true,
+                ..
+            }
+        ));
+
+        for extra in [
+            "--omenchat-announcement-upload-rejection-smoke",
+            "--omenchat-reaction-smoke",
+        ] {
+            let mut args = vec![
+                "--omenchat-smoke".to_string(),
+                FIXTURE_DESTINATION_HASH.to_string(),
+                "--omenchat-room-media-policy-upload-rejection-smoke".to_string(),
+                "--omenchat-upload-file".to_string(),
+                "/tmp/rejected.bin".to_string(),
+            ];
+            args.push(extra.to_string());
+            let error = CliCommand::parse(args).expect_err("invalid mixed qualification must fail");
+            assert!(error.to_string().contains("isolated qualification case"));
+        }
+
+        let missing_upload = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-room-media-policy-upload-rejection-smoke".to_string(),
+        ])
+        .expect_err("missing upload must fail");
+        assert!(missing_upload
+            .to_string()
+            .contains("requires one upload file"));
     }
 
     #[test]

@@ -4477,6 +4477,9 @@ fn apply_upload_reject(
     let Some(session_id) = preferred_session_id else {
         return;
     };
+    let room_policy_negotiated = state
+        .as_deref()
+        .is_some_and(|state| state.room_media_policy_negotiated(session_id));
     if let Some(state) = state {
         if state
             .pending_uploads
@@ -4486,15 +4489,28 @@ fn apply_upload_reject(
             state.pending_uploads.remove(&(session_id, frame.seq));
         }
     }
-    let reason = body_values(&frame.body)
+    let values = body_values(&frame.body);
+    let reason = values
         .and_then(|values| values.first())
         .and_then(FrameValueExt::as_str)
         .unwrap_or("upload rejected by server");
+    let room_policy_reason = room_policy_negotiated
+        .then(|| {
+            values
+                .and_then(|values| values.get(3))
+                .and_then(FrameValueExt::as_u64)
+                .and_then(super::protocol::RoomUploadRejectReason::from_code)
+        })
+        .flatten();
     let reason = bounded_chat_text(reason, CHAT_STATUS_MAX_BYTES);
     if let Some(session) = client.session_mut(session_id) {
         session.status = reason.clone();
     }
-    events.push(ChatClientEvent::UploadRejected { session_id, reason });
+    events.push(ChatClientEvent::UploadRejected {
+        session_id,
+        reason,
+        room_policy_reason,
+    });
 }
 
 fn apply_upload_complete(
@@ -9319,6 +9335,64 @@ mod tests {
             state.pending_upload_metrics(),
             LivePendingUploadMetrics::default()
         );
+    }
+
+    #[test]
+    fn negotiated_room_upload_rejection_uses_typed_code_and_legacy_ignores_it() {
+        let rejection = Frame::new(
+            ChatOp::UploadReject,
+            1,
+            Some(1),
+            FrameBody::Fields(vec![
+                FrameValue::String("localized text must not drive policy".into()),
+                FrameValue::U64(256 * 1024),
+                FrameValue::U64(512 * 1024),
+                FrameValue::U64(
+                    super::super::protocol::RoomUploadRejectReason::FileSizeCeilingExceeded.code(),
+                ),
+            ]),
+        );
+
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        state.room_media_policy_sessions.insert(session_id);
+        let mut events = Vec::new();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut CapturedChatTransport::default(),
+            Some(session_id),
+            rejection.clone(),
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::UploadRejected {
+                room_policy_reason: Some(
+                    super::super::protocol::RoomUploadRejectReason::FileSizeCeilingExceeded
+                ),
+                ..
+            }]
+        ));
+
+        let (mut legacy_client, legacy_session_id) = live_test_client();
+        let mut legacy_state = LiveChatClientState::default();
+        let mut legacy_events = Vec::new();
+        apply_frame_with_state(
+            &mut legacy_client,
+            Some(&mut legacy_state),
+            &mut CapturedChatTransport::default(),
+            Some(legacy_session_id),
+            rejection,
+            &mut legacy_events,
+        );
+        assert!(matches!(
+            legacy_events.as_slice(),
+            [ChatClientEvent::UploadRejected {
+                room_policy_reason: None,
+                ..
+            }]
+        ));
     }
 
     #[test]

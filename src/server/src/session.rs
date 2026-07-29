@@ -617,6 +617,23 @@ impl SessionEngine {
         active_room_peers: &[ServerPeer],
         moderation_audit_negotiated: bool,
     ) -> ServerResult<Vec<Frame>> {
+        self.handle_frame_with_negotiated_features(
+            peer,
+            frame,
+            active_room_peers,
+            moderation_audit_negotiated,
+            self.room_media_policy_enforcement_enabled,
+        )
+    }
+
+    pub(crate) fn handle_frame_with_negotiated_features(
+        &self,
+        peer: &ServerPeer,
+        frame: Frame,
+        active_room_peers: &[ServerPeer],
+        moderation_audit_negotiated: bool,
+        room_media_policy_negotiated: bool,
+    ) -> ServerResult<Vec<Frame>> {
         match frame.op {
             ChatOp::SessionOpen => self.handle_session_open(peer, frame.seq, frame.body),
             ChatOp::JoinRoom => {
@@ -647,9 +664,13 @@ impl SessionEngine {
             {
                 self.handle_moderation_audit_before(peer, frame.seq, frame.room_id, frame.body)
             }
-            ChatOp::UploadOffer => {
-                self.handle_upload_offer(peer, frame.seq, frame.room_id, frame.body)
-            }
+            ChatOp::UploadOffer => self.handle_upload_offer(
+                peer,
+                frame.seq,
+                frame.room_id,
+                frame.body,
+                room_media_policy_negotiated,
+            ),
             ChatOp::UploadFetch => {
                 self.handle_upload_fetch(peer, frame.seq, frame.room_id, frame.body)
             }
@@ -4268,6 +4289,7 @@ impl SessionEngine {
         seq: u32,
         room_id: Option<RoomId>,
         body: FrameBody,
+        room_media_policy_negotiated: bool,
     ) -> ServerResult<Vec<Frame>> {
         let Some(room_id) = room_id else {
             return Ok(vec![self.upload_reject_frame(
@@ -4352,9 +4374,12 @@ impl SessionEngine {
                 0,
             )]);
         }
-        if let Some(rejection) =
-            self.reject_room_upload_policy(seq, room_id, offer.incoming_bytes)?
-        {
+        if let Some(rejection) = self.reject_room_upload_policy(
+            seq,
+            room_id,
+            offer.incoming_bytes,
+            room_media_policy_negotiated,
+        )? {
             return Ok(vec![rejection]);
         }
         if offer.incoming_bytes > self.limits.upload_max_file_bytes {
@@ -4469,6 +4494,21 @@ impl SessionEngine {
         resource_id: &str,
         data: Vec<u8>,
     ) -> ServerResult<Vec<Frame>> {
+        self.handle_upload_resource_with_room_media_policy(
+            peer,
+            resource_id,
+            data,
+            self.room_media_policy_enforcement_enabled,
+        )
+    }
+
+    pub(crate) fn handle_upload_resource_with_room_media_policy(
+        &self,
+        peer: &ServerPeer,
+        resource_id: &str,
+        data: Vec<u8>,
+        room_media_policy_negotiated: bool,
+    ) -> ServerResult<Vec<Frame>> {
         let pending = self
             .pending_uploads
             .lock()
@@ -4539,9 +4579,12 @@ impl SessionEngine {
         )? {
             return Ok(vec![error]);
         }
-        if let Some(rejection) =
-            self.reject_room_upload_policy(0, upload.room_id, upload.incoming_bytes)?
-        {
+        if let Some(rejection) = self.reject_room_upload_policy(
+            0,
+            upload.room_id,
+            upload.incoming_bytes,
+            room_media_policy_negotiated,
+        )? {
             return Ok(vec![rejection]);
         }
         let Some(cache_root) = self.limits.upload_cache_root.clone() else {
@@ -4948,8 +4991,9 @@ impl SessionEngine {
         seq: u32,
         room_id: RoomId,
         incoming_bytes: u64,
+        room_media_policy_negotiated: bool,
     ) -> ServerResult<Option<Frame>> {
-        if !self.room_media_policy_enforcement_enabled {
+        if !room_media_policy_negotiated {
             return Ok(None);
         }
         let Some(policy) = self
@@ -4965,26 +5009,50 @@ impl SessionEngine {
             )));
         };
         match policy {
-            EffectiveRoomUploadPolicy::Disabled => Ok(Some(self.upload_reject_frame(
+            EffectiveRoomUploadPolicy::Disabled => Ok(Some(self.room_upload_policy_reject_frame(
                 seq,
-                Some(room_id),
+                room_id,
                 "uploads are disabled by room policy",
                 0,
                 incoming_bytes,
+                crate::protocol::RoomUploadRejectReason::Disabled,
             ))),
             EffectiveRoomUploadPolicy::MaximumFileBytes(max_file_bytes)
                 if incoming_bytes > max_file_bytes =>
             {
-                Ok(Some(self.upload_reject_frame(
+                Ok(Some(self.room_upload_policy_reject_frame(
                     seq,
-                    Some(room_id),
+                    room_id,
                     "upload exceeds room file size limit",
                     max_file_bytes,
                     incoming_bytes,
+                    crate::protocol::RoomUploadRejectReason::FileSizeCeilingExceeded,
                 )))
             }
             EffectiveRoomUploadPolicy::MaximumFileBytes(_) => Ok(None),
         }
+    }
+
+    fn room_upload_policy_reject_frame(
+        &self,
+        seq: u32,
+        room_id: RoomId,
+        reason: &str,
+        quota_bytes: u64,
+        incoming_bytes: u64,
+        reason_code: crate::protocol::RoomUploadRejectReason,
+    ) -> Frame {
+        Frame::new(
+            ChatOp::UploadReject,
+            seq,
+            Some(room_id),
+            FrameBody::Fields(vec![
+                FrameValue::String(reason.into()),
+                FrameValue::U64(quota_bytes),
+                FrameValue::U64(incoming_bytes),
+                FrameValue::U64(reason_code.code()),
+            ]),
+        )
     }
 
     fn batch_op(
@@ -6472,12 +6540,15 @@ mod tests {
         assert!(matches!(
             &disabled[0].body,
             FrameBody::Fields(fields)
-                if fields.len() == 3
+                if fields.len() == 4
                     && fields.first() == Some(&FrameValue::String(
                         "uploads are disabled by room policy".into()
                     ))
                     && fields.get(1) == Some(&FrameValue::U64(0))
                     && fields.get(2) == Some(&FrameValue::U64(1))
+                    && fields.get(3) == Some(&FrameValue::U64(
+                        crate::protocol::RoomUploadRejectReason::Disabled.code()
+                    ))
         ));
 
         engine
@@ -6502,9 +6573,12 @@ mod tests {
         assert!(matches!(
             &oversized[0].body,
             FrameBody::Fields(fields)
-                if fields.len() == 3
+                if fields.len() == 4
                     && fields.get(1) == Some(&FrameValue::U64(10))
                     && fields.get(2) == Some(&FrameValue::U64(11))
+                    && fields.get(3) == Some(&FrameValue::U64(
+                        crate::protocol::RoomUploadRejectReason::FileSizeCeilingExceeded.code()
+                    ))
         ));
 
         engine
@@ -6545,6 +6619,56 @@ mod tests {
             frame_error_code(&rate_limited[0]),
             Some(ChatErrorCode::RateLimited as u16 as u64)
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn room_media_policy_upload_admission_is_explicitly_negotiation_scoped() {
+        let root = temp_upload_root("media-policy-negotiation-scope");
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = SessionEngine::with_test_room_media_policy(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                upload_quota_bytes: 1024,
+                upload_max_file_bytes: 512,
+                upload_cache_root: Some(root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        let peer = peer();
+        join_lobby(&engine, &peer);
+        engine
+            .store
+            .update_room_upload_max_file_bytes(1, Some(1))
+            .expect("room upload ceiling");
+        let offer = |seq| {
+            Frame::new(
+                ChatOp::UploadOffer,
+                seq,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String(format!("scope-{seq}.bin")),
+                    FrameValue::U64(2),
+                ]),
+            )
+        };
+
+        let legacy = engine
+            .handle_frame_with_negotiated_features(&peer, offer(10), &[], false, false)
+            .expect("legacy admission");
+        assert_eq!(legacy[0].op, ChatOp::UploadAccept);
+
+        let negotiated = engine
+            .handle_frame_with_negotiated_features(&peer, offer(11), &[], false, true)
+            .expect("negotiated rejection");
+        assert_eq!(negotiated[0].op, ChatOp::UploadReject);
+        assert!(matches!(
+            &negotiated[0].body,
+            FrameBody::Fields(fields)
+                if fields.get(3) == Some(&FrameValue::U64(
+                    crate::protocol::RoomUploadRejectReason::FileSizeCeilingExceeded.code()
+                ))
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

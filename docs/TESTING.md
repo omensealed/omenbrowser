@@ -5259,13 +5259,15 @@ The wrapper builds the root and standalone server independently with
 `omenchat-room-media-policy-qualification`, uses isolated browser/server roots
 and a dynamically allocated loopback TCP endpoint, performs the normal
 database migration lifecycle before stopped-server room administration, and
-then requires cumulative durable/announcement/slow-mode/media-policy
-negotiation plus an exact 256-KiB room projection and ordinary message round
-trip. It has bounded startup and client deadlines and removes isolated roots.
-It does not prove adjacent-version compatibility, upload Resource rejection,
-restart recovery, GUI attachment behavior, or long-duration resource use.
-Evidence is in
-`docs/audits/omenchat-room-media-policy-negotiation-qualification.md`.
+then runs three homes with cumulative negotiation. The first commits and
+fetches a 64-KiB Resource under a 256-KiB room ceiling, orderly-restarts the
+server, and requires policy re-projection. The second requires typed rejection
+for a 300-KiB Resource offer. The third requires typed rejection for a disabled
+room. Both rejection homes must retain an empty upload ledger and filesystem.
+It has bounded startup/client deadlines and removes isolated roots. It does not
+prove adjacent-version compatibility, receiver cancellation, GUI attachment
+behavior, or long-duration resource use. Evidence is in
+`docs/audits/omenchat-room-media-policy-resource-qualification.md`.
 
 The real, still-non-product feature now has a first explicit desktop
 presentation slice:

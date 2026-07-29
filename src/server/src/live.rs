@@ -716,9 +716,16 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 }
                 let frames_before = self.transport.frame_count();
                 let bytes_before = self.transport.byte_count();
-                let responses =
-                    self.engine
-                        .handle_upload_resource(&peer, &resource_id, data.clone())?;
+                let room_media_policy_negotiated = self
+                    .room_media_policy_links
+                    .get(&link_id)
+                    .is_some_and(|identity_hash| identity_hash == &peer.identity_hash);
+                let responses = self.engine.handle_upload_resource_with_room_media_policy(
+                    &peer,
+                    &resource_id,
+                    data.clone(),
+                    room_media_policy_negotiated,
+                )?;
                 let send_result = responses.iter().try_for_each(|response| {
                     self.stats.count_outbound_op(response);
                     self.send_response_frame(link_id, response)?;
@@ -915,14 +922,17 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             .moderation_audit_links
             .get(&link_id)
             .is_some_and(|identity_hash| identity_hash == &peer.identity_hash);
-        let mut responses = self
-            .engine
-            .handle_frame_with_active_peers_and_moderation_audit(
-                peer,
-                frame,
-                active_room_peers,
-                moderation_audit_active,
-            )?;
+        let room_media_policy_active = self
+            .room_media_policy_links
+            .get(&link_id)
+            .is_some_and(|identity_hash| identity_hash == &peer.identity_hash);
+        let mut responses = self.engine.handle_frame_with_negotiated_features(
+            peer,
+            frame,
+            active_room_peers,
+            moderation_audit_active,
+            room_media_policy_active,
+        )?;
         let reply_mentions_active = self.durable_sessions.get(&link_id).is_some_and(|binding| {
             binding.identity_hash == peer.identity_hash && binding.reply_mentions
         });

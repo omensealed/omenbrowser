@@ -1882,6 +1882,20 @@ compatibility, Resource rejection/restart behavior, GUI attachment behavior, or
 resource measurements. Evidence:
 `docs/audits/omenchat-room-media-policy-negotiation-qualification.md`.
 
+The seventh slice moves enforcement ownership from a process-wide test switch
+to the authenticated Link that negotiated all cumulative media-policy
+capabilities. Offer admission and Resource publication receive that explicit
+authority; legacy/non-negotiating traffic retains its exact prior behavior.
+Negotiated disabled and over-limit responses use stable typed codes while
+unknown or unsolicited codes remain generic client evidence. The isolated
+process gate now uses three separate homes: a 64-KiB upload commits and fetches
+under a 256-KiB ceiling and the policy reappears after orderly server restart;
+a 300-KiB upload receives typed over-limit rejection; and a disabled room
+receives typed disabled rejection. Both rejection homes retain zero upload
+files and zero ledger rows. Production feature vectors remain unchanged.
+Evidence:
+`docs/audits/omenchat-room-media-policy-resource-qualification.md`.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

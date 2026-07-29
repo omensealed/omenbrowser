@@ -913,7 +913,9 @@ impl DesktopApp {
                         );
                     }
                 }
-                ChatClientEvent::UploadRejected { session_id, reason } => {
+                ChatClientEvent::UploadRejected {
+                    session_id, reason, ..
+                } => {
                     self.omenchat
                         .omenchat_pending_upload_sources
                         .retain(|(pending_session_id, _, _), _| *pending_session_id != *session_id);

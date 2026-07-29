@@ -324,6 +324,7 @@ pub enum ChatClientEvent {
     UploadRejected {
         session_id: ChatSessionId,
         reason: String,
+        room_policy_reason: Option<super::protocol::RoomUploadRejectReason>,
     },
     UploadCompleted {
         session_id: ChatSessionId,

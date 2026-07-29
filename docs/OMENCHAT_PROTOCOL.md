@@ -218,6 +218,14 @@ the capability and production servers do not accept it. omenchatd schema 13
 stores the nullable room ceiling and provides a guarded schema-12 copy export;
 canonical runtime upload admission remains unchanged.
 
+The qualification server now applies room upload admission only when the
+current authenticated Link owns negotiated media-policy authority. It rechecks
+the same authority at Resource publication. Negotiated disabled and over-limit
+rejections append stable numeric codes `1` and `2`; the client exposes the
+typed code only for a negotiated session and treats unknown codes as generic
+rejection. Non-negotiating peers retain the exact three-field rejection and
+legacy admission behavior.
+
 The shared client projection distinguishes absent negotiation from inherited,
 disabled, and bounded room policy. Explicit seven-field qualification can
 carry that projection into the desktop client's existing 256-room-per-session
@@ -226,8 +234,10 @@ disable Attach for authoritative disabled evidence. Qualification runtime
 shape selection can now produce that evidence only after all cumulative
 capabilities are accepted. Canonical runtime shape selection still cannot
 produce it, so legacy and current product behavior remain unchanged until
-capability activation passes its remaining adjacent-version, Resource, GUI,
-and measurement gates.
+capability activation passes its remaining adjacent-version, GUI, cancellation,
+and measurement gates. Current/current under-limit Resource commit/fetch,
+typed rejection, orderly server restart, and projection recovery pass in the
+isolated qualification lane.
 
 The browser persists the client-instance value under its active identity-scoped
 application storage and retains it in live client state. Invalid, unsafe, or

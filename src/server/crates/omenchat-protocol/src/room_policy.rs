@@ -38,6 +38,29 @@ pub enum RoomUploadPolicyProjection {
     MaximumFileBytes(u64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomUploadRejectReason {
+    Disabled,
+    FileSizeCeilingExceeded,
+}
+
+impl RoomUploadRejectReason {
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::Disabled => 1,
+            Self::FileSizeCeilingExceeded => 2,
+        }
+    }
+
+    pub const fn from_code(code: u64) -> Option<Self> {
+        match code {
+            1 => Some(Self::Disabled),
+            2 => Some(Self::FileSizeCeilingExceeded),
+            _ => None,
+        }
+    }
+}
+
 impl RoomPolicyProjection {
     pub fn new(policy_bits: u64, slow_mode_seconds: u32) -> Result<Self, RoomPolicyError> {
         Self::new_with_upload_policy(policy_bits, slow_mode_seconds, None)
@@ -593,6 +616,22 @@ mod tests {
             media_entry.policy_projection_for_shape(RoomCatalogShape::Legacy),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn room_upload_reject_reason_codes_are_stable_and_forward_compatible() {
+        for reason in [
+            RoomUploadRejectReason::Disabled,
+            RoomUploadRejectReason::FileSizeCeilingExceeded,
+        ] {
+            assert_eq!(
+                RoomUploadRejectReason::from_code(reason.code()),
+                Some(reason)
+            );
+        }
+        assert_eq!(RoomUploadRejectReason::from_code(0), None);
+        assert_eq!(RoomUploadRejectReason::from_code(3), None);
+        assert_eq!(RoomUploadRejectReason::from_code(u64::MAX), None);
     }
 
     #[test]

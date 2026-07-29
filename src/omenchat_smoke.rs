@@ -114,6 +114,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         local_display_name,
         announcement_rejection_smoke,
         announcement_upload_rejection_smoke,
+        room_media_policy_upload_rejection_smoke,
         slow_mode_rejection_smoke,
         slow_mode_delta_seconds,
         reaction_smoke,
@@ -234,6 +235,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                     message: &message,
                     announcement_rejection_smoke,
                     announcement_upload_rejection_smoke,
+                    room_media_policy_upload_rejection_smoke,
                     slow_mode_rejection_smoke,
                     slow_mode_delta_seconds,
                     moderation_audit_smoke,
@@ -295,6 +297,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
                 message: &message,
                 announcement_rejection_smoke,
                 announcement_upload_rejection_smoke,
+                room_media_policy_upload_rejection_smoke,
                 slow_mode_rejection_smoke,
                 slow_mode_delta_seconds,
                 moderation_audit_smoke,
@@ -490,11 +493,11 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "events": message_events,
     }));
 
-    let mut announcement_upload_rejection_ok = false;
-    if joined && announcement_upload_rejection_smoke {
+    let mut upload_rejection_ok = false;
+    if joined && (announcement_upload_rejection_smoke || room_media_policy_upload_rejection_smoke) {
         let upload_file = upload_file
             .as_ref()
-            .context("announcement upload rejection smoke requires an upload file")?;
+            .context("upload rejection smoke requires an upload file")?;
         let upload_bytes = std::fs::read(upload_file).with_context(|| {
             format!(
                 "failed to read OMENchat rejection smoke upload file {}",
@@ -546,30 +549,43 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             |_| false,
         )
         .await;
-        let announcement_upload_rejected =
-            omenchat_smoke_events_contain_announcement_policy_rejection(&rejection_events);
+        let policy_upload_rejected = if room_media_policy_upload_rejection_smoke {
+            let expected_reason = if room_upload_max_file_bytes == Some(Some(0)) {
+                omenbrowser_rs::chat::protocol::RoomUploadRejectReason::Disabled
+            } else {
+                omenbrowser_rs::chat::protocol::RoomUploadRejectReason::FileSizeCeilingExceeded
+            };
+            omenchat_smoke_events_contain_room_policy_upload_rejection(
+                &rejection_events,
+                expected_reason,
+            )
+        } else {
+            omenchat_smoke_events_contain_announcement_policy_rejection(&rejection_events)
+        };
         let upload_accepted =
             omenchat_smoke_events_contain_decoded_event(&rejection_events, "upload_accepted");
         let upload_completed =
             omenchat_smoke_events_contain_decoded_event(&rejection_events, "upload_completed");
-        let announcement_upload_committed = omenchat_session_upload_resource_id(
+        let upload_committed = omenchat_session_upload_resource_id(
             &client,
             session_id,
             &upload_filename,
             Some(upload_len),
         )
         .is_some();
-        announcement_upload_rejection_ok = announcement_upload_rejected
-            && !upload_accepted
-            && !upload_completed
-            && !announcement_upload_committed;
+        upload_rejection_ok =
+            policy_upload_rejected && !upload_accepted && !upload_completed && !upload_committed;
         stages.push(serde_json::json!({
-            "stage": "announcement_upload_rejection_wait",
-            "ok": announcement_upload_rejection_ok,
-            "announcement_rejected": announcement_upload_rejected,
+            "stage": if room_media_policy_upload_rejection_smoke {
+                "room_media_policy_upload_rejection_wait"
+            } else {
+                "announcement_upload_rejection_wait"
+            },
+            "ok": upload_rejection_ok,
+            "policy_upload_rejected": policy_upload_rejected,
             "upload_accepted": upload_accepted,
             "upload_completed": upload_completed,
-            "committed_upload_seen": announcement_upload_committed,
+            "committed_upload_seen": upload_committed,
             "events": rejection_events,
         }));
     }
@@ -822,7 +838,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
     }
 
     let mut upload_ok = true;
-    if joined && message_seen {
+    if joined && message_seen && !room_media_policy_upload_rejection_smoke {
         if let Some(upload_file) = upload_file {
             let upload_bytes = std::fs::read(&upload_file).with_context(|| {
                 format!(
@@ -1019,15 +1035,16 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             "status": session.status.clone(),
         })
     });
-    let message_outcome = if announcement_upload_rejection_smoke {
-        announcement_upload_rejection_ok
-    } else if slow_mode_rejection_smoke {
-        slow_mode_negotiated && slow_mode_rejected && !message_seen
-    } else if announcement_rejection_smoke {
-        announcement_publication_blocked && !message_seen
-    } else {
-        message_seen
-    };
+    let message_outcome =
+        if announcement_upload_rejection_smoke || room_media_policy_upload_rejection_smoke {
+            upload_rejection_ok
+        } else if slow_mode_rejection_smoke {
+            slow_mode_negotiated && slow_mode_rejected && !message_seen
+        } else if announcement_rejection_smoke {
+            announcement_publication_blocked && !message_seen
+        } else {
+            message_seen
+        };
     let outcome = joined
         && slow_mode_delta_observed
         && message_outcome
@@ -1041,6 +1058,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "join_wait"
     } else if !slow_mode_delta_observed {
         "slow_mode_delta_wait"
+    } else if !message_outcome && room_media_policy_upload_rejection_smoke {
+        "room_media_policy_upload_rejection_wait"
     } else if !message_outcome && announcement_upload_rejection_smoke {
         "announcement_upload_rejection_wait"
     } else if !message_outcome && announcement_rejection_smoke {
@@ -1073,6 +1092,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             message: &message,
             announcement_rejection_smoke,
             announcement_upload_rejection_smoke,
+            room_media_policy_upload_rejection_smoke,
             slow_mode_rejection_smoke,
             slow_mode_delta_seconds,
             moderation_audit_smoke,
@@ -3230,6 +3250,28 @@ fn omenchat_smoke_events_contain_slow_mode_rejection(events: &[serde_json::Value
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+fn omenchat_smoke_events_contain_room_policy_upload_rejection(
+    events: &[serde_json::Value],
+    expected: omenbrowser_rs::chat::protocol::RoomUploadRejectReason,
+) -> bool {
+    events.iter().any(|entry| {
+        entry
+            .get("decoded")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|decoded| {
+                decoded.iter().any(|event| {
+                    event.get("event").and_then(serde_json::Value::as_str)
+                        == Some("upload_rejected")
+                        && event
+                            .get("room_policy_reason_code")
+                            .and_then(serde_json::Value::as_u64)
+                            == Some(expected.code())
+                })
+            })
+    })
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn is_announcement_policy_rejection_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> bool {
     matches!(
         event,
@@ -3513,11 +3555,16 @@ fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_jso
                 "bytes": bytes,
             })
         }
-        omenbrowser_rs::chat::ChatClientEvent::UploadRejected { session_id, reason } => {
+        omenbrowser_rs::chat::ChatClientEvent::UploadRejected {
+            session_id,
+            reason,
+            room_policy_reason,
+        } => {
             serde_json::json!({
                 "event": "upload_rejected",
                 "session_id": session_id,
                 "reason": reason,
+                "room_policy_reason_code": room_policy_reason.map(|reason| reason.code()),
             })
         }
         omenbrowser_rs::chat::ChatClientEvent::UploadCompleted {
@@ -3640,6 +3687,7 @@ struct OmenChatSmokeReportContext<'a> {
     message: &'a str,
     announcement_rejection_smoke: bool,
     announcement_upload_rejection_smoke: bool,
+    room_media_policy_upload_rejection_smoke: bool,
     slow_mode_rejection_smoke: bool,
     slow_mode_delta_seconds: Option<u32>,
     moderation_audit_smoke: bool,
@@ -3659,6 +3707,7 @@ fn omenchat_smoke_report(
         message,
         announcement_rejection_smoke,
         announcement_upload_rejection_smoke,
+        room_media_policy_upload_rejection_smoke,
         slow_mode_rejection_smoke,
         slow_mode_delta_seconds,
         moderation_audit_smoke,
@@ -3670,6 +3719,8 @@ fn omenchat_smoke_report(
             "stage": stage,
             "reason": if ok && announcement_upload_rejection_smoke {
                 "OMENchat Link opened, room joined, and the server rejected the member upload before acceptance or commit"
+            } else if ok && room_media_policy_upload_rejection_smoke {
+                "OMENchat Link opened, room media policy was negotiated, and the server returned typed upload rejection without commit"
             } else if ok && announcement_rejection_smoke {
                 "OMENchat Link opened, room joined, and authoritative policy blocked member publication without committing the message"
             } else if ok && slow_mode_rejection_smoke {
@@ -3694,6 +3745,7 @@ fn omenchat_smoke_report(
         "message": message,
         "announcement_rejection_smoke": announcement_rejection_smoke,
         "announcement_upload_rejection_smoke": announcement_upload_rejection_smoke,
+        "room_media_policy_upload_rejection_smoke": room_media_policy_upload_rejection_smoke,
         "slow_mode_rejection_smoke": slow_mode_rejection_smoke,
         "slow_mode_delta_seconds": slow_mode_delta_seconds,
         "moderation_audit_smoke": moderation_audit_smoke,

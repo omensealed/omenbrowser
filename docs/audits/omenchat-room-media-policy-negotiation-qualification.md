@@ -129,10 +129,9 @@ and orderly shutdown before maintenance; validation was not weakened.
 
 The first broad qualification matrix also found that coupling capability
 acceptance to the existing enforcement test hook changed upload rejection for
-non-negotiating sessions. The normal constructors now enable only capability
-qualification; enforcement remains owned by the explicit test constructor
-until Link-scoped Resource qualification is implemented. The two legacy upload
-tests and the full server matrix pass after that separation.
+non-negotiating sessions. The normal direct-engine path therefore remained
+dormant in this slice. The following Resource slice moved enforcement to
+explicit authenticated-Link authority without weakening legacy behavior.
 
 ## Compatibility and rollback
 
@@ -146,8 +145,6 @@ rollback because this slice did not alter them.
 ## Remaining activation gates
 
 - adjacent current/previous mixed-version shape compatibility;
-- real upload Resource acceptance and typed over-limit or disabled rejection;
-- server restart and client reconnect with policy re-projection;
 - GUI attachment preflight and authoritative rejection smoke;
 - bounded resource measurements;
 - explicit activation review and product-feature decision.

@@ -405,8 +405,12 @@ Do not invent measurements.
    controls. omenchatd TUI reports configured/inactive operator evidence only.
    Evidence:
    `docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
-6. Current/current, adjacent-version, restart, Link replacement, Resource,
-   cancellation, GUI, and resource-measurement qualification.
+6. **Partially complete (2026-07-28):** current/current capability, Link
+   ownership, under-limit Resource commit/fetch, typed over-limit and disabled
+   rejection, clean rejection ledger/filesystem, orderly restart, and policy
+   re-projection pass in isolated real-process qualification. Adjacent-version,
+   cancellation, GUI, and resource-measurement evidence remains. Evidence:
+   `docs/audits/omenchat-room-media-policy-resource-qualification.md`.
 7. Activate negotiation and enforcement together in canonical desktop and
    standalone server product profiles; retain qualification hooks outside
    release graphs.

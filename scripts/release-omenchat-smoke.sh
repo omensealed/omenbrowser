@@ -28,6 +28,7 @@ announcement_moderator_smoke=0
 slow_mode_rejection_smoke=0
 slow_mode_seconds=30
 room_media_policy_smoke_bytes=""
+room_media_policy_upload_rejection_smoke=0
 live_policy_maintenance_refused="not-run"
 reaction_smoke=0
 revision_smoke=0
@@ -272,9 +273,8 @@ if [[ -n "$server_large_batch_threshold_bytes" ]] \
 fi
 if [[ -n "$room_media_policy_smoke_bytes" ]] \
   && { ! [[ "$room_media_policy_smoke_bytes" =~ ^[0-9]+$ ]] \
-    || [[ "$room_media_policy_smoke_bytes" -lt 1 ]] \
     || [[ "$room_media_policy_smoke_bytes" -gt 10485760 ]]; }; then
-  echo "--room-media-policy-smoke must be an integer from 1 through 10485760 bytes" >&2
+  echo "--room-media-policy-smoke must be an integer from 0 through 10485760 bytes" >&2
   exit 2
 fi
 if [[ "$restart_server" -eq 1 && "$continuous_client_reconnect" -eq 1 ]]; then
@@ -332,8 +332,7 @@ if [[ -n "$room_media_policy_smoke_bytes" ]] \
     || "$slow_mode_rejection_smoke" -eq 1 \
     || "$moderation_audit_smoke" -eq 1 \
     || "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
-    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
-    || -n "$upload_file" ]]; then
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 ]]; then
   echo "--room-media-policy-smoke is an isolated qualification case" >&2
   exit 2
 fi
@@ -419,7 +418,7 @@ verify_empty_server_upload_state() {
   fi
   if [[ -d "$server_home/uploads" ]] \
     && find "$server_home/uploads" -type f -print -quit | grep -q .; then
-    echo "rejected announcement-room upload created a server file" >&2
+    echo "rejected upload created a server file" >&2
     return 1
   fi
 }
@@ -582,7 +581,11 @@ if [[ -n "$room_media_policy_smoke_bytes" ]]; then
   kill -TERM "$bootstrap_pid"
   wait "$bootstrap_pid"
   bootstrap_pid=""
-  "$server_bin" rooms set-upload-policy 1 "$room_media_policy_smoke_bytes" \
+  room_media_policy_config="$room_media_policy_smoke_bytes"
+  if [[ "$room_media_policy_smoke_bytes" -eq 0 ]]; then
+    room_media_policy_config="disabled"
+  fi
+  "$server_bin" rooms set-upload-policy 1 "$room_media_policy_config" \
     --confirm --home "$server_home" \
     >> "$run_dir/omenchatd-config.txt"
 fi
@@ -838,6 +841,20 @@ upload_args=()
 if [[ -n "$upload_file" ]]; then
   upload_args=(--omenchat-upload-file "$upload_file")
 fi
+room_media_policy_rejection_args=()
+if [[ -n "$room_media_policy_smoke_bytes" && -n "$upload_file" ]]; then
+  if stat -c %s "$upload_file" >/dev/null 2>&1; then
+    upload_bytes="$(stat -c %s "$upload_file")"
+  else
+    upload_bytes="$(wc -c < "$upload_file" | tr -d '[:space:]')"
+  fi
+  if [[ "$upload_bytes" -gt "$room_media_policy_smoke_bytes" ]]; then
+    room_media_policy_upload_rejection_smoke=1
+    room_media_policy_rejection_args=(
+      --omenchat-room-media-policy-upload-rejection-smoke
+    )
+  fi
+fi
 restart_upload_args=()
 if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
   restart_upload_args=("${upload_args[@]}")
@@ -888,6 +905,7 @@ fi
   --app-root "$browser_root" \
   --omenchat-message "$message" \
   "${announcement_rejection_args[@]}" \
+  "${room_media_policy_rejection_args[@]}" \
   "${slow_mode_delta_args[@]}" \
   "${reaction_args[@]}" \
   "${revision_args[@]}" \
@@ -1017,6 +1035,9 @@ fi
 if [[ -n "$room_media_policy_smoke_bytes" ]]; then
   verify_room_media_policy_report \
     "$run_dir/omenchat-smoke.json" "$room_media_policy_smoke_bytes"
+fi
+if [[ "$room_media_policy_upload_rejection_smoke" -eq 1 ]]; then
+  verify_empty_server_upload_state "room-media-policy"
 fi
 if [[ "$moderation_audit_smoke" -eq 1 ]]; then
   python3 - "$run_dir/omenchat-smoke.json" <<'PY'
@@ -1218,6 +1239,10 @@ if [[ "$restart_server" -eq 1 ]]; then
   if [[ "$announcement_negotiation_smoke" -eq 1 ]]; then
     verify_announcement_negotiation_report "$run_dir/omenchat-smoke-restart.json"
   fi
+  if [[ -n "$room_media_policy_smoke_bytes" ]]; then
+    verify_room_media_policy_report \
+      "$run_dir/omenchat-smoke-restart.json" "$room_media_policy_smoke_bytes"
+  fi
   if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
     verify_empty_server_upload_state "restart"
   fi
@@ -1341,6 +1366,7 @@ announcement_moderator_smoke: $announcement_moderator_smoke
 slow_mode_rejection_smoke: $slow_mode_rejection_smoke
 slow_mode_seconds: $([[ "$slow_mode_rejection_smoke" -eq 1 ]] && printf '%s' "$slow_mode_seconds" || printf 'not-run')
 room_media_policy_smoke_bytes: $([[ -n "$room_media_policy_smoke_bytes" ]] && printf '%s' "$room_media_policy_smoke_bytes" || printf 'not-run')
+room_media_policy_upload_rejection_smoke: $room_media_policy_upload_rejection_smoke
 live_policy_maintenance_refused: $live_policy_maintenance_refused
 reaction_smoke: $reaction_smoke
 revision_smoke: $revision_smoke
