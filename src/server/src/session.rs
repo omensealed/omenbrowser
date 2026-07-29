@@ -36,8 +36,8 @@ use crate::store::slow_mode::{
     admit_room_publication, room_slow_mode_seconds, SlowModeAdmission, SlowModeRoomPublication,
 };
 use crate::store::{
-    normalize_room_name, OmenchatStore, RoomContentMutationAdmission, ServerRoom, ServerRoomEvent,
-    ServerRoomEventKind, ServerUser,
+    normalize_room_name, EffectiveRoomUploadPolicy, OmenchatStore, RoomContentMutationAdmission,
+    ServerRoom, ServerRoomEvent, ServerRoomEventKind, ServerUser,
 };
 use crate::upload::{
     plan_upload_with_index, store_upload_with_policy_indexed_and_commit, UploadPolicy,
@@ -212,6 +212,7 @@ pub struct SessionEngine {
     slow_mode_capability_enabled: bool,
     moderation_audit_enabled: bool,
     announcement_rooms_enabled: bool,
+    room_media_policy_enforcement_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -397,6 +398,7 @@ impl SessionEngine {
             slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
+            room_media_policy_enforcement_enabled: false,
         }
     }
 
@@ -413,6 +415,7 @@ impl SessionEngine {
             slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
+            room_media_policy_enforcement_enabled: false,
         }
     }
 
@@ -436,6 +439,7 @@ impl SessionEngine {
             slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
+            room_media_policy_enforcement_enabled: false,
         }
     }
 
@@ -458,6 +462,13 @@ impl SessionEngine {
         let mut engine = Self::new(store);
         engine.slow_mode_enforcement_enabled = true;
         engine.slow_mode_capability_enabled = true;
+        engine
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_room_media_policy(store: OmenchatStore, limits: SessionLimits) -> Self {
+        let mut engine = Self::with_limits(store, limits);
+        engine.room_media_policy_enforcement_enabled = true;
         engine
     }
 
@@ -4279,11 +4290,6 @@ impl SessionEngine {
         {
             return Ok(vec![error]);
         }
-        if let Some(error) =
-            self.reject_if_rate_limited(peer, seq, Some(room_id), RateKind::Command)?
-        {
-            return Ok(vec![error]);
-        }
 
         let Some(offer) = upload_offer_body(&body) else {
             return Ok(vec![self.upload_reject_frame(
@@ -4317,6 +4323,11 @@ impl SessionEngine {
                 0,
             )]);
         }
+        if let Some(rejection) =
+            self.reject_room_upload_policy(seq, room_id, offer.incoming_bytes)?
+        {
+            return Ok(vec![rejection]);
+        }
         if offer.incoming_bytes > self.limits.upload_max_file_bytes {
             return Ok(vec![self.upload_reject_frame(
                 seq,
@@ -4338,6 +4349,17 @@ impl SessionEngine {
         let policy = UploadPolicy {
             cache_root,
             quota_bytes: self.limits.upload_quota_bytes,
+        };
+        let rate_reservation = match self.reserve_rate(peer, RateKind::Command)? {
+            RateAdmission::Admitted(reservation) => reservation,
+            RateAdmission::Rejected => {
+                return Ok(vec![self.error_frame(
+                    seq,
+                    Some(room_id),
+                    ChatErrorCode::RateLimited,
+                    "command rate limit exceeded",
+                )]);
+            }
         };
         let identity_dir =
             crate::upload::upload_identity_dir_for_root(&policy.cache_root, &peer.identity_hash);
@@ -4393,6 +4415,9 @@ impl SessionEngine {
                         plan.quota_bytes,
                         plan.incoming_bytes,
                     )]);
+                }
+                if let Some(reservation) = rate_reservation {
+                    reservation.commit();
                 }
                 Ok(vec![Frame::new(
                     ChatOp::UploadAccept,
@@ -4450,6 +4475,46 @@ impl SessionEngine {
                 data.len() as u64,
             )]);
         }
+        let Some(user) = self.ensure_allowed_peer(peer, 0, Some(upload.room_id))? else {
+            return Ok(vec![self.upload_reject_frame(
+                0,
+                Some(upload.room_id),
+                "user is banned",
+                self.limits.upload_quota_bytes,
+                upload.incoming_bytes,
+            )]);
+        };
+        if user.status_bits & STATUS_MUTED != 0 {
+            return Ok(vec![self.upload_reject_frame(
+                0,
+                Some(upload.room_id),
+                "user is muted",
+                self.limits.upload_quota_bytes,
+                upload.incoming_bytes,
+            )]);
+        }
+        if !self.store.room_has_member(upload.room_id, user.user_id)? {
+            return Ok(vec![self.upload_reject_frame(
+                0,
+                Some(upload.room_id),
+                "join the room before uploading",
+                self.limits.upload_quota_bytes,
+                upload.incoming_bytes,
+            )]);
+        }
+        if let Some(error) = self.reject_room_content_policy(
+            0,
+            upload.room_id,
+            user.role_bits,
+            "publishing uploads",
+        )? {
+            return Ok(vec![error]);
+        }
+        if let Some(rejection) =
+            self.reject_room_upload_policy(0, upload.room_id, upload.incoming_bytes)?
+        {
+            return Ok(vec![rejection]);
+        }
         let Some(cache_root) = self.limits.upload_cache_root.clone() else {
             return Ok(vec![self.upload_reject_frame(
                 0,
@@ -4463,15 +4528,6 @@ impl SessionEngine {
             cache_root,
             quota_bytes: self.limits.upload_quota_bytes,
         };
-        let user = self.ensure_peer(peer)?;
-        if let Some(error) = self.reject_room_content_policy(
-            0,
-            upload.room_id,
-            user.role_bits,
-            "publishing uploads",
-        )? {
-            return Ok(vec![error]);
-        }
         let identity_dir =
             crate::upload::upload_identity_dir_for_root(&policy.cache_root, &peer.identity_hash);
         let stored = store_upload_with_policy_indexed_and_commit(
@@ -4856,6 +4912,50 @@ impl SessionEngine {
                 FrameValue::U64(incoming_bytes),
             ]),
         )
+    }
+
+    fn reject_room_upload_policy(
+        &self,
+        seq: u32,
+        room_id: RoomId,
+        incoming_bytes: u64,
+    ) -> ServerResult<Option<Frame>> {
+        if !self.room_media_policy_enforcement_enabled {
+            return Ok(None);
+        }
+        let Some(policy) = self
+            .store
+            .effective_room_upload_policy(room_id, self.limits.upload_max_file_bytes)?
+        else {
+            return Ok(Some(self.upload_reject_frame(
+                seq,
+                Some(room_id),
+                "room not found",
+                self.limits.upload_quota_bytes,
+                incoming_bytes,
+            )));
+        };
+        match policy {
+            EffectiveRoomUploadPolicy::Disabled => Ok(Some(self.upload_reject_frame(
+                seq,
+                Some(room_id),
+                "uploads are disabled by room policy",
+                0,
+                incoming_bytes,
+            ))),
+            EffectiveRoomUploadPolicy::MaximumFileBytes(max_file_bytes)
+                if incoming_bytes > max_file_bytes =>
+            {
+                Ok(Some(self.upload_reject_frame(
+                    seq,
+                    Some(room_id),
+                    "upload exceeds room file size limit",
+                    max_file_bytes,
+                    incoming_bytes,
+                )))
+            }
+            EffectiveRoomUploadPolicy::MaximumFileBytes(_) => Ok(None),
+        }
     }
 
     fn batch_op(
@@ -6263,6 +6363,383 @@ mod tests {
                     && fields.get(1) == Some(&FrameValue::U64(10))
                     && fields.get(2) == Some(&FrameValue::U64(11))
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dormant_room_media_policy_does_not_change_legacy_upload_admission() {
+        let root = temp_upload_root("media-policy-dormant");
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                upload_quota_bytes: 1024,
+                upload_max_file_bytes: 512,
+                upload_cache_root: Some(root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        engine
+            .store
+            .set_room_upload_max_file_bytes_for_qualification(1, Some(0))
+            .expect("dormant disabled policy");
+        let peer = peer();
+        join_lobby(&engine, &peer);
+
+        let response = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    3,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("legacy.bin".into()),
+                        FrameValue::U64(1),
+                    ]),
+                ),
+            )
+            .expect("legacy upload offer");
+        assert_eq!(response[0].op, ChatOp::UploadAccept);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn qualification_room_media_policy_rejects_before_consuming_rate_admission() {
+        let root = temp_upload_root("media-policy-offer");
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = SessionEngine::with_test_room_media_policy(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                rate_commands_per_minute: 1,
+                upload_quota_bytes: 1024,
+                upload_max_file_bytes: 512,
+                upload_cache_root: Some(root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        let peer = peer();
+        join_lobby(&engine, &peer);
+
+        engine
+            .store
+            .set_room_upload_max_file_bytes_for_qualification(1, Some(0))
+            .expect("disabled room");
+        let disabled = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    3,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("disabled.bin".into()),
+                        FrameValue::U64(1),
+                    ]),
+                ),
+            )
+            .expect("disabled offer");
+        assert_eq!(disabled[0].op, ChatOp::UploadReject);
+        assert!(matches!(
+            &disabled[0].body,
+            FrameBody::Fields(fields)
+                if fields.len() == 3
+                    && fields.first() == Some(&FrameValue::String(
+                        "uploads are disabled by room policy".into()
+                    ))
+                    && fields.get(1) == Some(&FrameValue::U64(0))
+                    && fields.get(2) == Some(&FrameValue::U64(1))
+        ));
+
+        engine
+            .store
+            .set_room_upload_max_file_bytes_for_qualification(1, Some(10))
+            .expect("limited room");
+        let oversized = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    4,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("oversized.bin".into()),
+                        FrameValue::U64(11),
+                    ]),
+                ),
+            )
+            .expect("oversized offer");
+        assert_eq!(oversized[0].op, ChatOp::UploadReject);
+        assert!(matches!(
+            &oversized[0].body,
+            FrameBody::Fields(fields)
+                if fields.len() == 3
+                    && fields.get(1) == Some(&FrameValue::U64(10))
+                    && fields.get(2) == Some(&FrameValue::U64(11))
+        ));
+
+        engine
+            .store
+            .set_room_upload_max_file_bytes_for_qualification(1, None)
+            .expect("inherited room");
+        let accepted = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    5,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("accepted.bin".into()),
+                        FrameValue::U64(1),
+                    ]),
+                ),
+            )
+            .expect("accepted offer");
+        assert_eq!(accepted[0].op, ChatOp::UploadAccept);
+
+        let rate_limited = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    6,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("rate-limited.bin".into()),
+                        FrameValue::U64(1),
+                    ]),
+                ),
+            )
+            .expect("rate-limited offer");
+        assert_eq!(
+            frame_error_code(&rate_limited[0]),
+            Some(ChatErrorCode::RateLimited as u16 as u64)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn qualification_room_media_policy_is_rechecked_before_durable_publication() {
+        let root = temp_upload_root("media-policy-publication");
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = SessionEngine::with_test_room_media_policy(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                upload_quota_bytes: 1024,
+                upload_max_file_bytes: 512,
+                upload_cache_root: Some(root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        let peer = peer();
+        join_lobby(&engine, &peer);
+
+        let offer = |seq, filename: &str, bytes| {
+            let response = engine
+                .handle_frame(
+                    &peer,
+                    Frame::new(
+                        ChatOp::UploadOffer,
+                        seq,
+                        Some(1),
+                        FrameBody::Fields(vec![
+                            FrameValue::String(filename.into()),
+                            FrameValue::U64(bytes),
+                        ]),
+                    ),
+                )
+                .expect("upload offer");
+            assert_eq!(response[0].op, ChatOp::UploadAccept);
+            frame_body_values(&response[0].body)
+                .and_then(|values| values.first())
+                .and_then(frame_value_string)
+                .expect("resource id")
+                .to_owned()
+        };
+
+        let disabled_resource = offer(3, "disabled-after-offer.bin", 4);
+        engine
+            .store
+            .set_room_upload_max_file_bytes_for_qualification(1, Some(0))
+            .expect("disable before publication");
+        let disabled = engine
+            .handle_upload_resource(&peer, &disabled_resource, b"data".to_vec())
+            .expect("disabled publication");
+        assert_eq!(disabled[0].op, ChatOp::UploadReject);
+        assert_eq!(
+            engine
+                .pending_upload_metrics()
+                .expect("pending upload metrics"),
+            (0, 0, 0, 0)
+        );
+        assert!(engine
+            .store
+            .upload_file(&disabled_resource)
+            .expect("upload ledger")
+            .is_none());
+
+        engine
+            .store
+            .set_room_upload_max_file_bytes_for_qualification(1, None)
+            .expect("inherit before offer");
+        let limited_resource = offer(4, "limited-after-offer.bin", 4);
+        engine
+            .store
+            .set_room_upload_max_file_bytes_for_qualification(1, Some(2))
+            .expect("lower ceiling before publication");
+        let limited = engine
+            .handle_upload_resource(&peer, &limited_resource, b"data".to_vec())
+            .expect("limited publication");
+        assert_eq!(limited[0].op, ChatOp::UploadReject);
+        assert!(engine
+            .store
+            .upload_file(&limited_resource)
+            .expect("upload ledger")
+            .is_none());
+
+        engine
+            .store
+            .set_room_upload_max_file_bytes_for_qualification(1, Some(4))
+            .expect("allow publication");
+        let committed_resource = offer(5, "committed.bin", 4);
+        let committed = engine
+            .handle_upload_resource(&peer, &committed_resource, b"data".to_vec())
+            .expect("committed publication");
+        assert_eq!(committed[0].op, ChatOp::UploadComplete);
+        assert!(engine
+            .store
+            .upload_file(&committed_resource)
+            .expect("upload ledger")
+            .is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn qualification_room_media_policy_survives_engine_restart() {
+        let database = temp_store_path("room-media-policy-restart");
+        let root = temp_upload_root("media-policy-restart");
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&root);
+        let limits = SessionLimits {
+            upload_quota_bytes: 1024,
+            upload_max_file_bytes: 512,
+            upload_cache_root: Some(root.clone()),
+            ..SessionLimits::default()
+        };
+        let peer = peer();
+        let first_store = OmenchatStore::open(&database).expect("first store");
+        let room_id = first_store
+            .ensure_room("lobby", None)
+            .expect("persistent lobby")
+            .room_id;
+        let first = SessionEngine::with_test_room_media_policy(first_store, limits.clone());
+        join_lobby(&first, &peer);
+        first
+            .store
+            .set_room_upload_max_file_bytes_for_qualification(room_id, Some(2))
+            .expect("persistent room policy");
+        drop(first);
+
+        let restarted = SessionEngine::with_test_room_media_policy(
+            OmenchatStore::open(&database).expect("restarted store"),
+            limits,
+        );
+        join_lobby(&restarted, &peer);
+        let response = restarted
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    3,
+                    Some(room_id),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("after-restart.bin".into()),
+                        FrameValue::U64(3),
+                    ]),
+                ),
+            )
+            .expect("restart offer");
+        assert_eq!(response[0].op, ChatOp::UploadReject);
+        assert!(
+            matches!(
+                &response[0].body,
+                FrameBody::Fields(fields)
+                    if fields.get(1) == Some(&FrameValue::U64(2))
+                        && fields.get(2) == Some(&FrameValue::U64(3))
+            ),
+            "unexpected restart response: {:?}",
+            response
+        );
+        drop(restarted);
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_file(database.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(database.with_extension("sqlite-shm"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn upload_publication_rechecks_membership_and_releases_pending_offer() {
+        let root = temp_upload_root("publication-membership");
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                upload_quota_bytes: 1024,
+                upload_max_file_bytes: 512,
+                upload_cache_root: Some(root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        let peer = peer();
+        join_lobby(&engine, &peer);
+        let accepted = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    3,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("membership.bin".into()),
+                        FrameValue::U64(4),
+                    ]),
+                ),
+            )
+            .expect("upload offer");
+        let resource_id = frame_body_values(&accepted[0].body)
+            .and_then(|values| values.first())
+            .and_then(frame_value_string)
+            .expect("resource id")
+            .to_owned();
+        let user = engine.ensure_peer(&peer).expect("user");
+        engine
+            .store
+            .leave_room(1, user.user_id)
+            .expect("membership removal");
+
+        let rejected = engine
+            .handle_upload_resource(&peer, &resource_id, b"data".to_vec())
+            .expect("publication rejection");
+        assert_eq!(rejected[0].op, ChatOp::UploadReject);
+        assert!(matches!(
+            &rejected[0].body,
+            FrameBody::Fields(fields)
+                if fields.first() == Some(&FrameValue::String(
+                    "join the room before uploading".into()
+                ))
+        ));
+        assert_eq!(
+            engine
+                .pending_upload_metrics()
+                .expect("pending upload metrics"),
+            (0, 0, 0, 0)
+        );
+        assert!(engine
+            .store
+            .upload_file(&resource_id)
+            .expect("upload ledger")
+            .is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 

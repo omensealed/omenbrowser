@@ -1826,6 +1826,19 @@ configuration, administration, upload admission/publication, workers, timers,
 and UI remain inactive. Evidence:
 `docs/audits/omenchat-room-media-policy-storage-qualification.md`.
 
+The third slice is also complete. A store-owned typed resolver is now the
+single implementation of inherited, disabled, and room/global-minimum upload
+semantics. A test-only session constructor applies that result both before
+pending-offer admission and again after the exact identity-bound Resource is
+taken but before durable filesystem/ledger publication. The offer path now
+holds the existing rollback-capable command-rate reservation until bounded
+pending admission succeeds, so policy, quota, cache, and overload rejection do
+not consume a rate slot. Publication also rechecks ban, mute, membership, and
+announcement authorization. Canonical constructors keep enforcement false;
+capability negotiation, Cargo product features, configuration, administration,
+and UI remain unchanged. Evidence:
+`docs/audits/omenchat-room-media-policy-enforcement-qualification.md`.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

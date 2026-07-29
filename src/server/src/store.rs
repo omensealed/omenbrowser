@@ -5,7 +5,7 @@ use rusqlite::OptionalExtension;
 use crate::error::ServerResult;
 use crate::protocol::{
     EventId, RichMessageEventMetadata, RoomId, UserId, ROOM_POLICY_ANNOUNCEMENT,
-    ROOM_SLOW_MODE_MAX_SECONDS,
+    ROOM_SLOW_MODE_MAX_SECONDS, ROOM_UPLOAD_MAX_FILE_BYTES,
 };
 
 pub mod durable_replay;
@@ -28,6 +28,12 @@ pub struct ServerRoom {
     pub policy_bits: u64,
     pub slow_mode_seconds: u32,
     pub upload_max_file_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EffectiveRoomUploadPolicy {
+    Disabled,
+    MaximumFileBytes(u64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -581,6 +587,67 @@ impl OmenchatStore {
         )?;
         let rows = statement.query_map([], room_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn effective_room_upload_policy(
+        &self,
+        room_id: RoomId,
+        global_max_file_bytes: u64,
+    ) -> ServerResult<Option<EffectiveRoomUploadPolicy>> {
+        if global_max_file_bytes > ROOM_UPLOAD_MAX_FILE_BYTES {
+            return Err(crate::error::ServerError::Message(format!(
+                "global upload file ceiling exceeds protocol maximum of {ROOM_UPLOAD_MAX_FILE_BYTES} bytes"
+            )));
+        }
+        let Some(room) = self.room_by_id(room_id)? else {
+            return Ok(None);
+        };
+        let effective = match room.upload_max_file_bytes {
+            Some(0) => EffectiveRoomUploadPolicy::Disabled,
+            Some(room_max) => {
+                EffectiveRoomUploadPolicy::MaximumFileBytes(room_max.min(global_max_file_bytes))
+            }
+            None if global_max_file_bytes == 0 => EffectiveRoomUploadPolicy::Disabled,
+            None => EffectiveRoomUploadPolicy::MaximumFileBytes(global_max_file_bytes),
+        };
+        Ok(Some(effective))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_room_upload_max_file_bytes_for_qualification(
+        &self,
+        room_id: RoomId,
+        upload_max_file_bytes: Option<u64>,
+    ) -> ServerResult<Option<ServerRoom>> {
+        if upload_max_file_bytes.is_some_and(|bytes| bytes > ROOM_UPLOAD_MAX_FILE_BYTES) {
+            return Err(crate::error::ServerError::Message(format!(
+                "room upload file ceiling exceeds protocol maximum of {ROOM_UPLOAD_MAX_FILE_BYTES} bytes"
+            )));
+        }
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        transaction.execute(
+            "UPDATE rooms
+             SET upload_max_file_bytes = ?2,
+                 room_revision = room_revision + CASE
+                   WHEN upload_max_file_bytes IS ?2 THEN 0 ELSE 1
+                 END
+             WHERE room_id = ?1 AND archived = 0",
+            rusqlite::params![room_id, upload_max_file_bytes],
+        )?;
+        let room = transaction
+            .query_row(
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                        upload_max_file_bytes
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                room_from_row,
+            )
+            .optional()?;
+        transaction.commit()?;
+        Ok(room)
     }
 
     pub fn update_room_topic(
@@ -4526,6 +4593,86 @@ mod tests {
         drop(backup);
         drop(store);
         std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn effective_room_upload_policy_is_store_owned_bounded_and_persistent() {
+        let path = isolated_database_path("effective-room-upload-policy");
+        let store = OmenchatStore::open(&path).expect("store");
+        let room = store.ensure_room("policy-room", None).expect("policy room");
+
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 512 * 1024)
+                .expect("inherited policy"),
+            Some(EffectiveRoomUploadPolicy::MaximumFileBytes(512 * 1024))
+        );
+        let limited = store
+            .set_room_upload_max_file_bytes_for_qualification(room.room_id, Some(256 * 1024))
+            .expect("limited policy")
+            .expect("room");
+        assert_eq!(limited.room_revision, room.room_revision + 1);
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 512 * 1024)
+                .expect("room-limited policy"),
+            Some(EffectiveRoomUploadPolicy::MaximumFileBytes(256 * 1024))
+        );
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 128 * 1024)
+                .expect("global-limited policy"),
+            Some(EffectiveRoomUploadPolicy::MaximumFileBytes(128 * 1024))
+        );
+        let unchanged = store
+            .set_room_upload_max_file_bytes_for_qualification(room.room_id, Some(256 * 1024))
+            .expect("idempotent policy")
+            .expect("room");
+        assert_eq!(unchanged.room_revision, limited.room_revision);
+        store
+            .set_room_upload_max_file_bytes_for_qualification(room.room_id, Some(0))
+            .expect("disabled policy");
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 512 * 1024)
+                .expect("disabled policy"),
+            Some(EffectiveRoomUploadPolicy::Disabled)
+        );
+        store
+            .set_room_upload_max_file_bytes_for_qualification(room.room_id, None)
+            .expect("inherit policy");
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 0)
+                .expect("globally disabled policy"),
+            Some(EffectiveRoomUploadPolicy::Disabled)
+        );
+        assert!(store
+            .effective_room_upload_policy(room.room_id, ROOM_UPLOAD_MAX_FILE_BYTES + 1)
+            .is_err());
+        assert!(store
+            .set_room_upload_max_file_bytes_for_qualification(
+                room.room_id,
+                Some(ROOM_UPLOAD_MAX_FILE_BYTES + 1)
+            )
+            .is_err());
+        assert_eq!(
+            store
+                .effective_room_upload_policy(u32::MAX, 512 * 1024)
+                .expect("missing room"),
+            None
+        );
+        drop(store);
+
+        let reopened = OmenchatStore::open(&path).expect("reopened store");
+        assert_eq!(
+            reopened
+                .effective_room_upload_policy(room.room_id, 512 * 1024)
+                .expect("restarted inherited policy"),
+            Some(EffectiveRoomUploadPolicy::MaximumFileBytes(512 * 1024))
+        );
+        drop(reopened);
         remove_database_files(&path);
     }
 

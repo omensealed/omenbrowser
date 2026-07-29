@@ -392,8 +392,11 @@ Do not invent measurements.
    tests, and guarded schema-12 copy export. Runtime enforcement remains
    inactive. Evidence:
    `docs/audits/omenchat-room-media-policy-storage-qualification.md`.
-3. Store-owned effective-policy resolver plus test-only offer/publication
-   enforcement using existing quota and durable file boundaries.
+3. **Complete (2026-07-28):** store-owned effective-policy resolver plus
+   test-only offer/publication enforcement using existing quota and durable
+   file boundaries. Production constructors keep enforcement disabled.
+   Evidence:
+   `docs/audits/omenchat-room-media-policy-enforcement-qualification.md`.
 4. Confirmation-gated stopped-server administration and bounded human/JSON
    status evidence explicitly labeled inactive.
 5. Bounded desktop projection and static Iced controls. omenchatd TUI reports

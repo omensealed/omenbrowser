@@ -262,6 +262,11 @@ zero will disable room uploads, and positive values are constrained to at most
 10 MiB. This slice is storage-only: canonical clients do not request the
 capability, omenchatd does not accept it, no administration command changes
 the value, and upload admission still uses the existing global policy.
+An internal test-only qualification path resolves inherited, disabled, and
+room/global-minimum limits at both offer and Resource-publication boundaries.
+Normal and canonical server constructors explicitly keep that enforcement
+disabled until negotiation, administration, mixed-version, and live Resource
+qualification are complete.
 
 To prepare a separate schema-12-compatible rollback copy while retaining the
 active schema-13 database, stop the server cleanly and run:

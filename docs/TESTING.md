@@ -5163,6 +5163,30 @@ only `upload_max_file_bytes`. The active schema-13 database is not modified.
 Production negotiation and upload enforcement remain inactive. Evidence is in
 `docs/audits/omenchat-room-media-policy-storage-qualification.md`.
 
+The store-owned resolver and qualification-only enforcement boundary are
+covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    effective_room_upload_policy_is_store_owned_bounded_and_persistent \
+    --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_media_policy --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    upload_publication_rechecks_membership --lib -- --nocapture
+)
+```
+
+These tests prove exact `NULL`/zero/minimum semantics, the shared 10-MiB
+ceiling, idempotent policy persistence across engine restart, dormant canonical
+behavior, policy rejection before command-rate consumption, legacy three-field
+rejections, publication-time policy changes, pending-offer release, membership
+revalidation, and no filesystem/ledger publication after rejection. No product
+feature or capability acceptance is enabled. Evidence is in
+`docs/audits/omenchat-room-media-policy-enforcement-qualification.md`.
+
 The real, still-non-product feature now has a first explicit desktop
 presentation slice:
 
