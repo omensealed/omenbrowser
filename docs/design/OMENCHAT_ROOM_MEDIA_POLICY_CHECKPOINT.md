@@ -405,7 +405,7 @@ Do not invent measurements.
    controls. omenchatd TUI reports configured/inactive operator evidence only.
    Evidence:
    `docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
-6. **Partially complete (2026-07-28):** current/current capability, Link
+6. **Complete (2026-07-28):** current/current capability, Link
    ownership, under-limit Resource commit/fetch, typed over-limit and disabled
    rejection, clean rejection ledger/filesystem, orderly restart, and policy
    re-projection pass in isolated real-process qualification. The optimized
@@ -415,14 +415,16 @@ Do not invent measurements.
    cancellation only, so receiver-side cancellation remains an explicit
    upstream limitation rather than a fabricated pass. Native Linux Iced now
    also passes accepted, over-limit, and disabled attachment cases with
-   independent durable storage assertions. Adjacent-version, live-process
-   CPU/shutdown, and physical-network evidence remains. Evidence:
+   independent durable storage assertions. Adjacent-version and optimized
+   live-process CPU/RSS/handle/queue/shutdown evidence pass. Physical-network
+   evidence remains unclaimed. Evidence:
    `docs/audits/omenchat-room-media-policy-resource-qualification.md` and
    `docs/audits/omenchat-room-media-policy-resource-measurement.md` and
    `docs/audits/omenchat-room-media-policy-gui-qualification.md`.
-7. Activate negotiation and enforcement together in canonical desktop and
-   standalone server product profiles; retain qualification hooks outside
-   release graphs.
+7. **Complete (2026-07-28):** activate negotiation and enforcement together in
+   canonical desktop and standalone server product profiles; retain
+   qualification hooks outside release graphs. Evidence:
+   `docs/audits/omenchat-room-media-policy-activation-review.md`.
 8. Batch Windows/macOS native presentation, Python interoperability, and
    packaging with the stable release candidate.
 
@@ -431,26 +433,23 @@ schema introduction, production negotiation, and activation in one patch.
 
 ## Rollback
 
-Before activation, the nullable schema-13 column can remain harmlessly dormant,
-or an operator can use the validated schema-12 copy with an older binary.
-
 After activation:
 
-1. disable `room-media-policy-v1` acceptance/request first;
-2. retain stored room values and enforce conservatively until the binary
-   rollback is complete;
-3. stop omenchatd;
-4. create and validate the schema-12 copy;
+1. stop omenchatd;
+2. preserve the schema-13 database and sidecars;
+3. create and validate the schema-12 copy;
+4. disable `room-media-policy-v1` request/accept in both rebuilt binaries or
+   install the matching prior pair;
 5. move the live database aside rather than deleting it;
-6. restore the copy and the matching prior binary.
+6. restore the copy only when the selected prior binary requires schema 12.
 
 No rollback deletes identities, uploads, history, replay results, slow-mode
 admissions, room policy, or client attachment caches automatically.
 
-## Approval gate
+## Approval decision
 
-No schema or production wire change should begin until this checkpoint is
-reviewed. In particular, confirm:
+The checkpoint was approved through the completed staged gates. The activated
+contract remains:
 
 - the v1 scope is inherit/disabled/per-file ceiling only;
 - `NULL`/zero/positive semantics;

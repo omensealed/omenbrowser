@@ -130,7 +130,7 @@ No protocol byte, operation, capability label, schema, configuration default,
 identity, history, upload record, dependency, worker, queue, timer, cache, or
 retry behavior changed. The generic mixed harness gained optional current
 feature selectors so the same immutable process gate can test dormant
-capabilities without changing canonical product builds.
+or newly activated capabilities without changing the immutable peer build.
 
 All roots and Reticulum storage are temporary and isolated. The immutable
 adjacent source is exported with `git archive`; no worktree checkout or user
@@ -142,7 +142,6 @@ required.
 
 ## Remaining evidence
 
-- explicit production activation and rollback review;
 - adjacent-binary attachment/Resource traffic if compatibility claims expand
   beyond the legacy room shape and ordinary message behavior proven here;
 - later batched Python interoperability, native Windows/macOS presentation,

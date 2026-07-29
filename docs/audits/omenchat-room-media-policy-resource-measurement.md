@@ -113,7 +113,8 @@ Still required before activation:
 
 - hosted Windows/macOS attachment presentation; native Linux Iced accepted,
   over-limit, and disabled cases now pass;
-- explicit production activation and rollback review.
+- production activation is complete; see
+  `omenchat-room-media-policy-activation-review.md`.
 
 The live-process CPU, memory, queue, handle, and shutdown observation around a
 GUI upload is complete in

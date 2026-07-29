@@ -148,7 +148,8 @@ rollback because this slice did not alter them.
   complete; hosted native presentation remains a release-candidate gate;
 - live-process CPU/shutdown measurements; the isolated optimized
   retention/latency/storage/RSS measurement is complete;
-- explicit activation review and product-feature decision.
+- production activation is complete; see
+  `omenchat-room-media-policy-activation-review.md`.
 
 Until those pass, product capability vectors remain unchanged and the policy
 must not be advertised as active.

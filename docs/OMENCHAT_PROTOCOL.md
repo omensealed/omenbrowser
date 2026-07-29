@@ -195,10 +195,9 @@ capability and omenchatd does not accept it. These known operation numbers are
 a dormant compatibility reservation, not available message-edit behavior.
 Ordinary protocol-v1 history and messages remain unchanged.
 
-The shared contract now also contains a qualification-only
-`room-media-policy-v1` vocabulary. It reserves no operation number and changes
-no production capability vector. The non-product qualification feature
-requests and accepts it only with `durable-mutations-v1`,
+The shared contract also contains the production `room-media-policy-v1`
+vocabulary. It reserves no operation number. Canonical current clients and
+servers request and accept it only with `durable-mutations-v1`,
 `announcement-rooms-v1`, and `room-slow-mode-v1`, and therefore selects the
 cumulative seven-field room value:
 
@@ -208,17 +207,16 @@ cumulative seven-field room value:
 ```
 
 The final scalar is `nil` for inherited server policy, zero for disabled room
-uploads, or at most 10 MiB. The dormant typed upload-rejection extension keeps
+uploads, or at most 10 MiB. The typed upload-rejection extension keeps
 the existing reason/quota/incoming fields and appends a numeric reason code.
 Exact fixtures pass in both independent codecs. Qualification clients and
-servers now prove request/acceptance, authenticated-Link shape ownership,
+servers prove request/acceptance, authenticated-Link shape ownership,
 identity replacement cleanup, reconnect cleanup, and current/current
-projection over a real isolated Link. Production clients still do not request
-the capability and production servers do not accept it. omenchatd schema 13
-stores the nullable room ceiling and provides a guarded schema-12 copy export;
-canonical runtime upload admission remains unchanged.
+projection over a real isolated Link. Canonical profiles now activate that
+reviewed boundary. omenchatd schema 13 stores the nullable room ceiling and
+provides a guarded schema-12 copy export.
 
-The qualification server now applies room upload admission only when the
+The production server applies room upload admission only when the
 current authenticated Link owns negotiated media-policy authority. It rechecks
 the same authority at Resource publication. Negotiated disabled and over-limit
 rejections append stable numeric codes `1` and `2`; the client exposes the
@@ -227,17 +225,15 @@ rejection. Non-negotiating peers retain the exact three-field rejection and
 legacy admission behavior.
 
 The shared client projection distinguishes absent negotiation from inherited,
-disabled, and bounded room policy. Explicit seven-field qualification can
-carry that projection into the desktop client's existing 256-room-per-session
-map. Static Iced presentation can show the effective room/server minimum and
-disable Attach for authoritative disabled evidence. Qualification runtime
-shape selection can now produce that evidence only after all cumulative
-capabilities are accepted. Canonical runtime shape selection still cannot
-produce it, so legacy and current product behavior remain unchanged until
-capability activation passes its remaining adjacent-version, GUI, cancellation,
-and measurement gates. Current/current under-limit Resource commit/fetch,
-typed rejection, orderly server restart, and projection recovery pass in the
-isolated qualification lane.
+disabled, and bounded room policy. Seven-field negotiation carries that
+projection into the desktop client's existing 256-room-per-session map. Static
+Iced presentation shows the effective room/server minimum and disables Attach
+for authoritative disabled evidence. Production runtime shape selection
+produces that evidence only after all cumulative capabilities are accepted.
+Current/current Resource, rejection, restart, adjacent fallback, GUI, and
+bounded-process gates passed before activation. Receiver-side Resource
+cancellation remains unavailable through the locked upstream public API and is
+not presented as a supported action.
 
 The browser persists the client-instance value under its active identity-scoped
 application storage and retains it in live client state. Invalid, unsafe, or

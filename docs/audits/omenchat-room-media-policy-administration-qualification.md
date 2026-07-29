@@ -152,17 +152,15 @@ all passed
 ## Recovery and remaining work
 
 The schema-12 copy export remains the downgrade boundary. An inherited value
-restores global behavior without deleting any upload or ledger entry. Because
-production enforcement remains disabled, rollback can also omit only this
-command/status patch without changing live upload behavior.
+restores global behavior without deleting any upload or ledger entry. The
+subsequent production activation and rollback decision is recorded in
+`omenchat-room-media-policy-activation-review.md`; this paragraph describes
+the earlier administration-only checkpoint.
 
 Hosted native, Python interoperability, package, live Reticulum Resource,
 physical-network, and GPU measurements were not run for this local
 administration boundary. They remain release-candidate gates, not claimed
 results.
 
-The next smallest slice is the bounded desktop room-policy projection and
-static Iced controls, still without capability negotiation or production
-enforcement. Current/current, adjacent-version, restart, Link replacement,
-Resource, cancellation, GUI, and resource-measurement qualification remain
-required before activation.
+The later client, Resource, GUI, measurement, adjacent-version, and activation
+gates are complete. Hosted release-candidate evidence remains separate.

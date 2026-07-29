@@ -5221,9 +5221,11 @@ Tests require strict values and explicit confirmation, active-writer refusal,
 selected isolated-home ownership, transactional previous/configured values,
 idempotent revision behavior, injected pre-commit rollback, and missing-room
 failure. Human/JSON/TUI status distinguishes configured and effective policy,
-is bounded to 1,024 rooms and 1 MiB, reports truncation, and explicitly labels
-enforcement inactive. Production capability request/acceptance and upload
-enforcement remain disabled. Evidence is in
+is bounded to 1,024 rooms and 1 MiB, reports truncation, and explicitly labeled
+enforcement inactive at that staged checkpoint. Production activation is
+recorded separately in
+`docs/audits/omenchat-room-media-policy-activation-review.md`. Evidence for the
+administrative slice is in
 `docs/audits/omenchat-room-media-policy-administration-qualification.md`.
 
 The bounded client projection and static Iced presentation are covered by:
@@ -5248,19 +5250,20 @@ authenticated server maximum, and clears through the existing room-policy
 lifecycle. The Iced composer shows only authoritative evidence, disables
 Attach only when that evidence says disabled, and performs metadata-based
 local rejection before reading or queueing file contents. Production runtime
-selection still rejects seven-field media-policy values, requests no new
-capability, and preserves legacy upload behavior. Evidence is in
+selection now requests and accepts the seven-field shape; peers that do not
+negotiate it preserve legacy upload behavior. Evidence is in
 `docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
 
-The qualification-only request/acceptance and real-Link projection gate is:
+The deterministic request/acceptance and real-Link projection gate is:
 
 ```bash
 bash scripts/run-omenchat-room-media-policy-qualification.sh \
   --report /tmp/omen-room-media-policy-report.json
 ```
 
-The wrapper builds the root and standalone server independently with
-`omenchat-room-media-policy-qualification`, uses isolated browser/server roots
+The wrapper builds the root and standalone server independently with the
+production feature plus `omenchat-room-media-policy-qualification`, uses
+isolated browser/server roots
 and a dynamically allocated loopback TCP endpoint, performs the normal
 database migration lifecycle before stopped-server room administration, and
 then runs three homes with cumulative negotiation. The first commits and

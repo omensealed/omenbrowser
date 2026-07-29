@@ -27,7 +27,12 @@ pub(crate) const SLOW_MODE_ENFORCEMENT_STATUS: &str = if cfg!(feature = "omencha
 } else {
     "inactive"
 };
-pub(crate) const ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS: &str = "inactive";
+pub(crate) const ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS: &str =
+    if cfg!(feature = "omenchat-room-media-policy") {
+        "active"
+    } else {
+        "inactive"
+    };
 const ROOM_STATUS_MAX_ITEMS: usize = 1_024;
 const ROOM_STATUS_MAX_BYTES: usize = 1024 * 1024;
 
@@ -3123,7 +3128,7 @@ mod tests {
     }
 
     #[test]
-    fn room_status_projections_report_bounded_inactive_media_policy_without_secrets() {
+    fn room_status_projections_report_bounded_media_policy_feature_state_without_secrets() {
         let room = crate::store::ServerRoom {
             room_id: 7,
             name: "field".into(),

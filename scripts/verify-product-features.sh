@@ -7,7 +7,7 @@ cd "$repo_root"
 features="${OMENBROWSER_BROWSER_FEATURES:-desktop-product}"
 tree="$(cargo tree --locked -e features --no-default-features --features "$features" -i omenbrowser_rs)"
 
-required=(desktop-product desktop-qr portable-sqlite chat-client-gif chat-client-reticulum native-network omenchat-announcement-rooms omenchat-slow-mode omenchat-moderation-audit)
+required=(desktop-product desktop-qr portable-sqlite chat-client-gif chat-client-reticulum native-network omenchat-announcement-rooms omenchat-slow-mode omenchat-room-media-policy omenchat-moderation-audit)
 for feature in "${required[@]}"; do
   if ! grep -q "omenbrowser_rs feature \"$feature\"" <<<"$tree"; then
     echo "product feature verification failed: required feature '$feature' is absent" >&2
@@ -57,7 +57,7 @@ if grep -Eq '(^|[[:space:]])iced_gif v' <<<"$static_media_dependencies"; then
   echo "product feature verification failed: static-media product includes iced_gif" >&2
   exit 1
 fi
-for feature in desktop-product-static-media desktop-qr chat-client-reticulum native-network omenchat-announcement-rooms omenchat-slow-mode omenchat-moderation-audit; do
+for feature in desktop-product-static-media desktop-qr chat-client-reticulum native-network omenchat-announcement-rooms omenchat-slow-mode omenchat-room-media-policy omenchat-moderation-audit; do
   if ! grep -q "omenbrowser_rs feature \"$feature\"" <<<"$static_media_features"; then
     echo "product feature verification failed: static-media product lacks '$feature'" >&2
     exit 1
@@ -235,6 +235,11 @@ for server_profile in server-headless server-full; do
   if grep -q 'omenchatd feature "omenchat-room-media-policy-qualification"' \
     <<<"$server_features"; then
     echo "product feature verification failed: $server_profile activates dormant room media-policy qualification" >&2
+    exit 1
+  fi
+  if ! grep -q 'omenchatd feature "omenchat-room-media-policy"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile lacks room media-policy support" >&2
     exit 1
   fi
   if ! grep -q 'omenchatd feature "omenchat-moderation-audit"' <<<"$server_features"; then

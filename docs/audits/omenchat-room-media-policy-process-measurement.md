@@ -110,7 +110,6 @@ required.
 
 ## Remaining evidence
 
-- explicit product capability activation and rollback review;
 - a longer repeated-transfer soak if field evidence or subsequent changes
   suggest retained growth;
 - later batched Python interoperability, native Windows/macOS presentation,

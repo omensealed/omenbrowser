@@ -399,10 +399,8 @@ impl SessionEngine {
             slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
-            room_media_policy_capability_enabled: cfg!(
-                feature = "omenchat-room-media-policy-qualification"
-            ),
-            room_media_policy_enforcement_enabled: false,
+            room_media_policy_capability_enabled: cfg!(feature = "omenchat-room-media-policy"),
+            room_media_policy_enforcement_enabled: cfg!(feature = "omenchat-room-media-policy"),
         }
     }
 
@@ -419,10 +417,8 @@ impl SessionEngine {
             slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
-            room_media_policy_capability_enabled: cfg!(
-                feature = "omenchat-room-media-policy-qualification"
-            ),
-            room_media_policy_enforcement_enabled: false,
+            room_media_policy_capability_enabled: cfg!(feature = "omenchat-room-media-policy"),
+            room_media_policy_enforcement_enabled: cfg!(feature = "omenchat-room-media-policy"),
         }
     }
 
@@ -446,10 +442,8 @@ impl SessionEngine {
             slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
-            room_media_policy_capability_enabled: cfg!(
-                feature = "omenchat-room-media-policy-qualification"
-            ),
-            room_media_policy_enforcement_enabled: false,
+            room_media_policy_capability_enabled: cfg!(feature = "omenchat-room-media-policy"),
+            room_media_policy_enforcement_enabled: cfg!(feature = "omenchat-room-media-policy"),
         }
     }
 
@@ -482,6 +476,17 @@ impl SessionEngine {
         engine.slow_mode_capability_enabled = true;
         engine.room_media_policy_capability_enabled = true;
         engine.room_media_policy_enforcement_enabled = true;
+        engine
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_room_media_policy_disabled(
+        store: OmenchatStore,
+        limits: SessionLimits,
+    ) -> Self {
+        let mut engine = Self::with_limits(store, limits);
+        engine.room_media_policy_capability_enabled = false;
+        engine.room_media_policy_enforcement_enabled = false;
         engine
     }
 
@@ -622,7 +627,9 @@ impl SessionEngine {
             frame,
             active_room_peers,
             moderation_audit_negotiated,
-            self.room_media_policy_enforcement_enabled,
+            // This generic helper has no Link-scoped room-media negotiation
+            // evidence. Feature availability alone cannot grant authority.
+            false,
         )
     }
 
@@ -6464,10 +6471,10 @@ mod tests {
     }
 
     #[test]
-    fn dormant_room_media_policy_does_not_change_legacy_upload_admission() {
+    fn feature_disabled_room_media_policy_does_not_change_legacy_upload_admission() {
         let root = temp_upload_root("media-policy-dormant");
         let _ = std::fs::remove_dir_all(&root);
-        let engine = SessionEngine::with_limits(
+        let engine = SessionEngine::with_test_room_media_policy_disabled(
             OmenchatStore::in_memory().expect("store"),
             SessionLimits {
                 upload_quota_bytes: 1024,
@@ -6523,7 +6530,7 @@ mod tests {
             .update_room_upload_max_file_bytes(1, Some(0))
             .expect("disabled room");
         let disabled = engine
-            .handle_frame(
+            .handle_frame_with_negotiated_features(
                 &peer,
                 Frame::new(
                     ChatOp::UploadOffer,
@@ -6534,6 +6541,9 @@ mod tests {
                         FrameValue::U64(1),
                     ]),
                 ),
+                &[],
+                false,
+                true,
             )
             .expect("disabled offer");
         assert_eq!(disabled[0].op, ChatOp::UploadReject);
@@ -6556,7 +6566,7 @@ mod tests {
             .update_room_upload_max_file_bytes(1, Some(10))
             .expect("limited room");
         let oversized = engine
-            .handle_frame(
+            .handle_frame_with_negotiated_features(
                 &peer,
                 Frame::new(
                     ChatOp::UploadOffer,
@@ -6567,6 +6577,9 @@ mod tests {
                         FrameValue::U64(11),
                     ]),
                 ),
+                &[],
+                false,
+                true,
             )
             .expect("oversized offer");
         assert_eq!(oversized[0].op, ChatOp::UploadReject);
@@ -6586,7 +6599,7 @@ mod tests {
             .update_room_upload_max_file_bytes(1, None)
             .expect("inherited room");
         let accepted = engine
-            .handle_frame(
+            .handle_frame_with_negotiated_features(
                 &peer,
                 Frame::new(
                     ChatOp::UploadOffer,
@@ -6597,12 +6610,15 @@ mod tests {
                         FrameValue::U64(1),
                     ]),
                 ),
+                &[],
+                false,
+                true,
             )
             .expect("accepted offer");
         assert_eq!(accepted[0].op, ChatOp::UploadAccept);
 
         let rate_limited = engine
-            .handle_frame(
+            .handle_frame_with_negotiated_features(
                 &peer,
                 Frame::new(
                     ChatOp::UploadOffer,
@@ -6613,6 +6629,9 @@ mod tests {
                         FrameValue::U64(1),
                     ]),
                 ),
+                &[],
+                false,
+                true,
             )
             .expect("rate-limited offer");
         assert_eq!(
@@ -6800,7 +6819,7 @@ mod tests {
         );
         join_lobby(&restarted, &peer);
         let response = restarted
-            .handle_frame(
+            .handle_frame_with_negotiated_features(
                 &peer,
                 Frame::new(
                     ChatOp::UploadOffer,
@@ -6811,6 +6830,9 @@ mod tests {
                         FrameValue::U64(3),
                     ]),
                 ),
+                &[],
+                false,
+                true,
             )
             .expect("restart offer");
         assert_eq!(response[0].op, ChatOp::UploadReject);

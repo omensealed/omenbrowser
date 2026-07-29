@@ -1057,9 +1057,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         {
             requested_capabilities.push(ROOM_SLOW_MODE_CAPABILITY.into());
         }
-        if cfg!(feature = "omenchat-room-media-policy-qualification")
-            || room_media_policy_requested_for_test
-        {
+        if cfg!(feature = "omenchat-room-media-policy") || room_media_policy_requested_for_test {
             requested_capabilities.push(ROOM_MEDIA_POLICY_CAPABILITY.into());
         }
         if cfg!(feature = "omenchat-moderation-audit") {
@@ -1112,9 +1110,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         {
             state.slow_mode_requests.insert(session_id);
         }
-        if cfg!(feature = "omenchat-room-media-policy-qualification")
-            || room_media_policy_requested_for_test
-        {
+        if cfg!(feature = "omenchat-room-media-policy") || room_media_policy_requested_for_test {
             state.room_media_policy_requests.insert(session_id);
         }
         if cfg!(feature = "omenchat-moderation-audit") {
@@ -6348,8 +6344,8 @@ mod tests {
             negotiation.requested_capabilities.iter().any(
                 |capability| capability == crate::chat::protocol::ROOM_MEDIA_POLICY_CAPABILITY
             ),
-            cfg!(feature = "omenchat-room-media-policy-qualification"),
-            "canonical products must not request room media policy before activation"
+            cfg!(feature = "omenchat-room-media-policy"),
+            "only a room-media-policy-capable build may request room media policy"
         );
         let mut expected_capabilities = vec![
             DURABLE_MUTATION_CAPABILITY.into(),
@@ -6365,7 +6361,7 @@ mod tests {
         if cfg!(feature = "omenchat-slow-mode") {
             expected_capabilities.push(crate::chat::protocol::ROOM_SLOW_MODE_CAPABILITY.into());
         }
-        if cfg!(feature = "omenchat-room-media-policy-qualification") {
+        if cfg!(feature = "omenchat-room-media-policy") {
             expected_capabilities.push(crate::chat::protocol::ROOM_MEDIA_POLICY_CAPABILITY.into());
         }
         if cfg!(feature = "omenchat-moderation-audit") {
@@ -6403,7 +6399,7 @@ mod tests {
         );
         assert_eq!(
             state.room_media_policy_requests.contains(&1),
-            cfg!(feature = "omenchat-room-media-policy-qualification")
+            cfg!(feature = "omenchat-room-media-policy")
         );
         assert!(!state.room_media_policy_negotiated(1));
     }

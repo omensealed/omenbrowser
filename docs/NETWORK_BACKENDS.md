@@ -72,20 +72,24 @@ hooks such as the isolated room-policy transition and GUI auto-open behavior.
 The product verifier requires the production feature and rejects the
 qualification feature in release graphs.
 
-## OMENchat room media-policy qualification identity
+## OMENchat room media-policy feature identity
 
-`omenchat-room-media-policy-qualification` exists independently in the root
-and standalone server manifests. It depends on the activated announcement-room
-and slow-mode features, but no canonical desktop or server alias includes it.
-The product verifier rejects it from release graphs.
+`omenchat-room-media-policy` is dependency-free and included by canonical
+`desktop-product`, `desktop-product-static-media`, `server-headless`, and
+`server-full`. It depends on the already active announcement-room and slow-mode
+features. Current peers select the cumulative seven-field room shape only
+after explicit request/accept; non-negotiating peers retain their exact
+four-, five-, or six-field shape and global upload admission.
 
-The feature exists only to qualify the cumulative `room-media-policy-v1`
-request/acceptance boundary, seven-field room shape, Link-scoped lifecycle, and
-the already reviewed upload-policy enforcement hooks. It does not add a
-runtime, interface, worker, timer, queue, cache, subscription, or dependency.
-Legacy and canonical product peers retain their existing four-, five-, and
-six-field shapes until the remaining adjacent-version, Resource, GUI, and
-measurement gates support an explicit activation decision.
+`omenchat-room-media-policy-qualification` depends on the production feature
+but remains excluded from every product alias. It owns only deterministic
+process/GUI hooks. The product verifier requires the production feature and
+rejects the qualification hook from release graphs.
+
+Neither feature adds a runtime, interface, worker, timer, queue, cache,
+subscription, or dependency. The production activation and rollback decision
+is recorded in
+`audits/omenchat-room-media-policy-activation-review.md`.
 
 ## Security and ownership requirements
 

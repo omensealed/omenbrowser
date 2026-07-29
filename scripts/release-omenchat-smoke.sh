@@ -77,7 +77,7 @@ Options:
   --slow-mode-rejection-smoke
                        Qualification build only: commit once, restart, and prove typed slow-mode rejection
   --room-media-policy-smoke BYTES
-                       Qualification build only: negotiate and project this room upload ceiling
+                       Negotiate, project, and enforce this room upload ceiling
   --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
   --revision-smoke     Exercise negotiated durable corrections, tombstones, replay, and Resource recovery
   --pin-smoke          Exercise moderator-only durable pin replay, snapshots, no-op, and unpin

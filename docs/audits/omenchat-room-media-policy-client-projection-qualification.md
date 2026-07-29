@@ -164,14 +164,12 @@ The subsequent qualification slices now cover current/current negotiation,
 restart, Link replacement, Resource rejection/success, the upstream
 receiver-cancellation decision, isolated retention measurements, native Linux
 Iced attachment acceptance/rejection, adjacent-version shape compatibility,
-and live-process resource/shutdown observation. Python
-interoperability, hosted native platforms, packaging, and production activation
-remain later gates.
+live-process resource/shutdown observation, and production activation. Python
+interoperability, hosted native platforms, and packaging remain later gates.
 
 Rollback removes this optional projection and static presentation without a
 wire, storage, or configuration migration. Existing schema-12 copy export
 remains the deeper database downgrade boundary.
 
-The next smallest justified slice is the explicit production activation and
-rollback review. Capability request/acceptance remains outside canonical
-product graphs until that decision is complete.
+The activation decision is recorded in
+`omenchat-room-media-policy-activation-review.md`.

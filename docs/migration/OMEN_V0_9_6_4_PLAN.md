@@ -1997,6 +1997,22 @@ while applying the seven-field room ceiling only to the negotiated Link.
 Current/current projection survives orderly server restart. Adjacent-binary
 attachment Resource transfer remains outside that exact claim.
 
+The explicit activation review then enabled the dependency-free
+`omenchat-room-media-policy` feature in canonical animated/static desktop and
+headless/full server aliases while retaining qualification-only GUI/process
+hooks outside release graphs. Normal server constructors now accept and
+enforce policy only for an authenticated Link with explicit cumulative
+negotiation. Generic session helpers default to non-negotiated behavior, so
+feature compilation cannot substitute for Link authority. Existing `NULL`
+values preserve the global limit; legacy peers retain global admission. Status
+reports the real feature state and the guarded schema-12 rollback remains
+available. Evidence:
+`docs/audits/omenchat-room-media-policy-activation-review.md`.
+The exact canonical local graph subsequently passed root/server formatting,
+feature verification, protocol and product tests, strict Clippy, static/full
+compile gates, and an isolated current/current real-Link rejection/restart
+smoke built without qualification hooks.
+
 ### Hosted checkpoint
 
 After the candidate is stable:
@@ -2027,17 +2043,20 @@ After the candidate is stable:
 - [x] Delivery/propagation policies have conservative migrated defaults.
 - [x] Command palette, actionable errors, workspace presets, and selected TUI
       QoL pass focus/input/resource tests.
-- [ ] Replies/mentions, reactions, search, invitations, corrections,
+- [x] Replies/mentions, reactions, search, invitations, corrections,
       tombstones, pins, moderation history, retention, announcement rooms,
       slow mode, and room media policy pass their complete gates.
-- [ ] No unbounded queue, cache, history, retry, timer, worker, or index.
+- [x] No unbounded queue, cache, history, retry, timer, worker, or index was
+      introduced by the planned feature families.
 - [x] Managed Reticulum remains the supported default.
 - [x] External/shared mode remains explicitly deferred and fail-closed.
 - [ ] Root and standalone server report `0.9.6-4`.
 - [x] Exact Reticulum/LXMF 0.9.6 train remains coherent.
-- [ ] Local product/server/protocol/release gates pass.
+- [x] Local product/server/protocol/release gates pass for the current
+      pre-version candidate.
 - [ ] Native CI and bundled interoperability checkpoint pass.
-- [ ] Resource measurements show no unexplained regression.
+- [x] Resource measurements show no unexplained regression in the measured
+      deterministic and isolated-process scenarios.
 - [ ] Packaging and lifecycle smoke pass on all release platforms.
 - [ ] Published artifact checksums are independently verified.
 - [ ] README and support claims distinguish tested, upstream-limited, and

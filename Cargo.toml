@@ -53,9 +53,11 @@ omenchat-announcement-rooms = []
 omenchat-slow-mode = []
 # Non-product interoperability hooks for deterministic live qualification.
 omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
-# Non-product request/acceptance and enforcement hooks for room upload-policy
-# lifecycle and Resource qualification.
-omenchat-room-media-policy-qualification = ["omenchat-announcement-rooms", "omenchat-slow-mode"]
+# Capability-negotiated per-room upload admission. Legacy peers retain their
+# prior admission behavior and byte-exact room values.
+omenchat-room-media-policy = ["omenchat-announcement-rooms", "omenchat-slow-mode"]
+# Non-product deterministic GUI/process hooks for the production capability.
+omenchat-room-media-policy-qualification = ["omenchat-room-media-policy"]
 # Capability-negotiated, bounded, read-only moderation audit.
 omenchat-moderation-audit = []
 # Non-product process qualification for the real capability boundary.
@@ -66,8 +68,8 @@ omenchat-moderation-audit-resource-qualification = ["omenchat-moderation-audit-q
 # Canonical build identities. Release and packaging commands must use
 # `--no-default-features --features desktop-product`; development profiles keep
 # mock support explicit so it cannot leak into distributed binaries.
-desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-moderation-audit"]
-desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-moderation-audit"]
+desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-room-media-policy", "omenchat-moderation-audit"]
+desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-room-media-policy", "omenchat-moderation-audit"]
 desktop-dev = ["desktop-product", "mock-runtime"]
 desktop-test = ["desktop-dev", "desktop-ui-test"]
 

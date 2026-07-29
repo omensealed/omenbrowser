@@ -156,4 +156,5 @@ identity, history, or upload migration.
   Windows/macOS presentation remains batched release-candidate evidence;
 - live-process CPU and shutdown measurements (isolated server retention,
   latency, pending-offer, storage, and RSS observations are complete);
-- explicit production activation review.
+- production activation is complete; see
+  `omenchat-room-media-policy-activation-review.md`.

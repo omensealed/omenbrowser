@@ -256,8 +256,8 @@ legacy or non-negotiating sessions retain their prior room shape and behavior.
 Builds that deliberately omit `omenchat-slow-mode` preserve the stored scalar
 but report enforcement inactive.
 
-Schema 13 stores a nullable per-room upload file ceiling for the staged
-`room-media-policy-v1` work. `NULL` inherits the global server file ceiling,
+Schema 13 stores a nullable per-room upload file ceiling for
+`room-media-policy-v1`. `NULL` inherits the global server file ceiling,
 zero will disable room uploads, and positive values are constrained to at most
 10 MiB. Configuration is restart-only and confirmation-gated through the same
 exclusive maintenance boundary:
@@ -273,21 +273,21 @@ omenchatd rooms set-upload-policy 1 inherit --confirm --home ~/.omenchatd
 `inherit` stores `NULL`, `disabled` stores zero, and a numeric value must be in
 `1..=10485760`. The scalar and room revision change in one immediate
 transaction, while a no-op retains the revision. Output reports the prior,
-configured, and effective values and always reports `enforcement=inactive`.
+configured, and effective values and reports `enforcement=active` in canonical
+server builds.
 Human and JSON room listings are bounded to 1,024 rows and 1 MiB of retained
 room data, report truncation explicitly, and distinguish configured policy
 from the effective room/global minimum.
 
-This remains an administration-and-status slice only: canonical clients do not
-request the capability, omenchatd does not accept it, and upload admission
-still uses the existing global policy.
-An internal test-only qualification path resolves inherited, disabled, and
+Canonical omenchatd accepts the capability only from an authenticated Link that
+requested the complete dependency set. It resolves inherited, disabled, and
 room/global-minimum limits at both offer and Resource-publication boundaries.
-Normal and canonical server constructors explicitly keep that enforcement
-disabled until client projection, negotiation, mixed-version, live Resource,
-and resource-measurement qualification are complete. The optional omenchatd
-TUI likewise shows configured/effective policy with `enforcement=inactive`;
-it does not activate or edit the policy.
+Legacy/non-negotiating peers retain global admission for wire compatibility;
+use the global ceiling when every peer must share one hard limit. Builds that
+deliberately omit `omenchat-room-media-policy` preserve stored values and
+report enforcement inactive. The optional TUI reports configured/effective
+policy and the real feature state; it does not edit policy while the server is
+running.
 
 To prepare a separate schema-12-compatible rollback copy while retaining the
 active schema-13 database, stop the server cleanly and run:
