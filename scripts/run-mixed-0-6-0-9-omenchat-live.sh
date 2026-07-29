@@ -7,6 +7,8 @@ readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a
 readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
 readonly old_server_stop_mode=${OMEN_MIXED_OLD_SERVER_STOP_MODE:-sigterm}
 readonly current_expected_version=0.9.6-3
+readonly current_client_features=${OMEN_MIXED_CURRENT_CLIENT_FEATURES:-desktop-product}
+readonly current_server_features=${OMEN_MIXED_CURRENT_SERVER_FEATURES:-server-headless}
 
 case "$old_server_stop_mode" in
   orderly|sigterm) ;;
@@ -77,7 +79,7 @@ if ((reverse)); then
     --manifest-path "$old_source/Cargo.toml" \
     --no-default-features --features desktop-product --bin omenbrowser_rs
   cargo build --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
-    --no-default-features --features server-headless --bin omenchatd
+    --no-default-features --features "$current_server_features" --bin omenchatd
   browser_bin="$old_target/debug/omenbrowser_rs"
   server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
   expected_client_version="$old_expected_version"
@@ -89,7 +91,7 @@ else
     --manifest-path "$old_source/src/server/Cargo.toml" \
     --no-default-features --features server-headless --bin omenchatd
   cargo build --locked --manifest-path "$repo_root/Cargo.toml" \
-    --no-default-features --features desktop-product --bin omenbrowser_rs
+    --no-default-features --features "$current_client_features" --bin omenbrowser_rs
   browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
   server_bin="$old_target/debug/omenchatd"
   expected_client_version="$current_expected_version"
@@ -185,6 +187,10 @@ if current_client:
         raise RuntimeError("adjacent server projected policy without capability negotiation")
     if capabilities.get("moderation_audit_negotiated") is not False:
         raise RuntimeError("adjacent server unexpectedly negotiated moderation audit")
+    if capabilities.get("room_media_policy_negotiated") is not False:
+        raise RuntimeError("adjacent server unexpectedly negotiated room media policy")
+    if capabilities.get("room_upload_max_file_bytes") is not None:
+        raise RuntimeError("adjacent server projected a room upload policy")
 
 restart = sys.argv[7] == "1"
 if restart:
@@ -269,6 +275,8 @@ if current_client:
             "announcement_rooms_negotiated": False,
             "announcement_policy_bits": None,
             "moderation_audit_negotiated": False,
+            "room_media_policy_negotiated": False,
+            "room_upload_max_file_bytes": None,
         }
     )
 else:

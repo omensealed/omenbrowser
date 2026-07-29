@@ -159,7 +159,6 @@ migration is required.
 
 ## Remaining evidence
 
-- adjacent current/previous mixed-version shape qualification;
 - explicit production activation and rollback review;
 - later batched Python interoperability, Windows/macOS presentation, packaging,
   and physical-network evidence.
@@ -174,6 +173,6 @@ Screenshots remain in the caller-selected disposable evidence directory and
 are not committed.
 
 Not run in this unit: hosted CI, Python interoperability, native Windows/macOS
-presentation or packaging, adjacent-version process compatibility, public
+presentation or packaging, public
 gateways, physical interfaces, physical GPU measurement, or a long-running
 process soak. None is claimed as passed.

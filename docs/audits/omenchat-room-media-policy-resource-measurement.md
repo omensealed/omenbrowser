@@ -111,7 +111,6 @@ Rollback removes the ignored test and documentation only.
 
 Still required before activation:
 
-- adjacent current/previous mixed-version qualification;
 - hosted Windows/macOS attachment presentation; native Linux Iced accepted,
   over-limit, and disabled cases now pass;
 - explicit production activation and rollback review.

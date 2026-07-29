@@ -52,6 +52,7 @@ OMEN_MIXED_OLD_COMMIT="$adjacent_commit" \
 OMEN_MIXED_OLD_VERSION="$adjacent_version" \
 OMEN_MIXED_OLD_TARGET_DIR="$adjacent_target" \
 OMEN_MIXED_OLD_SERVER_STOP_MODE=orderly \
+OMEN_MIXED_CURRENT_CLIENT_FEATURES=desktop-product,omenchat-room-media-policy-qualification \
   bash "$repo_root/scripts/run-mixed-0-6-0-9-omenchat-live.sh" \
     --report "$current_to_adjacent"
 
@@ -60,13 +61,15 @@ OMEN_MIXED_OLD_COMMIT="$adjacent_commit" \
 OMEN_MIXED_OLD_VERSION="$adjacent_version" \
 OMEN_MIXED_OLD_TARGET_DIR="$adjacent_target" \
 OMEN_MIXED_OLD_SERVER_STOP_MODE=orderly \
+OMEN_MIXED_CURRENT_SERVER_FEATURES=server-headless,omenchat-room-media-policy-qualification \
   bash "$repo_root/scripts/run-mixed-0-6-0-9-omenchat-live.sh" --reverse \
     --report "$adjacent_to_current"
 
-echo "== Current per-Link four-/five-field shaping regression =="
+echo "== Current per-Link legacy/media-policy shaping and admission regression =="
 cargo test --quiet --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
-  --no-default-features --features server-headless \
-  live::tests::test_enabled_announcement_rooms_shape_join_and_delta_per_authenticated_link \
+  --no-default-features \
+  --features server-headless,omenchat-room-media-policy-qualification \
+  live::tests::room_media_policy_qualification_shapes_and_admits_per_authenticated_link \
   --lib -- --exact
 
 browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
@@ -78,7 +81,7 @@ fi
 
 port=$(python3 -c \
   'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
-echo "== Current negotiated client -> current server (five-field projection and replacement Link) =="
+echo "== Current negotiated client -> current server (media-policy projection and replacement Link) =="
 current_run_dir=$(
   bash "$repo_root/scripts/release-omenchat-smoke.sh" \
     --browser-bin "$browser_bin" \
@@ -86,8 +89,8 @@ current_run_dir=$(
     --tcp "127.0.0.1:$port" \
     --path-wait 45 \
     --out "$temporary_root/current-current" \
-    --message "room shape compatibility qualification" \
-    --announcement-negotiation-smoke \
+    --message "room media-policy shape compatibility qualification" \
+    --room-media-policy-smoke 262144 \
     --restart-server |
     tail -n 1
 )
@@ -119,13 +122,17 @@ if current_to_adjacent.get("announcement_policy_bits") is not None:
     raise SystemExit("adjacent server projected announcement policy bits")
 if current_to_adjacent.get("moderation_audit_negotiated") is not False:
     raise SystemExit("adjacent server unexpectedly negotiated moderation audit")
+if current_to_adjacent.get("room_media_policy_negotiated") is not False:
+    raise SystemExit("adjacent server unexpectedly negotiated room media policy")
+if current_to_adjacent.get("room_upload_max_file_bytes") is not None:
+    raise SystemExit("adjacent server projected a room upload policy")
 
 if adjacent_to_current.get("status") != "pass":
     raise SystemExit("adjacent-client/current-server compatibility did not pass")
 if adjacent_to_current.get("adjacent_client_completed_against_current_server") is not True:
     raise SystemExit("adjacent client did not complete ordinary current-server traffic")
 
-def negotiated_five_field(report):
+def negotiated_media_policy(report):
     if report.get("classification", {}).get("outcome") != "pass":
         return False
     stages = {
@@ -136,14 +143,17 @@ def negotiated_five_field(report):
     capabilities = stages.get("capability_observation", {})
     return (
         capabilities.get("announcement_rooms_negotiated") is True
-        and capabilities.get("announcement_policy_observed") is True
-        and capabilities.get("announcement_policy_bits") == 1
+        and capabilities.get("announcement_policy_observed") is False
+        and capabilities.get("announcement_policy_bits") == 0
+        and capabilities.get("slow_mode_negotiated") is True
+        and capabilities.get("room_media_policy_negotiated") is True
+        and capabilities.get("room_upload_max_file_bytes") == 262144
     )
 
-if not negotiated_five_field(current_initial):
-    raise SystemExit("current initial Link did not project negotiated five-field policy")
-if not negotiated_five_field(current_restart):
-    raise SystemExit("current replacement Link did not project negotiated five-field policy")
+if not negotiated_media_policy(current_initial):
+    raise SystemExit("current initial Link did not project negotiated room media policy")
+if not negotiated_media_policy(current_restart):
+    raise SystemExit("current replacement Link did not project negotiated room media policy")
 
 summary = {
     "status": "pass",
@@ -152,11 +162,13 @@ summary = {
     "isolated_loopback": True,
     "current_client_adjacent_server_legacy_four_field": True,
     "adjacent_client_current_server_ordinary_traffic": True,
-    "current_server_four_and_five_field_shaping_regression": True,
-    "current_current_initial_five_field": True,
-    "current_current_replacement_link_five_field": True,
+    "current_server_legacy_and_media_policy_shaping_regression": True,
+    "current_server_legacy_upload_admission_preserved": True,
+    "current_current_initial_media_policy_shape": True,
+    "current_current_replacement_link_media_policy_shape": True,
     "capability_fabricated_for_adjacent_peer": False,
     "moderation_audit_fabricated_for_adjacent_peer": False,
+    "room_media_policy_fabricated_for_adjacent_peer": False,
 }
 pathlib.Path(sys.argv[5]).write_text(
     json.dumps(summary, indent=2, sort_keys=True) + "\n",

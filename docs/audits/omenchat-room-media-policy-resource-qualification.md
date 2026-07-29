@@ -150,7 +150,6 @@ identity, history, or upload migration.
 
 ## Remaining activation gates
 
-- adjacent current/previous mixed-version qualification;
 - receiver-side cancellation during an admitted upload Resource remains
   unavailable through the locked Reticulum 0.9.6 public API;
 - native Linux GUI attachment acceptance/rejection smoke is complete; hosted

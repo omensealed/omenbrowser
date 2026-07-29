@@ -1980,12 +1980,22 @@ ceiling committed through the normal Attach action; a 300,000-byte file was
 locally blocked with truthful “room file limit” evidence; disabled policy made
 Attach inert. The two rejection homes retained zero SQLite upload rows and
 zero files. The deterministic picker and auto-open URI hooks exist only in the
-non-product qualification feature. Hosted native presentation, adjacent-version
-compatibility, and activation remain. The subsequent optimized loopback
+non-product qualification feature. Hosted native presentation and activation
+remain. The subsequent optimized loopback
 process observation recorded stable file-descriptor counts, no queue backlog
 or worker join failures, and 135-ms desktop/53-ms server shutdown around one
 accepted 64-KiB GUI upload. The observed browser/server RSS steps are recorded
 without being mislabeled as a leak or a hardware-independent threshold.
+
+The adjacent room-shape matrix now also passes against immutable `v0.9.6-3`
+commit `414d8eafd1a845a986032bad993ac9c09cc378e4` in both process directions.
+The current strict client receives no fabricated capability or upload ceiling
+from the adjacent server; the adjacent client completes ordinary traffic
+against a qualification-enabled current server. A simultaneous-Link current
+server regression preserves legacy four-field shaping and upload admission
+while applying the seven-field room ceiling only to the negotiated Link.
+Current/current projection survives orderly server restart. Adjacent-binary
+attachment Resource transfer remains outside that exact claim.
 
 ### Hosted checkpoint
 

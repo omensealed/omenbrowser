@@ -6553,7 +6553,13 @@ mod tests {
     }
 
     #[test]
-    fn room_media_policy_qualification_is_identity_scoped_and_shapes_authenticated_catalogs() {
+    fn room_media_policy_qualification_shapes_and_admits_per_authenticated_link() {
+        let upload_root = std::env::temp_dir().join(format!(
+            "omenchatd-live-room-media-policy-shape-{}-{}",
+            std::process::id(),
+            current_unix_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&upload_root);
         let store = OmenchatStore::in_memory().expect("store");
         store
             .update_room_slow_mode_seconds(1, 30)
@@ -6563,21 +6569,55 @@ mod tests {
             .expect("room upload policy");
         let engine = SessionEngine::with_test_room_media_policy(
             store,
-            crate::session::SessionLimits::default(),
+            crate::session::SessionLimits {
+                rate_commands_per_minute: 0,
+                upload_cache_root: Some(upload_root.clone()),
+                ..crate::session::SessionLimits::default()
+            },
         );
         let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
-        let link_id = [37u8; 16];
-        live.handle_event(OmenchatLinkEvent::LinkOpened {
-            link_id,
-            peer: ServerPeer {
-                identity_hash: b"media-policy-observer".to_vec(),
-                display_name: "Observer".into(),
-                lxmf_destination: None,
-            },
-        })
-        .expect("open link");
+        let legacy_link = [36u8; 16];
+        let negotiated_link = [37u8; 16];
+        for (link_id, identity_hash, display_name) in [
+            (
+                legacy_link,
+                b"legacy-media-observer".as_slice(),
+                "Legacy observer",
+            ),
+            (
+                negotiated_link,
+                b"media-policy-observer".as_slice(),
+                "Policy observer",
+            ),
+        ] {
+            live.handle_event(OmenchatLinkEvent::LinkOpened {
+                link_id,
+                peer: ServerPeer {
+                    identity_hash: identity_hash.to_vec(),
+                    display_name: display_name.into(),
+                    lxmf_destination: None,
+                },
+            })
+            .expect("open link");
+        }
+        for frame in [
+            Frame::new(
+                ChatOp::SessionOpen,
+                1,
+                None,
+                FrameBody::Text("Legacy observer".into()),
+            ),
+            Frame::new(ChatOp::JoinRoom, 2, None, FrameBody::Text("lobby".into())),
+        ] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id: legacy_link,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&frame).expect("encode legacy frame"),
+            })
+            .expect("handle legacy frame");
+        }
         let open = crate::protocol::with_session_open_negotiation(
-            FrameBody::Text("Observer".into()),
+            FrameBody::Text("Policy observer".into()),
             &crate::protocol::SessionOpenNegotiation {
                 requested_capabilities: vec![
                     DURABLE_MUTATION_CAPABILITY.into(),
@@ -6590,14 +6630,14 @@ mod tests {
         )
         .expect("room media-policy negotiation");
         live.handle_event(OmenchatLinkEvent::LinkData {
-            link_id,
+            link_id: negotiated_link,
             context: OMENCHAT_LINK_CONTEXT,
             data: encode_frame(&Frame::new(ChatOp::SessionOpen, 1, None, open))
                 .expect("session open"),
         })
         .expect("open session");
         live.handle_event(OmenchatLinkEvent::LinkData {
-            link_id,
+            link_id: negotiated_link,
             context: OMENCHAT_LINK_CONTEXT,
             data: encode_frame(&Frame::new(
                 ChatOp::JoinRoom,
@@ -6609,12 +6649,32 @@ mod tests {
         })
         .expect("join room");
 
+        let legacy_join = live
+            .transport()
+            .frames
+            .iter()
+            .filter(|captured| captured.link_id == legacy_link)
+            .filter_map(|captured| decode_frame(&captured.bytes).ok())
+            .find(|frame| frame.op == ChatOp::JoinAccept)
+            .expect("legacy join response");
+        let FrameBody::Fields(legacy_fields) = legacy_join.body else {
+            panic!("legacy join fields");
+        };
+        let legacy_room = crate::protocol::RoomCatalogEntry::from_frame_value_for_shape(
+            legacy_fields.first().expect("legacy lobby"),
+            RoomCatalogShape::Legacy,
+        )
+        .expect("legacy four-field room");
+        assert_eq!(legacy_room.policy_bits, 0);
+        assert_eq!(legacy_room.slow_mode_seconds, 0);
+        assert_eq!(legacy_room.upload_max_file_bytes, None);
+
         for op in [ChatOp::SessionAccept, ChatOp::JoinAccept] {
             let frame = live
                 .transport()
                 .frames
                 .iter()
-                .filter(|captured| captured.link_id == link_id)
+                .filter(|captured| captured.link_id == negotiated_link)
                 .filter_map(|captured| decode_frame(&captured.bytes).ok())
                 .find(|frame| frame.op == op)
                 .expect("response");
@@ -6638,16 +6698,64 @@ mod tests {
             assert_eq!(room.upload_max_file_bytes, Some(256 * 1024));
         }
         assert_eq!(
-            live.room_media_policy_links.get(&link_id),
+            live.room_media_policy_links.get(&negotiated_link),
             Some(&b"media-policy-observer".to_vec())
         );
+        assert!(!live.room_media_policy_links.contains_key(&legacy_link));
+
+        for (link_id, seq) in [(legacy_link, 3), (negotiated_link, 3)] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&Frame::new(
+                    ChatOp::UploadOffer,
+                    seq,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String(format!("{link_id:?}.bin")),
+                        FrameValue::U64(300 * 1024),
+                    ]),
+                ))
+                .expect("encode upload offer"),
+            })
+            .expect("handle upload offer");
+        }
+        let upload_response = |link_id| {
+            live.transport()
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == link_id)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .find(|frame| {
+                    frame.seq == 3
+                        && matches!(frame.op, ChatOp::UploadAccept | ChatOp::UploadReject)
+                })
+                .expect("upload response")
+        };
+        assert_eq!(upload_response(legacy_link).op, ChatOp::UploadAccept);
+        let negotiated_rejection = upload_response(negotiated_link);
+        assert_eq!(negotiated_rejection.op, ChatOp::UploadReject);
+        assert!(matches!(
+            negotiated_rejection.body,
+            FrameBody::Fields(fields)
+                if fields.get(3) == Some(&FrameValue::U64(
+                    crate::protocol::RoomUploadRejectReason::FileSizeCeilingExceeded.code()
+                ))
+        ));
 
         live.handle_event(OmenchatLinkEvent::PeerIdentified {
-            link_id,
+            link_id: negotiated_link,
             identity_hash: [38; 16],
         })
         .expect("replace identity");
-        assert!(!live.room_media_policy_links.contains_key(&link_id));
+        assert!(!live.room_media_policy_links.contains_key(&negotiated_link));
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id: legacy_link,
+            reason: Some("test complete".into()),
+        })
+        .expect("close legacy link");
+        assert_eq!(live.stats().pending_upload_items, 0);
+        let _ = std::fs::remove_dir_all(upload_root);
     }
 
     #[test]

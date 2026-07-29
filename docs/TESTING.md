@@ -4951,23 +4951,27 @@ does not. The test requires five-field JoinAccept/RoomDelta values only on the
 negotiated Link, four-field values on the legacy Link, and binding removal on
 identity replacement.
 
-The adjacent process matrix combines that exact shaping regression with both
-directions of immutable `v0.9.6-3` live traffic and negotiated current/current
-replacement-Link traffic:
+The adjacent process matrix combines immutable `v0.9.6-3` live traffic in both
+directions with a current per-Link legacy/media-policy shaping and admission
+regression plus negotiated current/current replacement-Link traffic:
 
 ```bash
 bash scripts/run-omenchat-room-shape-compatibility.sh \
   --report target/omenchat-room-shape-compatibility.json
 ```
 
-The strict current parser requires the adjacent server's legacy four-field
-shape and records that neither announcement rooms nor moderation audit was
-negotiated and that no policy field was projected. The adjacent parser is
-permissive, so its successful current-server run is treated only as ordinary
-compatibility; the exact current-server four-field claim comes from the
-per-Link shaping regression above. The current/current process cases require
-negotiated five-field policy on both the initial and replacement Links. The
-harness never fabricates capability support for the adjacent peer. This is a
+The current qualification client requires the adjacent server's legacy
+four-field shape and records that announcement rooms, moderation audit, and
+room media policy were not negotiated and that neither policy bits nor an
+upload ceiling were projected. The adjacent parser is permissive, so its
+successful current qualification-server run is treated only as ordinary
+compatibility. The captured current server test requires simultaneous
+four-field/seven-field shaping and admits a 300-KiB legacy offer while applying
+the 256-KiB room ceiling only to the negotiated Link. Current/current process
+cases require the seven-field ceiling on both initial and replacement Links.
+The harness never fabricates capability support for the adjacent peer. It does
+not claim an adjacent-binary attachment Resource transfer. Evidence is in
+`docs/audits/omenchat-room-media-policy-adjacent-qualification.md`. This is a
 long local/release-candidate gate and is not part of the quick release check.
 
 Production announcement-room feature identities are checked with:

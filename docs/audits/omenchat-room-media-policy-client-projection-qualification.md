@@ -162,9 +162,9 @@ correctly used the project's established `human_bytes` presentation,
 
 The subsequent qualification slices now cover current/current negotiation,
 restart, Link replacement, Resource rejection/success, the upstream
-receiver-cancellation decision, isolated retention measurements, and native
-Linux Iced attachment acceptance/rejection. Adjacent-version shape
-compatibility, live-process resource/shutdown observation, Python
+receiver-cancellation decision, isolated retention measurements, native Linux
+Iced attachment acceptance/rejection, adjacent-version shape compatibility,
+and live-process resource/shutdown observation. Python
 interoperability, hosted native platforms, packaging, and production activation
 remain later gates.
 
@@ -172,7 +172,6 @@ Rollback removes this optional projection and static presentation without a
 wire, storage, or configuration migration. Existing schema-12 copy export
 remains the deeper database downgrade boundary.
 
-The next smallest justified slice is qualification-only capability
-request/acceptance and real current/current lifecycle testing. It must remain
-outside canonical product graphs until mixed-version, Resource, GUI, and
-resource-measurement evidence is complete.
+The next smallest justified slice is the explicit production activation and
+rollback review. Capability request/acceptance remains outside canonical
+product graphs until that decision is complete.

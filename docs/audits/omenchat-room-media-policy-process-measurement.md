@@ -110,7 +110,6 @@ required.
 
 ## Remaining evidence
 
-- adjacent current/previous mixed-version shape qualification;
 - explicit product capability activation and rollback review;
 - a longer repeated-transfer soak if field evidence or subsequent changes
   suggest retained growth;
