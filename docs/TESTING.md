@@ -5269,6 +5269,35 @@ prove adjacent-version compatibility, receiver cancellation, GUI attachment
 behavior, or long-duration resource use. Evidence is in
 `docs/audits/omenchat-room-media-policy-resource-qualification.md`.
 
+Run the opt-in optimized room upload retention measurement with:
+
+```bash
+cargo test --release --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features \
+  --features server-headless,omenchat-room-media-policy-qualification \
+  room_media_policy_resource_retention_measurement \
+  --lib -- --ignored --nocapture
+```
+
+The measurement creates isolated SQLite and upload roots, admits 32 negotiated
+64-KiB Resources through the normal durable upload path, crosses a 512-KiB
+per-identity quota four times, and requires exactly eight retained files,
+524,288 retained ledger/disk bytes, zero pending offers, and no missing,
+mismatched, orphan, or unsafe paths. It reports optimized offer/publication
+latency, checkpointed database bytes, and Linux RSS when `/proc` is available;
+these observations are not hardware-independent thresholds. It does not add a
+worker, timer, queue, retry, or product feature.
+
+The same review verified that locked `reticulum-rs-transport 0.9.6`
+`Transport::cancel_resource` removes outbound state and sends
+`ResourceInitiatorCancel`. There is no public receiver-side cancellation
+operation or inbound advertisement handle. Inbound failure remains observable
+after a remote cancellation or transport failure, but OMENchat cannot safely
+initiate receiver cancellation without an upstream API or private transport
+access. Do not call the receiver-cancellation gate passed and do not fork the
+transport to hide the limitation. Evidence and local observations are in
+`docs/audits/omenchat-room-media-policy-resource-measurement.md`.
+
 The real, still-non-product feature now has a first explicit desktop
 presentation slice:
 

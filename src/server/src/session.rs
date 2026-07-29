@@ -6832,6 +6832,202 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "opt-in isolated room media-policy Resource measurement"]
+    fn room_media_policy_resource_retention_measurement() {
+        const UPLOAD_BYTES: usize = 64 * 1024;
+        const RETAINED_UPLOADS: usize = 8;
+        const ATTEMPTS: usize = 32;
+
+        fn rss_bytes() -> Option<u64> {
+            let status = std::fs::read_to_string("/proc/self/status").ok()?;
+            let kib = status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()?;
+            Some(kib.saturating_mul(1024))
+        }
+
+        fn percentile(samples: &mut [u128], percent: usize) -> u128 {
+            samples.sort_unstable();
+            let index = samples
+                .len()
+                .saturating_mul(percent)
+                .saturating_add(99)
+                .checked_div(100)
+                .unwrap_or(0)
+                .saturating_sub(1)
+                .min(samples.len().saturating_sub(1));
+            samples[index]
+        }
+
+        let database = temp_store_path("room-media-policy-resource-measurement");
+        let root = temp_upload_root("media-policy-resource-measurement");
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_dir_all(&root);
+        let store = OmenchatStore::open(&database).expect("measurement store");
+        let room_id = store
+            .ensure_room("lobby", None)
+            .expect("measurement lobby")
+            .room_id;
+        let engine = SessionEngine::with_test_room_media_policy(
+            store,
+            SessionLimits {
+                rate_commands_per_minute: 0,
+                upload_quota_bytes: (UPLOAD_BYTES * RETAINED_UPLOADS) as u64,
+                upload_max_file_bytes: UPLOAD_BYTES as u64,
+                upload_cache_root: Some(root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        let peer = peer();
+        join_lobby(&engine, &peer);
+        engine
+            .store
+            .update_room_upload_max_file_bytes(room_id, Some(UPLOAD_BYTES as u64))
+            .expect("measurement room policy");
+        let user_id = engine.local_user_id(&peer).expect("measurement user");
+        let payload = vec![0x5a; UPLOAD_BYTES];
+        let rss_before = rss_bytes();
+        let mut offer_micros = Vec::with_capacity(ATTEMPTS);
+        let mut publication_micros = Vec::with_capacity(ATTEMPTS);
+
+        for index in 0..ATTEMPTS {
+            let started = Instant::now();
+            let accepted = engine
+                .handle_frame_with_negotiated_features(
+                    &peer,
+                    Frame::new(
+                        ChatOp::UploadOffer,
+                        10 + index as u32,
+                        Some(room_id),
+                        FrameBody::Fields(vec![
+                            FrameValue::String(format!("measurement-{index:02}.bin")),
+                            FrameValue::U64(UPLOAD_BYTES as u64),
+                        ]),
+                    ),
+                    &[],
+                    false,
+                    true,
+                )
+                .expect("measurement upload offer");
+            offer_micros.push(started.elapsed().as_micros());
+            assert_eq!(accepted[0].op, ChatOp::UploadAccept);
+            let resource_id = frame_body_values(&accepted[0].body)
+                .and_then(|values| values.first())
+                .and_then(frame_value_string)
+                .expect("measurement resource id")
+                .to_owned();
+
+            let started = Instant::now();
+            let completed = engine
+                .handle_upload_resource_with_room_media_policy(
+                    &peer,
+                    &resource_id,
+                    payload.clone(),
+                    true,
+                )
+                .expect("measurement upload Resource");
+            publication_micros.push(started.elapsed().as_micros());
+            assert_eq!(completed[0].op, ChatOp::UploadComplete);
+        }
+
+        let rejected = engine
+            .handle_frame_with_negotiated_features(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    100,
+                    Some(room_id),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("over-room-ceiling.bin".into()),
+                        FrameValue::U64((UPLOAD_BYTES + 1) as u64),
+                    ]),
+                ),
+                &[],
+                false,
+                true,
+            )
+            .expect("measurement over-limit offer");
+        assert_eq!(rejected[0].op, ChatOp::UploadReject);
+        assert_eq!(
+            engine
+                .pending_upload_metrics()
+                .expect("measurement pending metrics"),
+            (0, 0, 0, 0)
+        );
+
+        let identity_dir = crate::upload::upload_identity_dir_for_root(&root, &peer.identity_hash);
+        let ledger = engine
+            .store
+            .reconcile_upload_ledger(user_id, &identity_dir)
+            .expect("measurement upload ledger");
+        assert_eq!(ledger.tracked_files, RETAINED_UPLOADS);
+        assert_eq!(
+            ledger.tracked_bytes,
+            (UPLOAD_BYTES * RETAINED_UPLOADS) as u64
+        );
+        assert_eq!(ledger.disk_files, RETAINED_UPLOADS);
+        assert_eq!(ledger.disk_bytes, (UPLOAD_BYTES * RETAINED_UPLOADS) as u64);
+        assert!(ledger.missing_paths.is_empty());
+        assert!(ledger.mismatched_paths.is_empty());
+        assert!(ledger.orphan_paths.is_empty());
+        assert!(ledger.unsafe_paths.is_empty());
+        let rss_after = rss_bytes();
+
+        let offer_max = offer_micros.iter().copied().max().unwrap_or(0);
+        let publication_max = publication_micros.iter().copied().max().unwrap_or(0);
+        let offer_p50 = percentile(&mut offer_micros.clone(), 50);
+        let offer_p95 = percentile(&mut offer_micros, 95);
+        let publication_p50 = percentile(&mut publication_micros.clone(), 50);
+        let publication_p95 = percentile(&mut publication_micros, 95);
+
+        drop(engine);
+        let checkpoint =
+            rusqlite::Connection::open(&database).expect("measurement checkpoint connection");
+        checkpoint
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("checkpoint measurement database");
+        drop(checkpoint);
+        let database_bytes = [
+            database.clone(),
+            database.with_extension("sqlite-wal"),
+            database.with_extension("sqlite-shm"),
+        ]
+        .into_iter()
+        .filter_map(|candidate| std::fs::metadata(candidate).ok())
+        .map(|metadata| metadata.len())
+        .sum::<u64>();
+
+        println!(
+            "ROOM_MEDIA_POLICY_RESOURCE_MEASUREMENT attempts={ATTEMPTS} upload_bytes={UPLOAD_BYTES} retained_files={} retained_bytes={} pending_items=0 pending_identities=0 database_bytes={database_bytes} offer_p50_us={offer_p50} offer_p95_us={offer_p95} offer_max_us={offer_max} publication_p50_us={publication_p50} publication_p95_us={publication_p95} publication_max_us={publication_max} rss_before_bytes={} rss_after_bytes={} rss_delta_bytes={}",
+            ledger.tracked_files,
+            ledger.tracked_bytes,
+            rss_before
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unavailable".into()),
+            rss_after
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unavailable".into()),
+            rss_after
+                .zip(rss_before)
+                .map(|(after, before)| (i128::from(after) - i128::from(before)).to_string())
+                .unwrap_or_else(|| "unavailable".into()),
+        );
+
+        for candidate in [
+            database.clone(),
+            database.with_extension("sqlite-wal"),
+            database.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn upload_publication_rechecks_membership_and_releases_pending_offer() {
         let root = temp_upload_root("publication-membership");
         let _ = std::fs::remove_dir_all(&root);

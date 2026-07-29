@@ -129,7 +129,9 @@ bash scripts/verify-product-features.sh
 
 Not run in this slice: hosted CI, Python interoperability, native
 Windows/macOS packaging, physical gateways, GUI automation, receiver-side
-Resource cancellation, and long-duration resource measurements.
+Resource cancellation, and long-duration resource measurements. The subsequent
+bounded retention measurement and cancellation API decision are recorded in
+`omenchat-room-media-policy-resource-measurement.md`.
 
 ## Resource impact
 
@@ -149,7 +151,9 @@ identity, history, or upload migration.
 ## Remaining activation gates
 
 - adjacent current/previous mixed-version qualification;
-- receiver-side cancellation during an admitted upload Resource;
+- receiver-side cancellation during an admitted upload Resource remains
+  unavailable through the locked Reticulum 0.9.6 public API;
 - native GUI attachment acceptance/rejection smoke;
-- bounded CPU, RSS, latency, pending-offer, shutdown, and storage measurements;
+- live-process CPU and shutdown measurements (isolated server retention,
+  latency, pending-offer, storage, and RSS observations are complete);
 - explicit production activation review.

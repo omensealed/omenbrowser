@@ -1964,6 +1964,16 @@ Repeat the existing harnesses for:
 A greater-than-10% unexplained regression is a review trigger. Do not invent
 GPU/hardware measurements.
 
+Room media-policy Resource qualification now includes an opt-in optimized
+server retention measurement: 32 negotiated 64-KiB publications repeatedly
+cross the 512-KiB per-identity quota while retaining exactly eight files,
+524,288 ledger/disk bytes, zero pending offers, and no reconciliation faults.
+The same source audit reconfirmed that Reticulum 0.9.6 offers only
+initiator/outbound cancellation publicly. Receiver-side cancellation remains
+evidence-bound upstream and is not replaced with private API access or a local
+transport fork. Live-process CPU/shutdown and GUI attachment evidence remain
+separate gates.
+
 ### Hosted checkpoint
 
 After the candidate is stable:
