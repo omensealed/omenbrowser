@@ -4064,7 +4064,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.6-2` must report
+therefore exits with the expected signal status; current `0.9.6-4` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -4091,10 +4091,12 @@ crash durability. The live cases prove both client/server directions for one
 session/message exchange. The restart cases prove both client-state roots
 reopen after the opposite-version server process restarts, not live automatic
 reconnect. The history-Resource cases prove both mixed application directions.
-The same scheduled workflow also runs the current-product continuous reconnect
-case and the current-product two-client upload/Resource case, retaining only
-their redacted reports. Physical power-loss durability remains separate
-evidence.
+The same scheduled workflow uses a separate bounded current-product job for the
+continuous reconnect, two-client upload/Resource, and direct NomadNet page
+cases, retaining only their redacted reports. Keeping current-only cases out of
+the long historical mixed-release job prevents a late current-product failure
+from invalidating or forcing repetition of already completed mixed-version
+evidence. Physical power-loss durability remains separate evidence.
 
 ## OMENchat routed-path admission
 
