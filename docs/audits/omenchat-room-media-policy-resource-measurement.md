@@ -112,7 +112,8 @@ Rollback removes the ignored test and documentation only.
 Still required before activation:
 
 - adjacent current/previous mixed-version qualification;
-- native GUI attachment acceptance/rejection smoke;
+- hosted Windows/macOS attachment presentation; native Linux Iced accepted,
+  over-limit, and disabled cases now pass;
 - live-process CPU, queue, and shutdown observation around an active upload;
 - explicit production activation and rollback review.
 

@@ -5298,6 +5298,32 @@ access. Do not call the receiver-cancellation gate passed and do not fork the
 transport to hide the limitation. Evidence and local observations are in
 `docs/audits/omenchat-room-media-policy-resource-measurement.md`.
 
+Run the isolated native Linux Iced attachment gate with:
+
+```bash
+bash scripts/run-omenchat-room-media-policy-gui-qualification.sh \
+  --evidence /tmp/omenchat-room-media-policy-gui-evidence
+```
+
+The harness requires Xvfb, i3, `xdotool`, `xprop`, ImageMagick `import`, `jq`,
+`ripgrep`, Python 3, and the standard `truncate`/`find` tools. It builds the
+desktop and standalone server independently with only the non-product room
+media-policy qualification hook, creates three separate browser/server
+identity and storage roots, and connects only to dynamically allocated
+loopback TCP endpoints.
+
+The accepted case selects a deterministic 64-KiB file through the normal Iced
+Attach action under a negotiated 256-KiB room ceiling, then requires exactly
+one 65,536-byte SQLite upload row and its durable file. The over-limit case
+selects a 300,000-byte file and requires the GUI to report the room ceiling
+truthfully while retaining zero upload rows/files. The disabled case clicks
+the inert Attach control and likewise requires zero upload state. Each case
+captures before/after screenshots, uses normal Alt-F4/SIGTERM shutdown, and
+requires the desktop drain marker. The deterministic picker path and automatic
+OMENchat URI are compiled only into qualification builds; canonical product
+feature verification rejects this feature. Evidence is in
+`docs/audits/omenchat-room-media-policy-gui-qualification.md`.
+
 The real, still-non-product feature now has a first explicit desktop
 presentation slice:
 

@@ -16,14 +16,16 @@ pub(in crate::desktop) fn omenchat_upload_policy_rejection(
     bytes: u64,
     quota: Option<u64>,
     max_file_bytes: Option<u64>,
+    room_policy_limit: bool,
 ) -> Option<String> {
     match quota {
         Some(0) => Some("upload blocked: server has uploads disabled".into()),
         _ => match max_file_bytes {
             Some(0) => Some("upload blocked: uploads are disabled in this room".into()),
             Some(limit) if bytes > limit => Some(format!(
-                "upload blocked: {} exceeds server file limit {}",
+                "upload blocked: {} exceeds {} file limit {}",
                 human_bytes(bytes),
+                if room_policy_limit { "room" } else { "server" },
                 human_bytes(limit)
             )),
             _ => None,
@@ -174,24 +176,28 @@ mod tests {
     #[test]
     fn omenchat_upload_file_limit_rejects_oversized_local_files() {
         assert_eq!(
-            omenchat_upload_policy_rejection(512, Some(50 * 1024 * 1024), None),
+            omenchat_upload_policy_rejection(512, Some(50 * 1024 * 1024), None, false),
             None
         );
         assert_eq!(
-            omenchat_upload_policy_rejection(512, Some(50 * 1024 * 1024), Some(512)),
+            omenchat_upload_policy_rejection(512, Some(50 * 1024 * 1024), Some(512), false),
             None
         );
         assert_eq!(
-            omenchat_upload_policy_rejection(1, Some(0), Some(512)),
+            omenchat_upload_policy_rejection(1, Some(0), Some(512), false),
             Some("upload blocked: server has uploads disabled".into())
         );
         assert_eq!(
-            omenchat_upload_policy_rejection(1, Some(50 * 1024 * 1024), Some(0)),
+            omenchat_upload_policy_rejection(1, Some(50 * 1024 * 1024), Some(0), true),
             Some("upload blocked: uploads are disabled in this room".into())
         );
         assert_eq!(
-            omenchat_upload_policy_rejection(1024, Some(50 * 1024 * 1024), Some(512)),
+            omenchat_upload_policy_rejection(1024, Some(50 * 1024 * 1024), Some(512), false),
             Some("upload blocked: 1.0 KiB exceeds server file limit 512 B".into())
+        );
+        assert_eq!(
+            omenchat_upload_policy_rejection(1024, Some(50 * 1024 * 1024), Some(512), true),
+            Some("upload blocked: 1.0 KiB exceeds room file limit 512 B".into())
         );
     }
 }

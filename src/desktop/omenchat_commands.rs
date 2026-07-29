@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::chat::commands::{parse_client_command, ClientCommand};
-use crate::chat::protocol::RoomId;
+use crate::chat::protocol::{RoomId, RoomUploadPolicyProjection};
 use crate::chat::{ChatClientEvent, ChatClientRequest, ChatSessionId};
 use crate::workspace::WorkspaceSection;
 
@@ -165,15 +165,27 @@ impl DesktopApp {
             self.set_omenchat_session_status(session_id, "upload file is empty".into());
             return OmenChatDraftCommandResult::HandledKeep;
         }
+        let server_max_file_bytes = self.omenchat_session_upload_max_file_bytes(session_id);
+        let room_upload_policy = room_id.and_then(|room_id| {
+            self.omenchat
+                .chat_client
+                .room_upload_policy(session_id, room_id)
+        });
+        let room_policy_limit = matches!(
+            room_upload_policy,
+            Some(RoomUploadPolicyProjection::MaximumFileBytes(room_max))
+                if server_max_file_bytes.is_none_or(|server_max| room_max <= server_max)
+        );
         let upload_max_file_bytes = room_id
             .and_then(|room_id| {
                 self.omenchat_room_effective_upload_max_file_bytes(session_id, room_id)
             })
-            .or_else(|| self.omenchat_session_upload_max_file_bytes(session_id));
+            .or(server_max_file_bytes);
         if let Some(reason) = omenchat_upload_policy_rejection(
             upload_byte_len,
             self.omenchat_session_upload_quota(session_id),
             upload_max_file_bytes,
+            room_policy_limit,
         ) {
             self.set_omenchat_session_status(session_id, reason);
             return OmenChatDraftCommandResult::HandledKeep;
@@ -197,6 +209,7 @@ impl DesktopApp {
             upload_byte_len,
             self.omenchat_session_upload_quota(session_id),
             upload_max_file_bytes,
+            room_policy_limit,
         ) {
             self.set_omenchat_session_status(session_id, reason);
             return OmenChatDraftCommandResult::HandledKeep;

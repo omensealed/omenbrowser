@@ -5,14 +5,20 @@ use iced::{Pixels, Settings};
 
 use crate::app::App;
 
-#[cfg(feature = "omenchat-slow-mode-qualification")]
+#[cfg(any(
+    feature = "omenchat-slow-mode-qualification",
+    feature = "omenchat-room-media-policy-qualification"
+))]
 use super::Message;
 use super::{
     desktop_ui_font, omen_application_style, set_desktop_font_size, DesktopApp,
     MICRON_VIEWPORT_FONT_BYTES,
 };
 
-#[cfg(feature = "omenchat-slow-mode-qualification")]
+#[cfg(any(
+    feature = "omenchat-slow-mode-qualification",
+    feature = "omenchat-room-media-policy-qualification"
+))]
 const QUALIFICATION_OMENCHAT_TARGET_ENV: &str = "OMENBROWSER_QUALIFICATION_OMENCHAT_TARGET";
 
 pub fn run(app: App) -> iced::Result {
@@ -23,7 +29,10 @@ pub fn run(app: App) -> iced::Result {
     app.bootstrap_runtime_on_launch();
     let mut desktop = DesktopApp::new(app);
     let startup_scroll = desktop.anchor_visible_workspace_scrolls_to_bottom_now(2);
-    #[cfg(feature = "omenchat-slow-mode-qualification")]
+    #[cfg(any(
+        feature = "omenchat-slow-mode-qualification",
+        feature = "omenchat-room-media-policy-qualification"
+    ))]
     desktop
         .set_qualification_omenchat_target(std::env::var(QUALIFICATION_OMENCHAT_TARGET_ENV).ok());
     let startup_task = startup_scroll;
@@ -53,7 +62,10 @@ pub fn run(app: App) -> iced::Result {
     .run()
 }
 
-#[cfg(feature = "omenchat-slow-mode-qualification")]
+#[cfg(any(
+    feature = "omenchat-slow-mode-qualification",
+    feature = "omenchat-room-media-policy-qualification"
+))]
 impl DesktopApp {
     fn set_qualification_omenchat_target(&mut self, target: Option<String>) {
         self.qualification_omenchat_target = target;
@@ -71,7 +83,13 @@ impl DesktopApp {
     }
 }
 
-#[cfg(all(test, feature = "omenchat-slow-mode-qualification"))]
+#[cfg(all(
+    test,
+    any(
+        feature = "omenchat-slow-mode-qualification",
+        feature = "omenchat-room-media-policy-qualification"
+    )
+))]
 mod tests {
     use super::*;
 

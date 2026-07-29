@@ -413,10 +413,13 @@ Do not invent measurements.
    quota four times and verifies exact retained file/byte and zero-pending
    bounds. The locked Reticulum 0.9.6 public API exposes initiator/outbound
    cancellation only, so receiver-side cancellation remains an explicit
-   upstream limitation rather than a fabricated pass. Adjacent-version, GUI,
-   live-process CPU/shutdown, and physical-network evidence remains. Evidence:
+   upstream limitation rather than a fabricated pass. Native Linux Iced now
+   also passes accepted, over-limit, and disabled attachment cases with
+   independent durable storage assertions. Adjacent-version, live-process
+   CPU/shutdown, and physical-network evidence remains. Evidence:
    `docs/audits/omenchat-room-media-policy-resource-qualification.md` and
-   `docs/audits/omenchat-room-media-policy-resource-measurement.md`.
+   `docs/audits/omenchat-room-media-policy-resource-measurement.md` and
+   `docs/audits/omenchat-room-media-policy-gui-qualification.md`.
 7. Activate negotiation and enforcement together in canonical desktop and
    standalone server product profiles; retain qualification hooks outside
    release graphs.

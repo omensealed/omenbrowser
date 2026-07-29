@@ -145,7 +145,8 @@ rollback because this slice did not alter them.
 ## Remaining activation gates
 
 - adjacent current/previous mixed-version shape compatibility;
-- GUI attachment preflight and authoritative rejection smoke;
+- native Linux GUI attachment preflight and authoritative rejection smoke is
+  complete; hosted native presentation remains a release-candidate gate;
 - live-process CPU/shutdown measurements; the isolated optimized
   retention/latency/storage/RSS measurement is complete;
 - explicit activation review and product-feature decision.

@@ -153,7 +153,8 @@ identity, history, or upload migration.
 - adjacent current/previous mixed-version qualification;
 - receiver-side cancellation during an admitted upload Resource remains
   unavailable through the locked Reticulum 0.9.6 public API;
-- native GUI attachment acceptance/rejection smoke;
+- native Linux GUI attachment acceptance/rejection smoke is complete; hosted
+  Windows/macOS presentation remains batched release-candidate evidence;
 - live-process CPU and shutdown measurements (isolated server retention,
   latency, pending-offer, storage, and RSS observations are complete);
 - explicit production activation review.

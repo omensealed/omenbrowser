@@ -160,10 +160,13 @@ correctly used the project's established `human_bytes` presentation,
 
 ## Remaining gates and rollback
 
-Current/current and adjacent-version negotiation, restart, Link replacement,
-Resource rejection/success/cancellation, real GUI, process resource
-measurements, Python interoperability, hosted native platforms, and packaging
-remain future activation or release-candidate gates. None is claimed here.
+The subsequent qualification slices now cover current/current negotiation,
+restart, Link replacement, Resource rejection/success, the upstream
+receiver-cancellation decision, isolated retention measurements, and native
+Linux Iced attachment acceptance/rejection. Adjacent-version shape
+compatibility, live-process resource/shutdown observation, Python
+interoperability, hosted native platforms, packaging, and production activation
+remain later gates.
 
 Rollback removes this optional projection and static presentation without a
 wire, storage, or configuration migration. Existing schema-12 copy export

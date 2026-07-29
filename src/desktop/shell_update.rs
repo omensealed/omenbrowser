@@ -194,12 +194,18 @@ impl DesktopApp {
         tracing::debug!(applied, "desktop internal event wake drained");
         #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         let omenchat_runtime_events = self.drain_omenchat_runtime_events();
-        #[cfg(feature = "omenchat-slow-mode-qualification")]
+        #[cfg(any(
+            feature = "omenchat-slow-mode-qualification",
+            feature = "omenchat-room-media-policy-qualification"
+        ))]
         let qualification_omenchat_open = self.open_qualification_omenchat_if_runtime_ready();
         Task::batch([
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_runtime_events,
-            #[cfg(feature = "omenchat-slow-mode-qualification")]
+            #[cfg(any(
+                feature = "omenchat-slow-mode-qualification",
+                feature = "omenchat-room-media-policy-qualification"
+            ))]
             qualification_omenchat_open,
             self.snap_conversations_with_new_messages_to_bottom(),
             #[cfg(feature = "chat-client")]

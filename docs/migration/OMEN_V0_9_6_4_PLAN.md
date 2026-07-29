@@ -1971,8 +1971,17 @@ cross the 512-KiB per-identity quota while retaining exactly eight files,
 The same source audit reconfirmed that Reticulum 0.9.6 offers only
 initiator/outbound cancellation publicly. Receiver-side cancellation remains
 evidence-bound upstream and is not replaced with private API access or a local
-transport fork. Live-process CPU/shutdown and GUI attachment evidence remain
-separate gates.
+transport fork. Live-process CPU/shutdown and GUI attachment evidence were
+separate gates at that checkpoint.
+
+The following native Linux Iced slice completed the GUI attachment gate using
+three isolated current/current homes. A 64-KiB file under a 256-KiB room
+ceiling committed through the normal Attach action; a 300,000-byte file was
+locally blocked with truthful “room file limit” evidence; disabled policy made
+Attach inert. The two rejection homes retained zero SQLite upload rows and
+zero files. The deterministic picker and auto-open URI hooks exist only in the
+non-product qualification feature. Hosted native presentation, adjacent-version
+compatibility, live-process CPU/shutdown, and activation remain.
 
 ### Hosted checkpoint
 
