@@ -114,8 +114,13 @@ Still required before activation:
 - adjacent current/previous mixed-version qualification;
 - hosted Windows/macOS attachment presentation; native Linux Iced accepted,
   over-limit, and disabled cases now pass;
-- live-process CPU, queue, and shutdown observation around an active upload;
 - explicit production activation and rollback review.
+
+The live-process CPU, memory, queue, handle, and shutdown observation around a
+GUI upload is complete in
+`omenchat-room-media-policy-process-measurement.md`. Its single short
+software-rendered loopback run does not replace a long soak or physical
+platform measurement.
 
 Hosted CI, Python interoperability, native packaging, public gateways,
 physical interfaces, GUI automation, and physical GPU measurements were not

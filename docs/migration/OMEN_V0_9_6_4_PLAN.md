@@ -1981,7 +1981,11 @@ locally blocked with truthful “room file limit” evidence; disabled policy ma
 Attach inert. The two rejection homes retained zero SQLite upload rows and
 zero files. The deterministic picker and auto-open URI hooks exist only in the
 non-product qualification feature. Hosted native presentation, adjacent-version
-compatibility, live-process CPU/shutdown, and activation remain.
+compatibility, and activation remain. The subsequent optimized loopback
+process observation recorded stable file-descriptor counts, no queue backlog
+or worker join failures, and 135-ms desktop/53-ms server shutdown around one
+accepted 64-KiB GUI upload. The observed browser/server RSS steps are recorded
+without being mislabeled as a leak or a hardware-independent threshold.
 
 ### Hosted checkpoint
 

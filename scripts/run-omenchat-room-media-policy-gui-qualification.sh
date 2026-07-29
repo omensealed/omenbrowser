@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
 evidence_root="${TMPDIR:-/tmp}/omenchat-room-media-policy-gui-evidence"
+sample_seconds="${OMENCHAT_ROOM_MEDIA_POLICY_SAMPLE_SECONDS:-0}"
+warmup_seconds="${OMENCHAT_ROOM_MEDIA_POLICY_WARMUP_SECONDS:-10}"
 while (($#)); do
   case "$1" in
     --evidence)
@@ -21,12 +23,36 @@ while (($#)); do
   esac
 done
 
+if [[ ! "$sample_seconds" =~ ^[0-9]+$ ]] ||
+    ((sample_seconds > 300)); then
+  echo "OMENCHAT_ROOM_MEDIA_POLICY_SAMPLE_SECONDS must be an integer from 0 through 300" >&2
+  exit 2
+fi
+if [[ ! "$warmup_seconds" =~ ^[0-9]+$ ]] ||
+    ((warmup_seconds > 300)); then
+  echo "OMENCHAT_ROOM_MEDIA_POLICY_WARMUP_SECONDS must be an integer from 0 through 300" >&2
+  exit 2
+fi
+if ((sample_seconds > 0)) &&
+    [[ "$(uname -s)" != "Linux" || ! -r /proc/self/status ]]; then
+  echo "room media-policy process measurement requires Linux /proc" >&2
+  exit 2
+fi
+
 for tool in Xvfb i3 xdpyinfo xdotool xprop import jq rg python3 truncate find; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "missing room media-policy GUI qualification tool: $tool" >&2
     exit 2
   fi
 done
+if ((sample_seconds > 0)); then
+  for tool in awk getconf; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "missing room media-policy process measurement tool: $tool" >&2
+      exit 2
+    fi
+  done
+fi
 
 session_root=$(mktemp -d "${TMPDIR:-/tmp}/omenchat-room-media-policy-gui.XXXXXX")
 xvfb_pid=""
@@ -69,17 +95,25 @@ trap 'report_error "$?" "$LINENO"' ERR
 rm -rf -- "$evidence_root"
 mkdir -p -- "$evidence_root"
 
+build_profile="debug"
+build_profile_args=()
+if ((sample_seconds > 0)); then
+  build_profile="release"
+  build_profile_args=(--release)
+fi
 cargo build --quiet --locked --manifest-path "$repo_root/Cargo.toml" \
+  "${build_profile_args[@]}" \
   --no-default-features \
   --features desktop-product,omenchat-room-media-policy-qualification \
   --bin omenbrowser_rs
 cargo build --quiet --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
+  "${build_profile_args[@]}" \
   --no-default-features \
   --features server-headless,omenchat-room-media-policy-qualification \
   --bin omenchatd
 
-browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
-server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
+browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/$build_profile/omenbrowser_rs"
+server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/$build_profile/omenchatd"
 
 under_file="$session_root/under-limit.bin"
 over_file="$session_root/over-limit.bin"
@@ -194,6 +228,135 @@ print(json.dumps({
 PY
 }
 
+sample_processes() {
+  local phase=$1
+  local seconds=$2
+  local destination=$3
+  local browser_ticks
+  local server_ticks
+  local total_ticks
+  local cpu_count
+  local sample
+  local next_browser_ticks
+  local next_server_ticks
+  local next_total_ticks
+  local browser_cpu
+  local server_cpu
+  local browser_rss
+  local server_rss
+  local browser_dirty
+  local server_dirty
+  local browser_threads
+  local server_threads
+  local browser_fds
+  local server_fds
+
+  browser_ticks=$(awk '{print $14+$15}' "/proc/$app_pid/stat")
+  server_ticks=$(awk '{print $14+$15}' "/proc/$server_pid/stat")
+  total_ticks=$(awk 'NR==1 {for(i=2;i<=NF;i++) total+=$i; print total}' /proc/stat)
+  cpu_count=$(getconf _NPROCESSORS_ONLN)
+  for ((sample = 0; sample < seconds; sample++)); do
+    sleep 1
+    kill -0 "$app_pid" 2>/dev/null ||
+      { echo "desktop exited during process measurement" >&2; return 1; }
+    kill -0 "$server_pid" 2>/dev/null ||
+      { echo "omenchatd exited during process measurement" >&2; return 1; }
+    next_browser_ticks=$(awk '{print $14+$15}' "/proc/$app_pid/stat")
+    next_server_ticks=$(awk '{print $14+$15}' "/proc/$server_pid/stat")
+    next_total_ticks=$(
+      awk 'NR==1 {for(i=2;i<=NF;i++) total+=$i; print total}' /proc/stat
+    )
+    browser_cpu=$(
+      awk -v p="$next_browser_ticks" -v pp="$browser_ticks" \
+        -v t="$next_total_ticks" -v pt="$total_ticks" -v n="$cpu_count" \
+        'BEGIN {if(t>pt) printf "%.3f", 100*(p-pp)*n/(t-pt); else print "0.000"}'
+    )
+    server_cpu=$(
+      awk -v p="$next_server_ticks" -v pp="$server_ticks" \
+        -v t="$next_total_ticks" -v pt="$total_ticks" -v n="$cpu_count" \
+        'BEGIN {if(t>pt) printf "%.3f", 100*(p-pp)*n/(t-pt); else print "0.000"}'
+    )
+    browser_ticks=$next_browser_ticks
+    server_ticks=$next_server_ticks
+    total_ticks=$next_total_ticks
+    browser_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$app_pid/status")
+    server_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$server_pid/status")
+    browser_dirty=$(
+      awk '/^Private_Dirty:/ {sum += $2} END {print sum + 0}' \
+        "/proc/$app_pid/smaps_rollup"
+    )
+    server_dirty=$(
+      awk '/^Private_Dirty:/ {sum += $2} END {print sum + 0}' \
+        "/proc/$server_pid/smaps_rollup"
+    )
+    browser_threads=$(awk '/^Threads:/ {print $2}' "/proc/$app_pid/status")
+    server_threads=$(awk '/^Threads:/ {print $2}' "/proc/$server_pid/status")
+    browser_fds=$(
+      find "/proc/$app_pid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l
+    )
+    server_fds=$(
+      find "/proc/$server_pid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l
+    )
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$phase" "$(( $(date +%s%N) / 1000000 ))" \
+      "$browser_cpu" "$server_cpu" "$browser_rss" "$server_rss" \
+      "$browser_dirty" "$server_dirty" "$browser_threads" "$server_threads" \
+      "$browser_fds" "$server_fds" >>"$destination"
+  done
+}
+
+write_process_summary() {
+  local samples=$1
+  local destination=$2
+  python3 - "$samples" "$destination" <<'PY'
+import math
+import pathlib
+import statistics
+import sys
+
+source = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2])
+columns = (
+    "browser_cpu_percent",
+    "server_cpu_percent",
+    "browser_rss_kib",
+    "server_rss_kib",
+    "browser_private_dirty_kib",
+    "server_private_dirty_kib",
+    "browser_threads",
+    "server_threads",
+    "browser_fds",
+    "server_fds",
+)
+rows = []
+with source.open(encoding="utf-8") as stream:
+    header = stream.readline().rstrip("\n").split("\t")
+    for line in stream:
+        values = line.rstrip("\n").split("\t")
+        rows.append(dict(zip(header, values, strict=True)))
+
+def percentile(values, fraction):
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)]
+
+lines = []
+for phase in ("before_upload", "after_upload"):
+    selected = [row for row in rows if row["phase"] == phase]
+    lines.append(f"{phase}_samples={len(selected)}")
+    for column in columns:
+        values = [float(row[column]) for row in selected]
+        lines.append(f"{phase}_{column}_median={statistics.median(values):.3f}")
+        lines.append(f"{phase}_{column}_p95={percentile(values, 0.95):.3f}")
+before = [row for row in rows if row["phase"] == "before_upload"]
+after = [row for row in rows if row["phase"] == "after_upload"]
+for process in ("browser", "server"):
+    initial = float(before[-1][f"{process}_rss_kib"])
+    final = float(after[-1][f"{process}_rss_kib"])
+    lines.append(f"{process}_rss_kib_post_minus_pre={final - initial:.0f}")
+destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
 run_case() {
   local label=$1
   local policy=$2
@@ -209,6 +372,11 @@ run_case() {
   local identity_storage
   local window=""
   local upload_count
+  local desktop_shutdown_start_ns=0
+  local desktop_shutdown_end_ns=0
+  local server_shutdown_start_ns=0
+  local server_shutdown_end_ns=0
+  local process_samples="$case_evidence/process-samples.tsv"
 
   mkdir -p -- "$case_root" "$case_evidence"
   port=$(python3 -c \
@@ -318,6 +486,12 @@ run_case() {
   sleep 1
 
   DISPLAY="$test_display" import -window "$window" "$case_evidence/before-attach.png"
+  if [[ "$label" == "under-limit" ]] && ((sample_seconds > 0)); then
+    sleep "$warmup_seconds"
+    printf 'phase\tepoch_ms\tbrowser_cpu_percent\tserver_cpu_percent\tbrowser_rss_kib\tserver_rss_kib\tbrowser_private_dirty_kib\tserver_private_dirty_kib\tbrowser_threads\tserver_threads\tbrowser_fds\tserver_fds\n' \
+      >"$process_samples"
+    sample_processes before_upload 5 "$process_samples"
+  fi
   DISPLAY="$test_display" xdotool windowactivate --sync "$window"
   DISPLAY="$test_display" xdotool mousemove --window "$window" 572 765 click 1
 
@@ -332,6 +506,10 @@ run_case() {
     if [[ $(database_upload_count "$server_root/omenchat.sqlite") -ne 1 ]]; then
       echo "accepted GUI upload did not reach durable storage" >&2
       return 1
+    fi
+    if [[ "$label" == "under-limit" ]] && ((sample_seconds > 0)); then
+      sample_processes after_upload "$sample_seconds" "$process_samples"
+      write_process_summary "$process_samples" "$case_evidence/process-summary.txt"
     fi
   else
     sleep 2
@@ -357,12 +535,16 @@ run_case() {
     fi
   fi
 
+  desktop_shutdown_start_ns=$(date +%s%N)
   DISPLAY="$test_display" xdotool key --window "$window" alt+F4
   wait_for_exit "$app_pid" "desktop $label"
   app_pid=""
+  desktop_shutdown_end_ns=$(date +%s%N)
+  server_shutdown_start_ns=$(date +%s%N)
   kill "$server_pid"
   wait_for_exit "$server_pid" "omenchatd $label"
   server_pid=""
+  server_shutdown_end_ns=$(date +%s%N)
 
   rg -q 'desktop shutdown drained successfully' "$case_root/browser.stderr"
   cp -- "$case_root/browser.stderr" "$case_evidence/browser.stderr"
@@ -373,6 +555,48 @@ run_case() {
   fi
   if [[ -f "$server_root/omenchatd.log" ]]; then
     cp -- "$server_root/omenchatd.log" "$case_evidence/omenchatd.log"
+  fi
+  if [[ "$label" == "under-limit" ]] && ((sample_seconds > 0)); then
+    {
+      printf 'utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'build_profile=%s\n' "$build_profile"
+      printf 'warmup_seconds=%s\n' "$warmup_seconds"
+      printf 'before_upload_sample_seconds=5\n'
+      printf 'after_upload_sample_seconds=%s\n' "$sample_seconds"
+      printf 'desktop_shutdown_ms=%s\n' \
+        "$(( (desktop_shutdown_end_ns - desktop_shutdown_start_ns) / 1000000 ))"
+      printf 'server_shutdown_ms=%s\n' \
+        "$(( (server_shutdown_end_ns - server_shutdown_start_ns) / 1000000 ))"
+      printf 'browser_version=%s\n' "$("$browser_bin" --version)"
+      printf 'server_version=%s\n' "$("$server_bin" --version)"
+      rustc -Vv | sed 's/^/rustc_/'
+    } >"$case_evidence/measurement-metadata.txt"
+    if ((sample_seconds >= 30)); then
+      rg -q '^stats: active_links=1 ' "$case_evidence/server.log"
+      rg -q '^queues: transport=items:0 bytes:0 .*events=items:0 bytes:0 ' \
+        "$case_evidence/server.log"
+      rg -q \
+        'reticulum-rs live server drained .*worker_join_timeouts=0 worker_join_failures=0 queues: transport=items:0 bytes:0 .*events=items:0 bytes:0 ' \
+        "$case_evidence/omenchatd.log"
+    fi
+    {
+      cat "$case_evidence/process-summary.txt"
+      printf 'desktop_shutdown_ms=%s\n' \
+        "$(( (desktop_shutdown_end_ns - desktop_shutdown_start_ns) / 1000000 ))"
+      printf 'server_shutdown_ms=%s\n' \
+        "$(( (server_shutdown_end_ns - server_shutdown_start_ns) / 1000000 ))"
+      if ((sample_seconds >= 30)); then
+        rg '^stats: active_links=' "$case_evidence/server.log" |
+          tail -n 1 |
+          sed 's/^/server_/'
+        rg '^queues:' "$case_evidence/server.log" |
+          tail -n 1 |
+          sed 's/^/server_/'
+        rg 'reticulum-rs live server drained' "$case_evidence/omenchatd.log" |
+          tail -n 1 |
+          sed 's/^/server_/'
+      fi
+    } >"$case_evidence/resource-summary.txt"
   fi
 }
 

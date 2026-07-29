@@ -160,10 +160,15 @@ migration is required.
 ## Remaining evidence
 
 - adjacent current/previous mixed-version shape qualification;
-- live-process CPU, queue, and shutdown observation around an active upload;
 - explicit production activation and rollback review;
 - later batched Python interoperability, Windows/macOS presentation, packaging,
   and physical-network evidence.
+
+The separate optimized process observation is now complete. It found empty
+transport/event and pending-resource queues, stable FD counts, no worker join
+failures, and bounded shutdown around an accepted 64-KiB upload. See
+`omenchat-room-media-policy-process-measurement.md`; its short loopback run is
+not a long-duration leak or physical-GPU claim.
 
 Screenshots remain in the caller-selected disposable evidence directory and
 are not committed.

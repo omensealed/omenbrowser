@@ -5324,6 +5324,26 @@ OMENchat URI are compiled only into qualification builds; canonical product
 feature verification rejects this feature. Evidence is in
 `docs/audits/omenchat-room-media-policy-gui-qualification.md`.
 
+An opt-in optimized process observation reuses the same harness:
+
+```bash
+OMENCHAT_ROOM_MEDIA_POLICY_WARMUP_SECONDS=5 \
+OMENCHAT_ROOM_MEDIA_POLICY_SAMPLE_SECONDS=30 \
+bash scripts/run-omenchat-room-media-policy-gui-qualification.sh \
+  --evidence /tmp/omenchat-room-media-policy-gui-process
+```
+
+Positive durations, bounded to 300 seconds, require Linux `/proc` and use
+release-profile binaries. The accepted case records five samples before the
+Attach action and the requested one-second samples after durable acceptance.
+It reports CPU, RSS/private dirty memory, threads, FDs, and bounded shutdown;
+a 30-second-or-longer run also requires the server queue snapshot and final
+drain telemetry to show empty transport/event queues and no worker join
+failure. A zero duration remains the fast default and adds no measurement
+delay. Evidence and the limitations of a single software-rendered loopback
+observation are in
+`docs/audits/omenchat-room-media-policy-process-measurement.md`.
+
 The real, still-non-product feature now has a first explicit desktop
 presentation slice:
 
