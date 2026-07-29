@@ -98,6 +98,7 @@ struct AdminRoomRow {
     name: String,
     topic: Option<String>,
     policy: RoomPolicyProjection,
+    upload_max_file_bytes: Option<u64>,
 }
 
 enum PendingRoomDatabase {
@@ -165,6 +166,7 @@ fn bounded_admin_room_rows(rooms: Vec<ServerRoom>) -> (Vec<AdminRoomRow>, bool) 
             name: room.name,
             topic: room.topic,
             policy,
+            upload_max_file_bytes: room.upload_max_file_bytes,
         })
     });
     let (rows, truncated) = bounded_admin_room_cache(rows);
@@ -195,7 +197,7 @@ fn bounded_admin_room_cache(
     (rows, truncated)
 }
 
-fn room_policy_status(policy: RoomPolicyProjection) -> String {
+fn room_policy_status(policy: RoomPolicyProjection, upload_max_file_bytes: Option<u64>) -> String {
     let publication = if policy.announcement_only() {
         "announcement"
     } else {
@@ -207,8 +209,10 @@ fn room_policy_status(policy: RoomPolicyProjection) -> String {
         "off".into()
     };
     format!(
-        "Publication policy: {publication}\nSlow mode: {slow_mode} configured · enforcement {}",
-        crate::SLOW_MODE_ENFORCEMENT_STATUS
+        "Publication policy: {publication}\nSlow mode: {slow_mode} configured · enforcement {}\nUpload policy: {} configured · enforcement {}",
+        crate::SLOW_MODE_ENFORCEMENT_STATUS,
+        crate::room_upload_policy_config_label(upload_max_file_bytes),
+        crate::ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS,
     )
 }
 
@@ -1086,6 +1090,7 @@ impl AdminTui {
             name: room.name,
             topic: room.topic,
             policy,
+            upload_max_file_bytes: room.upload_max_file_bytes,
         });
         self.rooms.sort_by(|left, right| {
             left.name
@@ -1857,7 +1862,7 @@ impl AdminTui {
             format!(
                 "{}\n{}",
                 selected_room_text(room.room_id, &room.name, room.topic.as_deref()),
-                room_policy_status(room.policy)
+                room_policy_status(room.policy, room.upload_max_file_bytes)
             )
         } else {
             "No rooms yet.".to_string()
@@ -4928,7 +4933,9 @@ fn rooms_text_from_rows(rooms: &[AdminRoomRow]) -> String {
             topic: room.topic.as_deref().unwrap_or_default(),
         }));
         text.push_str("  ");
-        text.push_str(&room_policy_status(room.policy).replace('\n', " | "));
+        text.push_str(
+            &room_policy_status(room.policy, room.upload_max_file_bytes).replace('\n', " | "),
+        );
         text.push('\n');
     }
     text
@@ -4945,6 +4952,7 @@ fn admin_room_rows(rooms: &[ServerRoom]) -> Vec<AdminRoomRow> {
                     name: room.name.clone(),
                     topic: room.topic.clone(),
                     policy,
+                    upload_max_file_bytes: room.upload_max_file_bytes,
                 })
         })
         .collect()
@@ -4959,6 +4967,7 @@ fn configured_admin_room_rows(rooms: &[(i64, String, Option<String>)]) -> Vec<Ad
             name: name.clone(),
             topic: topic.clone(),
             policy: RoomPolicyProjection::default(),
+            upload_max_file_bytes: None,
         })
         .collect()
 }
@@ -5697,17 +5706,18 @@ mod tests {
             room_revision: 4,
             policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
             slow_mode_seconds: 30,
-            upload_max_file_bytes: None,
+            upload_max_file_bytes: Some(262_144),
         }]);
         assert!(!truncated);
         let room = rows.first().expect("projected room");
         assert!(room.policy.announcement_only());
         assert_eq!(room.policy.slow_mode_seconds(), 30);
         assert_eq!(
-            room_policy_status(room.policy),
+            room_policy_status(room.policy, room.upload_max_file_bytes),
             format!(
-                "Publication policy: announcement\nSlow mode: 30s configured · enforcement {}",
-                crate::SLOW_MODE_ENFORCEMENT_STATUS
+                "Publication policy: announcement\nSlow mode: 30s configured · enforcement {}\nUpload policy: 262144B configured · enforcement {}",
+                crate::SLOW_MODE_ENFORCEMENT_STATUS,
+                crate::ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS,
             )
         );
         let console = rooms_text_from_rows(&rows);
@@ -5715,6 +5725,10 @@ mod tests {
         assert!(console.contains(&format!(
             "Slow mode: 30s configured · enforcement {}",
             crate::SLOW_MODE_ENFORCEMENT_STATUS
+        )));
+        assert!(console.contains(&format!(
+            "Upload policy: 262144B configured · enforcement {}",
+            crate::ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS
         )));
         assert!(console.len() < 1_024);
 

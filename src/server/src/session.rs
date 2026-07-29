@@ -6381,7 +6381,7 @@ mod tests {
         );
         engine
             .store
-            .set_room_upload_max_file_bytes_for_qualification(1, Some(0))
+            .update_room_upload_max_file_bytes(1, Some(0))
             .expect("dormant disabled policy");
         let peer = peer();
         join_lobby(&engine, &peer);
@@ -6423,7 +6423,7 @@ mod tests {
 
         engine
             .store
-            .set_room_upload_max_file_bytes_for_qualification(1, Some(0))
+            .update_room_upload_max_file_bytes(1, Some(0))
             .expect("disabled room");
         let disabled = engine
             .handle_frame(
@@ -6453,7 +6453,7 @@ mod tests {
 
         engine
             .store
-            .set_room_upload_max_file_bytes_for_qualification(1, Some(10))
+            .update_room_upload_max_file_bytes(1, Some(10))
             .expect("limited room");
         let oversized = engine
             .handle_frame(
@@ -6480,7 +6480,7 @@ mod tests {
 
         engine
             .store
-            .set_room_upload_max_file_bytes_for_qualification(1, None)
+            .update_room_upload_max_file_bytes(1, None)
             .expect("inherited room");
         let accepted = engine
             .handle_frame(
@@ -6561,7 +6561,7 @@ mod tests {
         let disabled_resource = offer(3, "disabled-after-offer.bin", 4);
         engine
             .store
-            .set_room_upload_max_file_bytes_for_qualification(1, Some(0))
+            .update_room_upload_max_file_bytes(1, Some(0))
             .expect("disable before publication");
         let disabled = engine
             .handle_upload_resource(&peer, &disabled_resource, b"data".to_vec())
@@ -6581,12 +6581,12 @@ mod tests {
 
         engine
             .store
-            .set_room_upload_max_file_bytes_for_qualification(1, None)
+            .update_room_upload_max_file_bytes(1, None)
             .expect("inherit before offer");
         let limited_resource = offer(4, "limited-after-offer.bin", 4);
         engine
             .store
-            .set_room_upload_max_file_bytes_for_qualification(1, Some(2))
+            .update_room_upload_max_file_bytes(1, Some(2))
             .expect("lower ceiling before publication");
         let limited = engine
             .handle_upload_resource(&peer, &limited_resource, b"data".to_vec())
@@ -6600,7 +6600,7 @@ mod tests {
 
         engine
             .store
-            .set_room_upload_max_file_bytes_for_qualification(1, Some(4))
+            .update_room_upload_max_file_bytes(1, Some(4))
             .expect("allow publication");
         let committed_resource = offer(5, "committed.bin", 4);
         let committed = engine
@@ -6637,7 +6637,7 @@ mod tests {
         join_lobby(&first, &peer);
         first
             .store
-            .set_room_upload_max_file_bytes_for_qualification(room_id, Some(2))
+            .update_room_upload_max_file_bytes(room_id, Some(2))
             .expect("persistent room policy");
         drop(first);
 

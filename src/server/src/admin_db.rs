@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::{RoomId, UserId};
 use crate::store::{
-    OmenchatStore, RoomHistoryUsage, RoomSlowModeUpdate, ServerAdminUser, ServerRoom, ServerUser,
+    OmenchatStore, RoomHistoryUsage, RoomSlowModeUpdate, RoomUploadPolicyUpdate, ServerAdminUser,
+    ServerRoom, ServerUser,
 };
 
 const ADMIN_DATABASE_QUEUE_ITEMS: usize = 16;
@@ -188,6 +189,16 @@ impl AdminDatabase {
         slow_mode_seconds: u32,
     ) -> ServerResult<RoomSlowModeUpdate> {
         self.call(move |store| store.update_room_slow_mode_seconds(room_id, slow_mode_seconds))
+    }
+
+    pub fn set_room_upload_max_file_bytes(
+        &self,
+        room_id: RoomId,
+        upload_max_file_bytes: Option<u64>,
+    ) -> ServerResult<RoomUploadPolicyUpdate> {
+        self.call(move |store| {
+            store.update_room_upload_max_file_bytes(room_id, upload_max_file_bytes)
+        })
     }
 
     pub fn request_update_room_topic(

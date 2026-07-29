@@ -397,8 +397,10 @@ Do not invent measurements.
    file boundaries. Production constructors keep enforcement disabled.
    Evidence:
    `docs/audits/omenchat-room-media-policy-enforcement-qualification.md`.
-4. Confirmation-gated stopped-server administration and bounded human/JSON
-   status evidence explicitly labeled inactive.
+4. **Complete (2026-07-28):** confirmation-gated stopped-server
+   administration and bounded human/JSON/TUI status evidence explicitly
+   labeled inactive. Evidence:
+   `docs/audits/omenchat-room-media-policy-administration-qualification.md`.
 5. Bounded desktop projection and static Iced controls. omenchatd TUI reports
    configured/inactive operator evidence only.
 6. Current/current, adjacent-version, restart, Link replacement, Resource,

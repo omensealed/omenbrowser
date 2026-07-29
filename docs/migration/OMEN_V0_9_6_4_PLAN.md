@@ -1839,6 +1839,18 @@ capability negotiation, Cargo product features, configuration, administration,
 and UI remain unchanged. Evidence:
 `docs/audits/omenchat-room-media-policy-enforcement-qualification.md`.
 
+The fourth slice adds the confirmation-gated, stopped-server
+`rooms set-upload-policy` command and bounded human/JSON/TUI operator status.
+It accepts exactly `inherit`, `disabled`, or `1..=10485760` bytes, reuses the
+exclusive current-schema maintenance boundary, commits the nullable scalar and
+room revision atomically, and preserves the revision on a no-op. Status is
+bounded to 1,024 rooms and 1 MiB of retained room data, reports truncation, and
+distinguishes configured from effective room/global-minimum policy. Every
+projection explicitly labels enforcement inactive. Capability negotiation,
+production admission/publication, Cargo product features, recurring polling,
+and live policy editing remain unchanged. Evidence:
+`docs/audits/omenchat-room-media-policy-administration-qualification.md`.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

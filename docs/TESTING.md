@@ -5187,6 +5187,41 @@ revalidation, and no filesystem/ledger publication after rejection. No product
 feature or capability acceptance is enabled. Evidence is in
 `docs/audits/omenchat-room-media-policy-enforcement-qualification.md`.
 
+The stopped-server room media-policy administration/status slice is covered
+by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-full \
+    room_upload_policy --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-full \
+    upload_policy_cli --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-full \
+    room_status_projection --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-full \
+    dashboard_room_projection --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-full \
+    cli_parses_release_runbook_server_commands --lib -- --nocapture
+)
+```
+
+The command is:
+
+```bash
+omenchatd rooms set-upload-policy <room-id> \
+  inherit|disabled|<1..=10485760> --confirm --home <server-home>
+```
+
+Tests require strict values and explicit confirmation, active-writer refusal,
+selected isolated-home ownership, transactional previous/configured values,
+idempotent revision behavior, injected pre-commit rollback, and missing-room
+failure. Human/JSON/TUI status distinguishes configured and effective policy,
+is bounded to 1,024 rooms and 1 MiB, reports truncation, and explicitly labels
+enforcement inactive. Production capability request/acceptance and upload
+enforcement remain disabled. Evidence is in
+`docs/audits/omenchat-room-media-policy-administration-qualification.md`.
+
 The real, still-non-product feature now has a first explicit desktop
 presentation slice:
 

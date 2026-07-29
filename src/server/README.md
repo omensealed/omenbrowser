@@ -259,14 +259,35 @@ but report enforcement inactive.
 Schema 13 stores a nullable per-room upload file ceiling for the staged
 `room-media-policy-v1` work. `NULL` inherits the global server file ceiling,
 zero will disable room uploads, and positive values are constrained to at most
-10 MiB. This slice is storage-only: canonical clients do not request the
-capability, omenchatd does not accept it, no administration command changes
-the value, and upload admission still uses the existing global policy.
+10 MiB. Configuration is restart-only and confirmation-gated through the same
+exclusive maintenance boundary:
+
+```bash
+# Stop omenchatd first.
+omenchatd rooms set-upload-policy 1 262144 --confirm --home ~/.omenchatd
+omenchatd rooms list --json --home ~/.omenchatd
+omenchatd rooms set-upload-policy 1 disabled --confirm --home ~/.omenchatd
+omenchatd rooms set-upload-policy 1 inherit --confirm --home ~/.omenchatd
+```
+
+`inherit` stores `NULL`, `disabled` stores zero, and a numeric value must be in
+`1..=10485760`. The scalar and room revision change in one immediate
+transaction, while a no-op retains the revision. Output reports the prior,
+configured, and effective values and always reports `enforcement=inactive`.
+Human and JSON room listings are bounded to 1,024 rows and 1 MiB of retained
+room data, report truncation explicitly, and distinguish configured policy
+from the effective room/global minimum.
+
+This remains an administration-and-status slice only: canonical clients do not
+request the capability, omenchatd does not accept it, and upload admission
+still uses the existing global policy.
 An internal test-only qualification path resolves inherited, disabled, and
 room/global-minimum limits at both offer and Resource-publication boundaries.
 Normal and canonical server constructors explicitly keep that enforcement
-disabled until negotiation, administration, mixed-version, and live Resource
-qualification are complete.
+disabled until client projection, negotiation, mixed-version, live Resource,
+and resource-measurement qualification are complete. The optional omenchatd
+TUI likewise shows configured/effective policy with `enforcement=inactive`;
+it does not activate or edit the policy.
 
 To prepare a separate schema-12-compatible rollback copy while retaining the
 active schema-13 database, stop the server cleanly and run:

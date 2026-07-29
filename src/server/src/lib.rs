@@ -27,6 +27,9 @@ pub(crate) const SLOW_MODE_ENFORCEMENT_STATUS: &str = if cfg!(feature = "omencha
 } else {
     "inactive"
 };
+pub(crate) const ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS: &str = "inactive";
+const ROOM_STATUS_MAX_ITEMS: usize = 1_024;
+const ROOM_STATUS_MAX_BYTES: usize = 1024 * 1024;
 
 use error::ServerResult;
 use std::io::Read;
@@ -61,6 +64,7 @@ pub enum CliCommand {
     RoomsSetTopic(ServerOptions, RoomTopicOptions),
     RoomsSetPolicy(ServerOptions, RoomPolicyOptions),
     RoomsSetSlowMode(ServerOptions, RoomSlowModeOptions),
+    RoomsSetUploadPolicy(ServerOptions, RoomUploadPolicyOptions),
     RoomsArchive(ServerOptions, RoomSelectOptions),
     UsersListJson(ServerOptions),
     UsersSetRole(ServerOptions, UserRoleOptions),
@@ -134,6 +138,12 @@ pub struct RoomPolicyOptions {
 pub struct RoomSlowModeOptions {
     pub room_id: i64,
     pub seconds: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomUploadPolicyOptions {
+    pub room_id: i64,
+    pub max_file_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -605,8 +615,15 @@ impl Omenchatd {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
                 let database = admin_db::AdminDatabase::open(&config.database_path)?;
-                for room in database.list_rooms()? {
-                    println!("{}", room_status_line(&room));
+                let rooms = database.list_rooms()?;
+                let (rooms, truncated) = bounded_room_status_rows(&rooms);
+                for room in rooms {
+                    println!("{}", room_status_line(room, config.upload_max_file_bytes)?);
+                }
+                if truncated {
+                    println!(
+                        "room_status_truncated=true item_limit={ROOM_STATUS_MAX_ITEMS} byte_limit={ROOM_STATUS_MAX_BYTES}"
+                    );
                 }
                 Ok(())
             }
@@ -617,7 +634,11 @@ impl Omenchatd {
                 let rooms = database.list_rooms()?;
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&room_status_json(&rooms)).map_err(|error| {
+                    serde_json::to_string_pretty(&room_status_json(
+                        &rooms,
+                        config.upload_max_file_bytes
+                    )?)
+                    .map_err(|error| {
                         crate::error::ServerError::Message(format!(
                             "room status JSON encoding failed: {error}"
                         ))
@@ -690,6 +711,36 @@ impl Omenchatd {
                     update.room.room_revision,
                     update.previous_seconds != update.room.slow_mode_seconds,
                     SLOW_MODE_ENFORCEMENT_STATUS
+                );
+                Ok(())
+            }
+            CliCommand::RoomsSetUploadPolicy(options, room) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "room upload-policy update refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let room_id = u32::try_from(room.room_id)
+                    .map_err(|_| error::ServerError::Message("room not found".into()))?;
+                let update =
+                    database.set_room_upload_max_file_bytes(room_id, room.max_file_bytes)?;
+                let effective = store::EffectiveRoomUploadPolicy::resolve(
+                    update.room.upload_max_file_bytes,
+                    config.upload_max_file_bytes,
+                )?;
+                println!(
+                    "room upload policy stored: id={} previous={} configured={} effective={} revision={} changed={} enforcement={}",
+                    update.room.room_id,
+                    room_upload_policy_config_label(update.previous_max_file_bytes),
+                    room_upload_policy_config_label(update.room.upload_max_file_bytes),
+                    effective_room_upload_policy_label(effective),
+                    update.room.room_revision,
+                    update.previous_max_file_bytes != update.room.upload_max_file_bytes,
+                    ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS
                 );
                 Ok(())
             }
@@ -1049,6 +1100,16 @@ fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
                 None => CliCommand::Invalid(format!(
                     "room slow mode requires <room_id> off|<1..={}> --confirm and must be run while omenchatd is stopped",
                     crate::protocol::ROOM_SLOW_MODE_MAX_SECONDS
+                )),
+            }
+        }
+        "set-upload-policy" => {
+            let (options, room) = parse_room_upload_policy_options(args);
+            match room {
+                Some(room) => CliCommand::RoomsSetUploadPolicy(options, room),
+                None => CliCommand::Invalid(format!(
+                    "room upload policy requires <room_id> inherit|disabled|<1..={}> --confirm and must be run while omenchatd is stopped",
+                    crate::protocol::ROOM_UPLOAD_MAX_FILE_BYTES
                 )),
             }
         }
@@ -1425,6 +1486,52 @@ fn parse_room_slow_mode_options(
     )
 }
 
+fn parse_room_upload_policy_options(
+    args: impl IntoIterator<Item = String>,
+) -> (ServerOptions, Option<RoomUploadPolicyOptions>) {
+    let mut options = ServerOptions::default();
+    let mut confirmed = false;
+    let mut positional = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => {
+                let Some(path) = args.next() else {
+                    return (options, None);
+                };
+                options.home = Some(PathBuf::from(path));
+            }
+            "--confirm" => confirmed = true,
+            value if !value.starts_with("--") => positional.push(value.to_owned()),
+            _ => return (options, None),
+        }
+    }
+    let [room_id, policy] = positional.as_slice() else {
+        return (options, None);
+    };
+    let room_id = room_id.parse::<i64>().ok().filter(|value| *value > 0);
+    let max_file_bytes = match policy.as_str() {
+        "inherit" => Some(None),
+        "disabled" => Some(Some(0)),
+        value => value
+            .parse::<u64>()
+            .ok()
+            .filter(|bytes| (1..=crate::protocol::ROOM_UPLOAD_MAX_FILE_BYTES).contains(bytes))
+            .map(Some),
+    };
+    (
+        options,
+        confirmed
+            .then_some(())
+            .and(room_id)
+            .zip(max_file_bytes)
+            .map(|(room_id, max_file_bytes)| RoomUploadPolicyOptions {
+                room_id,
+                max_file_bytes,
+            }),
+    )
+}
+
 fn slow_mode_label(seconds: u32) -> String {
     if seconds == 0 {
         "off".into()
@@ -1433,9 +1540,57 @@ fn slow_mode_label(seconds: u32) -> String {
     }
 }
 
-fn room_status_line(room: &store::ServerRoom) -> String {
-    format!(
-        "#{name}\troom_id={room_id}\tpolicy={policy}\tslow_mode_config={slow_mode}\tslow_mode_enforcement={enforcement}\trevision={revision}\ttopic={topic}",
+pub(crate) fn room_upload_policy_config_label(configured: Option<u64>) -> String {
+    match configured {
+        None => "inherit".into(),
+        Some(0) => "disabled".into(),
+        Some(bytes) => format!("{bytes}B"),
+    }
+}
+
+fn effective_room_upload_policy_label(policy: store::EffectiveRoomUploadPolicy) -> String {
+    match policy {
+        store::EffectiveRoomUploadPolicy::Disabled => "disabled".into(),
+        store::EffectiveRoomUploadPolicy::MaximumFileBytes(bytes) => format!("{bytes}B"),
+    }
+}
+
+fn effective_room_upload_max_file_bytes(policy: store::EffectiveRoomUploadPolicy) -> Option<u64> {
+    match policy {
+        store::EffectiveRoomUploadPolicy::Disabled => None,
+        store::EffectiveRoomUploadPolicy::MaximumFileBytes(bytes) => Some(bytes),
+    }
+}
+
+fn bounded_room_status_rows(rooms: &[store::ServerRoom]) -> (Vec<&store::ServerRoom>, bool) {
+    let mut rows = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for room in rooms {
+        let room_bytes = room
+            .name
+            .len()
+            .saturating_add(room.topic.as_ref().map_or(0, String::len))
+            .saturating_add(std::mem::size_of::<store::ServerRoom>());
+        if rows.len() >= ROOM_STATUS_MAX_ITEMS
+            || bytes.saturating_add(room_bytes) > ROOM_STATUS_MAX_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        bytes = bytes.saturating_add(room_bytes);
+        rows.push(room);
+    }
+    (rows, truncated)
+}
+
+fn room_status_line(room: &store::ServerRoom, global_max_file_bytes: u64) -> ServerResult<String> {
+    let effective = store::EffectiveRoomUploadPolicy::resolve(
+        room.upload_max_file_bytes,
+        global_max_file_bytes,
+    )?;
+    Ok(format!(
+        "#{name}\troom_id={room_id}\tpolicy={policy}\tslow_mode_config={slow_mode}\tslow_mode_enforcement={enforcement}\tupload_policy_config={upload_config}\tupload_policy_effective={upload_effective}\tupload_policy_enforcement={upload_enforcement}\trevision={revision}\ttopic={topic}",
         name = room.name,
         room_id = room.room_id,
         policy = if room.policy_bits == 0 {
@@ -1445,16 +1600,27 @@ fn room_status_line(room: &store::ServerRoom) -> String {
         },
         slow_mode = slow_mode_label(room.slow_mode_seconds),
         enforcement = SLOW_MODE_ENFORCEMENT_STATUS,
+        upload_config = room_upload_policy_config_label(room.upload_max_file_bytes),
+        upload_effective = effective_room_upload_policy_label(effective),
+        upload_enforcement = ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS,
         revision = room.room_revision,
         topic = room.topic.as_deref().unwrap_or_default()
-    )
+    ))
 }
 
-fn room_status_json(rooms: &[store::ServerRoom]) -> serde_json::Value {
+fn room_status_json(
+    rooms: &[store::ServerRoom],
+    global_max_file_bytes: u64,
+) -> ServerResult<serde_json::Value> {
+    let (rooms, truncated) = bounded_room_status_rows(rooms);
     let rooms = rooms
         .iter()
         .map(|room| {
-            serde_json::json!({
+            let effective = store::EffectiveRoomUploadPolicy::resolve(
+                room.upload_max_file_bytes,
+                global_max_file_bytes,
+            )?;
+            Ok(serde_json::json!({
                 "room_id": room.room_id,
                 "name": room.name,
                 "topic": room.topic,
@@ -1466,14 +1632,22 @@ fn room_status_json(rooms: &[store::ServerRoom]) -> serde_json::Value {
                 "policy_bits": room.policy_bits,
                 "slow_mode_seconds": room.slow_mode_seconds,
                 "slow_mode_enforcement": SLOW_MODE_ENFORCEMENT_STATUS,
+                "upload_max_file_bytes": room.upload_max_file_bytes,
+                "upload_policy_config": room_upload_policy_config_label(room.upload_max_file_bytes),
+                "upload_effective_max_file_bytes": effective_room_upload_max_file_bytes(effective),
+                "upload_policy_effective": effective_room_upload_policy_label(effective),
+                "upload_policy_enforcement": ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS,
                 "room_revision": room.room_revision,
-            })
+            }))
         })
-        .collect::<Vec<_>>();
-    serde_json::json!({
+        .collect::<ServerResult<Vec<_>>>()?;
+    Ok(serde_json::json!({
         "schema_version": 1,
+        "truncated": truncated,
+        "item_limit": ROOM_STATUS_MAX_ITEMS,
+        "byte_limit": ROOM_STATUS_MAX_BYTES,
         "rooms": rooms,
-    })
+    }))
 }
 
 fn parse_user_role_options(
@@ -1670,6 +1844,7 @@ fn print_help() {
     println!("  rooms topic <room_id> [--topic <topic>] [--home <path>]");
     println!("  rooms policy <room_id> ordinary|announcement --confirm [--home <path>]  # server must be stopped");
     println!("  rooms set-slow-mode <room_id> off|<seconds> --confirm [--home <path>]  # 1..=86400; server must be stopped");
+    println!("  rooms set-upload-policy <room_id> inherit|disabled|<bytes> --confirm [--home <path>]  # 1..=10485760; server must be stopped; enforcement inactive");
     println!("  rooms archive <room_id> [--home <path>]");
     println!("  users list --json [--home <path>]");
     println!("  users role <user_id> standard|trusted|moderator|administrator --confirm [--home <path>]  # server must be stopped");
@@ -2525,6 +2700,55 @@ mod tests {
                 }
             )
         );
+        assert!(matches!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "set-upload-policy".to_string(),
+                "7".to_string(),
+                "disabled".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        for invalid in ["0", "10485761", "invalid"] {
+            assert!(matches!(
+                CliCommand::parse([
+                    "rooms".to_string(),
+                    "set-upload-policy".to_string(),
+                    "7".to_string(),
+                    invalid.to_string(),
+                    "--confirm".to_string(),
+                ]),
+                CliCommand::Invalid(message) if message.contains("1..=10485760")
+            ));
+        }
+        for (value, expected) in [
+            ("inherit", None),
+            ("disabled", Some(0)),
+            ("262144", Some(262_144)),
+        ] {
+            assert_eq!(
+                CliCommand::parse([
+                    "rooms".to_string(),
+                    "set-upload-policy".to_string(),
+                    "7".to_string(),
+                    value.to_string(),
+                    "--confirm".to_string(),
+                    "--home".to_string(),
+                    "/tmp/omenchatd-admin".to_string(),
+                ]),
+                CliCommand::RoomsSetUploadPolicy(
+                    ServerOptions {
+                        home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                        tcp_server: None,
+                        tcp_client: None,
+                    },
+                    RoomUploadPolicyOptions {
+                        room_id: 7,
+                        max_file_bytes: expected,
+                    }
+                )
+            );
+        }
         assert_eq!(
             CliCommand::parse([
                 "rooms".to_string(),
@@ -2899,7 +3123,7 @@ mod tests {
     }
 
     #[test]
-    fn room_status_projections_report_effective_slow_mode_without_secrets() {
+    fn room_status_projections_report_bounded_inactive_media_policy_without_secrets() {
         let room = crate::store::ServerRoom {
             room_id: 7,
             name: "field".into(),
@@ -2907,24 +3131,73 @@ mod tests {
             room_revision: 4,
             policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
             slow_mode_seconds: 30,
-            upload_max_file_bytes: None,
+            upload_max_file_bytes: Some(256 * 1024),
         };
-        let human = room_status_line(&room);
+        let human = room_status_line(&room, 512 * 1024).expect("human room status");
         assert!(human.contains("policy=announcement"));
         assert!(human.contains("slow_mode_config=30s"));
         assert!(human.contains(&format!(
             "slow_mode_enforcement={SLOW_MODE_ENFORCEMENT_STATUS}"
         )));
+        assert!(human.contains("upload_policy_config=262144B"));
+        assert!(human.contains("upload_policy_effective=262144B"));
+        assert!(human.contains(&format!(
+            "upload_policy_enforcement={ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS}"
+        )));
         assert!(human.contains("revision=4"));
-        let json = room_status_json(&[room]);
+        let json = room_status_json(&[room], 512 * 1024).expect("JSON room status");
         assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["truncated"], false);
         assert_eq!(json["rooms"][0]["slow_mode_seconds"], 30);
         assert_eq!(
             json["rooms"][0]["slow_mode_enforcement"],
             SLOW_MODE_ENFORCEMENT_STATUS
         );
+        assert_eq!(json["rooms"][0]["upload_max_file_bytes"], 256 * 1024);
+        assert_eq!(
+            json["rooms"][0]["upload_effective_max_file_bytes"],
+            256 * 1024
+        );
+        assert_eq!(
+            json["rooms"][0]["upload_policy_enforcement"],
+            ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS
+        );
         assert_eq!(json["rooms"][0]["policy"], "announcement");
         assert!(json.to_string().len() < 1_024);
+    }
+
+    #[test]
+    fn room_status_projection_has_item_and_byte_ceilings() {
+        let rooms = (0..=ROOM_STATUS_MAX_ITEMS)
+            .map(|index| crate::store::ServerRoom {
+                room_id: index as u32 + 1,
+                name: format!("room-{index}"),
+                topic: Some("bounded".into()),
+                room_revision: 0,
+                policy_bits: 0,
+                slow_mode_seconds: 0,
+                upload_max_file_bytes: None,
+            })
+            .collect::<Vec<_>>();
+        let json = room_status_json(&rooms, 512 * 1024).expect("bounded room status");
+        assert_eq!(json["truncated"], true);
+        assert_eq!(
+            json["rooms"].as_array().expect("room array").len(),
+            ROOM_STATUS_MAX_ITEMS
+        );
+
+        let oversized = vec![crate::store::ServerRoom {
+            room_id: 1,
+            name: "large".into(),
+            topic: Some("x".repeat(ROOM_STATUS_MAX_BYTES + 1)),
+            room_revision: 0,
+            policy_bits: 0,
+            slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
+        }];
+        let json = room_status_json(&oversized, 512 * 1024).expect("byte-bounded room status");
+        assert_eq!(json["truncated"], true);
+        assert!(json["rooms"].as_array().expect("room array").is_empty());
     }
 
     #[test]
@@ -3954,6 +4227,44 @@ mod tests {
         assert_eq!(disabled.room_revision, 4);
         drop(database);
         Omenchatd
+            .run(CliCommand::RoomsSetUploadPolicy(
+                options.clone(),
+                RoomUploadPolicyOptions {
+                    room_id: room.0,
+                    max_file_bytes: Some(262_144),
+                },
+            ))
+            .expect("set room upload policy");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open upload-policy database");
+        let limited = database
+            .room_by_id(room.0 as u32)
+            .expect("upload-policy room lookup")
+            .expect("upload-policy room");
+        assert_eq!(limited.upload_max_file_bytes, Some(262_144));
+        assert_eq!(limited.room_revision, 5);
+        drop(database);
+        Omenchatd
+            .run(CliCommand::RoomsSetUploadPolicy(
+                options.clone(),
+                RoomUploadPolicyOptions {
+                    room_id: room.0,
+                    max_file_bytes: None,
+                },
+            ))
+            .expect("inherit room upload policy");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open inherited upload-policy database");
+        let inherited = database
+            .room_by_id(room.0 as u32)
+            .expect("inherited room lookup")
+            .expect("inherited room");
+        assert_eq!(inherited.upload_max_file_bytes, None);
+        assert_eq!(inherited.room_revision, 6);
+        drop(database);
+        Omenchatd
             .run(CliCommand::RoomsArchive(
                 options,
                 RoomSelectOptions { room_id: room.0 },
@@ -4012,14 +4323,71 @@ mod tests {
                 },
             ))
             .expect("stopped-server update");
-        let store =
-            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
-                .expect("maintenance store");
+        let store = crate::store::OmenchatStore::open_read_only(&config.database_path)
+            .expect("read-only verification store");
         let updated = store
             .room_by_id(room.room_id)
             .expect("room lookup")
             .expect("room");
         assert_eq!(updated.slow_mode_seconds, 30);
+        assert_eq!(updated.room_revision, room.room_revision + 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn upload_policy_cli_refuses_active_writer_then_updates_selected_home() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-upload-policy-exclusive-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let store = crate::store::OmenchatStore::open(&config.database_path).expect("store");
+        let room = store.ensure_room("uploads-cli", None).expect("room");
+        drop(store);
+        let writer = rusqlite::Connection::open(&config.database_path).expect("writer");
+        writer
+            .execute_batch("BEGIN IMMEDIATE;")
+            .expect("active write transaction");
+        let options = ServerOptions {
+            home: Some(root.clone()),
+            ..ServerOptions::default()
+        };
+        let error = Omenchatd
+            .run(CliCommand::RoomsSetUploadPolicy(
+                options.clone(),
+                RoomUploadPolicyOptions {
+                    room_id: i64::from(room.room_id),
+                    max_file_bytes: Some(262_144),
+                },
+            ))
+            .expect_err("active writer must block maintenance")
+            .to_string();
+        assert!(error.contains("exclusive access"));
+        writer.execute_batch("ROLLBACK;").expect("release writer");
+        drop(writer);
+
+        Omenchatd
+            .run(CliCommand::RoomsSetUploadPolicy(
+                options,
+                RoomUploadPolicyOptions {
+                    room_id: i64::from(room.room_id),
+                    max_file_bytes: Some(262_144),
+                },
+            ))
+            .expect("stopped-server update");
+        let store = crate::store::OmenchatStore::open_read_only(&config.database_path)
+            .expect("read-only verification store");
+        let updated = store
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("room");
+        assert_eq!(updated.upload_max_file_bytes, Some(262_144));
         assert_eq!(updated.room_revision, room.room_revision + 1);
         drop(store);
         let _ = std::fs::remove_dir_all(root);
