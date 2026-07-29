@@ -30,8 +30,8 @@ Reticulum/LXMF train: exact `0.9.6`
 
 ## Candidate gates
 
-- [ ] Formatting and strict Clippy pass on the exact versioned candidate.
-- [ ] Canonical root and standalone server test matrices pass on the exact
+- [x] Formatting and strict Clippy pass on the exact versioned candidate.
+- [x] Canonical root and standalone server test matrices pass on the exact
       versioned candidate.
 - [ ] Native GitHub CI passes once on the frozen candidate.
 - [ ] Pinned/current Python and mixed-version interoperability pass once on the

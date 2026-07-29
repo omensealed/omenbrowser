@@ -125,8 +125,9 @@ The exact activated product graph passed on 2026-07-28/29:
 
 - root formatting, standalone formatting, shell syntax, ShellCheck, and
   `scripts/verify-product-features.sh`;
-- `omenchat-protocol`: 50 passed;
-- canonical animated desktop library tests: 1,377 passed, 9 ignored;
+- `omenchat-protocol`: 59 passed;
+- canonical animated desktop library tests: 1,528 passed, 31 explicit
+  live/hardware/measurement cases ignored;
 - canonical animated desktop strict Clippy across all targets;
 - canonical static-media desktop compilation;
 - canonical standalone `server-headless`: 432 passed, 12 ignored;
