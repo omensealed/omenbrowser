@@ -14,7 +14,8 @@ directions, the current server preserves legacy per-Link upload admission, and
 current/current policy projection survives an orderly server restart.
 
 Both the working tree and adjacent tag still report application version
-`0.9.6-3` because the planned `0.9.6-4` version change has not occurred. The
+`0.9.6-3` because the planned `0.9.6-4` version change had not occurred at the
+time of this adjacent-version qualification. The
 gate distinguishes them by the immutable adjacent Git commit and independently
 archived/build source, not by version text alone.
 

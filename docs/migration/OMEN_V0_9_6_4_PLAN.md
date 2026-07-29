@@ -2050,7 +2050,7 @@ After the candidate is stable:
       introduced by the planned feature families.
 - [x] Managed Reticulum remains the supported default.
 - [x] External/shared mode remains explicitly deferred and fail-closed.
-- [ ] Root and standalone server report `0.9.6-4`.
+- [x] Root and standalone server report `0.9.6-4`.
 - [x] Exact Reticulum/LXMF 0.9.6 train remains coherent.
 - [x] Local product/server/protocol/release gates pass for the current
       pre-version candidate.
