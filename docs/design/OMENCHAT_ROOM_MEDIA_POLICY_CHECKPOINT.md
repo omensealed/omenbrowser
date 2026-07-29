@@ -2,8 +2,9 @@
 
 Date: 2026-07-28
 
-Status: design checkpoint only; no wire, schema, configuration, negotiation,
-administration, or runtime behavior is active
+Status: dormant shared wire vocabulary and independent codec fixtures complete;
+schema, configuration, negotiation, administration, and runtime behavior remain
+inactive
 
 Baseline: `release/v0.9.6-4` at `70eb363`
 
@@ -381,9 +382,12 @@ Do not invent measurements.
 
 ## Staged implementation order
 
-1. Dormant shared constant, bound, shape variant, typed optional scalar,
-   capability dependency, rejection-code vocabulary, and byte-exact fixtures.
-   Production clients do not request and servers do not accept it.
+1. **Complete (2026-07-28):** dormant shared constant, bound, shape variant,
+   typed optional scalar, capability dependency, rejection-code vocabulary,
+   and byte-exact fixtures. Both independent codecs reproduce the exact
+   seven-field room delta and typed upload-rejection fixtures. Production
+   clients do not request and servers do not accept the capability. Evidence:
+   `docs/audits/omenchat-room-media-policy-wire-qualification.md`.
 2. Schema-13 nullable scalar, migration/fault/restart tests, and guarded
    schema-12 copy export. Runtime enforcement remains inactive.
 3. Store-owned effective-policy resolver plus test-only offer/publication

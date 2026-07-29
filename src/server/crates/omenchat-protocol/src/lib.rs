@@ -303,6 +303,13 @@ pub mod fixtures {
             b"\x96\x01\x21\x00\x0c\xc0\x91\x96\x07\xadannouncements\xb0Operator updates\x03\x01\x1e";
     }
 
+    pub mod room_media_policy_v1 {
+        pub const ROOM_DELTA: &[u8] =
+            b"\x96\x01\x21\x00\x0c\xc0\x91\x97\x07\xadannouncements\xb0Operator updates\x03\x01\x1e\xce\x00\x04\x00\x00";
+        pub const UPLOAD_REJECT: &[u8] =
+            b"\x96\x01\x48\x00\x0d\x07\x94\xd9#upload exceeds room file size limit\xce\x00\x04\x00\x00\xce\x00\x08\x00\x00\x02";
+    }
+
     pub mod reply_mentions_v1 {
         pub const ROOM_MESSAGE: &[u8] =
             b"\x96\x01\x14\x00\x07\x07\x94\xa5hello\xb1reply-mentions-v1\x92\x07\x2a\x92\x02\x09";
@@ -351,6 +358,8 @@ mod tests {
         assert_eq!(MODERATION_AUDIT_CAPABILITY, "moderation-audit-v1");
         assert_eq!(ANNOUNCEMENT_ROOMS_CAPABILITY, "announcement-rooms-v1");
         assert_eq!(ROOM_SLOW_MODE_CAPABILITY, "room-slow-mode-v1");
+        assert_eq!(ROOM_MEDIA_POLICY_CAPABILITY, "room-media-policy-v1");
+        assert_eq!(ROOM_UPLOAD_MAX_FILE_BYTES, 10 * 1024 * 1024);
         assert_eq!(DURABLE_NOTICE_ACK_CAPABILITY, "durable-room-notice-ack-v1");
         assert_eq!(ChatErrorCode::DurableMutationMalformed as u16, 1012);
         assert_eq!(ChatErrorCode::DurableMutationConflict as u16, 1013);

@@ -181,7 +181,7 @@ mod tests {
 
     use omenchat_protocol::fixtures::{
         announcement_rooms_v1, message_revisions_v1, moderation_audit_v1, pins_v1, reactions_v1,
-        reply_mentions_v1, room_slow_mode_v1, v0_6_0_1, v0_9_6_3,
+        reply_mentions_v1, room_media_policy_v1, room_slow_mode_v1, v0_6_0_1, v0_9_6_3,
     };
     use omenchat_protocol::{
         MessageRevisionAction, MessageRevisionRequest, ModerationAuditRequest, PinAction,
@@ -271,6 +271,7 @@ mod tests {
             room_revision: 3,
             policy_bits: ROOM_POLICY_ANNOUNCEMENT,
             slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
         };
         for (negotiated, fixture) in [
             (false, announcement_rooms_v1::LEGACY_ROOM_DELTA),
@@ -315,6 +316,7 @@ mod tests {
             room_revision: 3,
             policy_bits: ROOM_POLICY_ANNOUNCEMENT,
             slow_mode_seconds: 30,
+            upload_max_file_bytes: None,
         };
         let room_value = room
             .clone()
@@ -339,6 +341,64 @@ mod tests {
         assert_eq!(
             RoomCatalogEntry::from_frame_value_for_shape(&values[0], RoomCatalogShape::SlowMode),
             Ok(room)
+        );
+    }
+
+    #[test]
+    fn media_policy_room_and_rejection_values_are_byte_exact_and_dormant() {
+        let room = RoomCatalogEntry {
+            room_id: 7,
+            name: "announcements".into(),
+            topic: Some("Operator updates".into()),
+            room_revision: 3,
+            policy_bits: ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 30,
+            upload_max_file_bytes: Some(256 * 1024),
+        };
+        let room_value = room
+            .clone()
+            .into_frame_value_for_shape(RoomCatalogShape::MediaPolicy)
+            .expect("bounded media-policy room value");
+        let room_frame = Frame::new(
+            ChatOp::RoomDelta,
+            12,
+            None,
+            FrameBody::Fields(vec![room_value]),
+        );
+        assert_eq!(
+            encode_frame(&room_frame).expect("encode media-policy room delta"),
+            room_media_policy_v1::ROOM_DELTA
+        );
+        let decoded =
+            decode_frame(room_media_policy_v1::ROOM_DELTA).expect("decode media-policy room delta");
+        assert_eq!(decoded, room_frame);
+        let FrameBody::Fields(values) = decoded.body else {
+            panic!("room delta must have fields");
+        };
+        assert_eq!(
+            RoomCatalogEntry::from_frame_value_for_shape(&values[0], RoomCatalogShape::MediaPolicy),
+            Ok(room)
+        );
+
+        let rejection = Frame::new(
+            ChatOp::UploadReject,
+            13,
+            Some(7),
+            FrameBody::Fields(vec![
+                FrameValue::String("upload exceeds room file size limit".into()),
+                FrameValue::U64(256 * 1024),
+                FrameValue::U64(512 * 1024),
+                FrameValue::U64(2),
+            ]),
+        );
+        assert_eq!(
+            encode_frame(&rejection).expect("encode typed upload rejection"),
+            room_media_policy_v1::UPLOAD_REJECT
+        );
+        assert_eq!(
+            decode_frame(room_media_policy_v1::UPLOAD_REJECT)
+                .expect("decode typed upload rejection"),
+            rejection
         );
     }
 

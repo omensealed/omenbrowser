@@ -12232,6 +12232,7 @@ mod tests {
             room_revision: 2,
             policy_bits: super::super::protocol::ROOM_POLICY_ANNOUNCEMENT,
             slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
         }
         .into_frame_value(true)
         .expect("policy room");
@@ -12315,6 +12316,7 @@ mod tests {
             room_revision: 2,
             policy_bits: super::super::protocol::ROOM_POLICY_ANNOUNCEMENT,
             slow_mode_seconds: 30,
+            upload_max_file_bytes: None,
         }
         .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
         .expect("bounded slow-mode room");
@@ -12353,6 +12355,7 @@ mod tests {
             room_revision: 3,
             policy_bits: 0,
             slow_mode_seconds: super::super::protocol::ROOM_SLOW_MODE_MAX_SECONDS + 1,
+            upload_max_file_bytes: None,
         };
         assert!(malformed
             .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
@@ -12392,6 +12395,7 @@ mod tests {
                 room_revision: 2,
                 policy_bits: 0,
                 slow_mode_seconds: 30,
+                upload_max_file_bytes: None,
             }
             .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
             .expect("slow-mode room");
@@ -12434,6 +12438,7 @@ mod tests {
                 room_revision: u64::from(slow_mode_seconds),
                 policy_bits: 0,
                 slow_mode_seconds,
+                upload_max_file_bytes: None,
             }
             .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
             .expect("slow-mode room update");
@@ -12462,6 +12467,7 @@ mod tests {
             room_revision: 75,
             policy_bits: 0,
             slow_mode_seconds: 75,
+            upload_max_file_bytes: None,
         }
         .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
         .expect("slow-mode command room");
@@ -12527,6 +12533,7 @@ mod tests {
                 room_revision: 2,
                 policy_bits: super::super::protocol::ROOM_POLICY_ANNOUNCEMENT,
                 slow_mode_seconds: 0,
+                upload_max_file_bytes: None,
             }
             .into_frame_value(policy_negotiated)
             .expect("room catalog entry");

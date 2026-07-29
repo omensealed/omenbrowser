@@ -2,15 +2,18 @@ use crate::{FrameValue, Revision, RoomId};
 
 pub const ANNOUNCEMENT_ROOMS_CAPABILITY: &str = "announcement-rooms-v1";
 pub const ROOM_SLOW_MODE_CAPABILITY: &str = "room-slow-mode-v1";
+pub const ROOM_MEDIA_POLICY_CAPABILITY: &str = "room-media-policy-v1";
 pub const ROOM_POLICY_ANNOUNCEMENT: u64 = 0x01;
 pub const ROOM_POLICY_KNOWN_MASK: u64 = ROOM_POLICY_ANNOUNCEMENT;
 pub const ROOM_SLOW_MODE_MAX_SECONDS: u32 = 86_400;
+pub const ROOM_UPLOAD_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 pub const ROOM_NAME_MAX_BYTES: usize = 64;
 pub const ROOM_TOPIC_MAX_BYTES: usize = 4 * 1024;
 
 const LEGACY_ROOM_VALUE_FIELDS: usize = 4;
 const POLICY_ROOM_VALUE_FIELDS: usize = 5;
 const SLOW_MODE_ROOM_VALUE_FIELDS: usize = 6;
+const MEDIA_POLICY_ROOM_VALUE_FIELDS: usize = 7;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RoomCatalogShape {
@@ -18,6 +21,7 @@ pub enum RoomCatalogShape {
     Legacy,
     PolicyBits,
     SlowMode,
+    MediaPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,6 +69,7 @@ pub struct RoomCatalogEntry {
     pub room_revision: Revision,
     pub policy_bits: u64,
     pub slow_mode_seconds: u32,
+    pub upload_max_file_bytes: Option<u64>,
 }
 
 impl RoomCatalogEntry {
@@ -93,6 +98,7 @@ impl RoomCatalogEntry {
             RoomCatalogShape::Legacy => LEGACY_ROOM_VALUE_FIELDS,
             RoomCatalogShape::PolicyBits => POLICY_ROOM_VALUE_FIELDS,
             RoomCatalogShape::SlowMode => SLOW_MODE_ROOM_VALUE_FIELDS,
+            RoomCatalogShape::MediaPolicy => MEDIA_POLICY_ROOM_VALUE_FIELDS,
         });
         fields.push(FrameValue::U64(u64::from(self.room_id)));
         fields.push(FrameValue::String(self.name));
@@ -105,8 +111,18 @@ impl RoomCatalogEntry {
         if shape != RoomCatalogShape::Legacy {
             fields.push(FrameValue::U64(self.policy_bits));
         }
-        if shape == RoomCatalogShape::SlowMode {
+        if matches!(
+            shape,
+            RoomCatalogShape::SlowMode | RoomCatalogShape::MediaPolicy
+        ) {
             fields.push(FrameValue::U64(u64::from(self.slow_mode_seconds)));
+        }
+        if shape == RoomCatalogShape::MediaPolicy {
+            fields.push(
+                self.upload_max_file_bytes
+                    .map(FrameValue::U64)
+                    .unwrap_or(FrameValue::Nil),
+            );
         }
         Ok(FrameValue::Array(fields))
     }
@@ -136,6 +152,7 @@ impl RoomCatalogEntry {
             RoomCatalogShape::Legacy => LEGACY_ROOM_VALUE_FIELDS,
             RoomCatalogShape::PolicyBits => POLICY_ROOM_VALUE_FIELDS,
             RoomCatalogShape::SlowMode => SLOW_MODE_ROOM_VALUE_FIELDS,
+            RoomCatalogShape::MediaPolicy => MEDIA_POLICY_ROOM_VALUE_FIELDS,
         };
         if fields.len() != expected_fields {
             return Err(RoomPolicyError::InvalidShape);
@@ -145,15 +162,30 @@ impl RoomCatalogEntry {
         else {
             return Err(RoomPolicyError::InvalidShape);
         };
-        let (policy_bits, slow_mode_seconds) = match (shape, rest) {
-            (RoomCatalogShape::Legacy, []) => (0, 0),
-            (RoomCatalogShape::PolicyBits, [FrameValue::U64(policy_bits)]) => (*policy_bits, 0),
+        let (policy_bits, slow_mode_seconds, upload_max_file_bytes) = match (shape, rest) {
+            (RoomCatalogShape::Legacy, []) => (0, 0, None),
+            (RoomCatalogShape::PolicyBits, [FrameValue::U64(policy_bits)]) => {
+                (*policy_bits, 0, None)
+            }
             (
                 RoomCatalogShape::SlowMode,
                 [FrameValue::U64(policy_bits), FrameValue::U64(slow_mode_seconds)],
             ) => (
                 *policy_bits,
                 u32::try_from(*slow_mode_seconds).map_err(|_| RoomPolicyError::InvalidSlowMode)?,
+                None,
+            ),
+            (
+                RoomCatalogShape::MediaPolicy,
+                [FrameValue::U64(policy_bits), FrameValue::U64(slow_mode_seconds), upload_max_file_bytes],
+            ) => (
+                *policy_bits,
+                u32::try_from(*slow_mode_seconds).map_err(|_| RoomPolicyError::InvalidSlowMode)?,
+                match upload_max_file_bytes {
+                    FrameValue::Nil => None,
+                    FrameValue::U64(bytes) => Some(*bytes),
+                    _ => return Err(RoomPolicyError::InvalidUploadMaxFileBytes),
+                },
             ),
             _ => return Err(RoomPolicyError::InvalidShape),
         };
@@ -168,6 +200,7 @@ impl RoomCatalogEntry {
             room_revision: *room_revision,
             policy_bits,
             slow_mode_seconds,
+            upload_max_file_bytes,
         };
         entry.validate()?;
         Ok(entry)
@@ -193,7 +226,32 @@ impl RoomCatalogEntry {
         if self.slow_mode_seconds > ROOM_SLOW_MODE_MAX_SECONDS {
             return Err(RoomPolicyError::InvalidSlowMode);
         }
+        if self
+            .upload_max_file_bytes
+            .is_some_and(|bytes| bytes > ROOM_UPLOAD_MAX_FILE_BYTES)
+        {
+            return Err(RoomPolicyError::InvalidUploadMaxFileBytes);
+        }
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RoomMediaUploadRejectCode {
+    UploadsDisabled = 1,
+    FileSizeExceeded = 2,
+}
+
+impl TryFrom<u64> for RoomMediaUploadRejectCode {
+    type Error = RoomPolicyError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::UploadsDisabled),
+            2 => Ok(Self::FileSizeExceeded),
+            _ => Err(RoomPolicyError::UnknownUploadRejectCode(value)),
+        }
     }
 }
 
@@ -211,6 +269,10 @@ pub enum RoomPolicyError {
     UnknownPolicyBits(u64),
     #[error("room catalog slow mode exceeds {ROOM_SLOW_MODE_MAX_SECONDS} seconds")]
     InvalidSlowMode,
+    #[error("room upload maximum must be nil or no more than {ROOM_UPLOAD_MAX_FILE_BYTES} bytes")]
+    InvalidUploadMaxFileBytes,
+    #[error("unknown room media upload rejection code {0}")]
+    UnknownUploadRejectCode(u64),
 }
 
 #[cfg(test)]
@@ -225,6 +287,7 @@ mod tests {
             room_revision: 3,
             policy_bits: ROOM_POLICY_ANNOUNCEMENT,
             slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
         }
     }
 
@@ -249,6 +312,7 @@ mod tests {
             Ok(RoomCatalogEntry {
                 policy_bits: 0,
                 slow_mode_seconds: 0,
+                upload_max_file_bytes: None,
                 ..room
             })
         );
@@ -283,6 +347,83 @@ mod tests {
                 RoomCatalogShape::SlowMode
             ),
             Err(RoomPolicyError::InvalidSlowMode)
+        );
+    }
+
+    #[test]
+    fn media_policy_shape_is_explicit_bounded_and_round_trips() {
+        for upload_max_file_bytes in [None, Some(0), Some(256 * 1024)] {
+            let room = RoomCatalogEntry {
+                slow_mode_seconds: 30,
+                upload_max_file_bytes,
+                ..announcement_room()
+            };
+            let value = room
+                .clone()
+                .into_frame_value_for_shape(RoomCatalogShape::MediaPolicy)
+                .expect("media-policy value");
+            assert_eq!(
+                RoomCatalogEntry::from_frame_value_for_shape(&value, RoomCatalogShape::MediaPolicy),
+                Ok(room)
+            );
+            assert_eq!(
+                RoomCatalogEntry::from_frame_value_for_shape(&value, RoomCatalogShape::SlowMode),
+                Err(RoomPolicyError::InvalidShape)
+            );
+        }
+
+        let value = RoomCatalogEntry {
+            upload_max_file_bytes: Some(ROOM_UPLOAD_MAX_FILE_BYTES),
+            ..announcement_room()
+        }
+        .into_frame_value_for_shape(RoomCatalogShape::MediaPolicy)
+        .expect("maximum media-policy value");
+        let FrameValue::Array(mut fields) = value else {
+            panic!("room value must be an array");
+        };
+        fields[6] = FrameValue::U64(ROOM_UPLOAD_MAX_FILE_BYTES + 1);
+        assert_eq!(
+            RoomCatalogEntry::from_frame_value_for_shape(
+                &FrameValue::Array(fields),
+                RoomCatalogShape::MediaPolicy
+            ),
+            Err(RoomPolicyError::InvalidUploadMaxFileBytes)
+        );
+
+        let value = RoomCatalogEntry {
+            upload_max_file_bytes: Some(1),
+            ..announcement_room()
+        }
+        .into_frame_value_for_shape(RoomCatalogShape::MediaPolicy)
+        .expect("typed media-policy value");
+        let FrameValue::Array(mut fields) = value else {
+            panic!("room value must be an array");
+        };
+        fields[6] = FrameValue::Bool(false);
+        assert_eq!(
+            RoomCatalogEntry::from_frame_value_for_shape(
+                &FrameValue::Array(fields),
+                RoomCatalogShape::MediaPolicy
+            ),
+            Err(RoomPolicyError::InvalidUploadMaxFileBytes)
+        );
+    }
+
+    #[test]
+    fn media_policy_rejection_codes_are_stable_and_fail_closed() {
+        assert_eq!(RoomMediaUploadRejectCode::UploadsDisabled as u8, 1);
+        assert_eq!(RoomMediaUploadRejectCode::FileSizeExceeded as u8, 2);
+        assert_eq!(
+            RoomMediaUploadRejectCode::try_from(1),
+            Ok(RoomMediaUploadRejectCode::UploadsDisabled)
+        );
+        assert_eq!(
+            RoomMediaUploadRejectCode::try_from(2),
+            Ok(RoomMediaUploadRejectCode::FileSizeExceeded)
+        );
+        assert_eq!(
+            RoomMediaUploadRejectCode::try_from(3),
+            Err(RoomPolicyError::UnknownUploadRejectCode(3))
         );
     }
 
@@ -359,9 +500,13 @@ mod tests {
                 slow_mode_seconds: ROOM_SLOW_MODE_MAX_SECONDS + 1,
                 ..announcement_room()
             },
+            RoomCatalogEntry {
+                upload_max_file_bytes: Some(ROOM_UPLOAD_MAX_FILE_BYTES + 1),
+                ..announcement_room()
+            },
         ] {
             assert!(invalid
-                .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
+                .into_frame_value_for_shape(RoomCatalogShape::MediaPolicy)
                 .is_err());
         }
     }

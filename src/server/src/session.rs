@@ -5386,6 +5386,7 @@ fn room_to_value_for_shape(
         room_revision: room.room_revision,
         policy_bits: room.policy_bits,
         slow_mode_seconds: room.slow_mode_seconds,
+        upload_max_file_bytes: None,
     }
     .into_frame_value_for_shape(room_catalog_shape)
     .map_err(|error| ServerError::Message(format!("stored room cannot be encoded: {error}")))
@@ -6625,6 +6626,7 @@ mod tests {
                 room_revision: announcement_room.room_revision,
                 policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
                 slow_mode_seconds: announcement_room.slow_mode_seconds,
+                upload_max_file_bytes: None,
             }
         );
     }

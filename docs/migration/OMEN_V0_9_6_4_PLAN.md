@@ -1803,6 +1803,17 @@ guarded schema-12 copy. This checkpoint changes no protocol, schema,
 configuration, feature graph, or runtime behavior. Implementation remains
 staged behind explicit wire/storage review and qualification gates.
 
+The first media-policy implementation slice is complete. The shared protocol
+crate owns the dormant capability name, 10-MiB scalar bound, cumulative
+seven-field room shape, exact inheritance/disabled/limited scalar decoding,
+and two typed upload-rejection reason codes. Capability validation requires
+the earlier announcement and slow-mode shapes. Both independent MessagePack
+codecs reproduce the same room-delta and typed-rejection fixtures byte for
+byte. Existing four-, five-, and six-field fixtures remain unchanged.
+Production request/acceptance state, Cargo features, schema 12, configuration,
+upload admission, workers, timers, and UI are unchanged. Evidence:
+`docs/audits/omenchat-room-media-policy-wire-qualification.md`.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

@@ -195,6 +195,24 @@ capability and omenchatd does not accept it. These known operation numbers are
 a dormant compatibility reservation, not available message-edit behavior.
 Ordinary protocol-v1 history and messages remain unchanged.
 
+The shared contract now also contains a dormant `room-media-policy-v1`
+vocabulary. It reserves no operation number and changes no production
+capability vector. A peer that eventually negotiates the capability must also
+negotiate `announcement-rooms-v1` and `room-slow-mode-v1`, and therefore
+understand the cumulative seven-field room value:
+
+```text
+[room_id, name, topic_or_nil, room_revision, policy_bits,
+ slow_mode_seconds, room_upload_max_file_bytes_or_nil]
+```
+
+The final scalar is `nil` for inherited server policy, zero for disabled room
+uploads, or at most 10 MiB. The dormant typed upload-rejection extension keeps
+the existing reason/quota/incoming fields and appends a numeric reason code.
+Exact fixtures pass in both independent codecs, but production clients do not
+request the capability, servers do not accept it, and schema/runtime upload
+behavior remains unchanged.
+
 The browser persists the client-instance value under its active identity-scoped
 application storage and retains it in live client state. Invalid, unsafe, or
 overly permissive stored state disables durable negotiation instead of

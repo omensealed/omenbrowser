@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    ClientInstanceId, FrameBody, FrameValue, DURABLE_MUTATION_CAPABILITY,
-    MESSAGE_REVISIONS_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
-    ROOM_SLOW_MODE_CAPABILITY,
+    ClientInstanceId, FrameBody, FrameValue, ANNOUNCEMENT_ROOMS_CAPABILITY,
+    DURABLE_MUTATION_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY,
+    REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY, ROOM_SLOW_MODE_CAPABILITY,
 };
 
 pub const SESSION_CAPABILITY_MAX_ITEMS: usize = 64;
@@ -211,6 +211,12 @@ fn validate_capability_list(capabilities: &[String]) -> Result<(), SessionNegoti
     if unique.contains(ROOM_SLOW_MODE_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
         return Err(SessionNegotiationError::MissingSlowModeDependency);
     }
+    if unique.contains(ROOM_MEDIA_POLICY_CAPABILITY)
+        && (!unique.contains(ANNOUNCEMENT_ROOMS_CAPABILITY)
+            || !unique.contains(ROOM_SLOW_MODE_CAPABILITY))
+    {
+        return Err(SessionNegotiationError::MissingMediaPolicyDependency);
+    }
     Ok(())
 }
 
@@ -256,6 +262,10 @@ pub enum SessionNegotiationError {
     MissingMessageRevisionsDependency,
     #[error("{ROOM_SLOW_MODE_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
     MissingSlowModeDependency,
+    #[error(
+        "{ROOM_MEDIA_POLICY_CAPABILITY} requires {ANNOUNCEMENT_ROOMS_CAPABILITY} and {ROOM_SLOW_MODE_CAPABILITY}"
+    )]
+    MissingMediaPolicyDependency,
     #[error(transparent)]
     Durable(#[from] crate::DurableMutationError),
 }
@@ -470,6 +480,42 @@ mod tests {
         };
         let body = with_session_accept_negotiation(current_session_accept(), &complete)
             .expect("dependent capability set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn media_policy_capability_requires_cumulative_room_shapes() {
+        for capabilities in [
+            vec![ROOM_MEDIA_POLICY_CAPABILITY.into()],
+            vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                ROOM_SLOW_MODE_CAPABILITY.into(),
+                ROOM_MEDIA_POLICY_CAPABILITY.into(),
+            ],
+            vec![
+                ANNOUNCEMENT_ROOMS_CAPABILITY.into(),
+                ROOM_MEDIA_POLICY_CAPABILITY.into(),
+            ],
+        ] {
+            let incomplete = SessionAcceptNegotiation {
+                accepted_capabilities: capabilities,
+            };
+            assert_eq!(
+                with_session_accept_negotiation(current_session_accept(), &incomplete),
+                Err(SessionNegotiationError::MissingMediaPolicyDependency)
+            );
+        }
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                ANNOUNCEMENT_ROOMS_CAPABILITY.into(),
+                ROOM_SLOW_MODE_CAPABILITY.into(),
+                ROOM_MEDIA_POLICY_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("complete media-policy dependency set");
         assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
     }
 
