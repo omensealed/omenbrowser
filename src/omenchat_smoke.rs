@@ -356,8 +356,12 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         };
     let announcement_rooms_negotiated = live_state.announcement_rooms_negotiated(session_id);
     let slow_mode_negotiated = live_state.slow_mode_negotiated(session_id);
+    let room_media_policy_negotiated = live_state.room_media_policy_negotiated(session_id);
     let final_slow_mode_seconds =
         active_room_id.and_then(|room_id| client.room_slow_mode_seconds(session_id, room_id));
+    let room_upload_max_file_bytes = active_room_id
+        .and_then(|room_id| client.room_upload_policy(session_id, room_id))
+        .map(|policy| policy.configured_max_file_bytes());
     let slow_mode_delta_observed = slow_mode_delta_seconds.is_none_or(|expected| {
         slow_mode_negotiated
             && initial_slow_mode_seconds == Some(0)
@@ -400,6 +404,8 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         "slow_mode_negotiated": slow_mode_negotiated,
         "slow_mode_seconds": final_slow_mode_seconds,
         "slow_mode_delta_observed": slow_mode_delta_observed,
+        "room_media_policy_negotiated": room_media_policy_negotiated,
+        "room_upload_max_file_bytes": room_upload_max_file_bytes,
         "local_user_id_bound": live_state.local_user_id(session_id).is_some(),
     }));
 

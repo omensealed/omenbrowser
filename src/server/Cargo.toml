@@ -29,6 +29,9 @@ omenchat-announcement-rooms = []
 omenchat-slow-mode = []
 # Non-product interoperability hooks for deterministic live qualification.
 omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
+# Non-product request/acceptance and enforcement hooks for room upload-policy
+# lifecycle and Resource qualification.
+omenchat-room-media-policy-qualification = ["omenchat-announcement-rooms", "omenchat-slow-mode"]
 # Capability-negotiated, bounded, read-only moderation audit.
 omenchat-moderation-audit = []
 # Non-product process qualification for the real capability boundary.

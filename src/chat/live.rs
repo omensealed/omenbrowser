@@ -26,7 +26,8 @@ use super::protocol::{
     RichMessageBody, RoomCatalogEntry, RoomCatalogShape, RoomId, RoomPolicyProjection,
     SessionOpenNegotiation, ANNOUNCEMENT_ROOMS_CAPABILITY, DEFAULT_JOIN_BACKLOG_EVENTS,
     DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, MODERATION_AUDIT_CAPABILITY,
-    PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY, ROOM_SLOW_MODE_CAPABILITY,
+    PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY,
+    ROOM_SLOW_MODE_CAPABILITY,
 };
 use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
 
@@ -95,6 +96,8 @@ pub struct LiveChatClientState {
     announcement_room_sessions: BTreeSet<ChatSessionId>,
     slow_mode_requests: BTreeSet<ChatSessionId>,
     slow_mode_sessions: BTreeSet<ChatSessionId>,
+    room_media_policy_requests: BTreeSet<ChatSessionId>,
+    room_media_policy_sessions: BTreeSet<ChatSessionId>,
     local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
@@ -230,8 +233,14 @@ impl LiveChatClientState {
         self.slow_mode_sessions.contains(&session_id)
     }
 
+    pub fn room_media_policy_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.room_media_policy_sessions.contains(&session_id)
+    }
+
     fn room_catalog_shape(&self, session_id: ChatSessionId) -> RoomCatalogShape {
-        if self.slow_mode_negotiated(session_id) {
+        if self.room_media_policy_negotiated(session_id) {
+            RoomCatalogShape::MediaPolicy
+        } else if self.slow_mode_negotiated(session_id) {
             RoomCatalogShape::SlowMode
         } else if self.announcement_rooms_negotiated(session_id) {
             RoomCatalogShape::PolicyBits
@@ -251,6 +260,22 @@ impl LiveChatClientState {
         } else {
             self.slow_mode_requests.remove(&session_id);
             self.slow_mode_sessions.remove(&session_id);
+            self.room_media_policy_requests.remove(&session_id);
+            self.room_media_policy_sessions.remove(&session_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_room_media_policy_requested_for_test(
+        &mut self,
+        session_id: ChatSessionId,
+        requested: bool,
+    ) {
+        if requested {
+            self.room_media_policy_requests.insert(session_id);
+        } else {
+            self.room_media_policy_requests.remove(&session_id);
+            self.room_media_policy_sessions.remove(&session_id);
         }
     }
 
@@ -265,6 +290,8 @@ impl LiveChatClientState {
         } else {
             self.announcement_room_requests.remove(&session_id);
             self.announcement_room_sessions.remove(&session_id);
+            self.room_media_policy_requests.remove(&session_id);
+            self.room_media_policy_sessions.remove(&session_id);
         }
     }
 
@@ -523,6 +550,8 @@ impl LiveChatClientState {
         self.announcement_room_sessions.remove(&session_id);
         self.slow_mode_requests.remove(&session_id);
         self.slow_mode_sessions.remove(&session_id);
+        self.room_media_policy_requests.remove(&session_id);
+        self.room_media_policy_sessions.remove(&session_id);
         self.local_user_ids.remove(&session_id);
         retired_echoes
     }
@@ -970,6 +999,8 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         Err(_) => return vec![sequence_space_exhausted_event(session_id)],
     };
     let slow_mode_requested_for_test = state.slow_mode_requests.contains(&session_id);
+    let room_media_policy_requested_for_test =
+        state.room_media_policy_requests.contains(&session_id);
     state.durable_sessions.remove(&session_id);
     state.durable_notice_ack_sessions.remove(&session_id);
     state.durable_requests.remove(&session_id);
@@ -988,6 +1019,8 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.announcement_room_sessions.remove(&session_id);
     state.slow_mode_requests.remove(&session_id);
     state.slow_mode_sessions.remove(&session_id);
+    state.room_media_policy_requests.remove(&session_id);
+    state.room_media_policy_sessions.remove(&session_id);
     client.clear_room_policies(session_id);
     client.clear_moderation_audit(session_id);
     state
@@ -1015,11 +1048,19 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
             super::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
             super::protocol::ROOM_PINS_CAPABILITY.into(),
         ];
-        if cfg!(feature = "omenchat-announcement-rooms") {
+        if cfg!(feature = "omenchat-announcement-rooms") || room_media_policy_requested_for_test {
             requested_capabilities.push(ANNOUNCEMENT_ROOMS_CAPABILITY.into());
         }
-        if cfg!(feature = "omenchat-slow-mode") || slow_mode_requested_for_test {
+        if cfg!(feature = "omenchat-slow-mode")
+            || slow_mode_requested_for_test
+            || room_media_policy_requested_for_test
+        {
             requested_capabilities.push(ROOM_SLOW_MODE_CAPABILITY.into());
+        }
+        if cfg!(feature = "omenchat-room-media-policy-qualification")
+            || room_media_policy_requested_for_test
+        {
+            requested_capabilities.push(ROOM_MEDIA_POLICY_CAPABILITY.into());
         }
         if cfg!(feature = "omenchat-moderation-audit") {
             requested_capabilities.push(MODERATION_AUDIT_CAPABILITY.into());
@@ -1062,11 +1103,19 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         state.reaction_requests.insert(session_id);
         state.message_revision_requests.insert(session_id);
         state.pin_requests.insert(session_id);
-        if cfg!(feature = "omenchat-announcement-rooms") {
+        if cfg!(feature = "omenchat-announcement-rooms") || room_media_policy_requested_for_test {
             state.announcement_room_requests.insert(session_id);
         }
-        if cfg!(feature = "omenchat-slow-mode") || slow_mode_requested_for_test {
+        if cfg!(feature = "omenchat-slow-mode")
+            || slow_mode_requested_for_test
+            || room_media_policy_requested_for_test
+        {
             state.slow_mode_requests.insert(session_id);
+        }
+        if cfg!(feature = "omenchat-room-media-policy-qualification")
+            || room_media_policy_requested_for_test
+        {
+            state.room_media_policy_requests.insert(session_id);
         }
         if cfg!(feature = "omenchat-moderation-audit") {
             state.moderation_audit_requests.insert(session_id);
@@ -2922,6 +2971,9 @@ fn apply_frame_with_state(
             let slow_mode_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == ROOM_SLOW_MODE_CAPABILITY);
+            let room_media_policy_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == ROOM_MEDIA_POLICY_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state.as_deref_mut()) {
                 state.pin_sessions.remove(&session_id);
                 state
@@ -2939,6 +2991,8 @@ fn apply_frame_with_state(
                 let announcement_rooms_requested =
                     state.announcement_room_requests.remove(&session_id);
                 let slow_mode_requested = state.slow_mode_requests.remove(&session_id);
+                let room_media_policy_requested =
+                    state.room_media_policy_requests.remove(&session_id);
                 let already_accepted = state.durable_sessions.contains(&session_id);
                 if durable_accepted
                     && state.client_instance_id.is_some()
@@ -2999,6 +3053,16 @@ fn apply_frame_with_state(
                     state.slow_mode_sessions.insert(session_id);
                 } else {
                     state.slow_mode_sessions.remove(&session_id);
+                }
+                if state.durable_sessions.contains(&session_id)
+                    && state.announcement_room_sessions.contains(&session_id)
+                    && state.slow_mode_sessions.contains(&session_id)
+                    && room_media_policy_requested
+                    && room_media_policy_accepted
+                {
+                    state.room_media_policy_sessions.insert(session_id);
+                } else {
+                    state.room_media_policy_sessions.remove(&session_id);
                 }
             }
             let room_catalog_shape = preferred_session_id
@@ -6264,6 +6328,13 @@ mod tests {
             cfg!(feature = "omenchat-slow-mode"),
             "only a slow-mode-capable build may request slow mode"
         );
+        assert_eq!(
+            negotiation.requested_capabilities.iter().any(
+                |capability| capability == crate::chat::protocol::ROOM_MEDIA_POLICY_CAPABILITY
+            ),
+            cfg!(feature = "omenchat-room-media-policy-qualification"),
+            "canonical products must not request room media policy before activation"
+        );
         let mut expected_capabilities = vec![
             DURABLE_MUTATION_CAPABILITY.into(),
             DURABLE_NOTICE_ACK_CAPABILITY.into(),
@@ -6277,6 +6348,9 @@ mod tests {
         }
         if cfg!(feature = "omenchat-slow-mode") {
             expected_capabilities.push(crate::chat::protocol::ROOM_SLOW_MODE_CAPABILITY.into());
+        }
+        if cfg!(feature = "omenchat-room-media-policy-qualification") {
+            expected_capabilities.push(crate::chat::protocol::ROOM_MEDIA_POLICY_CAPABILITY.into());
         }
         if cfg!(feature = "omenchat-moderation-audit") {
             expected_capabilities.push(crate::chat::protocol::MODERATION_AUDIT_CAPABILITY.into());
@@ -6311,6 +6385,11 @@ mod tests {
             state.slow_mode_requests.contains(&1),
             cfg!(feature = "omenchat-slow-mode")
         );
+        assert_eq!(
+            state.room_media_policy_requests.contains(&1),
+            cfg!(feature = "omenchat-room-media-policy-qualification")
+        );
+        assert!(!state.room_media_policy_negotiated(1));
     }
 
     #[test]
@@ -12414,6 +12493,163 @@ mod tests {
 
         client.clear_room_policies(session_id);
         assert_eq!(client.room_upload_policy(session_id, 1), None);
+    }
+
+    #[test]
+    fn test_only_room_media_policy_requires_cumulative_acceptance_and_clears_with_link_state() {
+        let (mut client, session_id) = live_test_client();
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(ClientInstanceId::new([92; 16])));
+        state.set_room_media_policy_requested_for_test(session_id, true);
+        let mut transport = CapturedChatTransport::default();
+        assert!(send_session_open_and_join(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            Some("Alice"),
+        )
+        .is_empty());
+        let session_open =
+            decode_frame(transport.sent_frames.first().expect("session open")).expect("frame");
+        let requested = crate::chat::protocol::parse_session_open_negotiation(&session_open.body)
+            .expect("valid negotiation")
+            .expect("explicit negotiation")
+            .requested_capabilities;
+        for capability in [
+            DURABLE_MUTATION_CAPABILITY,
+            ANNOUNCEMENT_ROOMS_CAPABILITY,
+            ROOM_SLOW_MODE_CAPABILITY,
+            ROOM_MEDIA_POLICY_CAPABILITY,
+        ] {
+            assert!(requested.iter().any(|requested| requested == capability));
+        }
+
+        let accepted_body = |shape: RoomCatalogShape,
+                             upload_max_file_bytes: Option<u64>,
+                             accepted_capabilities: Vec<String>| {
+            let room = RoomCatalogEntry {
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                room_revision: 2,
+                policy_bits: 0,
+                slow_mode_seconds: 30,
+                upload_max_file_bytes,
+            }
+            .into_frame_value_for_shape(shape)
+            .expect("room policy value");
+            crate::chat::protocol::with_session_accept_negotiation(
+                FrameBody::Fields(vec![
+                    FrameValue::String(PROTOCOL_NAME.into()),
+                    FrameValue::Array(vec![room]),
+                ]),
+                &crate::chat::protocol::SessionAcceptNegotiation {
+                    accepted_capabilities,
+                },
+            )
+            .expect("session acceptance")
+        };
+        let mut events = Vec::new();
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::SessionAccept,
+                1,
+                None,
+                accepted_body(
+                    RoomCatalogShape::MediaPolicy,
+                    Some(256 * 1024),
+                    vec![
+                        DURABLE_MUTATION_CAPABILITY.into(),
+                        ANNOUNCEMENT_ROOMS_CAPABILITY.into(),
+                        ROOM_SLOW_MODE_CAPABILITY.into(),
+                        ROOM_MEDIA_POLICY_CAPABILITY.into(),
+                    ],
+                ),
+            ),
+            &mut events,
+        );
+        assert!(state.room_media_policy_negotiated(session_id));
+        assert_eq!(
+            client.room_upload_policy(session_id, 1),
+            Some(super::super::protocol::RoomUploadPolicyProjection::MaximumFileBytes(256 * 1024))
+        );
+
+        let disabled_delta = RoomCatalogEntry {
+            room_id: 1,
+            name: "lobby".into(),
+            topic: None,
+            room_revision: 3,
+            policy_bits: 0,
+            slow_mode_seconds: 30,
+            upload_max_file_bytes: Some(0),
+        }
+        .into_frame_value_for_shape(RoomCatalogShape::MediaPolicy)
+        .expect("disabled room delta");
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::RoomDelta,
+                2,
+                Some(1),
+                FrameBody::Fields(vec![disabled_delta]),
+            ),
+            &mut events,
+        );
+        assert_eq!(
+            client.room_upload_policy(session_id, 1),
+            Some(super::super::protocol::RoomUploadPolicyProjection::Disabled)
+        );
+
+        let reconnect_events = reconnect_live_server(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            OmenChatDescriptor {
+                server_destination: "abcd".into(),
+                ..OmenChatDescriptor::default()
+            },
+        );
+        assert!(matches!(
+            reconnect_events.first(),
+            Some(ChatClientEvent::ServerOpened { .. })
+        ));
+        assert!(!state.room_media_policy_negotiated(session_id));
+        assert_eq!(client.room_upload_policy(session_id, 1), None);
+
+        state.set_room_media_policy_requested_for_test(session_id, true);
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::SessionAccept,
+                3,
+                None,
+                accepted_body(
+                    RoomCatalogShape::SlowMode,
+                    None,
+                    vec![
+                        DURABLE_MUTATION_CAPABILITY.into(),
+                        ANNOUNCEMENT_ROOMS_CAPABILITY.into(),
+                        ROOM_SLOW_MODE_CAPABILITY.into(),
+                    ],
+                ),
+            ),
+            &mut events,
+        );
+        assert!(!state.room_media_policy_negotiated(session_id));
+        assert_eq!(client.room_upload_policy(session_id, 1), None);
+        assert_eq!(client.room_slow_mode_seconds(session_id, 1), Some(30));
     }
 
     #[test]

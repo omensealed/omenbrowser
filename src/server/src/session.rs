@@ -21,8 +21,8 @@ use crate::protocol::{
     DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
     MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME,
     REACTIONS_CAPABILITY, REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG,
-    REPLY_MENTIONS_CAPABILITY, ROOM_PINS_CAPABILITY, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
-    ROOM_SLOW_MODE_CAPABILITY,
+    REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY, ROOM_PINS_CAPABILITY,
+    ROOM_PIN_SNAPSHOT_MAX_TARGETS, ROOM_SLOW_MODE_CAPABILITY,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -212,6 +212,7 @@ pub struct SessionEngine {
     slow_mode_capability_enabled: bool,
     moderation_audit_enabled: bool,
     announcement_rooms_enabled: bool,
+    room_media_policy_capability_enabled: bool,
     room_media_policy_enforcement_enabled: bool,
 }
 
@@ -398,6 +399,9 @@ impl SessionEngine {
             slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
+            room_media_policy_capability_enabled: cfg!(
+                feature = "omenchat-room-media-policy-qualification"
+            ),
             room_media_policy_enforcement_enabled: false,
         }
     }
@@ -415,6 +419,9 @@ impl SessionEngine {
             slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
+            room_media_policy_capability_enabled: cfg!(
+                feature = "omenchat-room-media-policy-qualification"
+            ),
             room_media_policy_enforcement_enabled: false,
         }
     }
@@ -439,6 +446,9 @@ impl SessionEngine {
             slow_mode_capability_enabled: cfg!(feature = "omenchat-slow-mode"),
             moderation_audit_enabled: MODERATION_AUDIT_SERVER_ENABLED,
             announcement_rooms_enabled: cfg!(feature = "omenchat-announcement-rooms"),
+            room_media_policy_capability_enabled: cfg!(
+                feature = "omenchat-room-media-policy-qualification"
+            ),
             room_media_policy_enforcement_enabled: false,
         }
     }
@@ -468,6 +478,9 @@ impl SessionEngine {
     #[cfg(test)]
     pub(crate) fn with_test_room_media_policy(store: OmenchatStore, limits: SessionLimits) -> Self {
         let mut engine = Self::with_limits(store, limits);
+        engine.announcement_rooms_enabled = true;
+        engine.slow_mode_capability_enabled = true;
+        engine.room_media_policy_capability_enabled = true;
         engine.room_media_policy_enforcement_enabled = true;
         engine
     }
@@ -1018,7 +1031,19 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == ANNOUNCEMENT_ROOMS_CAPABILITY)
             });
-        let room_catalog_shape = if slow_mode_requested {
+        let room_media_policy_requested = self.room_media_policy_capability_enabled
+            && durable_requested
+            && announcement_rooms_requested
+            && slow_mode_requested
+            && negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == ROOM_MEDIA_POLICY_CAPABILITY)
+            });
+        let room_catalog_shape = if room_media_policy_requested {
+            RoomCatalogShape::MediaPolicy
+        } else if slow_mode_requested {
             RoomCatalogShape::SlowMode
         } else if announcement_rooms_requested {
             RoomCatalogShape::PolicyBits
@@ -1053,6 +1078,7 @@ impl SessionEngine {
             || moderation_audit_requested
             || announcement_rooms_requested
             || slow_mode_requested
+            || room_media_policy_requested
         {
             let mut accepted_capabilities = Vec::new();
             if moderation_audit_requested {
@@ -1063,6 +1089,9 @@ impl SessionEngine {
             }
             if slow_mode_requested {
                 accepted_capabilities.push(ROOM_SLOW_MODE_CAPABILITY.into());
+            }
+            if room_media_policy_requested {
+                accepted_capabilities.push(ROOM_MEDIA_POLICY_CAPABILITY.into());
             }
             if durable_requested {
                 accepted_capabilities.push(DURABLE_MUTATION_CAPABILITY.into());
@@ -7211,6 +7240,102 @@ mod tests {
             expected_shape,
         )
         .expect("feature-selected room shape");
+    }
+
+    #[test]
+    fn room_media_policy_qualification_requires_cumulative_capabilities_and_exact_shape() {
+        let store = OmenchatStore::in_memory().expect("store");
+        store
+            .update_room_slow_mode_seconds(1, 30)
+            .expect("slow mode");
+        store
+            .update_room_upload_max_file_bytes(1, Some(256 * 1024))
+            .expect("room upload policy");
+        let engine = SessionEngine::with_test_room_media_policy(store, SessionLimits::default());
+        let request = |requested_capabilities: Vec<String>| {
+            crate::protocol::with_session_open_negotiation(
+                FrameBody::Text("Alice".into()),
+                &crate::protocol::SessionOpenNegotiation {
+                    requested_capabilities,
+                    client_instance_id: Some(crate::protocol::ClientInstanceId::new([21; 16])),
+                },
+            )
+            .expect("capability request")
+        };
+        let accepted = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::SessionOpen,
+                    11,
+                    None,
+                    request(vec![
+                        crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                        crate::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY.into(),
+                        crate::protocol::ROOM_SLOW_MODE_CAPABILITY.into(),
+                        crate::protocol::ROOM_MEDIA_POLICY_CAPABILITY.into(),
+                    ]),
+                ),
+            )
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&accepted[0].body),
+            Ok(Some(crate::protocol::SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    crate::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY.into(),
+                    crate::protocol::ROOM_SLOW_MODE_CAPABILITY.into(),
+                    crate::protocol::ROOM_MEDIA_POLICY_CAPABILITY.into(),
+                    crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                ],
+            }))
+        );
+        let FrameBody::Fields(fields) = &accepted[0].body else {
+            panic!("session acceptance fields");
+        };
+        let Some(FrameValue::Array(rooms)) = fields.get(1) else {
+            panic!("session acceptance room catalog");
+        };
+        let room = crate::protocol::RoomCatalogEntry::from_frame_value_for_shape(
+            rooms.first().expect("lobby"),
+            crate::protocol::RoomCatalogShape::MediaPolicy,
+        )
+        .expect("seven-field room media policy");
+        assert_eq!(room.slow_mode_seconds, 30);
+        assert_eq!(room.upload_max_file_bytes, Some(256 * 1024));
+
+        let slow_only = engine
+            .handle_frame(
+                &peer(),
+                Frame::new(
+                    ChatOp::SessionOpen,
+                    12,
+                    None,
+                    request(vec![
+                        crate::protocol::DURABLE_MUTATION_CAPABILITY.into(),
+                        crate::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY.into(),
+                        crate::protocol::ROOM_SLOW_MODE_CAPABILITY.into(),
+                    ]),
+                ),
+            )
+            .expect("slow-only session open");
+        let negotiation = crate::protocol::parse_session_accept_negotiation(&slow_only[0].body)
+            .expect("session acceptance negotiation")
+            .expect("explicit negotiation");
+        assert!(!negotiation
+            .accepted_capabilities
+            .iter()
+            .any(|capability| capability == crate::protocol::ROOM_MEDIA_POLICY_CAPABILITY));
+        let FrameBody::Fields(fields) = &slow_only[0].body else {
+            panic!("slow-only session acceptance fields");
+        };
+        let Some(FrameValue::Array(rooms)) = fields.get(1) else {
+            panic!("slow-only room catalog");
+        };
+        crate::protocol::RoomCatalogEntry::from_frame_value_for_shape(
+            rooms.first().expect("lobby"),
+            crate::protocol::RoomCatalogShape::SlowMode,
+        )
+        .expect("six-field slow-mode fallback");
     }
 
     #[test]

@@ -195,11 +195,12 @@ capability and omenchatd does not accept it. These known operation numbers are
 a dormant compatibility reservation, not available message-edit behavior.
 Ordinary protocol-v1 history and messages remain unchanged.
 
-The shared contract now also contains a dormant `room-media-policy-v1`
-vocabulary. It reserves no operation number and changes no production
-capability vector. A peer that eventually negotiates the capability must also
-negotiate `announcement-rooms-v1` and `room-slow-mode-v1`, and therefore
-understand the cumulative seven-field room value:
+The shared contract now also contains a qualification-only
+`room-media-policy-v1` vocabulary. It reserves no operation number and changes
+no production capability vector. The non-product qualification feature
+requests and accepts it only with `durable-mutations-v1`,
+`announcement-rooms-v1`, and `room-slow-mode-v1`, and therefore selects the
+cumulative seven-field room value:
 
 ```text
 [room_id, name, topic_or_nil, room_revision, policy_bits,
@@ -209,20 +210,24 @@ understand the cumulative seven-field room value:
 The final scalar is `nil` for inherited server policy, zero for disabled room
 uploads, or at most 10 MiB. The dormant typed upload-rejection extension keeps
 the existing reason/quota/incoming fields and appends a numeric reason code.
-Exact fixtures pass in both independent codecs, but production clients do not
-request the capability and servers do not accept it. omenchatd schema 13 stores
-the dormant nullable room ceiling and provides a guarded schema-12 copy export,
-but runtime upload admission remains unchanged.
+Exact fixtures pass in both independent codecs. Qualification clients and
+servers now prove request/acceptance, authenticated-Link shape ownership,
+identity replacement cleanup, reconnect cleanup, and current/current
+projection over a real isolated Link. Production clients still do not request
+the capability and production servers do not accept it. omenchatd schema 13
+stores the nullable room ceiling and provides a guarded schema-12 copy export;
+canonical runtime upload admission remains unchanged.
 
 The shared client projection distinguishes absent negotiation from inherited,
 disabled, and bounded room policy. Explicit seven-field qualification can
 carry that projection into the desktop client's existing 256-room-per-session
 map. Static Iced presentation can show the effective room/server minimum and
-disable Attach for authoritative disabled evidence. Canonical runtime shape
-selection still cannot produce that evidence, so legacy and current product
-behavior remain unchanged until capability activation passes its separate
-current/current, adjacent-version, lifecycle, Resource, GUI, and measurement
-gates.
+disable Attach for authoritative disabled evidence. Qualification runtime
+shape selection can now produce that evidence only after all cumulative
+capabilities are accepted. Canonical runtime shape selection still cannot
+produce it, so legacy and current product behavior remain unchanged until
+capability activation passes its remaining adjacent-version, Resource, GUI,
+and measurement gates.
 
 The browser persists the client-instance value under its active identity-scoped
 application storage and retains it in live client state. Invalid, unsafe, or

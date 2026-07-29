@@ -1866,6 +1866,22 @@ behavior. No product capability request/acceptance, enforcement, persistence,
 worker, timer, subscription, or polling was added. Evidence:
 `docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
 
+The sixth slice adds an explicit non-product
+`omenchat-room-media-policy-qualification` feature to both independent roots.
+It requests and accepts `room-media-policy-v1` only with durable mutations,
+announcement rooms, and slow mode; owns the seven-field room shape per
+authenticated Link; and clears that authority on identity replacement, Link
+close, reconnect, or capability loss. Canonical product profiles exclude the
+feature and the machine-checkable product verifier rejects leakage. The
+existing release smoke now has one isolated mode that performs a bounded normal
+database bootstrap, applies stopped-server policy, opens a real loopback
+Reticulum Link, negotiates all four cumulative capabilities, projects exactly
+256 KiB, completes an ordinary message round trip, and shuts down normally.
+This proves current/current negotiation and projection, not adjacent-version
+compatibility, Resource rejection/restart behavior, GUI attachment behavior, or
+resource measurements. Evidence:
+`docs/audits/omenchat-room-media-policy-negotiation-qualification.md`.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

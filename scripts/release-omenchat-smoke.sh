@@ -27,6 +27,7 @@ announcement_upload_rejection_smoke=0
 announcement_moderator_smoke=0
 slow_mode_rejection_smoke=0
 slow_mode_seconds=30
+room_media_policy_smoke_bytes=""
 live_policy_maintenance_refused="not-run"
 reaction_smoke=0
 revision_smoke=0
@@ -74,6 +75,8 @@ Options:
                        Promote the isolated client, configure lobby read-only, and prove moderator publication
   --slow-mode-rejection-smoke
                        Qualification build only: commit once, restart, and prove typed slow-mode rejection
+  --room-media-policy-smoke BYTES
+                       Qualification build only: negotiate and project this room upload ceiling
   --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
   --revision-smoke     Exercise negotiated durable corrections, tombstones, replay, and Resource recovery
   --pin-smoke          Exercise moderator-only durable pin replay, snapshots, no-op, and unpin
@@ -184,6 +187,10 @@ while [[ $# -gt 0 ]]; do
       restart_server=1
       shift
       ;;
+    --room-media-policy-smoke)
+      room_media_policy_smoke_bytes="${2:-}"
+      shift 2
+      ;;
     --reaction-smoke)
       reaction_smoke=1
       shift
@@ -263,6 +270,13 @@ if [[ -n "$server_large_batch_threshold_bytes" ]] \
   echo "--server-large-batch-threshold-bytes must be a positive integer" >&2
   exit 2
 fi
+if [[ -n "$room_media_policy_smoke_bytes" ]] \
+  && { ! [[ "$room_media_policy_smoke_bytes" =~ ^[0-9]+$ ]] \
+    || [[ "$room_media_policy_smoke_bytes" -lt 1 ]] \
+    || [[ "$room_media_policy_smoke_bytes" -gt 10485760 ]]; }; then
+  echo "--room-media-policy-smoke must be an integer from 1 through 10485760 bytes" >&2
+  exit 2
+fi
 if [[ "$restart_server" -eq 1 && "$continuous_client_reconnect" -eq 1 ]]; then
   echo "--restart-server and --continuous-client-reconnect are separate cases" >&2
   exit 2
@@ -311,6 +325,18 @@ if [[ "$moderation_audit_smoke" -eq 1 ]] \
   echo "--moderation-audit-smoke is an isolated qualification case" >&2
   exit 2
 fi
+if [[ -n "$room_media_policy_smoke_bytes" ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 \
+    || "$announcement_upload_rejection_smoke" -eq 1 \
+    || "$announcement_moderator_smoke" -eq 1 \
+    || "$slow_mode_rejection_smoke" -eq 1 \
+    || "$moderation_audit_smoke" -eq 1 \
+    || "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
+    || -n "$upload_file" ]]; then
+  echo "--room-media-policy-smoke is an isolated qualification case" >&2
+  exit 2
+fi
 if [[ ( "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 ) \
   && -z "$server_large_batch_threshold_bytes" ]]; then
   server_large_batch_threshold_bytes=1
@@ -354,6 +380,7 @@ if [[ -n "$passphrase_file" ]]; then
 fi
 
 server_pid=""
+bootstrap_pid=""
 client_pid=""
 moderation_target_pid=""
 cleanup() {
@@ -368,6 +395,10 @@ cleanup() {
   if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$bootstrap_pid" ]] && kill -0 "$bootstrap_pid" 2>/dev/null; then
+    kill "$bootstrap_pid" 2>/dev/null || true
+    wait "$bootstrap_pid" 2>/dev/null || true
   fi
   if [[ "$keep_roots" -eq 0 ]]; then
     rm -rf "$server_home" "$browser_root" "$browser_root_2"
@@ -484,6 +515,35 @@ if not delta.get("events"):
 PY
 }
 
+verify_room_media_policy_report() {
+  local report="$1"
+  local expected_bytes="$2"
+  python3 - "$report" "$expected_bytes" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_bytes = int(sys.argv[2])
+stages = {
+    stage.get("stage"): stage
+    for stage in report.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+capabilities = stages.get("capability_observation", {})
+if capabilities.get("room_media_policy_negotiated") is not True:
+    raise SystemExit("room-media-policy-v1 was not negotiated")
+if capabilities.get("announcement_rooms_negotiated") is not True:
+    raise SystemExit("room media policy omitted announcement-rooms-v1")
+if capabilities.get("slow_mode_negotiated") is not True:
+    raise SystemExit("room media policy omitted room-slow-mode-v1")
+if capabilities.get("durable_mutations_negotiated") is not True:
+    raise SystemExit("room media policy omitted durable-mutations-v1")
+if capabilities.get("room_upload_max_file_bytes") != expected_bytes:
+    raise SystemExit("the seven-field room catalog did not project the configured upload ceiling")
+PY
+}
+
 echo "== Initializing isolated omenchatd =="
 "$server_bin" init --home "$server_home" "${server_interface_args[@]}" \
   > "$run_dir/omenchatd-init.txt"
@@ -497,6 +557,33 @@ fi
 if [[ -n "$server_large_batch_threshold_bytes" ]]; then
   "$server_bin" config set --home "$server_home" \
     --large-batch-threshold-bytes "$server_large_batch_threshold_bytes" \
+    >> "$run_dir/omenchatd-config.txt"
+fi
+if [[ -n "$room_media_policy_smoke_bytes" ]]; then
+  echo "== Bootstrapping isolated omenchatd database for stopped-server room policy =="
+  "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+    > "$run_dir/omenchatd-bootstrap.log" 2>&1 &
+  bootstrap_pid="$!"
+  for _ in {1..80}; do
+    if grep -q 'live server ready' "$run_dir/omenchatd-bootstrap.log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$bootstrap_pid" 2>/dev/null; then
+      echo "omenchatd exited before bootstrap completed" >&2
+      tail -n 80 "$run_dir/omenchatd-bootstrap.log" >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if ! grep -q 'live server ready' "$run_dir/omenchatd-bootstrap.log" 2>/dev/null; then
+    echo "omenchatd bootstrap did not become ready in time" >&2
+    exit 1
+  fi
+  kill -TERM "$bootstrap_pid"
+  wait "$bootstrap_pid"
+  bootstrap_pid=""
+  "$server_bin" rooms set-upload-policy 1 "$room_media_policy_smoke_bytes" \
+    --confirm --home "$server_home" \
     >> "$run_dir/omenchatd-config.txt"
 fi
 
@@ -927,6 +1014,10 @@ if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
   fi
   live_policy_maintenance_refused=1
 fi
+if [[ -n "$room_media_policy_smoke_bytes" ]]; then
+  verify_room_media_policy_report \
+    "$run_dir/omenchat-smoke.json" "$room_media_policy_smoke_bytes"
+fi
 if [[ "$moderation_audit_smoke" -eq 1 ]]; then
   python3 - "$run_dir/omenchat-smoke.json" <<'PY'
 import json
@@ -1249,6 +1340,7 @@ announcement_upload_rejection_smoke: $announcement_upload_rejection_smoke
 announcement_moderator_smoke: $announcement_moderator_smoke
 slow_mode_rejection_smoke: $slow_mode_rejection_smoke
 slow_mode_seconds: $([[ "$slow_mode_rejection_smoke" -eq 1 ]] && printf '%s' "$slow_mode_seconds" || printf 'not-run')
+room_media_policy_smoke_bytes: $([[ -n "$room_media_policy_smoke_bytes" ]] && printf '%s' "$room_media_policy_smoke_bytes" || printf 'not-run')
 live_policy_maintenance_refused: $live_policy_maintenance_refused
 reaction_smoke: $reaction_smoke
 revision_smoke: $revision_smoke

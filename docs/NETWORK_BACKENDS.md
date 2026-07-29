@@ -72,6 +72,21 @@ hooks such as the isolated room-policy transition and GUI auto-open behavior.
 The product verifier requires the production feature and rejects the
 qualification feature in release graphs.
 
+## OMENchat room media-policy qualification identity
+
+`omenchat-room-media-policy-qualification` exists independently in the root
+and standalone server manifests. It depends on the activated announcement-room
+and slow-mode features, but no canonical desktop or server alias includes it.
+The product verifier rejects it from release graphs.
+
+The feature exists only to qualify the cumulative `room-media-policy-v1`
+request/acceptance boundary, seven-field room shape, Link-scoped lifecycle, and
+the already reviewed upload-policy enforcement hooks. It does not add a
+runtime, interface, worker, timer, queue, cache, subscription, or dependency.
+Legacy and canonical product peers retain their existing four-, five-, and
+six-field shapes until the remaining adjacent-version, Resource, GUI, and
+measurement gates support an explicit activation decision.
+
 ## Security and ownership requirements
 
 A future external backend must be explicit opt-in, prefer a restrictive local

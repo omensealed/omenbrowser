@@ -5248,6 +5248,25 @@ selection still rejects seven-field media-policy values, requests no new
 capability, and preserves legacy upload behavior. Evidence is in
 `docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
 
+The qualification-only request/acceptance and real-Link projection gate is:
+
+```bash
+bash scripts/run-omenchat-room-media-policy-qualification.sh \
+  --report /tmp/omen-room-media-policy-report.json
+```
+
+The wrapper builds the root and standalone server independently with
+`omenchat-room-media-policy-qualification`, uses isolated browser/server roots
+and a dynamically allocated loopback TCP endpoint, performs the normal
+database migration lifecycle before stopped-server room administration, and
+then requires cumulative durable/announcement/slow-mode/media-policy
+negotiation plus an exact 256-KiB room projection and ordinary message round
+trip. It has bounded startup and client deadlines and removes isolated roots.
+It does not prove adjacent-version compatibility, upload Resource rejection,
+restart recovery, GUI attachment behavior, or long-duration resource use.
+Evidence is in
+`docs/audits/omenchat-room-media-policy-negotiation-qualification.md`.
+
 The real, still-non-product feature now has a first explicit desktop
 presentation slice:
 
