@@ -297,6 +297,36 @@ impl DesktopApp {
     }
 
     #[cfg(feature = "chat-client")]
+    pub(in crate::desktop) fn omenchat_room_effective_upload_max_file_bytes(
+        &self,
+        session_id: ChatSessionId,
+        room_id: crate::chat::protocol::RoomId,
+    ) -> Option<u64> {
+        let global_max = self.omenchat_session_upload_max_file_bytes(session_id);
+        match self
+            .omenchat
+            .chat_client
+            .room_upload_policy(session_id, room_id)
+        {
+            Some(crate::chat::protocol::RoomUploadPolicyProjection::Disabled) => Some(0),
+            Some(policy) => global_max.and_then(|global| policy.effective_max_file_bytes(global)),
+            None => global_max,
+        }
+    }
+
+    #[cfg(feature = "chat-client")]
+    pub(in crate::desktop) fn omenchat_room_uploads_disabled(
+        &self,
+        session_id: ChatSessionId,
+        room_id: crate::chat::protocol::RoomId,
+    ) -> bool {
+        self.omenchat
+            .chat_client
+            .room_upload_policy(session_id, room_id)
+            .is_some_and(crate::chat::protocol::RoomUploadPolicyProjection::uploads_disabled)
+    }
+
+    #[cfg(feature = "chat-client")]
     pub(in crate::desktop) fn omenchat_session_upload_quota(
         &self,
         session_id: ChatSessionId,

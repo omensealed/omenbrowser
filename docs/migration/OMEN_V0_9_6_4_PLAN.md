@@ -1851,6 +1851,21 @@ production admission/publication, Cargo product features, recurring polling,
 and live policy editing remain unchanged. Evidence:
 `docs/audits/omenchat-room-media-policy-administration-qualification.md`.
 
+The fifth slice extends the existing fixed-size shared
+`RoomPolicyProjection` with an optional typed upload-policy value that
+distinguishes unavailable evidence from inherited, disabled, and bounded
+maximum policy. `ChatClient` retains it only in the existing
+256-room-per-session bounded map and clears it with the existing
+session/capability lifecycle. Explicit seven-field parsing carries the value,
+while canonical runtime shape selection remains limited to already activated
+legacy/announcement/slow-mode shapes and rejects unsolicited media-policy
+data. The Iced composer can show a static effective limit, disables Attach only
+for authoritative disabled evidence, and applies the room/server minimum before
+reading file contents. With no negotiated evidence it preserves legacy upload
+behavior. No product capability request/acceptance, enforcement, persistence,
+worker, timer, subscription, or polling was added. Evidence:
+`docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
+
 These units are in the `v0.9.6-4` target scope. If any unit cannot satisfy its
 wire, storage, mixed-version, resource, and rollback gates, do not advertise
 that capability or call the release complete; record the blocker and make an

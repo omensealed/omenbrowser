@@ -28,19 +28,39 @@ pub enum RoomCatalogShape {
 pub struct RoomPolicyProjection {
     policy_bits: u64,
     slow_mode_seconds: u32,
+    upload_policy: Option<RoomUploadPolicyProjection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomUploadPolicyProjection {
+    Inherit,
+    Disabled,
+    MaximumFileBytes(u64),
 }
 
 impl RoomPolicyProjection {
     pub fn new(policy_bits: u64, slow_mode_seconds: u32) -> Result<Self, RoomPolicyError> {
+        Self::new_with_upload_policy(policy_bits, slow_mode_seconds, None)
+    }
+
+    pub fn new_with_upload_policy(
+        policy_bits: u64,
+        slow_mode_seconds: u32,
+        upload_max_file_bytes: Option<Option<u64>>,
+    ) -> Result<Self, RoomPolicyError> {
         if policy_bits & !ROOM_POLICY_KNOWN_MASK != 0 {
             return Err(RoomPolicyError::UnknownPolicyBits(policy_bits));
         }
         if slow_mode_seconds > ROOM_SLOW_MODE_MAX_SECONDS {
             return Err(RoomPolicyError::InvalidSlowMode);
         }
+        let upload_policy = upload_max_file_bytes
+            .map(RoomUploadPolicyProjection::from_configured_max_file_bytes)
+            .transpose()?;
         Ok(Self {
             policy_bits,
             slow_mode_seconds,
+            upload_policy,
         })
     }
 
@@ -58,6 +78,44 @@ impl RoomPolicyProjection {
 
     pub fn slow_mode_enabled(self) -> bool {
         self.slow_mode_seconds != 0
+    }
+
+    pub fn upload_policy(self) -> Option<RoomUploadPolicyProjection> {
+        self.upload_policy
+    }
+}
+
+impl RoomUploadPolicyProjection {
+    fn from_configured_max_file_bytes(configured: Option<u64>) -> Result<Self, RoomPolicyError> {
+        match configured {
+            None => Ok(Self::Inherit),
+            Some(0) => Ok(Self::Disabled),
+            Some(bytes) if bytes <= ROOM_UPLOAD_MAX_FILE_BYTES => Ok(Self::MaximumFileBytes(bytes)),
+            Some(_) => Err(RoomPolicyError::InvalidUploadMaxFileBytes),
+        }
+    }
+
+    pub fn configured_max_file_bytes(self) -> Option<u64> {
+        match self {
+            Self::Inherit => None,
+            Self::Disabled => Some(0),
+            Self::MaximumFileBytes(bytes) => Some(bytes),
+        }
+    }
+
+    pub fn effective_max_file_bytes(self, global_max_file_bytes: u64) -> Option<u64> {
+        if global_max_file_bytes == 0 {
+            return None;
+        }
+        match self {
+            Self::Inherit => Some(global_max_file_bytes),
+            Self::Disabled => None,
+            Self::MaximumFileBytes(bytes) => Some(bytes.min(global_max_file_bytes)),
+        }
+    }
+
+    pub fn uploads_disabled(self) -> bool {
+        matches!(self, Self::Disabled)
     }
 }
 
@@ -79,6 +137,24 @@ impl RoomCatalogEntry {
 
     pub fn policy_projection(&self) -> Result<RoomPolicyProjection, RoomPolicyError> {
         RoomPolicyProjection::new(self.policy_bits, self.slow_mode_seconds)
+    }
+
+    pub fn policy_projection_for_shape(
+        &self,
+        shape: RoomCatalogShape,
+    ) -> Result<Option<RoomPolicyProjection>, RoomPolicyError> {
+        match shape {
+            RoomCatalogShape::Legacy => Ok(None),
+            RoomCatalogShape::PolicyBits | RoomCatalogShape::SlowMode => {
+                self.policy_projection().map(Some)
+            }
+            RoomCatalogShape::MediaPolicy => RoomPolicyProjection::new_with_upload_policy(
+                self.policy_bits,
+                self.slow_mode_seconds,
+                Some(self.upload_max_file_bytes),
+            )
+            .map(Some),
+        }
     }
 
     pub fn into_frame_value(self, policy_negotiated: bool) -> Result<FrameValue, RoomPolicyError> {
@@ -432,6 +508,7 @@ mod tests {
         let ordinary = RoomPolicyProjection::default();
         assert_eq!(ordinary.policy_bits(), 0);
         assert_eq!(ordinary.slow_mode_seconds(), 0);
+        assert_eq!(ordinary.upload_policy(), None);
         assert!(!ordinary.announcement_only());
         assert!(!ordinary.slow_mode_enabled());
 
@@ -439,6 +516,7 @@ mod tests {
             RoomPolicyProjection::new(ROOM_POLICY_ANNOUNCEMENT, 30).expect("bounded room policy");
         assert_eq!(projected.policy_bits(), ROOM_POLICY_ANNOUNCEMENT);
         assert_eq!(projected.slow_mode_seconds(), 30);
+        assert_eq!(projected.upload_policy(), None);
         assert!(projected.announcement_only());
         assert!(projected.slow_mode_enabled());
         assert_eq!(
@@ -459,6 +537,61 @@ mod tests {
         assert_eq!(
             RoomPolicyProjection::new(0, ROOM_SLOW_MODE_MAX_SECONDS + 1),
             Err(RoomPolicyError::InvalidSlowMode)
+        );
+    }
+
+    #[test]
+    fn room_upload_policy_projection_distinguishes_unavailable_inherit_disabled_and_maximum() {
+        let unavailable = RoomPolicyProjection::new(0, 0).expect("legacy policy projection");
+        assert_eq!(unavailable.upload_policy(), None);
+
+        for (configured, expected, effective) in [
+            (None, RoomUploadPolicyProjection::Inherit, Some(512 * 1024)),
+            (Some(0), RoomUploadPolicyProjection::Disabled, None),
+            (
+                Some(256 * 1024),
+                RoomUploadPolicyProjection::MaximumFileBytes(256 * 1024),
+                Some(256 * 1024),
+            ),
+        ] {
+            let projection = RoomPolicyProjection::new_with_upload_policy(0, 0, Some(configured))
+                .expect("bounded upload policy projection");
+            let policy = projection.upload_policy().expect("available policy");
+            assert_eq!(policy, expected);
+            assert_eq!(policy.configured_max_file_bytes(), configured);
+            assert_eq!(policy.effective_max_file_bytes(512 * 1024), effective);
+            assert_eq!(policy.uploads_disabled(), configured == Some(0));
+        }
+
+        assert_eq!(
+            RoomPolicyProjection::new_with_upload_policy(
+                0,
+                0,
+                Some(Some(ROOM_UPLOAD_MAX_FILE_BYTES + 1))
+            ),
+            Err(RoomPolicyError::InvalidUploadMaxFileBytes)
+        );
+        assert_eq!(
+            RoomUploadPolicyProjection::Inherit.effective_max_file_bytes(0),
+            None
+        );
+
+        let media_entry = RoomCatalogEntry {
+            upload_max_file_bytes: None,
+            ..announcement_room()
+        };
+        assert_eq!(
+            media_entry.policy_projection_for_shape(RoomCatalogShape::MediaPolicy),
+            RoomPolicyProjection::new_with_upload_policy(ROOM_POLICY_ANNOUNCEMENT, 0, Some(None))
+                .map(Some)
+        );
+        assert_eq!(
+            media_entry.policy_projection_for_shape(RoomCatalogShape::SlowMode),
+            media_entry.policy_projection().map(Some)
+        );
+        assert_eq!(
+            media_entry.policy_projection_for_shape(RoomCatalogShape::Legacy),
+            Ok(None)
         );
     }
 

@@ -20,6 +20,7 @@ pub(in crate::desktop) fn omenchat_upload_policy_rejection(
     match quota {
         Some(0) => Some("upload blocked: server has uploads disabled".into()),
         _ => match max_file_bytes {
+            Some(0) => Some("upload blocked: uploads are disabled in this room".into()),
             Some(limit) if bytes > limit => Some(format!(
                 "upload blocked: {} exceeds server file limit {}",
                 human_bytes(bytes),
@@ -183,6 +184,10 @@ mod tests {
         assert_eq!(
             omenchat_upload_policy_rejection(1, Some(0), Some(512)),
             Some("upload blocked: server has uploads disabled".into())
+        );
+        assert_eq!(
+            omenchat_upload_policy_rejection(1, Some(50 * 1024 * 1024), Some(0)),
+            Some("upload blocked: uploads are disabled in this room".into())
         );
         assert_eq!(
             omenchat_upload_policy_rejection(1024, Some(50 * 1024 * 1024), Some(512)),

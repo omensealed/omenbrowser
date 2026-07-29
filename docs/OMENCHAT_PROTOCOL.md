@@ -214,6 +214,16 @@ request the capability and servers do not accept it. omenchatd schema 13 stores
 the dormant nullable room ceiling and provides a guarded schema-12 copy export,
 but runtime upload admission remains unchanged.
 
+The shared client projection distinguishes absent negotiation from inherited,
+disabled, and bounded room policy. Explicit seven-field qualification can
+carry that projection into the desktop client's existing 256-room-per-session
+map. Static Iced presentation can show the effective room/server minimum and
+disable Attach for authoritative disabled evidence. Canonical runtime shape
+selection still cannot produce that evidence, so legacy and current product
+behavior remain unchanged until capability activation passes its separate
+current/current, adjacent-version, lifecycle, Resource, GUI, and measurement
+gates.
+
 The browser persists the client-instance value under its active identity-scoped
 application storage and retains it in live client state. Invalid, unsafe, or
 overly permissive stored state disables durable negotiation instead of

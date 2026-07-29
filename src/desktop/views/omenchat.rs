@@ -327,6 +327,22 @@ fn omenchat_slow_mode_indicator(
         .map(|seconds| format!("Slow mode · {seconds}s"))
 }
 
+fn omenchat_upload_policy_indicator(
+    client: &crate::chat::ChatClient,
+    session_id: ChatSessionId,
+    room_id: crate::chat::protocol::RoomId,
+    global_max_file_bytes: Option<u64>,
+) -> Option<String> {
+    use crate::chat::protocol::RoomUploadPolicyProjection;
+
+    match client.room_upload_policy(session_id, room_id)? {
+        RoomUploadPolicyProjection::Disabled => Some("Uploads disabled · room policy".into()),
+        policy => policy
+            .effective_max_file_bytes(global_max_file_bytes?)
+            .map(|bytes| format!("Uploads ≤ {} · room policy", human_bytes(bytes))),
+    }
+}
+
 #[cfg(all(
     feature = "omenchat-moderation-audit",
     any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
@@ -881,12 +897,15 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         .map(String::as_str)
         .unwrap_or_default();
     let session_id = session.session_id;
+    let room_uploads_disabled =
+        desktop.omenchat_room_uploads_disabled(session.session_id, active_room_id);
+    let upload_allowed = publish_allowed && !room_uploads_disabled;
     let attach_button = button(centered_toolbar_icon(ICON_ATTACH))
         .padding(0)
         .width(Length::Fixed(toolbar_icon_button_side()))
         .height(Length::Fixed(toolbar_icon_button_side()))
         .style(subtle_button_style);
-    let attach_button = if publish_allowed {
+    let attach_button = if upload_allowed {
         attach_button.on_press(Message::OmenChat(OmenChatMessage::PickUpload(
             session.session_id,
         )))
@@ -927,7 +946,9 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         ),
         tooltip_button(
             attach_button,
-            if publish_allowed {
+            if room_uploads_disabled {
+                "Uploads disabled by room policy"
+            } else if publish_allowed {
                 "Attach file"
             } else {
                 "Read-only announcement room"
@@ -982,6 +1003,19 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             .padding([6, 8])
             .width(Length::Fill)
             .style(status_container_style),
+        );
+    }
+    if let Some(indicator) = omenchat_upload_policy_indicator(
+        &desktop.omenchat.chat_client,
+        session.session_id,
+        active_room_id,
+        desktop.omenchat_session_upload_max_file_bytes(session.session_id),
+    ) {
+        composer_panel = composer_panel.push(
+            container(text(indicator).size(ui_size(12)))
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(status_container_style),
         );
     }
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -1503,11 +1537,13 @@ mod accessibility_tests {
     use super::omenchat_moderation_audit_record_line;
     use super::{
         compact_recovery_destination, omenchat_media_animation_allowed,
-        omenchat_slow_mode_indicator, reaction_token_presentation, recovered_mutation_expiry_label,
-        recovered_mutation_notice, recovered_mutation_operation,
+        omenchat_slow_mode_indicator, omenchat_upload_policy_indicator,
+        reaction_token_presentation, recovered_mutation_expiry_label, recovered_mutation_notice,
+        recovered_mutation_operation,
     };
     use crate::chat::protocol::{
-        ChatOp, FrameBody, ReactionToken, RoomPolicyProjection, ROOM_POLICY_ANNOUNCEMENT,
+        ChatOp, FrameBody, ReactionToken, RoomPolicyProjection, RoomUploadPolicyProjection,
+        ROOM_POLICY_ANNOUNCEMENT,
     };
     use crate::chat::{ChatConnectionState, ChatRoomSummary, ChatServerSummary, ChatSessionView};
 
@@ -1657,6 +1693,68 @@ mod accessibility_tests {
         );
         assert_eq!(client.room_slow_mode_seconds(session_id, 7), Some(30));
         assert!(client.room_is_announcement_only(session_id, 7));
+    }
+
+    #[test]
+    fn room_upload_policy_indicator_is_static_authoritative_and_bounded() {
+        let mut client = crate::chat::ChatClient::new();
+        let session_id = client.reserve_session_id();
+        let room = ChatRoomSummary {
+            server_id: "server".into(),
+            room_id: 7,
+            name: "lobby".into(),
+            topic: None,
+            unread: 0,
+            joined: true,
+        };
+        assert!(client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "server".into(),
+                destination: "destination".into(),
+                display_name: "Test".into(),
+            },
+            rooms: vec![room.clone()],
+            active_room: room,
+            users: Vec::new(),
+            events: Vec::new(),
+            status: String::new(),
+        }));
+        assert_eq!(
+            omenchat_upload_policy_indicator(&client, session_id, 7, Some(512 * 1024)),
+            None
+        );
+
+        let inherited = RoomPolicyProjection::new_with_upload_policy(0, 0, Some(None))
+            .expect("inherited room upload policy");
+        assert!(client.update_room_policy(session_id, 7, inherited));
+        assert_eq!(
+            client.room_upload_policy(session_id, 7),
+            Some(RoomUploadPolicyProjection::Inherit)
+        );
+        assert_eq!(
+            omenchat_upload_policy_indicator(&client, session_id, 7, Some(512 * 1024)).as_deref(),
+            Some("Uploads ≤ 512.0 KiB · room policy")
+        );
+
+        let limited = RoomPolicyProjection::new_with_upload_policy(0, 0, Some(Some(256 * 1024)))
+            .expect("limited room upload policy");
+        assert!(client.update_room_policy(session_id, 7, limited));
+        assert_eq!(
+            omenchat_upload_policy_indicator(&client, session_id, 7, Some(128 * 1024)).as_deref(),
+            Some("Uploads ≤ 128.0 KiB · room policy")
+        );
+
+        let disabled = RoomPolicyProjection::new_with_upload_policy(0, 0, Some(Some(0)))
+            .expect("disabled room upload policy");
+        assert!(client.update_room_policy(session_id, 7, disabled));
+        assert_eq!(
+            omenchat_upload_policy_indicator(&client, session_id, 7, None).as_deref(),
+            Some("Uploads disabled · room policy")
+        );
+        assert!(client
+            .room_upload_policy(session_id, 7)
+            .is_some_and(RoomUploadPolicyProjection::uploads_disabled));
     }
 
     #[cfg(feature = "omenchat-moderation-audit")]

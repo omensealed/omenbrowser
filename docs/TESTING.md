@@ -5222,6 +5222,32 @@ enforcement inactive. Production capability request/acceptance and upload
 enforcement remain disabled. Evidence is in
 `docs/audits/omenchat-room-media-policy-administration-qualification.md`.
 
+The bounded client projection and static Iced presentation are covered by:
+
+```bash
+cargo test --locked -p omenchat-protocol \
+  room_upload_policy_projection -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  room_media_policy_projection --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  room_upload_policy_indicator --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  negotiated_room_upload_policy --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_upload_file_limit --lib -- --nocapture
+```
+
+The projection distinguishes no negotiated evidence from `inherit`,
+`disabled`, and a bounded maximum. It remains in the existing
+256-room-per-session map, combines a positive room ceiling with the
+authenticated server maximum, and clears through the existing room-policy
+lifecycle. The Iced composer shows only authoritative evidence, disables
+Attach only when that evidence says disabled, and performs metadata-based
+local rejection before reading or queueing file contents. Production runtime
+selection still rejects seven-field media-policy values, requests no new
+capability, and preserves legacy upload behavior. Evidence is in
+`docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
+
 The real, still-non-product feature now has a first explicit desktop
 presentation slice:
 

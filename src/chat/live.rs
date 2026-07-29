@@ -5405,10 +5405,7 @@ fn parse_room_policy_for_shape(
     shape: RoomCatalogShape,
 ) -> Option<ParsedRoom> {
     let room = RoomCatalogEntry::from_frame_value_for_shape(value, shape).ok()?;
-    let policy = (shape != RoomCatalogShape::Legacy)
-        .then(|| room.policy_projection())
-        .transpose()
-        .ok()?;
+    let policy = room.policy_projection_for_shape(shape).ok()?;
     Some(ParsedRoom {
         summary: ChatRoomSummary {
             server_id,
@@ -12360,6 +12357,63 @@ mod tests {
         assert!(malformed
             .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
             .is_err());
+    }
+
+    #[test]
+    fn room_media_policy_projection_is_explicit_bounded_and_not_selected_by_production_shapes() {
+        let (mut client, session_id) = live_test_client();
+        let room_value = RoomCatalogEntry {
+            room_id: 1,
+            name: "lobby".into(),
+            topic: Some("Uploads".into()),
+            room_revision: 3,
+            policy_bits: 0,
+            slow_mode_seconds: 30,
+            upload_max_file_bytes: Some(256 * 1024),
+        }
+        .into_frame_value_for_shape(RoomCatalogShape::MediaPolicy)
+        .expect("bounded room media policy");
+
+        assert!(
+            parse_room_policy(&room_value, "abcd".into(), true, false).is_none(),
+            "legacy runtime shape must reject seven-field policy"
+        );
+        assert!(
+            parse_room_policy(&room_value, "abcd".into(), true, true).is_none(),
+            "announcement runtime shape must reject seven-field policy"
+        );
+        assert!(
+            parse_room_policy_for_shape(
+                &room_value,
+                "abcd".into(),
+                true,
+                RoomCatalogShape::SlowMode,
+            )
+            .is_none(),
+            "slow-mode runtime shape must reject seven-field policy"
+        );
+
+        let projected = parse_room_policy_for_shape(
+            &room_value,
+            "abcd".into(),
+            true,
+            RoomCatalogShape::MediaPolicy,
+        )
+        .expect("explicit dormant media-policy projection");
+        let policy = projected.policy.expect("typed room policy");
+        assert_eq!(policy.slow_mode_seconds(), 30);
+        assert_eq!(
+            policy.upload_policy(),
+            Some(super::super::protocol::RoomUploadPolicyProjection::MaximumFileBytes(256 * 1024))
+        );
+        assert!(client.update_room_policy(session_id, 1, policy));
+        assert_eq!(
+            client.room_upload_policy(session_id, 1),
+            policy.upload_policy()
+        );
+
+        client.clear_room_policies(session_id);
+        assert_eq!(client.room_upload_policy(session_id, 1), None);
     }
 
     #[test]

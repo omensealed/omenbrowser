@@ -54,6 +54,65 @@ fn append_cached_event(desktop: &mut DesktopApp) {
 }
 
 #[test]
+fn negotiated_room_upload_policy_combines_with_server_limit_without_persistence() {
+    use crate::chat::protocol::RoomPolicyProjection;
+
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-room-upload-policy");
+    let session_id = open_mock_session(&mut desktop);
+    desktop
+        .omenchat
+        .omenchat_upload_max_file_bytes
+        .insert(session_id, 512 * 1024);
+    assert_eq!(
+        desktop.omenchat_room_effective_upload_max_file_bytes(session_id, 1),
+        Some(512 * 1024)
+    );
+    assert!(!desktop.omenchat_room_uploads_disabled(session_id, 1));
+
+    let limited = RoomPolicyProjection::new_with_upload_policy(0, 0, Some(Some(256 * 1024)))
+        .expect("bounded room policy");
+    assert!(desktop
+        .omenchat
+        .chat_client
+        .update_room_policy(session_id, 1, limited));
+    assert_eq!(
+        desktop.omenchat_room_effective_upload_max_file_bytes(session_id, 1),
+        Some(256 * 1024)
+    );
+
+    let globally_limited =
+        RoomPolicyProjection::new_with_upload_policy(0, 0, Some(Some(1024 * 1024)))
+            .expect("bounded room policy");
+    assert!(desktop
+        .omenchat
+        .chat_client
+        .update_room_policy(session_id, 1, globally_limited));
+    assert_eq!(
+        desktop.omenchat_room_effective_upload_max_file_bytes(session_id, 1),
+        Some(512 * 1024)
+    );
+
+    let disabled = RoomPolicyProjection::new_with_upload_policy(0, 0, Some(Some(0)))
+        .expect("disabled room policy");
+    assert!(desktop
+        .omenchat
+        .chat_client
+        .update_room_policy(session_id, 1, disabled));
+    assert!(desktop.omenchat_room_uploads_disabled(session_id, 1));
+    assert_eq!(
+        desktop.omenchat_room_effective_upload_max_file_bytes(session_id, 1),
+        Some(0)
+    );
+
+    desktop.omenchat.chat_client.clear_room_policies(session_id);
+    assert!(!desktop.omenchat_room_uploads_disabled(session_id, 1));
+    assert_eq!(
+        desktop.omenchat_room_effective_upload_max_file_bytes(session_id, 1),
+        Some(512 * 1024)
+    );
+}
+
+#[test]
 fn cached_omenchat_room_restore_preserves_saved_scroll_offset() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-preserve-scroll");
     let session_id = open_mock_session(&mut desktop);

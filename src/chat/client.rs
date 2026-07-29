@@ -583,6 +583,15 @@ impl ChatClient {
             .map(RoomPolicyProjection::slow_mode_seconds)
     }
 
+    pub fn room_upload_policy(
+        &self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) -> Option<super::protocol::RoomUploadPolicyProjection> {
+        self.room_policy(session_id, room_id)
+            .and_then(RoomPolicyProjection::upload_policy)
+    }
+
     pub fn room_is_announcement_only(&self, session_id: ChatSessionId, room_id: RoomId) -> bool {
         self.room_policy(session_id, room_id)
             .is_some_and(RoomPolicyProjection::announcement_only)
@@ -2473,6 +2482,7 @@ mod tests {
         assert!(client.update_room_policy(session_id, 1, policy));
         assert_eq!(client.room_policy(session_id, 1), Some(policy));
         assert_eq!(client.room_slow_mode_seconds(session_id, 1), Some(30));
+        assert_eq!(client.room_upload_policy(session_id, 1), None);
         assert!(!client.update_room_policy(session_id, 2, policy));
 
         let oversized = vec![(1, policy); CHAT_SESSION_MAX_ROOMS + 1];

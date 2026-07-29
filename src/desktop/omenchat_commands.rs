@@ -165,10 +165,15 @@ impl DesktopApp {
             self.set_omenchat_session_status(session_id, "upload file is empty".into());
             return OmenChatDraftCommandResult::HandledKeep;
         }
+        let upload_max_file_bytes = room_id
+            .and_then(|room_id| {
+                self.omenchat_room_effective_upload_max_file_bytes(session_id, room_id)
+            })
+            .or_else(|| self.omenchat_session_upload_max_file_bytes(session_id));
         if let Some(reason) = omenchat_upload_policy_rejection(
             upload_byte_len,
             self.omenchat_session_upload_quota(session_id),
-            self.omenchat_session_upload_max_file_bytes(session_id),
+            upload_max_file_bytes,
         ) {
             self.set_omenchat_session_status(session_id, reason);
             return OmenChatDraftCommandResult::HandledKeep;
@@ -191,7 +196,7 @@ impl DesktopApp {
         if let Some(reason) = omenchat_upload_policy_rejection(
             upload_byte_len,
             self.omenchat_session_upload_quota(session_id),
-            self.omenchat_session_upload_max_file_bytes(session_id),
+            upload_max_file_bytes,
         ) {
             self.set_omenchat_session_status(session_id, reason);
             return OmenChatDraftCommandResult::HandledKeep;

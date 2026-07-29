@@ -401,8 +401,10 @@ Do not invent measurements.
    administration and bounded human/JSON/TUI status evidence explicitly
    labeled inactive. Evidence:
    `docs/audits/omenchat-room-media-policy-administration-qualification.md`.
-5. Bounded desktop projection and static Iced controls. omenchatd TUI reports
-   configured/inactive operator evidence only.
+5. **Complete (2026-07-28):** bounded desktop projection and static Iced
+   controls. omenchatd TUI reports configured/inactive operator evidence only.
+   Evidence:
+   `docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
 6. Current/current, adjacent-version, restart, Link replacement, Resource,
    cancellation, GUI, and resource-measurement qualification.
 7. Activate negotiation and enforcement together in canonical desktop and
