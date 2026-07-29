@@ -521,9 +521,13 @@ The first exchange creates a marker only inside the harness's temporary root.
 The wrapper then drains and restarts current omenchatd without stopping the
 client process. The client must observe the old link close, open a different
 link, reconnect the same in-memory session, and receive a second echoed message.
-It also negotiates reactions before and after replacement, deliberately loses
-and exactly replays an acknowledgement on the replacement Link, and requires
-authoritative Resource snapshot, no-op, removal, and clean-intent evidence.
+It also negotiates reactions, pins, and message revisions before and after
+replacement. Each mutation family deliberately loses and exactly replays an
+acknowledgement, then requires its authoritative snapshot, semantic no-op or
+terminal inverse operation, and clean-intent evidence. Pin qualification runs
+before revision qualification because the revision scenario deliberately
+tombstones their shared smoke-message target; attempting to pin that deleted
+event must remain a truthful `HistoryUnavailable` rejection.
 The retained report contains only versions and booleans. This exercises the
 headless product smoke path; an interactive Iced-window restart soak remains a
 separate presentation/lifecycle check.

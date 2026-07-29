@@ -633,38 +633,6 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         stages.extend(reaction_stages);
     }
 
-    let mut revision_ok = true;
-    if joined && message_seen && revision_smoke {
-        let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
-            .context("OMENchat revision smoke target message was not retained")?;
-        let authenticated_identity_hash =
-            mutation_identity_hash.context("OMENchat revision smoke has no active identity")?;
-        let room_id = client
-            .session(session_id)
-            .map(|session| session.active_room.room_id)
-            .unwrap_or(1);
-        let (passed, revision_stages) = run_omenchat_revision_smoke(
-            &*app.runtime,
-            &mut runtime_events,
-            &mut client,
-            &mut live_state,
-            &mut transport,
-            OmenChatRevisionSmokeOptions {
-                link_id: opened.link_id,
-                session_id,
-                room_id,
-                target_event_id,
-                server_destination: &destination,
-                identity_storage_root: &mutation_identity_storage_root,
-                authenticated_identity_hash,
-                wait: Duration::from_secs(response_wait_secs),
-            },
-        )
-        .await?;
-        revision_ok = passed;
-        stages.extend(revision_stages);
-    }
-
     let mut pin_ok = true;
     if joined && message_seen && pin_smoke {
         let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
@@ -695,6 +663,41 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         .await?;
         pin_ok = passed;
         stages.extend(pin_stages);
+    }
+
+    // Revision qualification ends by tombstoning its target. Run pin
+    // qualification first when both features share this smoke message so the
+    // pin test never asks the server to pin an intentionally deleted event.
+    let mut revision_ok = true;
+    if joined && message_seen && revision_smoke {
+        let target_event_id = omenchat_session_message_event_id(&client, session_id, &message)
+            .context("OMENchat revision smoke target message was not retained")?;
+        let authenticated_identity_hash =
+            mutation_identity_hash.context("OMENchat revision smoke has no active identity")?;
+        let room_id = client
+            .session(session_id)
+            .map(|session| session.active_room.room_id)
+            .unwrap_or(1);
+        let (passed, revision_stages) = run_omenchat_revision_smoke(
+            &*app.runtime,
+            &mut runtime_events,
+            &mut client,
+            &mut live_state,
+            &mut transport,
+            OmenChatRevisionSmokeOptions {
+                link_id: opened.link_id,
+                session_id,
+                room_id,
+                target_event_id,
+                server_destination: &destination,
+                identity_storage_root: &mutation_identity_storage_root,
+                authenticated_identity_hash,
+                wait: Duration::from_secs(response_wait_secs),
+            },
+        )
+        .await?;
+        revision_ok = passed;
+        stages.extend(revision_stages);
     }
 
     let mut moderation_audit_ok = true;
@@ -1511,54 +1514,6 @@ async fn run_omenchat_continuous_reconnect_smoke(
             stage
         }));
     }
-    let mut revision_ok = true;
-    if input.revision_smoke && message_seen {
-        let target_event_id =
-            omenchat_session_message_event_id(input.client, input.session_id, &reconnect_message)
-                .context("continuous reconnect revision target message was not retained")?;
-        let room_id = input
-            .client
-            .session(input.session_id)
-            .map(|session| session.active_room.room_id)
-            .unwrap_or(1);
-        let Some(authenticated_identity_hash) = input.authenticated_identity_hash else {
-            stages.push(serde_json::json!({
-                "stage": "continuous_revision_identity",
-                "ok": false,
-                "reason": "active identity was unavailable",
-            }));
-            return Ok((false, Some(opened.link_id), stages));
-        };
-        let (passed, revision_stages) = run_omenchat_revision_smoke(
-            input.runtime,
-            input.runtime_events,
-            input.client,
-            input.live_state,
-            input.transport,
-            OmenChatRevisionSmokeOptions {
-                link_id: opened.link_id,
-                session_id: input.session_id,
-                room_id,
-                target_event_id,
-                server_destination: input.server_destination,
-                identity_storage_root: input.identity_storage_root,
-                authenticated_identity_hash,
-                wait: input.response_wait,
-            },
-        )
-        .await?;
-        revision_ok = passed;
-        stages.extend(revision_stages.into_iter().map(|mut stage| {
-            if let Some(name) = stage
-                .get("stage")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-            {
-                stage["stage"] = serde_json::Value::String(format!("continuous_{name}"));
-            }
-            stage
-        }));
-    }
     let mut pin_ok = true;
     if input.pin_smoke && message_seen {
         let target_event_id =
@@ -1597,6 +1552,56 @@ async fn run_omenchat_continuous_reconnect_smoke(
         .await?;
         pin_ok = passed;
         stages.extend(pin_stages.into_iter().map(|mut stage| {
+            if let Some(name) = stage
+                .get("stage")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+            {
+                stage["stage"] = serde_json::Value::String(format!("continuous_{name}"));
+            }
+            stage
+        }));
+    }
+    // Keep the shared reconnect target pinnable until pin recovery has
+    // completed; revision recovery deliberately tombstones it.
+    let mut revision_ok = true;
+    if input.revision_smoke && message_seen {
+        let target_event_id =
+            omenchat_session_message_event_id(input.client, input.session_id, &reconnect_message)
+                .context("continuous reconnect revision target message was not retained")?;
+        let room_id = input
+            .client
+            .session(input.session_id)
+            .map(|session| session.active_room.room_id)
+            .unwrap_or(1);
+        let Some(authenticated_identity_hash) = input.authenticated_identity_hash else {
+            stages.push(serde_json::json!({
+                "stage": "continuous_revision_identity",
+                "ok": false,
+                "reason": "active identity was unavailable",
+            }));
+            return Ok((false, Some(opened.link_id), stages));
+        };
+        let (passed, revision_stages) = run_omenchat_revision_smoke(
+            input.runtime,
+            input.runtime_events,
+            input.client,
+            input.live_state,
+            input.transport,
+            OmenChatRevisionSmokeOptions {
+                link_id: opened.link_id,
+                session_id: input.session_id,
+                room_id,
+                target_event_id,
+                server_destination: input.server_destination,
+                identity_storage_root: input.identity_storage_root,
+                authenticated_identity_hash,
+                wait: input.response_wait,
+            },
+        )
+        .await?;
+        revision_ok = passed;
+        stages.extend(revision_stages.into_iter().map(|mut stage| {
             if let Some(name) = stage
                 .get("stage")
                 .and_then(serde_json::Value::as_str)
@@ -2240,6 +2245,12 @@ async fn discard_omenchat_pin_ack(
                         "bytes": data.frame_bytes.len(),
                         "sequence": frame.seq,
                     }));
+                }
+                if frame.op == omenbrowser_rs::chat::protocol::ChatOp::Error {
+                    anyhow::bail!(
+                        "OMENchat server rejected the pin selected for lost-ack recovery: {:?}",
+                        frame.body
+                    );
                 }
             }
             Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
