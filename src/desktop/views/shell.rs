@@ -26,7 +26,11 @@ impl DesktopApp {
                 "Menu",
                 Message::Shell(ShellMessage::ToggleNavigation)
             ),
-            subtle_button("Commands", Message::Shell(ShellMessage::OpenCommandPalette)),
+            tooltip_icon_button(
+                ICON_COMMAND_PALETTE,
+                "Commands",
+                Message::Shell(ShellMessage::OpenCommandPalette)
+            ),
             container(text(runtime_icon).font(emoji_font())).width(Length::Fixed(18.0)),
             row![
                 text(format!("{ICON_STATUS_IDENTITY} ")).font(nerd_icon_font()),

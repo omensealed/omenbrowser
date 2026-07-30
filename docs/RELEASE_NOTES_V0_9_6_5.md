@@ -14,6 +14,8 @@ This is a narrow OMENchat correctness and presentation revision over
   treating an acknowledgement as final projection state.
 - Reaction summaries remain visible, while the emoji mutation controls appear
   only while the pointer is over that specific message.
+- The footer command-palette action uses a compact, centered terminal icon with
+  its label available as a tooltip.
 - Moderation audit is an explicit authorized action with a close control.
   Unauthorized sessions no longer show an unusable audit panel.
 - Remote user names retain mention toggling without the room-button border.

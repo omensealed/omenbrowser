@@ -10,6 +10,7 @@ pub(super) const ICON_DIAGNOSTICS: &str = "\u{f0f0}";
 pub(super) const ICON_MENU: &str = "\u{f0c9}";
 pub(super) const ICON_ATTACH: &str = "\u{f0c6}";
 pub(super) const ICON_STATUS_MENU: &str = "\u{f142}";
+pub(super) const ICON_COMMAND_PALETTE: &str = "\u{f120}";
 pub(super) const ICON_STATUS_IDENTITY: &str = "\u{f2c2}";
 pub(super) const ICON_STATUS_UNREAD: &str = "\u{f27a}";
 pub(super) const ICON_WINDOW_MAX: &str = "\u{f2d0}";
