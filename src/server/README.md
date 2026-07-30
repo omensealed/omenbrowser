@@ -203,7 +203,7 @@ files are modified. Run `doctor` before restarting. Restore is deliberately an
 offline, explicit `--confirm` operation.
 
 Schema 11 stores an explicit ordinary/announcement policy per room. The
-v0.9.6-4 policy-administration contract is deliberately restart-only: stop
+v0.9.6-5 policy-administration contract is deliberately restart-only: stop
 omenchatd, run the maintenance command, then restart omenchatd. The command
 fails closed while the live server owns the database. This release does not
 reload policy or fan out policy deltas from an offline maintenance process:

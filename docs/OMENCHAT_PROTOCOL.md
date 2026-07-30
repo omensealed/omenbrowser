@@ -9,10 +9,10 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-### v0.6.0-1 / v0.9.6-4 compatibility boundary
+### v0.6.0-1 / v0.9.6-5 compatibility boundary
 
 The application release number does not version the OMENchat wire protocol.
-The v0.9.6-4 release retains protocol version `1`, protocol name
+The v0.9.6-5 release retains protocol version `1`, protocol name
 `omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
 legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
 

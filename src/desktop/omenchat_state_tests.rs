@@ -3,6 +3,7 @@ use crate::app::App;
 use crate::chat::client::{CHAT_CLIENT_MAX_SESSIONS, CHAT_SESSION_HISTORY_MAX_EVENTS};
 use crate::chat::store::ChatStore;
 use crate::chat::{ChatEvent, ChatEventKind, OmenChatDescriptor};
+use crate::desktop::message::OmenChatMessage;
 use iced::widget::scrollable::RelativeOffset;
 
 fn desktop_with_temp_root(name: &str) -> DesktopApp {
@@ -182,6 +183,66 @@ fn cached_omenchat_room_restore_schedules_visible_scroll_retry() {
         .omenchat
         .chat_scroll_bottom_locks
         .contains(&(session_id, 1)));
+}
+
+#[test]
+fn omenchat_message_action_hover_has_one_owner_and_ignores_stale_exit() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-message-hover");
+    let session_id = open_mock_session(&mut desktop);
+
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::MessageActionsHovered {
+        session_id,
+        room_id: 1,
+        event_id: 7,
+    }));
+    assert_eq!(
+        desktop.omenchat.omenchat_hovered_message,
+        Some((session_id, 1, 7))
+    );
+
+    let _ = desktop.update(Message::OmenChat(
+        OmenChatMessage::MessageActionsUnhovered {
+            session_id,
+            room_id: 1,
+            event_id: 6,
+        },
+    ));
+    assert_eq!(
+        desktop.omenchat.omenchat_hovered_message,
+        Some((session_id, 1, 7))
+    );
+
+    let _ = desktop.update(Message::OmenChat(
+        OmenChatMessage::MessageActionsUnhovered {
+            session_id,
+            room_id: 1,
+            event_id: 7,
+        },
+    ));
+    assert_eq!(desktop.omenchat.omenchat_hovered_message, None);
+}
+
+#[cfg(all(
+    feature = "omenchat-moderation-audit",
+    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+))]
+#[test]
+fn omenchat_moderation_audit_close_hides_the_session_panel() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-close-audit");
+    let session_id = open_mock_session(&mut desktop);
+    desktop
+        .omenchat
+        .omenchat_visible_moderation_audits
+        .insert(session_id);
+
+    let _ = desktop.update(Message::OmenChat(OmenChatMessage::CloseModerationAudit(
+        session_id,
+    )));
+
+    assert!(!desktop
+        .omenchat
+        .omenchat_visible_moderation_audits
+        .contains(&session_id));
 }
 
 #[test]

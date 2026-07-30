@@ -862,12 +862,21 @@ impl ChatClient {
             super::protocol::UserId::MAX,
             ReactionToken::Question,
         );
-        self.reactions
+        let mut reactions = self
+            .reactions
             .range(range_start..=range_end)
             .map(|(_, reaction)| reaction)
             .filter(|reaction| targets.contains(&reaction.target_event_id))
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        reactions.sort_unstable_by_key(|reaction| {
+            (
+                reaction.target_event_id,
+                reaction.token.as_str(),
+                reaction.actor_user_id,
+            )
+        });
+        reactions
     }
 
     pub fn reaction_snapshot_complete(
@@ -2985,19 +2994,29 @@ mod tests {
                 1,
                 &ReactionSnapshot {
                     target_event_ids: vec![1],
-                    entries: vec![ReactionSnapshotEntry {
-                        target_event_id: 1,
-                        actor_user_id: 8,
-                        token: ReactionToken::Celebrate,
-                        created_at_unix: 11,
-                    }],
+                    entries: vec![
+                        ReactionSnapshotEntry {
+                            target_event_id: 1,
+                            actor_user_id: 8,
+                            token: ReactionToken::Celebrate,
+                            created_at_unix: 11,
+                        },
+                        ReactionSnapshotEntry {
+                            target_event_id: 1,
+                            actor_user_id: 7,
+                            token: ReactionToken::ThumbsUp,
+                            created_at_unix: 12,
+                        },
+                    ],
                 },
             )
             .expect("authoritative snapshot");
         let retained = client.reactions_for_targets(session_id, 1, &[1]);
-        assert_eq!(retained.len(), 1);
+        assert_eq!(retained.len(), 2);
         assert_eq!(retained[0].actor_user_id, 8);
         assert_eq!(retained[0].token, ReactionToken::Celebrate);
+        assert_eq!(retained[1].actor_user_id, 7);
+        assert_eq!(retained[1].token, ReactionToken::ThumbsUp);
         assert!(client.reaction_snapshot_complete(session_id, 1, 1));
 
         client

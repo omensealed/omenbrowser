@@ -16,12 +16,26 @@ impl DesktopApp {
         self.omenchat.chat_drafts.remove(&session_id);
         self.omenchat.omenchat_reply_drafts.remove(&session_id);
         self.omenchat.omenchat_selected_mentions.remove(&session_id);
+        if self
+            .omenchat
+            .omenchat_hovered_message
+            .is_some_and(|(hovered_session_id, _, _)| hovered_session_id == session_id)
+        {
+            self.omenchat.omenchat_hovered_message = None;
+        }
         #[cfg(all(
             feature = "omenchat-moderation-audit",
             any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
         ))]
         self.omenchat
             .omenchat_moderation_audit_requests
+            .remove(&session_id);
+        #[cfg(all(
+            feature = "omenchat-moderation-audit",
+            any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+        ))]
+        self.omenchat
+            .omenchat_visible_moderation_audits
             .remove(&session_id);
         #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         {

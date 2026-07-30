@@ -4064,7 +4064,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.6-4` must report
+therefore exits with the expected signal status; current `0.9.6-5` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -4159,9 +4159,13 @@ These isolated regressions exercise the shared GUI/TUI model, identity-scoped
 SQLite cache, negotiated live parser, and bounded inline/Resource snapshot
 transport. They prove duplicate deltas are idempotent, explicit-target
 snapshots are authoritative only for their page, overload rolls back prior
-state, and restart restores eligible retained targets. Presentation tests prove
-actor deduplication, fixed token ordering, identity/room/target scoping, exact
-counts, and local-user highlighting in the non-interactive Iced timeline model.
+state, and restart restores eligible retained targets. The restart regression
+also combines different tokens from different actors so client persistence
+must restore the protocol's canonical `(target, token, actor)` snapshot order
+instead of leaking the client's internal `(target, actor, token)` map order.
+Presentation tests prove actor deduplication, fixed token ordering,
+identity/room/target scoping, exact counts, and local-user highlighting in the
+non-interactive Iced timeline model.
 They also prove restart/reconnect clears non-persistent snapshot evidence while
 retaining bounded cache rows and that the next snapshot prunes targets no
 longer present in resident history. Dormant action tests require both
@@ -4190,7 +4194,20 @@ cargo test --locked --no-default-features --features desktop-dev \
   durable_reaction --lib
 cargo test --locked --no-default-features --features desktop-dev \
   reaction_intent_survives_restart --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_message_action_hover_has_one_owner_and_ignores_stale_exit --lib
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless \
+  reaction_events_fan_out_only_to_joined_capability_bound_links --lib)
 ```
+
+The focused live fan-out regression requires the authoritative
+`ReactionEvent` to reach both the capable originating Link and another capable
+joined Link, while excluding legacy and identity-replaced Links. The desktop
+hover regression proves that only one message owns the ephemeral action row
+overlay and that a stale exit event cannot hide a newer message's controls.
+Reaction
+summary chips are independent and remain visible.
 
 Standalone server qualification and explicit isolated measurements:
 
@@ -4248,7 +4265,9 @@ codecs preserve the same correction bytes. Client and server tests prove
 explicit request/accept dependency, unsolicited acceptance rejection,
 downgrade clearing, and base-only peer isolation. The server-full focus also
 covers persistence/execution, Link-scoped fan-out, history snapshots, replay
-suppression, and retirement.
+suppression, and retirement. Fan-out includes the capability-bound origin, so
+the editing client consumes the same authoritative revision event as its
+peers; exact replay returns another acknowledgement without another event.
 The desktop-dev focus covers the separate immutable-event revision projection,
 stable item/byte bounds, additive cache and restart recovery, transactional
 capacity rollback, ordered/idempotent deltas, authoritative snapshots,
@@ -4496,7 +4515,9 @@ snapshots, and capable-room-only fan-out use:
 These tests bind the internal Link capability state explicitly. After the
 separate activation slice, production negotiation tests prove the desktop
 requests `room-pins-v1` only with durable identity and omenchatd refuses a
-pin-only request.
+pin-only request. The capable origin and another capable room Link each receive
+one authoritative event; legacy and identity-replaced Links receive none, and
+exact replay does not fan out again.
 
 The dormant desktop projection, identity-scoped SQLite cache, restart-stale
 authority, inline snapshot decoding, and read-only timeline labels use:
@@ -5234,15 +5255,13 @@ recorded separately in
 administrative slice is in
 `docs/audits/omenchat-room-media-policy-administration-qualification.md`.
 
-The bounded client projection and static Iced presentation are covered by:
+The bounded client projection and Iced enforcement boundary are covered by:
 
 ```bash
 cargo test --locked -p omenchat-protocol \
   room_upload_policy_projection -- --nocapture
 cargo test --locked --no-default-features --features desktop-product \
   room_media_policy_projection --lib -- --nocapture
-cargo test --locked --no-default-features --features desktop-product \
-  room_upload_policy_indicator --lib -- --nocapture
 cargo test --locked --no-default-features --features desktop-product \
   negotiated_room_upload_policy --lib -- --nocapture
 cargo test --locked --no-default-features --features desktop-product \
@@ -5253,9 +5272,10 @@ The projection distinguishes no negotiated evidence from `inherit`,
 `disabled`, and a bounded maximum. It remains in the existing
 256-room-per-session map, combines a positive room ceiling with the
 authenticated server maximum, and clears through the existing room-policy
-lifecycle. The Iced composer shows only authoritative evidence, disables
-Attach only when that evidence says disabled, and performs metadata-based
-local rejection before reading or queueing file contents. Production runtime
+lifecycle. The Iced composer does not reserve a persistent banner for passive
+upload policy metadata. It disables Attach with an actionable tooltip when
+authoritative evidence says disabled and performs metadata-based local
+rejection before reading or queueing file contents. Production runtime
 selection now requests and accepts the seven-field shape; peers that do not
 negotiate it preserve legacy upload behavior. Evidence is in
 `docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
@@ -5364,6 +5384,8 @@ presentation slice:
 cargo test --locked --no-default-features \
   --features desktop-product,omenchat-moderation-audit \
   moderation_audit --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_moderation_audit_close_hides_the_session_panel --lib
 ```
 
 The focused tests require moderator/admin authority, one single-flight manual
@@ -5376,7 +5398,9 @@ requested limit; it accumulates only within the existing 256-record/512-KiB
 client ceilings and stops at explicit end or the local retention ceiling. A
 full page is “complete; more may exist,” not an indefinitely receiving
 transfer. The panel never polls, automatically retries, or exposes a false
-inbound-Resource Cancel action. Canonical desktop/static-media and standalone
+inbound-Resource Cancel action. Opening it is an explicit authorized action,
+closing it clears only bounded ephemeral presentation state, and unauthorized
+sessions render no audit panel or opener. Canonical desktop/static-media and standalone
 server products require the real capability; both process-qualification hooks
 remain forbidden. A separate root TUI consumer is not fabricated: that TUI's
 Messages workspace is LXMF-only and omenchatd's TUI has no client identity. Any

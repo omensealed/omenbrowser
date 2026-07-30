@@ -64,6 +64,10 @@ enforces active/audit bounds, creates authoritative bounded snapshots, and
 limits reaction-event fan-out to capability-bound Links. omenchatd now accepts
 `reactions-v1` only when an identified Link explicitly requests it together
 with `durable-mutations-v1`; base and legacy Links receive no reaction state.
+The authoritative live reaction event is returned to the capable originating
+Link as well as other capable joined Links. The origin acknowledgement remains
+mutation-correlation evidence only; it is not used as a substitute for the
+authoritative reaction delta.
 Version 6 adds constrained dormant current-state and append-only audit tables
 for the reserved `message-revisions-v1` contract. Migration and recovery
 support and a bounded transactional server executor are present. The executor
@@ -131,6 +135,10 @@ evidence. The reserved durable-intent operation has a bounded live sender and
 exact typed acknowledgement correlation. The desktop has a bounded correction
 draft separate from the ordinary composer, explicit deletion confirmation,
 durable prepare-before-send actions, and author/moderator/mute/depth checks.
+omenchatd returns the authoritative revision event to the capable originating
+Link as well as other capable joined Links, so the editor updates from the
+same validated delta as every other client. The acknowledgement remains
+mutation-correlation evidence and exact replay does not fan out again.
 Those controls require authoritative target evidence plus explicitly
 negotiated `durable-mutations-v1` and `message-revisions-v1`. The client
 requests the revision capability only with its persistent client instance
@@ -183,8 +191,11 @@ The shared presentation reducer can summarize retained rows by fixed token and
 distinct actor count. When retained reaction state is available, the
 Iced timeline displays those summaries as chips and marks `you` only
 when the negotiated numeric local-user ID is among the actors. The summary
-chips remain read-only; a separate bounded token-control row appears only when
-every dormant action gate above is satisfied. Counts are visible only after a
+chips remain read-only; a bounded token-control overlay appears only when
+every dormant action gate above is satisfied and the pointer is over that
+specific message, without adding timeline height. Moving between messages
+retains at most one ephemeral hover owner and does not change reaction state.
+Counts are visible only after a
 validated live snapshot marks that explicit target complete. Cache restore and
 reconnect clear this non-persistent evidence without deleting bounded rows, so
 stale counts are not presented as current while reconciliation is pending. The
@@ -232,6 +243,9 @@ Pin/unpin controls require current moderator/administrator role, joined-room
 membership, retained target eligibility, exact-target authority, durable
 identity, and both negotiated capabilities. Intent is persisted before send;
 an ACK is presented only as accepted pending an authoritative room update.
+That authoritative pin event is returned to the capable originating Link as
+well as other capable joined Links; exact replay returns only its original
+result.
 Older, base-only, downgraded, or unsolicited peers cannot activate them.
 
 An offline non-destructive schema-7 downgrade artifact can be created with

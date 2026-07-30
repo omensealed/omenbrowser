@@ -484,6 +484,7 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) chat_drafts: HashMap<ChatSessionId, String>,
     pub(in crate::desktop) omenchat_reply_drafts: HashMap<ChatSessionId, OmenChatReplyDraft>,
     pub(in crate::desktop) omenchat_selected_mentions: HashMap<ChatSessionId, BTreeSet<u32>>,
+    pub(in crate::desktop) omenchat_hovered_message: Option<(ChatSessionId, RoomId, u64)>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_revision_drafts: HashMap<ChatSessionId, OmenChatRevisionDraft>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -538,6 +539,11 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     ))]
     pub(in crate::desktop) omenchat_moderation_audit_requests:
         HashMap<ChatSessionId, OmenChatModerationAuditRequest>,
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    pub(in crate::desktop) omenchat_visible_moderation_audits: HashSet<ChatSessionId>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_link_sessions: HashMap<[u8; 16], ChatSessionId>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -630,6 +636,7 @@ impl OmenChatDesktopState {
             chat_drafts: HashMap::new(),
             omenchat_reply_drafts: HashMap::new(),
             omenchat_selected_mentions: HashMap::new(),
+            omenchat_hovered_message: None,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_revision_drafts: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -676,6 +683,11 @@ impl OmenChatDesktopState {
                 any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
             ))]
             omenchat_moderation_audit_requests: HashMap::new(),
+            #[cfg(all(
+                feature = "omenchat-moderation-audit",
+                any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+            ))]
+            omenchat_visible_moderation_audits: HashSet::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_link_sessions: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
