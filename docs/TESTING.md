@@ -4159,9 +4159,13 @@ These isolated regressions exercise the shared GUI/TUI model, identity-scoped
 SQLite cache, negotiated live parser, and bounded inline/Resource snapshot
 transport. They prove duplicate deltas are idempotent, explicit-target
 snapshots are authoritative only for their page, overload rolls back prior
-state, and restart restores eligible retained targets. Presentation tests prove
-actor deduplication, fixed token ordering, identity/room/target scoping, exact
-counts, and local-user highlighting in the non-interactive Iced timeline model.
+state, and restart restores eligible retained targets. The restart regression
+also combines different tokens from different actors so client persistence
+must restore the protocol's canonical `(target, token, actor)` snapshot order
+instead of leaking the client's internal `(target, actor, token)` map order.
+Presentation tests prove actor deduplication, fixed token ordering,
+identity/room/target scoping, exact counts, and local-user highlighting in the
+non-interactive Iced timeline model.
 They also prove restart/reconnect clears non-persistent snapshot evidence while
 retaining bounded cache rows and that the next snapshot prunes targets no
 longer present in resident history. Dormant action tests require both

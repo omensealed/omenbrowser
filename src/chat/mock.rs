@@ -903,7 +903,7 @@ impl ChatStore for MockChatStore {
             .iter()
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
-        Ok(self
+        let mut reactions = self
             .reactions
             .values()
             .filter(|reaction| {
@@ -912,7 +912,15 @@ impl ChatStore for MockChatStore {
                     && targets.contains(&reaction.target_event_id)
             })
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        reactions.sort_unstable_by_key(|reaction| {
+            (
+                reaction.target_event_id,
+                reaction.token.as_str(),
+                reaction.actor_user_id,
+            )
+        });
+        Ok(reactions)
     }
 
     fn apply_message_revision_event(

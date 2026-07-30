@@ -9,6 +9,9 @@ This is a narrow OMENchat correctness and presentation revision over
 
 - omenchatd now returns each authoritative live reaction event to the capable
   originating Link as well as other capable clients joined to the room.
+- Client session persistence now canonicalizes multi-user reaction snapshots,
+  preventing repeated `invalid OMENchat reaction snapshot` warnings when
+  different users select different reactions on one message.
 - Authoritative correction/tombstone and pin events likewise return to the
   capable originating Link, so the initiating client updates live without
   treating an acknowledgement as final projection state.
