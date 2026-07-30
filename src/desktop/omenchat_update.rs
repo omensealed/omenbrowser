@@ -98,6 +98,24 @@ impl DesktopApp {
                 self.update_toggle_omenchat_mention(session_id, user_id);
                 Ok(Task::none())
             }
+            Message::OmenChat(OmenChatMessage::MessageActionsHovered {
+                session_id,
+                room_id,
+                event_id,
+            }) => {
+                self.omenchat.omenchat_hovered_message = Some((session_id, room_id, event_id));
+                Ok(Task::none())
+            }
+            Message::OmenChat(OmenChatMessage::MessageActionsUnhovered {
+                session_id,
+                room_id,
+                event_id,
+            }) => {
+                if self.omenchat.omenchat_hovered_message == Some((session_id, room_id, event_id)) {
+                    self.omenchat.omenchat_hovered_message = None;
+                }
+                Ok(Task::none())
+            }
             Message::OmenChat(OmenChatMessage::ClearMentions(session_id)) => {
                 self.omenchat.omenchat_selected_mentions.remove(&session_id);
                 Ok(Task::none())
@@ -210,6 +228,37 @@ impl DesktopApp {
             ))]
             Message::OmenChat(OmenChatMessage::LoadOlderModerationAudit(session_id)) => {
                 self.load_older_omenchat_moderation_audit(session_id);
+                Ok(Task::none())
+            }
+            #[cfg(all(
+                feature = "omenchat-moderation-audit",
+                any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+            ))]
+            Message::OmenChat(OmenChatMessage::OpenModerationAudit(session_id)) => {
+                if self
+                    .omenchat
+                    .chat_client
+                    .local_user_can_view_moderation_audit(session_id)
+                    && self
+                        .omenchat
+                        .omenchat_live_state
+                        .moderation_audit_negotiated(session_id)
+                {
+                    self.omenchat
+                        .omenchat_visible_moderation_audits
+                        .insert(session_id);
+                    self.refresh_omenchat_moderation_audit(session_id);
+                }
+                Ok(Task::none())
+            }
+            #[cfg(all(
+                feature = "omenchat-moderation-audit",
+                any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+            ))]
+            Message::OmenChat(OmenChatMessage::CloseModerationAudit(session_id)) => {
+                self.omenchat
+                    .omenchat_visible_moderation_audits
+                    .remove(&session_id);
                 Ok(Task::none())
             }
             Message::OmenChat(OmenChatMessage::CopyInvitation(session_id)) => {

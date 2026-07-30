@@ -1159,7 +1159,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.send_response_frame(link_id, &dispatch.origin)?;
         for broadcast in dispatch.broadcasts {
             if broadcast.op == ChatOp::ReactionEvent {
-                self.broadcast_reaction_event(link_id, &broadcast)?;
+                self.broadcast_reaction_event(&broadcast)?;
             } else if broadcast.op == ChatOp::MessageRevisionEvent {
                 self.broadcast_message_revision_event(link_id, &broadcast)?;
             } else if broadcast.op == ChatOp::PinEvent {
@@ -1200,11 +1200,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         Ok(())
     }
 
-    fn broadcast_reaction_event(
-        &mut self,
-        origin_link_id: LinkId,
-        response: &crate::protocol::Frame,
-    ) -> ServerResult<()> {
+    fn broadcast_reaction_event(&mut self, response: &crate::protocol::Frame) -> ServerResult<()> {
         if response.op != ChatOp::ReactionEvent {
             return Ok(());
         }
@@ -1215,7 +1211,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             .link_rooms
             .iter()
             .filter_map(|(link_id, joined_room_id)| {
-                (*link_id != origin_link_id && *joined_room_id == room_id).then_some(*link_id)
+                (*joined_room_id == room_id).then_some(*link_id)
             })
             .filter(|link_id| {
                 let Some(binding) = self.durable_sessions.get(link_id) else {
@@ -3513,6 +3509,11 @@ mod tests {
         for link_id in [origin_link, capable_link, legacy_link, wrong_identity_link] {
             live.link_rooms.insert(link_id, 1);
         }
+        let origin_peer = ServerPeer {
+            identity_hash: b"origin".to_vec(),
+            display_name: "Origin".into(),
+            lxmf_destination: None,
+        };
         let capable_peer = ServerPeer {
             identity_hash: b"capable".to_vec(),
             display_name: "Capable".into(),
@@ -3528,10 +3529,23 @@ mod tests {
             display_name: "Replacement".into(),
             lxmf_destination: None,
         };
+        live.peers.insert(origin_link, origin_peer.clone());
         live.peers.insert(capable_link, capable_peer.clone());
         live.peers.insert(legacy_link, legacy_peer.clone());
         live.peers
             .insert(wrong_identity_link, mismatched_peer.clone());
+        live.durable_sessions.insert(
+            origin_link,
+            DurableSessionBinding {
+                identity_hash: origin_peer.identity_hash,
+                client_instance_id: ClientInstanceId::new([0x70; 16]),
+                durable_notice_ack: true,
+                reply_mentions: true,
+                reactions: true,
+                message_revisions: false,
+                pins: false,
+            },
+        );
         live.durable_sessions.insert(
             capable_link,
             DurableSessionBinding {
@@ -3569,19 +3583,28 @@ mod tests {
             },
         );
 
-        live.broadcast_reaction_event(
-            origin_link,
-            &Frame::new(ChatOp::ReactionEvent, 9, Some(1), FrameBody::Empty),
-        )
+        live.broadcast_reaction_event(&Frame::new(
+            ChatOp::ReactionEvent,
+            9,
+            Some(1),
+            FrameBody::Empty,
+        ))
         .expect("reaction fanout");
-        assert_eq!(live.transport().frames.len(), 1);
-        assert_eq!(live.transport().frames[0].link_id, capable_link);
-        assert_eq!(
-            decode_frame(&live.transport().frames[0].bytes)
-                .expect("captured reaction")
-                .op,
-            ChatOp::ReactionEvent
-        );
+        assert_eq!(live.transport().frames.len(), 2);
+        let mut recipients = live
+            .transport()
+            .frames
+            .iter()
+            .map(|frame| {
+                assert_eq!(
+                    decode_frame(&frame.bytes).expect("captured reaction").op,
+                    ChatOp::ReactionEvent
+                );
+                frame.link_id
+            })
+            .collect::<Vec<_>>();
+        recipients.sort_unstable();
+        assert_eq!(recipients, vec![origin_link, capable_link]);
     }
 
     #[test]

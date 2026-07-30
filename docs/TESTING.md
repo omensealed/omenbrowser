@@ -4064,7 +4064,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.6-4` must report
+therefore exits with the expected signal status; current `0.9.6-5` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -4190,7 +4190,20 @@ cargo test --locked --no-default-features --features desktop-dev \
   durable_reaction --lib
 cargo test --locked --no-default-features --features desktop-dev \
   reaction_intent_survives_restart --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_message_action_hover_has_one_owner_and_ignores_stale_exit --lib
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless \
+  reaction_events_fan_out_only_to_joined_capability_bound_links --lib)
 ```
+
+The focused live fan-out regression requires the authoritative
+`ReactionEvent` to reach both the capable originating Link and another capable
+joined Link, while excluding legacy and identity-replaced Links. The desktop
+hover regression proves that only one message owns the ephemeral action row
+overlay and that a stale exit event cannot hide a newer message's controls.
+Reaction
+summary chips are independent and remain visible.
 
 Standalone server qualification and explicit isolated measurements:
 
@@ -5364,6 +5377,8 @@ presentation slice:
 cargo test --locked --no-default-features \
   --features desktop-product,omenchat-moderation-audit \
   moderation_audit --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_moderation_audit_close_hides_the_session_panel --lib
 ```
 
 The focused tests require moderator/admin authority, one single-flight manual
@@ -5376,7 +5391,9 @@ requested limit; it accumulates only within the existing 256-record/512-KiB
 client ceilings and stops at explicit end or the local retention ceiling. A
 full page is “complete; more may exist,” not an indefinitely receiving
 transfer. The panel never polls, automatically retries, or exposes a false
-inbound-Resource Cancel action. Canonical desktop/static-media and standalone
+inbound-Resource Cancel action. Opening it is an explicit authorized action,
+closing it clears only bounded ephemeral presentation state, and unauthorized
+sessions render no audit panel or opener. Canonical desktop/static-media and standalone
 server products require the real capability; both process-qualification hooks
 remain forbidden. A separate root TUI consumer is not fabricated: that TUI's
 Messages workspace is LXMF-only and omenchatd's TUI has no client identity. Any

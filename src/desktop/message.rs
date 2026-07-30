@@ -481,6 +481,16 @@ pub(in crate::desktop) enum OmenChatMessage {
         session_id: ChatSessionId,
         user_id: u32,
     },
+    MessageActionsHovered {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
+    MessageActionsUnhovered {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
     ClearMentions(ChatSessionId),
     SendDraft(ChatSessionId),
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -551,6 +561,16 @@ pub(in crate::desktop) enum OmenChatMessage {
         any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
     ))]
     LoadOlderModerationAudit(ChatSessionId),
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    OpenModerationAudit(ChatSessionId),
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    CloseModerationAudit(ChatSessionId),
     CopyInvitation(ChatSessionId),
     #[cfg(feature = "desktop-qr")]
     ToggleInvitationQr(ChatSessionId),

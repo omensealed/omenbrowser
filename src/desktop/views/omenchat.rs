@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, stack, text, text_input};
 #[cfg(feature = "desktop-qr")]
 use iced::widget::{qr_code, text::Wrapping};
 use iced::{Element, Font, Length};
@@ -482,6 +482,11 @@ fn omenchat_moderation_audit_panel<'a>(
             Message::OmenChat(OmenChatMessage::LoadOlderModerationAudit(session_id)),
         ));
     }
+    header = header.push(inline_icon_button_owned(
+        ICON_WINDOW_CLOSE,
+        "Close moderation audit",
+        Message::OmenChat(OmenChatMessage::CloseModerationAudit(session_id)),
+    ));
     let mut content = column![header, text(status).size(ui_size(11))]
         .spacing(5)
         .width(Length::Fill);
@@ -585,6 +590,28 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 }),
             ));
         }
+        #[cfg(all(
+            feature = "omenchat-moderation-audit",
+            any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+        ))]
+        if desktop
+            .omenchat
+            .chat_client
+            .local_user_can_view_moderation_audit(session.session_id)
+            && desktop
+                .omenchat
+                .omenchat_live_state
+                .moderation_audit_negotiated(session.session_id)
+            && !desktop
+                .omenchat
+                .omenchat_visible_moderation_audits
+                .contains(&session.session_id)
+        {
+            room_column = room_column.push(subtle_button(
+                "Moderation audit",
+                Message::OmenChat(OmenChatMessage::OpenModerationAudit(session.session_id)),
+            ));
+        }
         room_column.width(Length::Shrink)
     } else {
         column![].width(Length::Shrink)
@@ -685,8 +712,15 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         let mut group_content: iced::widget::Column<'_, Message> =
             column![header].spacing(1).width(Length::Fill);
         for body in group.bodies {
+            let hover_target = body.reaction_target;
+            let message_hovered = hover_target.is_some_and(|event_id| {
+                desktop.omenchat.omenchat_hovered_message
+                    == Some((session.session_id, session.active_room.room_id, event_id))
+            });
+            let mut body_content: iced::widget::Column<'_, Message> =
+                column![].spacing(1).width(Length::Fill);
             if let Some(reply) = body.reply.as_ref() {
-                group_content = group_content.push(omenchat_reply_line(reply, desktop));
+                body_content = body_content.push(omenchat_reply_line(reply, desktop));
             }
             let media_hints = omenchat_media_hints(
                 &body.text,
@@ -729,13 +763,13 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             }
             if let Some(upload) = body.upload.as_ref() {
                 let key = omenchat_upload_cache_key(upload.session_id, &upload.resource_id);
-                group_content = group_content.push(omenchat_upload_action_row(
+                body_content = body_content.push(omenchat_upload_action_row(
                     line,
                     upload.clone(),
                     desktop.omenchat.omenchat_media_cache.get(&key).cloned(),
                 ));
             } else if let Some(resend) = body.resend {
-                group_content = group_content.push(omenchat_resend_action_row(
+                body_content = body_content.push(omenchat_resend_action_row(
                     line,
                     resend.session_id,
                     resend.room_id,
@@ -747,7 +781,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 .reply_target
                 .filter(|_| desktop.omenchat_reply_mentions_available(session.session_id))
             {
-                group_content = group_content.push(
+                body_content = body_content.push(
                     row![
                         line,
                         inline_icon_button_owned(
@@ -764,14 +798,14 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     .align_y(iced::Alignment::Center),
                 );
             } else {
-                group_content = group_content.push(line);
+                body_content = body_content.push(line);
             }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             if let Some(event_id) = body.reply_target {
                 let correction = revision_correction_targets.contains(&event_id);
                 let deletion = revision_deletion_targets.contains(&event_id);
                 if correction || deletion {
-                    group_content = group_content.push(omenchat_message_revision_controls(
+                    body_content = body_content.push(omenchat_message_revision_controls(
                         session.session_id,
                         session.active_room.room_id,
                         event_id,
@@ -790,7 +824,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     )
                     .map(|action| (event_id, action))
             }) {
-                group_content = group_content.push(omenchat_pin_control(
+                body_content = body_content.push(omenchat_pin_control(
                     session.session_id,
                     session.active_room.room_id,
                     event_id,
@@ -798,27 +832,22 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 ));
             }
             if !body.reactions.is_empty() {
-                group_content = group_content.push(omenchat_reaction_summary_row(&body.reactions));
+                body_content = body_content.push(omenchat_reaction_summary_row(&body.reactions));
             }
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            if let Some(event_id) = body.reaction_target.filter(|event_id| {
-                publish_allowed
+            let reaction_controls_target = body.reaction_target.filter(|event_id| {
+                message_hovered
+                    && publish_allowed
                     && desktop.omenchat_reactions_available(session.session_id)
                     && desktop.omenchat.chat_client.reaction_snapshot_complete(
                         session.session_id,
                         session.active_room.room_id,
                         *event_id,
                     )
-            }) {
-                group_content = group_content.push(omenchat_reaction_controls(
-                    session.session_id,
-                    session.active_room.room_id,
-                    event_id,
-                ));
-            }
+            });
             for hint in media_hints {
                 if let Some(row) = omenchat_media_hint_row(hint.clone()) {
-                    group_content = group_content.push(row);
+                    body_content = body_content.push(row);
                 }
                 if let Some(path) = hint.image_path.as_ref() {
                     if let Some(preview) = omenchat_media_hint_preview(
@@ -828,10 +857,10 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                             .then(|| desktop.omenchat.omenchat_gif_frames.get(path))
                             .flatten(),
                     ) {
-                        group_content = group_content.push(preview);
+                        body_content = body_content.push(preview);
                         if let Some(caption) = hint.caption {
-                            group_content =
-                                group_content.push(safe_timeline_text(caption.to_string(), 11));
+                            body_content =
+                                body_content.push(safe_timeline_text(caption.to_string(), 11));
                         }
                     }
                 }
@@ -850,10 +879,44 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                                     .flatten()
                             }),
                     ) {
-                        group_content = group_content.push(preview);
+                        body_content = body_content.push(preview);
                     }
                 }
             }
+            let mut body_element: Element<'_, Message> =
+                container(body_content).width(Length::Fill).into();
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            if let Some(event_id) = reaction_controls_target {
+                body_element = stack![
+                    body_element,
+                    container(omenchat_reaction_controls(
+                        session.session_id,
+                        session.active_room.room_id,
+                        event_id,
+                    ))
+                    .align_right(Length::Fill)
+                ]
+                .into();
+            }
+            group_content = if let Some(event_id) = hover_target {
+                group_content.push(
+                    mouse_area(body_element)
+                        .on_enter(Message::OmenChat(OmenChatMessage::MessageActionsHovered {
+                            session_id: session.session_id,
+                            room_id: session.active_room.room_id,
+                            event_id,
+                        }))
+                        .on_exit(Message::OmenChat(
+                            OmenChatMessage::MessageActionsUnhovered {
+                                session_id: session.session_id,
+                                room_id: session.active_room.room_id,
+                                event_id,
+                            },
+                        )),
+                )
+            } else {
+                group_content.push(body_element)
+            };
         }
         timeline = timeline.push(container(group_content).padding([2, 8]).width(Length::Fill));
     }
@@ -878,13 +941,15 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             } else {
                 user.display_label()
             };
-            userlist = userlist.push(subtle_button_owned(
-                label,
-                Message::OmenChat(OmenChatMessage::ToggleMention {
-                    session_id: session.session_id,
-                    user_id: user.user_id,
-                }),
-            ));
+            userlist = userlist.push(
+                button(text(label).size(ui_size(13)))
+                    .on_press(Message::OmenChat(OmenChatMessage::ToggleMention {
+                        session_id: session.session_id,
+                        user_id: user.user_id,
+                    }))
+                    .padding(0)
+                    .style(inline_icon_button_style),
+            );
         } else {
             userlist = userlist.push(text(user.display_label()).size(ui_size(13)));
         }
@@ -1219,11 +1284,25 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
     ))]
     {
-        timeline_panel = timeline_panel.push(omenchat_moderation_audit_panel(
-            desktop,
-            session.session_id,
-            active_room_id,
-        ));
+        if desktop
+            .omenchat
+            .omenchat_visible_moderation_audits
+            .contains(&session.session_id)
+            && desktop
+                .omenchat
+                .chat_client
+                .local_user_can_view_moderation_audit(session.session_id)
+            && desktop
+                .omenchat
+                .omenchat_live_state
+                .moderation_audit_negotiated(session.session_id)
+        {
+            timeline_panel = timeline_panel.push(omenchat_moderation_audit_panel(
+                desktop,
+                session.session_id,
+                active_room_id,
+            ));
+        }
     }
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     if let Some(progress) = omenchat_session_resource_progress(desktop, session.session_id) {

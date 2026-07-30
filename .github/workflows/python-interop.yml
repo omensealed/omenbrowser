@@ -194,11 +194,11 @@ jobs:
           OMEN_MIXED_OLD_TARGET_DIR: ${{ github.workspace }}/target/mixed-adjacent-old-cargo
         run: |
           bash scripts/run-mixed-0-6-0-9-lxmf.sh \
-            --report target/mixed-0.9.5-2-0.9.6-4-lxmf-report.json
+            --report target/mixed-0.9.5-2-0.9.6-5-lxmf-report.json
           bash scripts/run-mixed-0-6-0-9-lxmf.sh --resource \
-            --report target/mixed-0.9.5-2-0.9.6-4-resource-report.json
+            --report target/mixed-0.9.5-2-0.9.6-5-resource-report.json
           bash scripts/run-mixed-0-6-0-9-lxmf.sh --restart \
-            --report target/mixed-0.9.5-2-0.9.6-4-restart-report.json
+            --report target/mixed-0.9.5-2-0.9.6-5-restart-report.json
 
       - name: Run adjacent-release propagated LXMF tests
         env:
@@ -207,10 +207,10 @@ jobs:
           OMEN_MIXED_OLD_TARGET_DIR: ${{ github.workspace }}/target/mixed-adjacent-old-cargo
         run: |
           bash scripts/run-mixed-0-6-0-9-propagation.sh --reverse \
-            --report target/mixed-0.9.5-2-0.9.6-4-propagation-report.json
+            --report target/mixed-0.9.5-2-0.9.6-5-propagation-report.json
           OMEN_MIXED_RECOVER_UNKNOWN_SENDER=true \
             bash scripts/run-mixed-0-6-0-9-propagation.sh \
-            --report target/mixed-0.9.6-4-0.9.5-2-propagation-report.json
+            --report target/mixed-0.9.6-5-0.9.5-2-propagation-report.json
 
       - name: Run adjacent-release propagation durability tests
         env:
@@ -220,11 +220,11 @@ jobs:
           OMEN_MIXED_RECOVER_UNKNOWN_SENDER: "true"
         run: |
           bash scripts/run-mixed-0-6-0-9-propagation.sh --node-restart \
-            --report target/mixed-0.9.6-4-0.9.5-2-propagation-node-restart-report.json
+            --report target/mixed-0.9.6-5-0.9.5-2-propagation-node-restart-report.json
           bash scripts/run-mixed-0-6-0-9-propagation.sh --node-crash \
-            --report target/mixed-0.9.6-4-0.9.5-2-propagation-node-crash-report.json
+            --report target/mixed-0.9.6-5-0.9.5-2-propagation-node-crash-report.json
           bash scripts/run-mixed-0-6-0-9-propagation.sh --stamp-ticket \
-            --report target/mixed-0.9.6-4-0.9.5-2-propagation-stamp-ticket-report.json
+            --report target/mixed-0.9.6-5-0.9.5-2-propagation-stamp-ticket-report.json
 
       - name: Run adjacent-release OMENchat compatibility tests
         env:
@@ -234,19 +234,19 @@ jobs:
           OMEN_MIXED_OLD_SERVER_STOP_MODE: orderly
         run: |
           bash scripts/run-mixed-0-6-0-9-omenchat-history.sh \
-            --report target/mixed-0.9.5-2-0.9.6-4-omenchat-history-report.json
+            --report target/mixed-0.9.5-2-0.9.6-5-omenchat-history-report.json
           bash scripts/run-mixed-0-6-0-9-omenchat-live.sh \
-            --report target/mixed-0.9.6-4-client-0.9.5-2-server-report.json
+            --report target/mixed-0.9.6-5-client-0.9.5-2-server-report.json
           bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse \
-            --report target/mixed-0.9.5-2-client-0.9.6-4-server-report.json
+            --report target/mixed-0.9.5-2-client-0.9.6-5-server-report.json
           bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --restart \
-            --report target/mixed-0.9.6-4-client-0.9.5-2-server-restart-report.json
+            --report target/mixed-0.9.6-5-client-0.9.5-2-server-restart-report.json
           bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --restart \
-            --report target/mixed-0.9.5-2-client-0.9.6-4-server-restart-report.json
+            --report target/mixed-0.9.5-2-client-0.9.6-5-server-restart-report.json
           bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --history-resource \
-            --report target/mixed-0.9.6-4-client-0.9.5-2-server-history-report.json
+            --report target/mixed-0.9.6-5-client-0.9.5-2-server-history-report.json
           bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --history-resource \
-            --report target/mixed-0.9.5-2-client-0.9.6-4-server-history-report.json
+            --report target/mixed-0.9.5-2-client-0.9.6-5-server-history-report.json
 
       - name: Run previous-release OMENchat compatibility tests
         env:
@@ -256,11 +256,11 @@ jobs:
           OMEN_MIXED_OLD_SERVER_STOP_MODE: orderly
         run: |
           bash scripts/run-mixed-0-6-0-9-omenchat-history.sh \
-            --report target/mixed-0.9.6-1-0.9.6-4-omenchat-history-report.json
+            --report target/mixed-0.9.6-1-0.9.6-5-omenchat-history-report.json
           bash scripts/run-mixed-0-6-0-9-omenchat-live.sh \
-            --report target/mixed-0.9.6-4-client-0.9.6-1-server-report.json
+            --report target/mixed-0.9.6-5-client-0.9.6-1-server-report.json
           bash scripts/run-mixed-0-6-0-9-omenchat-live.sh --reverse --restart \
-            --report target/mixed-0.9.6-1-client-0.9.6-4-server-restart-report.json
+            --report target/mixed-0.9.6-1-client-0.9.6-5-server-restart-report.json
 
       - name: Run mixed-application propagation-node restart test
         run: |

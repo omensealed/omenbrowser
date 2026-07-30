@@ -1959,7 +1959,7 @@ async fn run_omenchat_reaction_smoke(
         },
     );
     send_omenchat_smoke_outgoing(runtime, options.link_id, transport).await?;
-    let snapshot_events = wait_for_omenchat_condition(
+    let snapshot_events = wait_for_omenchat_condition_or_event(
         runtime,
         runtime_events,
         client,
@@ -1970,25 +1970,20 @@ async fn run_omenchat_reaction_smoke(
             session_id: options.session_id,
             wait: options.wait,
         },
-        |client| {
-            client
-                .reactions_for_targets(
-                    options.session_id,
-                    options.room_id,
-                    &[options.target_event_id],
-                )
-                .iter()
-                .any(|reaction| reaction.token == ReactionToken::Heart)
+        |_, _, events| {
+            omenchat_smoke_events_contain_decoded_event_on_transport(
+                events,
+                "reaction_snapshot_applied",
+                "resource_data",
+            )
         },
     )
     .await;
-    let resource_snapshot = snapshot_events.iter().any(|event| {
-        event.get("event").and_then(serde_json::Value::as_str) == Some("resource_data")
-            && omenchat_smoke_events_contain_decoded_event(
-                std::slice::from_ref(event),
-                "reaction_snapshot_applied",
-            )
-    });
+    let resource_snapshot = omenchat_smoke_events_contain_decoded_event_on_transport(
+        &snapshot_events,
+        "reaction_snapshot_applied",
+        "resource_data",
+    );
     stages.push(serde_json::json!({
         "stage": "reaction_resource_snapshot",
         "ok": resource_snapshot,
@@ -3828,6 +3823,7 @@ mod tests {
     use super::{
         create_omenchat_reconnect_ready_file, omenchat_local_announcement_policy_blocked,
         omenchat_smoke_events_contain_announcement_policy_rejection,
+        omenchat_smoke_events_contain_decoded_event_on_transport,
         omenchat_smoke_events_contain_slow_mode_rejection,
     };
     use omenbrowser_rs::chat::ChatClientEvent;
@@ -3845,6 +3841,30 @@ mod tests {
         assert_eq!(std::fs::read(&marker).expect("read marker"), b"ready\n");
         assert!(create_omenchat_reconnect_ready_file(&marker).is_err());
         std::fs::remove_dir_all(root).expect("remove isolated marker root");
+    }
+
+    #[test]
+    fn reaction_resource_evidence_does_not_short_circuit_on_live_delta() {
+        let events = vec![
+            serde_json::json!({
+                "event": "link_data",
+                "decoded": [{"event": "reaction_delta_applied"}],
+            }),
+            serde_json::json!({
+                "event": "resource_data",
+                "decoded": [{"event": "reaction_snapshot_applied"}],
+            }),
+        ];
+        assert!(!omenchat_smoke_events_contain_decoded_event_on_transport(
+            &events[..1],
+            "reaction_snapshot_applied",
+            "resource_data",
+        ));
+        assert!(omenchat_smoke_events_contain_decoded_event_on_transport(
+            &events,
+            "reaction_snapshot_applied",
+            "resource_data",
+        ));
     }
 
     #[test]
