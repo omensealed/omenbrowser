@@ -317,7 +317,16 @@ mod tests {
     use crate::protocol::batch::{resource_offer_body, ResourceOffer};
     use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue};
 
-    use omenchat_protocol::fixtures::v0_6_0_1;
+    use omenchat_protocol::fixtures::{
+        announcement_rooms_v1, message_revisions_v1, moderation_audit_v1, pins_v1, reactions_v1,
+        reply_mentions_v1, room_media_policy_v1, room_slow_mode_v1, v0_6_0_1, v0_9_6_3,
+    };
+    use omenchat_protocol::{
+        MessageRevisionAction, MessageRevisionRequest, ModerationAuditRequest, PinAction,
+        PinRequest, PinSnapshot, PinSnapshotEntry, ReactionAction, ReactionRequest, ReactionToken,
+        ReplyReference, RichMessageBody, RoomCatalogEntry, RoomCatalogShape,
+        ROOM_PIN_SNAPSHOT_MAX_ENTRIES, ROOM_PIN_SNAPSHOT_MAX_TARGETS, ROOM_POLICY_ANNOUNCEMENT,
+    };
 
     #[test]
     fn v0_6_0_1_frame_fixtures_remain_bidirectionally_exact() {
@@ -387,6 +396,327 @@ mod tests {
         let decoded = decode_frame(&encoded).expect("decode frame");
 
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn announcement_room_values_are_byte_exact_and_negotiation_scoped() {
+        let room = RoomCatalogEntry {
+            room_id: 7,
+            name: "announcements".into(),
+            topic: Some("Operator updates".into()),
+            room_revision: 3,
+            policy_bits: ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
+        };
+        for (negotiated, fixture) in [
+            (false, announcement_rooms_v1::LEGACY_ROOM_DELTA),
+            (true, announcement_rooms_v1::POLICY_ROOM_DELTA),
+        ] {
+            let room_value = room
+                .clone()
+                .into_frame_value(negotiated)
+                .expect("bounded room value");
+            let frame = Frame::new(
+                ChatOp::RoomDelta,
+                12,
+                None,
+                FrameBody::Fields(vec![room_value]),
+            );
+            assert_eq!(encode_frame(&frame).expect("encode room delta"), fixture);
+            let decoded = decode_frame(fixture).expect("decode room delta");
+            assert_eq!(decoded, frame);
+            let FrameBody::Fields(values) = decoded.body else {
+                panic!("room delta must have fields");
+            };
+            assert_eq!(
+                RoomCatalogEntry::from_frame_value(&values[0], negotiated),
+                Ok(if negotiated {
+                    room.clone()
+                } else {
+                    RoomCatalogEntry {
+                        policy_bits: 0,
+                        ..room.clone()
+                    }
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn slow_mode_room_value_is_byte_exact_and_shape_scoped() {
+        let room = RoomCatalogEntry {
+            room_id: 7,
+            name: "announcements".into(),
+            topic: Some("Operator updates".into()),
+            room_revision: 3,
+            policy_bits: ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 30,
+            upload_max_file_bytes: None,
+        };
+        let room_value = room
+            .clone()
+            .into_frame_value_for_shape(RoomCatalogShape::SlowMode)
+            .expect("bounded slow-mode room value");
+        let frame = Frame::new(
+            ChatOp::RoomDelta,
+            12,
+            None,
+            FrameBody::Fields(vec![room_value]),
+        );
+        assert_eq!(
+            encode_frame(&frame).expect("encode slow-mode room delta"),
+            room_slow_mode_v1::ROOM_DELTA
+        );
+        let decoded =
+            decode_frame(room_slow_mode_v1::ROOM_DELTA).expect("decode slow-mode room delta");
+        assert_eq!(decoded, frame);
+        let FrameBody::Fields(values) = decoded.body else {
+            panic!("room delta must have fields");
+        };
+        assert_eq!(
+            RoomCatalogEntry::from_frame_value_for_shape(&values[0], RoomCatalogShape::SlowMode),
+            Ok(room)
+        );
+    }
+
+    #[test]
+    fn media_policy_room_and_rejection_values_are_byte_exact_and_dormant() {
+        let room = RoomCatalogEntry {
+            room_id: 7,
+            name: "announcements".into(),
+            topic: Some("Operator updates".into()),
+            room_revision: 3,
+            policy_bits: ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 30,
+            upload_max_file_bytes: Some(256 * 1024),
+        };
+        let room_value = room
+            .clone()
+            .into_frame_value_for_shape(RoomCatalogShape::MediaPolicy)
+            .expect("bounded media-policy room value");
+        let room_frame = Frame::new(
+            ChatOp::RoomDelta,
+            12,
+            None,
+            FrameBody::Fields(vec![room_value]),
+        );
+        assert_eq!(
+            encode_frame(&room_frame).expect("encode media-policy room delta"),
+            room_media_policy_v1::ROOM_DELTA
+        );
+        let decoded =
+            decode_frame(room_media_policy_v1::ROOM_DELTA).expect("decode media-policy room delta");
+        assert_eq!(decoded, room_frame);
+        let FrameBody::Fields(values) = decoded.body else {
+            panic!("room delta must have fields");
+        };
+        assert_eq!(
+            RoomCatalogEntry::from_frame_value_for_shape(&values[0], RoomCatalogShape::MediaPolicy),
+            Ok(room)
+        );
+
+        let rejection = Frame::new(
+            ChatOp::UploadReject,
+            13,
+            Some(7),
+            FrameBody::Fields(vec![
+                FrameValue::String("upload exceeds room file size limit".into()),
+                FrameValue::U64(256 * 1024),
+                FrameValue::U64(512 * 1024),
+                FrameValue::U64(2),
+            ]),
+        );
+        assert_eq!(
+            encode_frame(&rejection).expect("encode typed upload rejection"),
+            room_media_policy_v1::UPLOAD_REJECT
+        );
+        assert_eq!(
+            decode_frame(room_media_policy_v1::UPLOAD_REJECT)
+                .expect("decode typed upload rejection"),
+            rejection
+        );
+    }
+
+    #[test]
+    fn v0_9_6_3_ordinary_message_remains_byte_exact() {
+        let frame = Frame::new(
+            ChatOp::RoomMessage,
+            7,
+            Some(42),
+            FrameBody::Fields(vec![
+                FrameValue::U64(100),
+                FrameValue::String("hello room".into()),
+            ]),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode ordinary message"),
+            v0_9_6_3::ORDINARY_ROOM_MESSAGE
+        );
+        assert_eq!(
+            decode_frame(v0_9_6_3::ORDINARY_ROOM_MESSAGE).expect("decode v0.9.6-3 message"),
+            frame
+        );
+    }
+
+    #[test]
+    fn reply_mentions_v1_fixture_is_bidirectionally_exact_and_capability_scoped() {
+        let frame = Frame::new(
+            ChatOp::RoomMessage,
+            7,
+            Some(7),
+            RichMessageBody {
+                body: "hello".into(),
+                reply_to: Some(ReplyReference {
+                    room_id: 7,
+                    event_id: 42,
+                }),
+                mentioned_user_ids: vec![2, 9],
+            }
+            .into_frame_body()
+            .expect("bounded rich message"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode rich message"),
+            reply_mentions_v1::ROOM_MESSAGE
+        );
+        assert_eq!(
+            decode_frame(reply_mentions_v1::ROOM_MESSAGE).expect("decode rich message"),
+            frame
+        );
+    }
+
+    #[test]
+    fn reactions_v1_fixture_is_bidirectionally_exact_and_capability_scoped() {
+        let frame = Frame::new(
+            ChatOp::RoomReaction,
+            8,
+            Some(7),
+            ReactionRequest {
+                target_event_id: 42,
+                token: ReactionToken::Heart,
+                action: ReactionAction::Add,
+            }
+            .into_frame_body()
+            .expect("bounded reaction"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode reaction"),
+            reactions_v1::ROOM_REACTION_ADD
+        );
+        assert_eq!(
+            decode_frame(reactions_v1::ROOM_REACTION_ADD).expect("decode reaction"),
+            frame
+        );
+    }
+
+    #[test]
+    fn message_revisions_v1_fixture_is_bidirectionally_exact_and_dormant() {
+        let frame = Frame::new(
+            ChatOp::RoomMessageRevision,
+            9,
+            Some(7),
+            MessageRevisionRequest {
+                target_event_id: 42,
+                action: MessageRevisionAction::Correct,
+                replacement: Some("edited".into()),
+            }
+            .into_frame_body()
+            .expect("bounded correction"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode correction"),
+            message_revisions_v1::ROOM_MESSAGE_CORRECTION
+        );
+        assert_eq!(
+            decode_frame(message_revisions_v1::ROOM_MESSAGE_CORRECTION).expect("decode correction"),
+            frame
+        );
+    }
+
+    #[test]
+    fn pins_v1_fixture_is_bidirectionally_exact_and_dormant() {
+        let frame = Frame::new(
+            ChatOp::RoomPin,
+            10,
+            Some(7),
+            PinRequest {
+                target_event_id: 42,
+                action: PinAction::Pin,
+            }
+            .into_frame_body()
+            .expect("bounded pin"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode pin"),
+            pins_v1::ROOM_PIN_ADD
+        );
+        assert_eq!(
+            decode_frame(pins_v1::ROOM_PIN_ADD).expect("decode pin"),
+            frame
+        );
+    }
+
+    #[test]
+    fn moderation_audit_v1_fixture_is_bidirectionally_exact_and_dormant() {
+        let frame = Frame::new(
+            ChatOp::ModerationAuditBefore,
+            11,
+            Some(7),
+            ModerationAuditRequest {
+                before_audit_id: Some(42),
+                limit: 50,
+            }
+            .into_frame_body()
+            .expect("bounded moderation audit request"),
+        );
+
+        assert_eq!(
+            encode_frame(&frame).expect("encode moderation audit request"),
+            moderation_audit_v1::AUDIT_BEFORE
+        );
+        assert_eq!(
+            decode_frame(moderation_audit_v1::AUDIT_BEFORE)
+                .expect("decode moderation audit request"),
+            frame
+        );
+    }
+
+    #[test]
+    fn maximum_pin_snapshot_remains_an_inline_bounded_frame() {
+        let snapshot = PinSnapshot {
+            target_event_ids: (1..=ROOM_PIN_SNAPSHOT_MAX_TARGETS as u64).collect(),
+            entries: (1..=ROOM_PIN_SNAPSHOT_MAX_ENTRIES as u64)
+                .map(|target_event_id| PinSnapshotEntry {
+                    target_event_id,
+                    pin_event_id: target_event_id + 1_000,
+                    actor_user_id: u32::MAX,
+                    pinned_at_unix: i64::MAX,
+                })
+                .collect(),
+        };
+        let frame = Frame::new(
+            ChatOp::PinSnapshot,
+            u32::MAX,
+            Some(u32::MAX),
+            snapshot.into_frame_body().expect("maximum pin snapshot"),
+        );
+
+        let encoded = encode_frame(&frame).expect("encode maximum pin snapshot");
+        assert!(
+            encoded.len() < MAX_FRAME_BYTES,
+            "maximum pin snapshot encoded to {} bytes",
+            encoded.len()
+        );
+        assert_eq!(
+            decode_frame(&encoded).expect("decode maximum pin snapshot"),
+            frame
+        );
     }
 
     #[test]

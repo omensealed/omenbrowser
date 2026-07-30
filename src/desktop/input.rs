@@ -113,6 +113,9 @@ pub(super) fn map_key_press(key: keyboard::Key, modifiers: keyboard::Modifiers) 
         Key::Character("b") if modifiers.command() => {
             Some(Message::Shell(ShellMessage::ToggleNavigation))
         }
+        Key::Character("k") if modifiers.command() => {
+            Some(Message::Shell(ShellMessage::OpenCommandPalette))
+        }
         Key::Character("+") | Key::Character("=") if modifiers.command() => {
             Some(Message::Browser(BrowserMessage::Zoom { direction: 1 }))
         }
@@ -145,6 +148,22 @@ pub(super) fn map_key_press(key: keyboard::Key, modifiers: keyboard::Modifiers) 
         }
         Key::Character("g") if modifiers.command() => {
             Some(Message::Runtime(RuntimeMessage::NativeQuickstart))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn map_command_palette_key_press(
+    key: keyboard::Key,
+    modifiers: keyboard::Modifiers,
+) -> Option<Message> {
+    use keyboard::key::Named;
+    use keyboard::Key;
+
+    match key.as_ref() {
+        Key::Named(Named::Escape) => Some(Message::Shell(ShellMessage::CloseCommandPalette)),
+        Key::Character("k") if modifiers.command() => {
+            Some(Message::Shell(ShellMessage::CloseCommandPalette))
         }
         _ => None,
     }
@@ -246,6 +265,17 @@ mod tests {
     use crate::browser::{BrowserPage, PageSource};
     use iced::keyboard::key::Named;
 
+    fn command_modifier() -> keyboard::Modifiers {
+        #[cfg(target_os = "macos")]
+        {
+            keyboard::Modifiers::LOGO
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            keyboard::Modifiers::CTRL
+        }
+    }
+
     fn desktop_with_temp_root(name: &str) -> DesktopApp {
         let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -273,6 +303,26 @@ mod tests {
             .apply_page(page, true);
         assert!(desktop.app.focus_browser_item_with_viewport(80, 20, false));
         assert!(desktop.app.activate_focused_browser_control());
+    }
+
+    #[test]
+    fn command_palette_shortcuts_are_explicit_and_do_not_reuse_browser_actions() {
+        assert!(matches!(
+            map_key_press(keyboard::Key::Character("k".into()), command_modifier()),
+            Some(Message::Shell(ShellMessage::OpenCommandPalette))
+        ));
+        assert!(matches!(
+            map_command_palette_key_press(
+                keyboard::Key::Named(Named::Escape),
+                keyboard::Modifiers::empty()
+            ),
+            Some(Message::Shell(ShellMessage::CloseCommandPalette))
+        ));
+        assert!(map_command_palette_key_press(
+            keyboard::Key::Character("t".into()),
+            command_modifier()
+        )
+        .is_none());
     }
 
     #[test]

@@ -4,10 +4,22 @@
 //! or server policy.
 
 mod durable;
+mod message_revisions;
+mod moderation_audit;
 mod negotiation;
+mod pins;
+mod reactions;
+mod rich_message;
+mod room_policy;
 
 pub use durable::*;
+pub use message_revisions::*;
+pub use moderation_audit::*;
 pub use negotiation::*;
+pub use pins::*;
+pub use reactions::*;
+pub use rich_message::*;
+pub use room_policy::*;
 
 pub type ServerId = String;
 pub type RoomId = u32;
@@ -42,19 +54,37 @@ pub enum ChatOp {
     RoomNotice = 22,
     RoomEvent = 23,
     MessageAck = 24,
+    RoomReaction = 25,
+    ReactionAck = 26,
+    ReactionEvent = 27,
+    ReactionSnapshotInline = 28,
+    ReactionSnapshotResource = 29,
     UserListSnapshotInline = 30,
     UserListSnapshotResource = 31,
     UserDelta = 32,
     RoomDelta = 33,
     RoleDelta = 34,
+    RoomMessageRevision = 35,
+    MessageRevisionAck = 36,
+    MessageRevisionEvent = 37,
+    MessageRevisionSnapshotInline = 38,
+    MessageRevisionSnapshotResource = 39,
     HistoryBefore = 40,
     HistoryInline = 41,
     HistoryResourceOffer = 42,
     HistoryEnd = 43,
     HistoryRecent = 44,
     HistoryCurrent = 45,
+    RoomPin = 46,
+    PinAck = 47,
+    PinEvent = 48,
+    PinSnapshot = 49,
     Command = 50,
     CommandResult = 51,
+    ModerationAuditBefore = 52,
+    ModerationAuditInline = 53,
+    ModerationAuditResource = 54,
+    ModerationAuditEnd = 55,
     ContactRequest = 60,
     ContactOffer = 61,
     ContactAccept = 62,
@@ -89,19 +119,37 @@ impl TryFrom<u64> for ChatOp {
             22 => Ok(Self::RoomNotice),
             23 => Ok(Self::RoomEvent),
             24 => Ok(Self::MessageAck),
+            25 => Ok(Self::RoomReaction),
+            26 => Ok(Self::ReactionAck),
+            27 => Ok(Self::ReactionEvent),
+            28 => Ok(Self::ReactionSnapshotInline),
+            29 => Ok(Self::ReactionSnapshotResource),
             30 => Ok(Self::UserListSnapshotInline),
             31 => Ok(Self::UserListSnapshotResource),
             32 => Ok(Self::UserDelta),
             33 => Ok(Self::RoomDelta),
             34 => Ok(Self::RoleDelta),
+            35 => Ok(Self::RoomMessageRevision),
+            36 => Ok(Self::MessageRevisionAck),
+            37 => Ok(Self::MessageRevisionEvent),
+            38 => Ok(Self::MessageRevisionSnapshotInline),
+            39 => Ok(Self::MessageRevisionSnapshotResource),
             40 => Ok(Self::HistoryBefore),
             41 => Ok(Self::HistoryInline),
             42 => Ok(Self::HistoryResourceOffer),
             43 => Ok(Self::HistoryEnd),
             44 => Ok(Self::HistoryRecent),
             45 => Ok(Self::HistoryCurrent),
+            46 => Ok(Self::RoomPin),
+            47 => Ok(Self::PinAck),
+            48 => Ok(Self::PinEvent),
+            49 => Ok(Self::PinSnapshot),
             50 => Ok(Self::Command),
             51 => Ok(Self::CommandResult),
+            52 => Ok(Self::ModerationAuditBefore),
+            53 => Ok(Self::ModerationAuditInline),
+            54 => Ok(Self::ModerationAuditResource),
+            55 => Ok(Self::ModerationAuditEnd),
             60 => Ok(Self::ContactRequest),
             61 => Ok(Self::ContactOffer),
             62 => Ok(Self::ContactAccept),
@@ -168,6 +216,8 @@ pub enum ChatErrorCode {
     DurableMutationConflict = 1013,
     DurableMutationResultExpired = 1014,
     DurableMutationStoreBusy = 1015,
+    RoomPolicyRestricted = 1016,
+    SlowModeActive = 1017,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -222,10 +272,60 @@ pub enum ProtocolError {
 }
 
 pub mod fixtures {
+    pub mod reactions_v1 {
+        pub const ROOM_REACTION_ADD: &[u8] =
+            b"\x96\x01\x19\x00\x08\x07\x94\xabreaction-v1\x2a\xa5heart\x01";
+    }
+
+    pub mod message_revisions_v1 {
+        pub const ROOM_MESSAGE_CORRECTION: &[u8] =
+            b"\x96\x01\x23\x00\x09\x07\x94\xb3message-revision-v1\x2a\x01\xa6edited";
+    }
+
+    pub mod pins_v1 {
+        pub const ROOM_PIN_ADD: &[u8] = b"\x96\x01\x2e\x00\x0a\x07\x93\xabroom-pin-v1\x2a\x01";
+    }
+
+    pub mod moderation_audit_v1 {
+        pub const AUDIT_BEFORE: &[u8] =
+            b"\x96\x01\x34\x00\x0b\x07\x93\xb3moderation-audit-v1\x2a\x32";
+    }
+
+    pub mod announcement_rooms_v1 {
+        pub const LEGACY_ROOM_DELTA: &[u8] =
+            b"\x96\x01\x21\x00\x0c\xc0\x91\x94\x07\xadannouncements\xb0Operator updates\x03";
+        pub const POLICY_ROOM_DELTA: &[u8] =
+            b"\x96\x01\x21\x00\x0c\xc0\x91\x95\x07\xadannouncements\xb0Operator updates\x03\x01";
+    }
+
+    pub mod room_slow_mode_v1 {
+        pub const ROOM_DELTA: &[u8] =
+            b"\x96\x01\x21\x00\x0c\xc0\x91\x96\x07\xadannouncements\xb0Operator updates\x03\x01\x1e";
+    }
+
+    pub mod room_media_policy_v1 {
+        pub const ROOM_DELTA: &[u8] =
+            b"\x96\x01\x21\x00\x0c\xc0\x91\x97\x07\xadannouncements\xb0Operator updates\x03\x01\x1e\xce\x00\x04\x00\x00";
+        pub const UPLOAD_REJECT: &[u8] =
+            b"\x96\x01\x48\x00\x0d\x07\x94\xd9#upload exceeds room file size limit\xce\x00\x04\x00\x00\xce\x00\x08\x00\x00\x02";
+    }
+
+    pub mod reply_mentions_v1 {
+        pub const ROOM_MESSAGE: &[u8] =
+            b"\x96\x01\x14\x00\x07\x07\x94\xa5hello\xb1reply-mentions-v1\x92\x07\x2a\x92\x02\x09";
+    }
+
     pub mod v0_6_0_1 {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../fixtures/omenchat/v0_6_0_1_wire.rs"
+        ));
+    }
+
+    pub mod v0_9_6_3 {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/omenchat/v0_9_6_3_wire.rs"
         ));
     }
 }
@@ -240,13 +340,33 @@ mod tests {
         assert_eq!(PROTOCOL_NAME, "omenchat-v0.1");
         assert_eq!(ChatOp::SessionOpen as u16, 1);
         assert_eq!(ChatOp::RoomMessage as u16, 20);
+        assert_eq!(ChatOp::RoomReaction as u16, 25);
+        assert_eq!(ChatOp::ReactionSnapshotResource as u16, 29);
+        assert_eq!(ChatOp::RoomMessageRevision as u16, 35);
+        assert_eq!(ChatOp::MessageRevisionSnapshotResource as u16, 39);
         assert_eq!(ChatOp::HistoryResourceOffer as u16, 42);
+        assert_eq!(ChatOp::RoomPin as u16, 46);
+        assert_eq!(ChatOp::PinSnapshot as u16, 49);
+        assert_eq!(ChatOp::ModerationAuditBefore as u16, 52);
+        assert_eq!(ChatOp::ModerationAuditEnd as u16, 55);
         assert_eq!(ChatErrorCode::MalformedFrame as u16, 1007);
         assert_eq!(ChatErrorCode::DurableMutationNotNegotiated as u16, 1011);
+        assert_eq!(DURABLE_MUTATION_CAPABILITY, "durable-mutations-v1");
+        assert_eq!(REACTIONS_CAPABILITY, "reactions-v1");
+        assert_eq!(MESSAGE_REVISIONS_CAPABILITY, "message-revisions-v1");
+        assert_eq!(ROOM_PINS_CAPABILITY, "room-pins-v1");
+        assert_eq!(MODERATION_AUDIT_CAPABILITY, "moderation-audit-v1");
+        assert_eq!(ANNOUNCEMENT_ROOMS_CAPABILITY, "announcement-rooms-v1");
+        assert_eq!(ROOM_SLOW_MODE_CAPABILITY, "room-slow-mode-v1");
+        assert_eq!(ROOM_MEDIA_POLICY_CAPABILITY, "room-media-policy-v1");
+        assert_eq!(ROOM_UPLOAD_MAX_FILE_BYTES, 10 * 1024 * 1024);
+        assert_eq!(DURABLE_NOTICE_ACK_CAPABILITY, "durable-room-notice-ack-v1");
         assert_eq!(ChatErrorCode::DurableMutationMalformed as u16, 1012);
         assert_eq!(ChatErrorCode::DurableMutationConflict as u16, 1013);
         assert_eq!(ChatErrorCode::DurableMutationResultExpired as u16, 1014);
         assert_eq!(ChatErrorCode::DurableMutationStoreBusy as u16, 1015);
+        assert_eq!(ChatErrorCode::RoomPolicyRestricted as u16, 1016);
+        assert_eq!(ChatErrorCode::SlowModeActive as u16, 1017);
         assert_eq!(fixtures::v0_6_0_1::PROTOCOL_VERSION, PROTOCOL_VERSION);
         assert_eq!(fixtures::v0_6_0_1::PROTOCOL_NAME, PROTOCOL_NAME);
         assert_eq!(fixtures::v0_6_0_1::LINK_CONTEXT, 0x4f);
@@ -257,5 +377,9 @@ mod tests {
         assert!(!fixtures::v0_6_0_1::SESSION_OPEN.is_empty());
         assert!(!fixtures::v0_6_0_1::ROOM_MESSAGE.is_empty());
         assert!(!fixtures::v0_6_0_1::HISTORY_RESOURCE_OFFER.is_empty());
+        assert_eq!(fixtures::v0_9_6_3::APPLICATION_VERSION, "0.9.6-3");
+        assert_eq!(fixtures::v0_9_6_3::PROTOCOL_VERSION, PROTOCOL_VERSION);
+        assert_eq!(fixtures::v0_9_6_3::PROTOCOL_NAME, PROTOCOL_NAME);
+        assert!(!fixtures::v0_9_6_3::ORDINARY_ROOM_MESSAGE.is_empty());
     }
 }

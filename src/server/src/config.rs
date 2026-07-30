@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use crate::error::{ServerError, ServerResult};
 use crate::session::SessionLimits;
+use crate::store::{OmenchatStore, RoomHistoryMaintenanceStatus, RoomHistoryRetentionPolicy};
 use crate::tui_format::human_bytes;
 use crate::{TcpClientOverride, TcpServerOverride};
 
@@ -16,6 +17,14 @@ pub const NOMADNET_PORTAL_PATH: &str = "/page/index.mu";
 pub const DEFAULT_UPLOAD_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
 pub const DEFAULT_UPLOAD_MAX_FILE_BYTES: u64 = 512 * 1024;
 pub const DEFAULT_PING_INTERVAL_SECONDS: u64 = 30;
+pub const DEFAULT_HISTORY_RETENTION_MAX_AGE_DAYS: u64 = 365;
+pub const DEFAULT_HISTORY_RETENTION_MAX_EVENTS_PER_ROOM: u64 = 100_000;
+pub const DEFAULT_HISTORY_RETENTION_MAX_BYTES_PER_ROOM: u64 = 256 * 1024 * 1024;
+pub const MAX_HISTORY_RETENTION_AGE_DAYS: u64 = 3_650;
+pub const MAX_HISTORY_RETENTION_EVENTS_PER_ROOM: u64 = 1_000_000;
+pub const MAX_HISTORY_RETENTION_BYTES_PER_ROOM: u64 = 10 * 1024 * 1024 * 1024;
+pub const RETICULUM_CONFIG_MAX_BYTES: usize = 2 * 1024 * 1024;
+pub const RETICULUM_CONFIG_MAX_INTERFACES: usize = 64;
 static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Default, Deserialize)]
@@ -27,6 +36,7 @@ struct ConfigDocument {
     limits: Option<LimitsDocument>,
     compression: Option<CompressionDocument>,
     policy: Option<PolicyDocument>,
+    history_retention: Option<HistoryRetentionDocument>,
     // Version-0 files could place supported values at the document root.
     name: Option<String>,
     operator_label: Option<String>,
@@ -100,6 +110,15 @@ struct PolicyDocument {
     allow_read_receipts: Option<bool>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HistoryRetentionDocument {
+    enabled: Option<bool>,
+    max_age_days: Option<u64>,
+    max_events_per_room: Option<u64>,
+    max_bytes_per_room: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerConfig {
     pub name: String,
@@ -116,6 +135,7 @@ pub struct ServerConfig {
     pub upload_quota_bytes: u64,
     pub upload_max_file_bytes: u64,
     pub ping_interval_seconds: u64,
+    pub history_retention: RoomHistoryRetentionConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +146,44 @@ pub struct ServerLimitsConfig {
     pub large_batch_threshold_bytes: usize,
     pub rate_messages_per_minute: usize,
     pub rate_commands_per_minute: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomHistoryRetentionConfig {
+    pub enabled: bool,
+    pub max_age_days: u64,
+    pub max_events_per_room: u64,
+    pub max_bytes_per_room: u64,
+}
+
+impl Default for RoomHistoryRetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_age_days: DEFAULT_HISTORY_RETENTION_MAX_AGE_DAYS,
+            max_events_per_room: DEFAULT_HISTORY_RETENTION_MAX_EVENTS_PER_ROOM,
+            max_bytes_per_room: DEFAULT_HISTORY_RETENTION_MAX_BYTES_PER_ROOM,
+        }
+    }
+}
+
+impl From<&RoomHistoryRetentionConfig> for RoomHistoryRetentionPolicy {
+    fn from(config: &RoomHistoryRetentionConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            max_age_days: config.max_age_days,
+            max_events_per_room: config.max_events_per_room,
+            max_bytes_per_room: config.max_bytes_per_room,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TcpClientInterfaceSummary {
+    pub name: String,
+    pub target_host: String,
+    pub target_port: u16,
+    pub ifac_configured: bool,
 }
 
 impl Default for ServerLimitsConfig {
@@ -198,6 +256,7 @@ impl ServerConfig {
             upload_quota_bytes: DEFAULT_UPLOAD_QUOTA_BYTES,
             upload_max_file_bytes: DEFAULT_UPLOAD_MAX_FILE_BYTES,
             ping_interval_seconds: DEFAULT_PING_INTERVAL_SECONDS,
+            history_retention: RoomHistoryRetentionConfig::default(),
         }
     }
 
@@ -257,6 +316,13 @@ contact_visibility_default = "on_request"
 require_invite_for_private_rooms = true
 allow_typing_indicators = false
 allow_read_receipts = false
+
+[history_retention]
+# Disabled preserves the historical indefinite-retention behavior.
+enabled = {history_retention_enabled}
+max_age_days = {history_retention_max_age_days}
+max_events_per_room = {history_retention_max_events_per_room}
+max_bytes_per_room = {history_retention_max_bytes_per_room}
 "#,
             name = toml_string(&self.name),
             operator = toml_string(&self.operator_label),
@@ -274,6 +340,19 @@ allow_read_receipts = false
             large_batch_threshold_bytes = self.limits.large_batch_threshold_bytes,
             rate_messages_per_minute = self.limits.rate_messages_per_minute,
             rate_commands_per_minute = self.limits.rate_commands_per_minute,
+            history_retention_enabled = self.history_retention.enabled,
+            history_retention_max_age_days = self
+                .history_retention
+                .max_age_days
+                .clamp(1, MAX_HISTORY_RETENTION_AGE_DAYS),
+            history_retention_max_events_per_room = self
+                .history_retention
+                .max_events_per_room
+                .clamp(1, MAX_HISTORY_RETENTION_EVENTS_PER_ROOM),
+            history_retention_max_bytes_per_room = self
+                .history_retention
+                .max_bytes_per_room
+                .clamp(1, MAX_HISTORY_RETENTION_BYTES_PER_ROOM),
         )
     }
 
@@ -368,7 +447,7 @@ allow_read_receipts = false
             .and_then(|value| value.large_batch_threshold_bytes)
             .or(document.large_batch_threshold_bytes)
         {
-            config.limits.large_batch_threshold_bytes = value.clamp(256, 1_048_576);
+            config.limits.large_batch_threshold_bytes = value.clamp(1, 1_048_576);
         }
         if let Some(value) = limits
             .and_then(|value| value.rate_messages_per_minute)
@@ -381,6 +460,23 @@ allow_read_receipts = false
             .or(document.rate_commands_per_minute)
         {
             config.limits.rate_commands_per_minute = value.min(600);
+        }
+        if let Some(retention) = document.history_retention {
+            config.history_retention.enabled = retention
+                .enabled
+                .unwrap_or(config.history_retention.enabled);
+            if let Some(value) = retention.max_age_days {
+                config.history_retention.max_age_days =
+                    value.clamp(1, MAX_HISTORY_RETENTION_AGE_DAYS);
+            }
+            if let Some(value) = retention.max_events_per_room {
+                config.history_retention.max_events_per_room =
+                    value.clamp(1, MAX_HISTORY_RETENTION_EVENTS_PER_ROOM);
+            }
+            if let Some(value) = retention.max_bytes_per_room {
+                config.history_retention.max_bytes_per_room =
+                    value.clamp(1, MAX_HISTORY_RETENTION_BYTES_PER_ROOM);
+            }
         }
         if upload_max_file_bytes.is_none()
             && config.upload_quota_bytes == DEFAULT_UPLOAD_MAX_FILE_BYTES
@@ -557,6 +653,21 @@ fn validate_fixed_document(document: &ConfigDocument) -> ServerResult<()> {
             6,
             "compression.compression_level",
         )?;
+    }
+    if let Some(retention) = &document.history_retention {
+        if retention.enabled == Some(true) {
+            for (name, value) in [
+                ("max_age_days", retention.max_age_days),
+                ("max_events_per_room", retention.max_events_per_room),
+                ("max_bytes_per_room", retention.max_bytes_per_room),
+            ] {
+                if value == Some(0) {
+                    return Err(ServerError::Message(format!(
+                        "history_retention.{name} must be positive when retention is enabled"
+                    )));
+                }
+            }
+        }
     }
     if let Some(policy) = &document.policy {
         require_fixed(policy.allow_public_rooms, true, "policy.allow_public_rooms")?;
@@ -842,6 +953,91 @@ pub fn write_reticulum_tcp_client_config(
     Ok(())
 }
 
+pub fn add_reticulum_tcp_client_config(
+    config: &ServerConfig,
+    tcp_client: &TcpClientOverride,
+) -> ServerResult<String> {
+    validate_tcp_client_override(tcp_client)?;
+    std::fs::create_dir_all(&config.reticulum_config_path)?;
+    let config_path = config.reticulum_config_file();
+    let current = read_reticulum_config_bounded(&config_path)?;
+    let blocks = reticulum_interface_blocks(&current);
+    if blocks.len() >= RETICULUM_CONFIG_MAX_INTERFACES {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration already contains the {RETICULUM_CONFIG_MAX_INTERFACES} interface limit"
+        )));
+    }
+    let summaries = checked_tcp_client_summaries(&current)?;
+    if let Some(existing) = summaries.into_iter().find(|existing| {
+        existing
+            .target_host
+            .eq_ignore_ascii_case(&tcp_client.target_host)
+            && existing.target_port == tcp_client.target_port
+    }) {
+        return Err(ServerError::Message(format!(
+            "TCP client {}:{} is already configured as {}",
+            tcp_client.target_host, tcp_client.target_port, existing.name
+        )));
+    }
+
+    let name = next_tcp_client_interface_name(&blocks);
+    let mut rendered = current;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    if !rendered.ends_with("\n\n") {
+        rendered.push('\n');
+    }
+    rendered.push_str(&render_reticulum_tcp_client_section(&name, tcp_client));
+    write_reticulum_config_edit(config, rendered.as_bytes())?;
+    Ok(name)
+}
+
+pub fn delete_reticulum_tcp_client_config(
+    config: &ServerConfig,
+    target_host: &str,
+    target_port: u16,
+) -> ServerResult<usize> {
+    validate_tcp_client_endpoint(target_host, target_port)?;
+    let config_path = config.reticulum_config_file();
+    let current = read_reticulum_config_bounded(&config_path)?;
+    let blocks = reticulum_interface_blocks(&current);
+    let removals = blocks
+        .iter()
+        .filter(|block| {
+            block.kind.as_deref() == Some("TCPClientInterface")
+                && block
+                    .target_host
+                    .as_deref()
+                    .is_some_and(|host| host.eq_ignore_ascii_case(target_host))
+                && block.target_port == Some(target_port)
+        })
+        .map(|block| (block.start, block.end))
+        .collect::<Vec<_>>();
+    if removals.is_empty() {
+        return Err(ServerError::Message(format!(
+            "TCP client {target_host}:{target_port} is not configured"
+        )));
+    }
+
+    let mut rendered = String::with_capacity(current.len());
+    let mut cursor = 0;
+    for (start, end) in &removals {
+        rendered.push_str(&current[cursor..*start]);
+        cursor = *end;
+    }
+    rendered.push_str(&current[cursor..]);
+    write_reticulum_config_edit(config, rendered.as_bytes())?;
+    Ok(removals.len())
+}
+
+pub fn list_reticulum_tcp_client_configs(
+    config: &ServerConfig,
+) -> ServerResult<Vec<TcpClientInterfaceSummary>> {
+    let current = read_reticulum_config_bounded(&config.reticulum_config_file())?;
+    checked_tcp_client_summaries(&current)
+}
+
 fn render_reticulum_base_config(config: &ServerConfig) -> String {
     format!(
         r#"[reticulum]
@@ -916,6 +1112,27 @@ loglevel = 4
         target_host = tcp_client.target_host,
         target_port = tcp_client.target_port
     );
+    append_tcp_client_ifac_fields(&mut rendered, tcp_client);
+    rendered
+}
+
+fn render_reticulum_tcp_client_section(name: &str, tcp_client: &TcpClientOverride) -> String {
+    let mut rendered = format!(
+        r#"  [[{name}]]
+    type = TCPClientInterface
+    enabled = Yes
+    interface_enabled = true
+    target_host = {target_host}
+    target_port = {target_port}
+"#,
+        target_host = tcp_client.target_host,
+        target_port = tcp_client.target_port
+    );
+    append_tcp_client_ifac_fields(&mut rendered, tcp_client);
+    rendered
+}
+
+fn append_tcp_client_ifac_fields(rendered: &mut String, tcp_client: &TcpClientOverride) {
     if let Some(network_name) = tcp_client
         .network_name
         .as_deref()
@@ -932,21 +1149,229 @@ loglevel = 4
     {
         rendered.push_str(&format!("    passphrase = {passphrase}\n"));
     }
-    rendered
+}
+
+#[derive(Debug)]
+struct ReticulumInterfaceBlock {
+    start: usize,
+    end: usize,
+    name: String,
+    kind: Option<String>,
+    target_host: Option<String>,
+    target_port: Option<u16>,
+    network_name: Option<String>,
+    passphrase_configured: bool,
+}
+
+fn read_reticulum_config_bounded(path: &std::path::Path) -> ServerResult<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration {} must be a regular non-symlink file",
+            path.display()
+        )));
+    }
+    if metadata.len() > RETICULUM_CONFIG_MAX_BYTES as u64 {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration exceeds the {RETICULUM_CONFIG_MAX_BYTES} byte limit"
+        )));
+    }
+    let contents = std::fs::read_to_string(path)?;
+    if contents.len() > RETICULUM_CONFIG_MAX_BYTES {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration exceeds the {RETICULUM_CONFIG_MAX_BYTES} byte limit"
+        )));
+    }
+    Ok(contents)
+}
+
+fn reticulum_interface_blocks(contents: &str) -> Vec<ReticulumInterfaceBlock> {
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in contents.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[[") && trimmed.ends_with("]]") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    if offset < contents.len() {
+        let trimmed = contents[offset..].trim();
+        if trimmed.starts_with("[[") && trimmed.ends_with("]]") {
+            starts.push(offset);
+        }
+    }
+
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = starts.get(index + 1).copied().unwrap_or(contents.len());
+            let text = &contents[*start..end];
+            let name = text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches("[[")
+                .trim_end_matches("]]")
+                .trim()
+                .to_string();
+            let mut block = ReticulumInterfaceBlock {
+                start: *start,
+                end,
+                name,
+                kind: None,
+                target_host: None,
+                target_port: None,
+                network_name: None,
+                passphrase_configured: false,
+            };
+            for line in text.lines().skip(1) {
+                let Some((key, value)) = parse_reticulum_assignment(line) else {
+                    continue;
+                };
+                match key {
+                    "type" => block.kind = Some(value),
+                    "target_host" => block.target_host = Some(value),
+                    "target_port" => block.target_port = value.parse().ok(),
+                    "network_name" => block.network_name = Some(value),
+                    "passphrase" => block.passphrase_configured = !value.is_empty(),
+                    _ => {}
+                }
+            }
+            block
+        })
+        .collect()
+}
+
+fn parse_reticulum_assignment(line: &str) -> Option<(&str, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('[') {
+        return None;
+    }
+    let (key, value) = trimmed.split_once('=')?;
+    let value = value
+        .trim()
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or_else(|| value.trim())
+        .to_string();
+    Some((key.trim(), value))
+}
+
+fn tcp_client_summaries(contents: &str) -> Vec<TcpClientInterfaceSummary> {
+    reticulum_interface_blocks(contents)
+        .into_iter()
+        .filter_map(|block| {
+            if block.kind.as_deref() != Some("TCPClientInterface") {
+                return None;
+            }
+            Some(TcpClientInterfaceSummary {
+                name: block.name,
+                target_host: block.target_host?,
+                target_port: block.target_port?,
+                ifac_configured: block.network_name.is_some() || block.passphrase_configured,
+            })
+        })
+        .collect()
+}
+
+fn checked_tcp_client_summaries(contents: &str) -> ServerResult<Vec<TcpClientInterfaceSummary>> {
+    let summaries = tcp_client_summaries(contents);
+    for summary in &summaries {
+        validate_reticulum_config_value(&summary.name, 256, "interface name")?;
+        validate_tcp_client_endpoint(&summary.target_host, summary.target_port)?;
+    }
+    Ok(summaries)
+}
+
+fn next_tcp_client_interface_name(blocks: &[ReticulumInterfaceBlock]) -> String {
+    for number in 1..=RETICULUM_CONFIG_MAX_INTERFACES {
+        let candidate = format!("OMENchat TCP Client {number}");
+        if blocks.iter().all(|block| block.name != candidate) {
+            return candidate;
+        }
+    }
+    "OMENchat TCP Client".into()
+}
+
+fn validate_tcp_client_override(tcp_client: &TcpClientOverride) -> ServerResult<()> {
+    validate_tcp_client_endpoint(&tcp_client.target_host, tcp_client.target_port)?;
+    if let Some(network_name) = tcp_client.network_name.as_deref() {
+        validate_reticulum_config_value(network_name, 4096, "network name")?;
+    }
+    if let Some(passphrase) = tcp_client.passphrase.as_deref() {
+        validate_reticulum_config_value(passphrase, 4096, "passphrase")?;
+    }
+    Ok(())
+}
+
+fn validate_tcp_client_endpoint(target_host: &str, target_port: u16) -> ServerResult<()> {
+    validate_reticulum_config_value(target_host, 255, "target host")?;
+    if !target_host.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, '.' | '-' | '_' | ':' | '[' | ']' | '%')
+    }) {
+        return Err(ServerError::Message(
+            "Reticulum target host contains unsupported characters".into(),
+        ));
+    }
+    if target_port == 0 {
+        return Err(ServerError::Message(
+            "TCP client target port must be nonzero".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reticulum_config_value(value: &str, max_bytes: usize, label: &str) -> ServerResult<()> {
+    if value.is_empty() || value.len() > max_bytes {
+        return Err(ServerError::Message(format!(
+            "Reticulum {label} must contain 1..={max_bytes} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(ServerError::Message(format!(
+            "Reticulum {label} contains an unsafe control character"
+        )));
+    }
+    Ok(())
+}
+
+fn write_reticulum_config_edit(config: &ServerConfig, bytes: &[u8]) -> ServerResult<()> {
+    if bytes.len() > RETICULUM_CONFIG_MAX_BYTES {
+        return Err(ServerError::Message(format!(
+            "Reticulum configuration would exceed the {RETICULUM_CONFIG_MAX_BYTES} byte limit"
+        )));
+    }
+    let path = config.reticulum_config_file();
+    let previous = read_reticulum_config_bounded(&path)?;
+    let backup = path.with_extension("before-interface-edit.bak");
+    write_private_atomic(&backup, previous.as_bytes())?;
+    write_private_atomic(&path, bytes)?;
+    Ok(())
 }
 
 pub fn render_status(config: &ServerConfig) -> String {
     let rooms = list_rooms(config).unwrap_or_default();
-    render_status_with_room_count(config, rooms.len())
+    let mut rendered = render_status_with_room_count(config, rooms.len());
+    let maintenance = OmenchatStore::open_read_only(&config.database_path)
+        .and_then(|store| store.room_history_maintenance_status(256));
+    rendered.push_str(&render_history_maintenance_status(
+        maintenance.as_ref().ok(),
+    ));
+    rendered
 }
 
 pub fn render_status_with_room_count(config: &ServerConfig, room_count: usize) -> String {
     let reticulum_config_file = config.reticulum_config_file();
     let destination_status = render_destination_status(config);
     let portal_file_status = render_portal_file_status(config);
+    let history_retention = render_history_retention_status(&config.history_retention);
     let limits = render_limits_status(&config.limits);
     format!(
-        "name: {name}\noperator: {operator}\nmotd: {motd}\nidentity: {identity}\n{destination_status}database: {database}\nreticulum dir: {reticulum_dir}\nreticulum config: {reticulum_config}\nchat service: omenchat.{aspect} (fixed)\nportal service: nomadnetwork.node path={nomadnet_page} (fixed)\n{portal_file_status}announce interval: {announce_interval} minute(s)\nping interval: {ping_interval} second(s)\nupload quota: {upload_quota}\nupload max file: {upload_max_file}\nupload cache: {upload_cache}\nrooms: {rooms}\n{limits}",
+        "name: {name}\noperator: {operator}\nmotd: {motd}\nidentity: {identity}\n{destination_status}database: {database}\nreticulum dir: {reticulum_dir}\nreticulum config: {reticulum_config}\nchat service: omenchat.{aspect} (fixed)\nportal service: nomadnetwork.node path={nomadnet_page} (fixed)\n{portal_file_status}announce interval: {announce_interval} minute(s)\nping interval: {ping_interval} second(s)\nupload quota: {upload_quota}\nupload max file: {upload_max_file}\nupload cache: {upload_cache}\nrooms: {rooms}\n{history_retention}{limits}",
         name = config.name,
         operator = config.operator_label,
         motd = if config.motd.trim().is_empty() {
@@ -972,6 +1397,7 @@ pub fn render_status_with_room_count(config: &ServerConfig, room_count: usize) -
         upload_max_file = human_bytes(config.upload_max_file_bytes),
         upload_cache = config.upload_cache_path().display(),
         rooms = room_count,
+        history_retention = history_retention,
         limits = limits,
     )
 }
@@ -1007,6 +1433,42 @@ fn render_limits_status(limits: &ServerLimitsConfig) -> String {
         large_batch_human = human_bytes(limits.large_batch_threshold_bytes as u64),
         rate_messages_per_minute = limits.rate_messages_per_minute,
         rate_commands_per_minute = limits.rate_commands_per_minute,
+    )
+}
+
+fn render_history_retention_status(retention: &RoomHistoryRetentionConfig) -> String {
+    format!(
+        "history retention: {state}\n  max age: {max_age_days} day(s)\n  max events per room: {max_events_per_room}\n  max bytes per room: {max_bytes_per_room} ({max_bytes_human})\n  runtime activity observable from status: no\n",
+        state = if retention.enabled {
+            "enabled for live event admission"
+        } else {
+            "disabled"
+        },
+        max_age_days = retention.max_age_days,
+        max_events_per_room = retention.max_events_per_room,
+        max_bytes_per_room = retention.max_bytes_per_room,
+        max_bytes_human = human_bytes(retention.max_bytes_per_room),
+    )
+}
+
+fn render_history_maintenance_status(status: Option<&RoomHistoryMaintenanceStatus>) -> String {
+    let Some(status) = status else {
+        return "history accounting: unavailable (read-only inspection failed)\n".into();
+    };
+    format!(
+        "history accounting: inspected {inspected_rooms} room(s){more}\n  complete: {complete_ledgers}; incomplete: {incomplete_ledgers}; missing: {missing_ledgers}\n  accounted: {accounted_events} event(s), {accounted_bytes} ({accounted_bytes_human})\n",
+        inspected_rooms = status.inspected_rooms,
+        more = if status.more_rooms {
+            " (more rooms not inspected)"
+        } else {
+            ""
+        },
+        complete_ledgers = status.complete_ledgers,
+        incomplete_ledgers = status.incomplete_ledgers,
+        missing_ledgers = status.missing_ledgers,
+        accounted_events = status.accounted_events,
+        accounted_bytes = status.accounted_bytes,
+        accounted_bytes_human = human_bytes(status.accounted_bytes),
     )
 }
 
@@ -1342,6 +1804,110 @@ mod tests {
     }
 
     #[test]
+    fn tcp_client_management_adds_lists_and_deletes_without_replacing_other_interfaces() {
+        let root = temp_root("tcp-client-multiple");
+        let config = ServerConfig::for_root(root.clone());
+        init_files(&config).expect("init");
+        write_reticulum_tcp_server_config(
+            &config,
+            &TcpServerOverride {
+                listen_ip: "127.0.0.1".into(),
+                listen_port: 42420,
+            },
+        )
+        .expect("write server");
+
+        let private_name = add_reticulum_tcp_client_config(
+            &config,
+            &TcpClientOverride {
+                target_host: "private.example".into(),
+                target_port: 42420,
+                network_name: Some("private-net".into()),
+                passphrase: Some("private-passphrase".into()),
+            },
+        )
+        .expect("add private");
+        let public_name = add_reticulum_tcp_client_config(
+            &config,
+            &TcpClientOverride {
+                target_host: "wns.example".into(),
+                target_port: 42420,
+                network_name: None,
+                passphrase: None,
+            },
+        )
+        .expect("add public");
+
+        assert_ne!(private_name, public_name);
+        let listed = list_reticulum_tcp_client_configs(&config).expect("list");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].target_host, "private.example");
+        assert!(listed[0].ifac_configured);
+        assert_eq!(listed[1].target_host, "wns.example");
+        assert!(!listed[1].ifac_configured);
+        let rendered =
+            std::fs::read_to_string(config.reticulum_config_file()).expect("read config");
+        assert!(rendered.contains("type = TCPServerInterface"));
+        assert!(rendered.contains("target_host = private.example"));
+        assert!(rendered.contains("target_host = wns.example"));
+
+        assert_eq!(
+            delete_reticulum_tcp_client_config(&config, "private.example", 42420)
+                .expect("delete private"),
+            1
+        );
+        let remaining = list_reticulum_tcp_client_configs(&config).expect("list remaining");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].target_host, "wns.example");
+        let rendered =
+            std::fs::read_to_string(config.reticulum_config_file()).expect("read remaining");
+        assert!(rendered.contains("type = TCPServerInterface"));
+        assert!(!rendered.contains("private.example"));
+        assert!(rendered.contains("wns.example"));
+        assert!(config
+            .reticulum_config_file()
+            .with_extension("before-interface-edit.bak")
+            .is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tcp_client_management_rejects_duplicates_and_config_injection() {
+        let root = temp_root("tcp-client-validation");
+        let config = ServerConfig::for_root(root.clone());
+        init_files(&config).expect("init");
+        let client = TcpClientOverride {
+            target_host: "gateway.example".into(),
+            target_port: 42420,
+            network_name: None,
+            passphrase: None,
+        };
+        add_reticulum_tcp_client_config(&config, &client).expect("add");
+
+        let duplicate =
+            add_reticulum_tcp_client_config(&config, &client).expect_err("duplicate rejected");
+        assert!(duplicate.to_string().contains("already configured"));
+        let injected = add_reticulum_tcp_client_config(
+            &config,
+            &TcpClientOverride {
+                target_host: "gateway.example\n[[Injected]]".into(),
+                target_port: 42421,
+                network_name: None,
+                passphrase: None,
+            },
+        )
+        .expect_err("injection rejected");
+        assert!(injected.to_string().contains("unsafe control character"));
+        assert_eq!(
+            list_reticulum_tcp_client_configs(&config)
+                .expect("list")
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn load_or_default_reads_saved_operator_config() {
         let root = temp_root("load-config");
         let mut config = ServerConfig::for_root(root.clone());
@@ -1380,6 +1946,22 @@ mod tests {
         assert_eq!(loaded.limits.rate_commands_per_minute, 17);
         assert_eq!(loaded.identity_path, config.identity_path);
         assert_eq!(loaded.reticulum_config_path, config.reticulum_config_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn large_batch_threshold_can_force_resource_without_changing_payload_limits() {
+        let root = temp_root("forced-resource-threshold");
+        let mut config = ServerConfig::for_root(root.clone());
+        init_files(&config).expect("init");
+        let max_message_bytes = config.limits.max_message_bytes;
+        config.limits.large_batch_threshold_bytes = 1;
+        config.save().expect("save");
+
+        let loaded = ServerConfig::load_or_default(root.clone()).expect("load");
+
+        assert_eq!(loaded.limits.large_batch_threshold_bytes, 1);
+        assert_eq!(loaded.limits.max_message_bytes, max_message_bytes);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1423,6 +2005,74 @@ mod tests {
             .expect_err("malformed quota must fail")
             .to_string();
         assert!(malformed.contains("upload_quota_bytes"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn history_retention_defaults_disabled_and_round_trips_bounded_policy() {
+        let root = temp_root("history-retention-config");
+        let mut config = ServerConfig::for_root(root.clone());
+        assert_eq!(
+            config.history_retention,
+            RoomHistoryRetentionConfig::default()
+        );
+        config.history_retention = RoomHistoryRetentionConfig {
+            enabled: true,
+            max_age_days: 90,
+            max_events_per_room: 25_000,
+            max_bytes_per_room: 64 * 1024 * 1024,
+        };
+        config.save().expect("save retention policy");
+
+        let loaded = ServerConfig::load_or_default(root.clone()).expect("load retention policy");
+        assert_eq!(loaded.history_retention, config.history_retention);
+        let status = render_status(&loaded);
+        assert!(status.contains("history retention: enabled for live event admission"));
+        assert!(status.contains("runtime activity observable from status: no"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enabled_history_retention_rejects_zero_and_clamps_excessive_limits() {
+        let root = temp_root("history-retention-validation");
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("config.toml");
+        std::fs::write(
+            &path,
+            "[history_retention]\nenabled = true\nmax_age_days = 0\n",
+        )
+        .expect("zero policy");
+        let error = ServerConfig::load_or_default(root.clone())
+            .expect_err("enabled zero limit must fail")
+            .to_string();
+        assert!(error.contains("max_age_days must be positive"));
+
+        std::fs::write(
+            &path,
+            format!(
+                "[history_retention]\nenabled = false\nmax_age_days = {}\nmax_events_per_room = {}\nmax_bytes_per_room = {}\n",
+                MAX_HISTORY_RETENTION_AGE_DAYS + 1,
+                MAX_HISTORY_RETENTION_EVENTS_PER_ROOM + 1,
+                MAX_HISTORY_RETENTION_BYTES_PER_ROOM + 1,
+            ),
+        )
+        .expect("excessive disabled policy");
+        let loaded = ServerConfig::load_or_default(root.clone()).expect("clamped policy");
+        assert!(!loaded.history_retention.enabled);
+        assert_eq!(
+            loaded.history_retention.max_age_days,
+            MAX_HISTORY_RETENTION_AGE_DAYS
+        );
+        assert_eq!(
+            loaded.history_retention.max_events_per_room,
+            MAX_HISTORY_RETENTION_EVENTS_PER_ROOM
+        );
+        assert_eq!(
+            loaded.history_retention.max_bytes_per_room,
+            MAX_HISTORY_RETENTION_BYTES_PER_ROOM
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

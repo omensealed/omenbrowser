@@ -98,6 +98,13 @@ pub enum IntentTransition {
     StateMismatch { current: OutboundMutationState },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum IntentRemoval {
+    Removed(OutboundMutationIntent),
+    Missing,
+    StateMismatch { current: OutboundMutationState },
+}
+
 pub struct MutationIntentStore {
     path: PathBuf,
     connection: rusqlite::Connection,
@@ -193,61 +200,9 @@ impl MutationIntentStore {
             &self.connection,
             rusqlite::TransactionBehavior::Deferred,
         )?;
-        let lengths = transaction
-            .query_row(
-                "SELECT length(client_instance_id),
-                        length(CAST(server_destination AS BLOB)),
-                        length(authenticated_identity_hash), length(request_hash),
-                        length(request_frame),
-                        COALESCE(length(CAST(correlation_id AS BLOB)), 0),
-                        retained_bytes
-                 FROM mutation_intents WHERE mutation_id = ?1",
-                [mutation_id.as_bytes().as_slice()],
-                |row| {
-                    Ok(IntentLengths {
-                        client_instance_id: row.get(0)?,
-                        server_destination: row.get(1)?,
-                        identity_hash: row.get(2)?,
-                        request_hash: row.get(3)?,
-                        request_frame: row.get(4)?,
-                        correlation_id: row.get(5)?,
-                        retained_bytes: row.get(6)?,
-                    })
-                },
-            )
-            .optional()?;
-        let Some(lengths) = lengths else {
-            transaction.commit()?;
-            return Ok(None);
-        };
-        validate_stored_lengths(lengths)?;
-        let row = transaction.query_row(
-            "SELECT client_instance_id, server_destination,
-                        authenticated_identity_hash, request_hash, op, room_id,
-                        request_frame, state, created_at, expires_at, correlation_id,
-                        retained_bytes
-                 FROM mutation_intents WHERE mutation_id = ?1",
-            [mutation_id.as_bytes().as_slice()],
-            |row| {
-                Ok(StoredIntent {
-                    client_instance_id: row.get(0)?,
-                    server_destination: row.get(1)?,
-                    authenticated_identity_hash: row.get(2)?,
-                    request_hash: row.get(3)?,
-                    op: row.get(4)?,
-                    room_id: row.get(5)?,
-                    request_frame: row.get(6)?,
-                    state: row.get(7)?,
-                    created_at: row.get(8)?,
-                    expires_at: row.get(9)?,
-                    correlation_id: row.get(10)?,
-                    retained_bytes: row.get(11)?,
-                })
-            },
-        )?;
-        let intent = decode_stored_intent(mutation_id, row)?;
+        let intent = load_intent(&transaction, mutation_id)?;
         transaction.commit()?;
-        Ok(Some(intent))
+        Ok(intent)
     }
 
     pub fn transition(
@@ -285,6 +240,44 @@ impl MutationIntentStore {
             },
             None => IntentTransition::Missing,
         })
+    }
+
+    /// Removes a definitively rejected transport attempt without adding a new
+    /// persistent state that older releases would retain indefinitely.
+    ///
+    /// The original intent is returned only when it was still uncertain, so an
+    /// acknowledgement or another terminal transition always wins the race.
+    pub fn remove_rejected_uncertain(
+        &self,
+        mutation_id: MutationId,
+    ) -> anyhow::Result<IntentRemoval> {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let Some(intent) = load_intent(&transaction, mutation_id)? else {
+            transaction.commit()?;
+            return Ok(IntentRemoval::Missing);
+        };
+        if intent.state != OutboundMutationState::SentUncertain {
+            let current = intent.state;
+            transaction.commit()?;
+            return Ok(IntentRemoval::StateMismatch { current });
+        }
+        let changed = transaction.execute(
+            "DELETE FROM mutation_intents WHERE mutation_id = ?1 AND state = ?2",
+            (
+                mutation_id.as_bytes().as_slice(),
+                OutboundMutationState::SentUncertain as i64,
+            ),
+        )?;
+        if changed != 1 {
+            return Err(anyhow!(
+                "uncertain OMENchat mutation intent changed during rejection removal"
+            ));
+        }
+        transaction.commit()?;
+        Ok(IntentRemoval::Removed(intent))
     }
 
     pub fn recover_nonterminal(&self) -> anyhow::Result<Vec<OutboundMutationIntent>> {
@@ -502,6 +495,64 @@ struct IntentLengths {
     retained_bytes: i64,
 }
 
+fn load_intent(
+    connection: &rusqlite::Connection,
+    mutation_id: MutationId,
+) -> anyhow::Result<Option<OutboundMutationIntent>> {
+    let lengths = connection
+        .query_row(
+            "SELECT length(client_instance_id),
+                    length(CAST(server_destination AS BLOB)),
+                    length(authenticated_identity_hash), length(request_hash),
+                    length(request_frame),
+                    COALESCE(length(CAST(correlation_id AS BLOB)), 0),
+                    retained_bytes
+             FROM mutation_intents WHERE mutation_id = ?1",
+            [mutation_id.as_bytes().as_slice()],
+            |row| {
+                Ok(IntentLengths {
+                    client_instance_id: row.get(0)?,
+                    server_destination: row.get(1)?,
+                    identity_hash: row.get(2)?,
+                    request_hash: row.get(3)?,
+                    request_frame: row.get(4)?,
+                    correlation_id: row.get(5)?,
+                    retained_bytes: row.get(6)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(lengths) = lengths else {
+        return Ok(None);
+    };
+    validate_stored_lengths(lengths)?;
+    let row = connection.query_row(
+        "SELECT client_instance_id, server_destination,
+                    authenticated_identity_hash, request_hash, op, room_id,
+                    request_frame, state, created_at, expires_at, correlation_id,
+                    retained_bytes
+             FROM mutation_intents WHERE mutation_id = ?1",
+        [mutation_id.as_bytes().as_slice()],
+        |row| {
+            Ok(StoredIntent {
+                client_instance_id: row.get(0)?,
+                server_destination: row.get(1)?,
+                authenticated_identity_hash: row.get(2)?,
+                request_hash: row.get(3)?,
+                op: row.get(4)?,
+                room_id: row.get(5)?,
+                request_frame: row.get(6)?,
+                state: row.get(7)?,
+                created_at: row.get(8)?,
+                expires_at: row.get(9)?,
+                correlation_id: row.get(10)?,
+                retained_bytes: row.get(11)?,
+            })
+        },
+    )?;
+    decode_stored_intent(mutation_id, row).map(Some)
+}
+
 fn validate_stored_lengths(lengths: IntentLengths) -> anyhow::Result<()> {
     if lengths.client_instance_id != 16
         || !(1..=CHAT_SERVER_DESTINATION_MAX_BYTES as i64).contains(&lengths.server_destination)
@@ -600,6 +651,9 @@ fn validate_prepare_request(
         ChatOp::RoomMessage
             | ChatOp::RoomAction
             | ChatOp::RoomNotice
+            | ChatOp::RoomReaction
+            | ChatOp::RoomMessageRevision
+            | ChatOp::RoomPin
             | ChatOp::PartRoom
             | ChatOp::Command
     ) {
@@ -850,6 +904,134 @@ mod tests {
     }
 
     #[test]
+    fn reaction_intent_survives_restart_without_changing_its_canonical_request() {
+        let root = isolated_root("reaction-restart");
+        let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
+        let body = crate::chat::protocol::ReactionRequest {
+            target_event_id: 42,
+            token: crate::chat::protocol::ReactionToken::Heart,
+            action: crate::chat::protocol::ReactionAction::Add,
+        }
+        .into_frame_body()
+        .expect("reaction body");
+        let request = PrepareOutboundMutation {
+            server_destination: "0123456789abcdef",
+            authenticated_identity_hash: b"authenticated-peer",
+            client_instance_id: ClientInstanceId::new([7; 16]),
+            op: ChatOp::RoomReaction,
+            room_id: Some(9),
+            body: body.clone(),
+            created_at: 100,
+            expires_at: 200,
+            correlation_id: None,
+        };
+        let mutation_id = MutationId::new([0x91; 16]);
+        let prepared = store
+            .persist_prepared_with_id(request, mutation_id, PRODUCTION_LIMITS)
+            .expect("persist reaction");
+        let request_hash = prepared.request_hash;
+        drop(store);
+
+        let reopened =
+            MutationIntentStore::open_for_identity_storage_root(&root).expect("reopen store");
+        let recovered = reopened.recover_nonterminal().expect("recover reaction");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].op, ChatOp::RoomReaction);
+        assert_eq!(recovered[0].body, body);
+        assert_eq!(recovered[0].request_hash, request_hash);
+        assert_eq!(recovered[0].state, OutboundMutationState::Prepared);
+        drop(reopened);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn dormant_message_revision_intent_kind_is_restart_safe_without_capability_activation() {
+        let root = isolated_root("message-revision-restart");
+        let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
+        let body = crate::chat::protocol::MessageRevisionRequest {
+            target_event_id: 42,
+            action: crate::chat::protocol::MessageRevisionAction::Correct,
+            replacement: Some("corrected".into()),
+        }
+        .into_frame_body()
+        .expect("revision body");
+        let mutation_id = MutationId::new([0x92; 16]);
+        let prepared = store
+            .persist_prepared_with_id(
+                PrepareOutboundMutation {
+                    server_destination: "0123456789abcdef",
+                    authenticated_identity_hash: b"authenticated-peer",
+                    client_instance_id: ClientInstanceId::new([7; 16]),
+                    op: ChatOp::RoomMessageRevision,
+                    room_id: Some(9),
+                    body: body.clone(),
+                    created_at: 100,
+                    expires_at: 200,
+                    correlation_id: None,
+                },
+                mutation_id,
+                PRODUCTION_LIMITS,
+            )
+            .expect("persist dormant revision");
+        drop(store);
+
+        let reopened =
+            MutationIntentStore::open_for_identity_storage_root(&root).expect("reopen store");
+        let recovered = reopened
+            .recover_nonterminal()
+            .expect("recover dormant revision");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].op, ChatOp::RoomMessageRevision);
+        assert_eq!(recovered[0].body, body);
+        assert_eq!(recovered[0].request_hash, prepared.request_hash);
+        assert_eq!(recovered[0].state, OutboundMutationState::Prepared);
+        drop(reopened);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn dormant_pin_intent_kind_is_restart_safe_without_capability_activation() {
+        let root = isolated_root("pin-restart");
+        let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
+        let body = crate::chat::protocol::PinRequest {
+            target_event_id: 42,
+            action: crate::chat::protocol::PinAction::Pin,
+        }
+        .into_frame_body()
+        .expect("pin body");
+        let mutation_id = MutationId::new([0x93; 16]);
+        let prepared = store
+            .persist_prepared_with_id(
+                PrepareOutboundMutation {
+                    server_destination: "0123456789abcdef",
+                    authenticated_identity_hash: b"authenticated-peer",
+                    client_instance_id: ClientInstanceId::new([7; 16]),
+                    op: ChatOp::RoomPin,
+                    room_id: Some(9),
+                    body: body.clone(),
+                    created_at: 100,
+                    expires_at: 200,
+                    correlation_id: None,
+                },
+                mutation_id,
+                PRODUCTION_LIMITS,
+            )
+            .expect("persist dormant pin");
+        drop(store);
+
+        let reopened =
+            MutationIntentStore::open_for_identity_storage_root(&root).expect("reopen store");
+        let recovered = reopened.recover_nonterminal().expect("recover dormant pin");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].op, ChatOp::RoomPin);
+        assert_eq!(recovered[0].body, body);
+        assert_eq!(recovered[0].request_hash, prepared.request_hash);
+        assert_eq!(recovered[0].state, OutboundMutationState::Prepared);
+        drop(reopened);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn capacity_refuses_new_admission_without_removing_existing_intent() {
         let root = isolated_root("capacity");
         let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
@@ -941,6 +1123,64 @@ mod tests {
             .recover_nonterminal()
             .expect("terminal recovery")
             .is_empty());
+        drop(store);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn rejected_removal_is_atomic_and_only_consumes_uncertain_intents() {
+        let root = isolated_root("rejected-removal");
+        let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
+        let rejected_id = MutationId::new([21; 16]);
+        let prepared_id = MutationId::new([22; 16]);
+        let rejected = store
+            .persist_prepared_with_id(request("restore me"), rejected_id, PRODUCTION_LIMITS)
+            .expect("rejected intent");
+        store
+            .persist_prepared_with_id(request("not sent"), prepared_id, PRODUCTION_LIMITS)
+            .expect("prepared intent");
+        store
+            .transition(
+                rejected_id,
+                OutboundMutationState::Prepared,
+                OutboundMutationState::SentUncertain,
+            )
+            .expect("uncertain transition");
+
+        assert!(matches!(
+            store
+                .remove_rejected_uncertain(prepared_id)
+                .expect("prepared mismatch"),
+            IntentRemoval::StateMismatch {
+                current: OutboundMutationState::Prepared
+            }
+        ));
+        let removed = store
+            .remove_rejected_uncertain(rejected_id)
+            .expect("rejected removal");
+        assert!(matches!(
+            removed,
+            IntentRemoval::Removed(OutboundMutationIntent {
+                mutation_id,
+                body: FrameBody::Text(ref body),
+                state: OutboundMutationState::SentUncertain,
+                ..
+            }) if mutation_id == rejected.mutation_id && body == "restore me"
+        ));
+        assert!(store.load(rejected_id).expect("removed load").is_none());
+        assert!(matches!(
+            store
+                .remove_rejected_uncertain(rejected_id)
+                .expect("missing removal"),
+            IntentRemoval::Missing
+        ));
+        assert_eq!(
+            store.recover_nonterminal().expect("recover"),
+            vec![store
+                .load(prepared_id)
+                .expect("prepared load")
+                .expect("prepared")]
+        );
         drop(store);
         fs::remove_dir_all(root).expect("cleanup");
     }

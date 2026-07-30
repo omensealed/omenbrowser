@@ -1,5 +1,5 @@
 use iced::widget::text::Wrapping;
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, row, text, Button};
 use iced::{Element, Length};
 
 use crate::app::message_summary_key;
@@ -7,12 +7,11 @@ use crate::micron::parse_micron;
 use crate::micron::render::render_document;
 
 use super::super::{
-    desktop_message_is_cancel_candidate, desktop_message_is_retry_candidate,
-    desktop_message_propagation_sync_label, desktop_message_retry_labels,
-    failed_message_container_style, format_epoch_secs, incoming_message_container_style,
-    lxmf_message_compact_stamp_status, lxmf_message_compact_status, lxmf_message_status_lines,
-    outgoing_message_container_style, selected_message_container_style, status_container_style,
-    ui_size, ConversationMessage, Message, CONVERSATION_MICRON_PREVIEW_WIDTH,
+    desktop_message_valid_actions, failed_message_container_style, format_epoch_secs,
+    incoming_message_container_style, lxmf_message_compact_stamp_status,
+    lxmf_message_compact_status, lxmf_message_status_lines, outgoing_message_container_style,
+    selected_message_container_style, status_container_style, ui_size, ConversationMessage,
+    DesktopMessageRetryLabels, Message, CONVERSATION_MICRON_PREVIEW_WIDTH,
     CONVERSATION_PREVIEW_CHARS, CONVERSATION_PREVIEW_LINES,
 };
 use super::{
@@ -95,42 +94,7 @@ pub(in crate::desktop) fn message_bubble<'a>(
         }),
     )];
     if selected {
-        if desktop_message_is_retry_candidate(message) {
-            let retry_key = message_key.clone();
-            let labels = desktop_message_retry_labels(message);
-            actions.push(subtle_button_owned(
-                labels.prepare.into(),
-                Message::Conversation(ConversationMessage::PrepareRetryForConversationRow {
-                    conversation_id,
-                    key: message_key,
-                }),
-            ));
-            actions.push(omen_button_owned(
-                labels.send.into(),
-                Message::Conversation(ConversationMessage::SendRetryForConversationRow {
-                    conversation_id,
-                    key: retry_key,
-                }),
-            ));
-        }
-        if desktop_message_is_cancel_candidate(message) {
-            actions.push(subtle_button_owned(
-                "Cancel delivery".into(),
-                Message::Conversation(ConversationMessage::CancelConversationRow {
-                    conversation_id,
-                    key: message_summary_key(message),
-                }),
-            ));
-        }
-        if let Some(sync_label) = desktop_message_propagation_sync_label(message) {
-            actions.push(omen_button_owned(
-                sync_label.into(),
-                Message::Conversation(ConversationMessage::SyncPropagationForConversationRow {
-                    conversation_id,
-                    key: message_summary_key(message),
-                }),
-            ));
-        }
+        actions.extend(message_valid_action_buttons(conversation_id, message));
     }
     if message.failed {
         actions.push(subtle_button_owned(
@@ -199,53 +163,16 @@ pub(in crate::desktop) fn selected_message_details_card(
     ]
     .spacing(10)
     .wrap();
-    let mut header_actions = Vec::new();
-    if desktop_message_is_retry_candidate(message) {
-        let retry_key = message_summary_key(message);
-        let labels = desktop_message_retry_labels(message);
-        header_actions.push(subtle_button_owned(
-            labels.prepare.into(),
-            Message::Conversation(ConversationMessage::PrepareRetryForConversationRow {
-                conversation_id,
-                key: retry_key.clone(),
-            }),
-        ));
-        header_actions.push(omen_button_owned(
-            labels.send.into(),
-            Message::Conversation(ConversationMessage::SendRetryForConversationRow {
-                conversation_id,
-                key: retry_key,
-            }),
-        ));
-    }
-    if desktop_message_is_cancel_candidate(message) {
-        header_actions.push(subtle_button_owned(
-            "Cancel delivery".into(),
-            Message::Conversation(ConversationMessage::CancelConversationRow {
-                conversation_id,
-                key: message_summary_key(message),
-            }),
-        ));
-    }
-    if let Some(sync_label) = desktop_message_propagation_sync_label(message) {
-        header_actions.push(omen_button_owned(
-            sync_label.into(),
-            Message::Conversation(ConversationMessage::SyncPropagationForConversationRow {
-                conversation_id,
-                key: message_summary_key(message),
-            }),
-        ));
-    }
+    let header_actions = message_valid_action_buttons(conversation_id, message);
+    let evidence_summary = lxmf_message_compact_status(message)
+        .unwrap_or_else(|| "No retained delivery evidence".into());
 
     let mut body = column![
         header,
         action_grid(header_actions, 3),
         text(format!("subject: {}", message_title_line(message))).size(ui_size(13)),
-        text(format!(
-            "state: delivered={} failed={} unread={}",
-            message.delivered, message.failed, message.unread
-        ))
-        .size(ui_size(13)),
+        text(format!("delivery/evidence: {evidence_summary}")).size(ui_size(13)),
+        text(format!("unread: {}", message.unread)).size(ui_size(13)),
         text(format!(
             "message id: {}",
             message.message_id.as_deref().unwrap_or("<none>")
@@ -262,6 +189,50 @@ pub(in crate::desktop) fn selected_message_details_card(
     }
 
     section_card("Message Details", body)
+}
+
+fn message_valid_action_buttons(
+    conversation_id: u64,
+    message: &crate::messaging::MessageSummary,
+) -> Vec<Button<'static, Message>> {
+    let actions = desktop_message_valid_actions(message);
+    let message_key = message_summary_key(message);
+    let mut buttons = Vec::new();
+    if let Some(DesktopMessageRetryLabels { prepare, send }) = actions.retry {
+        buttons.push(subtle_button_owned(
+            prepare.into(),
+            Message::Conversation(ConversationMessage::PrepareRetryForConversationRow {
+                conversation_id,
+                key: message_key.clone(),
+            }),
+        ));
+        buttons.push(omen_button_owned(
+            send.into(),
+            Message::Conversation(ConversationMessage::SendRetryForConversationRow {
+                conversation_id,
+                key: message_key.clone(),
+            }),
+        ));
+    }
+    if actions.cancel_delivery {
+        buttons.push(subtle_button_owned(
+            "Cancel delivery".into(),
+            Message::Conversation(ConversationMessage::CancelConversationRow {
+                conversation_id,
+                key: message_key.clone(),
+            }),
+        ));
+    }
+    if let Some(sync_label) = actions.propagation_sync {
+        buttons.push(omen_button_owned(
+            sync_label.into(),
+            Message::Conversation(ConversationMessage::SyncPropagationForConversationRow {
+                conversation_id,
+                key: message_key,
+            }),
+        ));
+    }
+    buttons
 }
 
 fn message_title_line(message: &crate::messaging::MessageSummary) -> String {

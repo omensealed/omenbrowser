@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,6 +15,42 @@ use super::omenchat_runtime::omenchat_event_counts_by_room;
 use super::omenchat_runtime::DesktopOmenChatTransport;
 use super::startup::OmenChatStartupState;
 use super::DesktopPane;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct OmenChatReplyDraft {
+    pub(in crate::desktop) room_id: RoomId,
+    pub(in crate::desktop) event_id: u64,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct OmenChatRevisionDraft {
+    pub(in crate::desktop) room_id: RoomId,
+    pub(in crate::desktop) event_id: u64,
+    pub(in crate::desktop) replacement: String,
+}
+
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct OmenChatRevisionDeleteConfirmation {
+    pub(in crate::desktop) session_id: ChatSessionId,
+    pub(in crate::desktop) room_id: RoomId,
+    pub(in crate::desktop) event_id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::desktop) struct PendingOmenChatInvitationRoom {
+    pub(in crate::desktop) server_destination: String,
+    pub(in crate::desktop) room_id: RoomId,
+    pub(in crate::desktop) session_id: Option<ChatSessionId>,
+}
+
+#[cfg(feature = "desktop-qr")]
+pub(in crate::desktop) struct OmenChatInvitationQr {
+    pub(in crate::desktop) session_id: ChatSessionId,
+    pub(in crate::desktop) uri: String,
+    pub(in crate::desktop) data: iced::widget::qr_code::Data,
+}
 
 #[cfg(feature = "chat-client-gif")]
 pub(in crate::desktop) type OmenChatGifFrames = iced_gif::Frames;
@@ -430,10 +466,29 @@ pub(in crate::desktop) struct OmenChatMutationResolutionConfirmation {
     pub(in crate::desktop) next: crate::chat::mutation_intents::OutboundMutationState,
 }
 
+#[cfg(all(
+    feature = "omenchat-moderation-audit",
+    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+))]
+pub(in crate::desktop) struct OmenChatModerationAuditRequest {
+    pub(in crate::desktop) room_id: RoomId,
+    pub(in crate::desktop) owner_user_id: crate::chat::protocol::UserId,
+    pub(in crate::desktop) before_audit_id: Option<crate::chat::protocol::EventId>,
+    pub(in crate::desktop) limit: u16,
+    pub(in crate::desktop) state: crate::chat::ChatModerationAuditRequestState,
+}
+
 pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) chat_client: ChatClient,
     pub(in crate::desktop) chat_store: Option<SqliteChatStore>,
     pub(in crate::desktop) chat_drafts: HashMap<ChatSessionId, String>,
+    pub(in crate::desktop) omenchat_reply_drafts: HashMap<ChatSessionId, OmenChatReplyDraft>,
+    pub(in crate::desktop) omenchat_selected_mentions: HashMap<ChatSessionId, BTreeSet<u32>>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_revision_drafts: HashMap<ChatSessionId, OmenChatRevisionDraft>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_revision_delete_confirmation:
+        Option<OmenChatRevisionDeleteConfirmation>,
     pub(in crate::desktop) chat_event_counts: HashMap<(ChatSessionId, RoomId), usize>,
     pub(in crate::desktop) chat_scroll_offsets: HashMap<(ChatSessionId, RoomId), RelativeOffset>,
     pub(in crate::desktop) chat_scroll_bottom_locks: HashSet<(ChatSessionId, RoomId)>,
@@ -448,6 +503,10 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) active_media_cache_jobs:
         HashMap<String, (ChatSessionId, u64, CancellationToken)>,
     pub(in crate::desktop) omenchat_server_entry: String,
+    pub(in crate::desktop) omenchat_invitation_preview: crate::chat::OmenChatInvitationPreviewOwner,
+    pub(in crate::desktop) omenchat_invitation_room: Option<PendingOmenChatInvitationRoom>,
+    #[cfg(feature = "desktop-qr")]
+    pub(in crate::desktop) omenchat_invitation_qr: Option<OmenChatInvitationQr>,
     pub(in crate::desktop) omenchat_rooms_visible: bool,
     pub(in crate::desktop) omenchat_pending_upload_sources:
         HashMap<(ChatSessionId, String, u64), PathBuf>,
@@ -469,8 +528,16 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     pub(in crate::desktop) omenchat_mutation_resolution_confirmation:
         Option<OmenChatMutationResolutionConfirmation>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_recovered_mutations_expanded_for: Option<String>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_live_transports:
         HashMap<ChatSessionId, DesktopOmenChatTransport>,
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    pub(in crate::desktop) omenchat_moderation_audit_requests:
+        HashMap<ChatSessionId, OmenChatModerationAuditRequest>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_link_sessions: HashMap<[u8; 16], ChatSessionId>,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -561,6 +628,12 @@ impl OmenChatDesktopState {
             chat_client: startup.chat_client,
             chat_store: startup.chat_store,
             chat_drafts: HashMap::new(),
+            omenchat_reply_drafts: HashMap::new(),
+            omenchat_selected_mentions: HashMap::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_revision_drafts: HashMap::new(),
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_revision_delete_confirmation: None,
             chat_event_counts,
             chat_scroll_offsets,
             chat_scroll_bottom_locks,
@@ -574,6 +647,10 @@ impl OmenChatDesktopState {
             media_cache_generation: 0,
             active_media_cache_jobs: HashMap::new(),
             omenchat_server_entry: String::new(),
+            omenchat_invitation_preview: crate::chat::OmenChatInvitationPreviewOwner::default(),
+            omenchat_invitation_room: None,
+            #[cfg(feature = "desktop-qr")]
+            omenchat_invitation_qr: None,
             omenchat_rooms_visible: true,
             omenchat_pending_upload_sources: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -591,7 +668,14 @@ impl OmenChatDesktopState {
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_mutation_resolution_confirmation: None,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_recovered_mutations_expanded_for: None,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_live_transports: HashMap::new(),
+            #[cfg(all(
+                feature = "omenchat-moderation-audit",
+                any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+            ))]
+            omenchat_moderation_audit_requests: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_link_sessions: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]

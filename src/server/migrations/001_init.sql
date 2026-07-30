@@ -42,8 +42,33 @@ CREATE TABLE IF NOT EXISTS room_events (
   target_user_id INTEGER,
   at INTEGER NOT NULL,
   payload BLOB,
+  reply_to_event_id INTEGER CHECK(
+    reply_to_event_id IS NULL OR reply_to_event_id > 0
+  ),
+  mention_user_ids BLOB CHECK(
+    mention_user_ids IS NULL OR (
+      length(mention_user_ids) BETWEEN 4 AND 64
+      AND length(mention_user_ids) % 4 = 0
+    )
+  ),
   deleted INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(room_id, event_id)
+);
+
+CREATE TABLE IF NOT EXISTS room_event_sequences (
+  room_id INTEGER PRIMARY KEY,
+  last_event_id INTEGER NOT NULL CHECK(last_event_id >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS room_history_usage (
+  room_id INTEGER PRIMARY KEY,
+  event_count INTEGER NOT NULL CHECK(event_count >= 0),
+  retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+  backfill_through_event_id INTEGER NOT NULL CHECK(backfill_through_event_id >= 0),
+  backfill_target_event_id INTEGER NOT NULL CHECK(backfill_target_event_id >= 0),
+  backfill_complete INTEGER NOT NULL CHECK(backfill_complete IN (0, 1)),
+  last_compacted_at INTEGER,
+  CHECK(backfill_through_event_id <= backfill_target_event_id)
 );
 
 CREATE TABLE IF NOT EXISTS upload_files (

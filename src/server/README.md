@@ -46,12 +46,29 @@ omenchatd config show
 omenchatd config set --name "My Chat" --operator-label "node-admin"
 omenchatd config set --announce-interval 360 --max-message-bytes 2048
 omenchatd rooms list
+omenchatd rooms list --json
 omenchatd rooms add field-ops --topic "Field operations"
 omenchatd interfaces tcp-server 127.0.0.1:42420
 omenchatd interfaces tcp-client gateway.example:42420
+omenchatd interfaces list
 omenchatd tui
 omenchatd run
 ```
+
+`interfaces tcp-client` adds a TCP client without replacing existing TCP
+clients or listeners. List the redacted endpoints and remove one exact endpoint
+with:
+
+```bash
+omenchatd interfaces list
+omenchatd interfaces delete tcp-client gateway.example:42420
+```
+
+Interface edits are capped at 64 sections and a 2 MiB configuration. Before an
+add/delete edit, omenchatd writes an owner-only
+`config.before-interface-edit.bak` recovery copy. Restart the live server after
+editing interfaces. The runtime already starts every enabled supported
+interface in the resulting configuration.
 
 `omenchatd run` arms its platform signal handlers before advertising readiness,
 then handles Ctrl-C/SIGINT on all supported platforms and SIGTERM on Unix.
@@ -101,7 +118,7 @@ omenchatd interfaces tcp-client gateway.example:42420 \
 
 IFAC is currently enforced only by omenchatd's project-local TCP **client**
 adapter. A `TCPServerInterface` containing `network_name` or `passphrase` is
-rejected at startup because the published reticulum-rs 0.9.5 stock TCP server
+rejected at startup because the published reticulum-rs 0.9.6 stock TCP server
 does not apply the Python IFAC wire transform. Run the enforcing gateway as the
 server and connect omenchatd to it as shown above.
 
@@ -171,7 +188,7 @@ server cleanly and run:
 
 ```bash
 omenchatd database restore-migration-backup \
-  --from ~/.omenchatd/omenchat.sqlite.pre-v3-from-v2.bak \
+  --from ~/.omenchatd/omenchat.sqlite.pre-v5-from-v4.bak \
   --confirm --home ~/.omenchatd
 ```
 
@@ -184,6 +201,234 @@ The previous active database is retained as a unique owner-only
 `omenchat.sqlite.pre-restore-*.bak`; neither the selected source nor upload
 files are modified. Run `doctor` before restarting. Restore is deliberately an
 offline, explicit `--confirm` operation.
+
+Schema 11 stores an explicit ordinary/announcement policy per room. The
+v0.9.6-4 policy-administration contract is deliberately restart-only: stop
+omenchatd, run the maintenance command, then restart omenchatd. The command
+fails closed while the live server owns the database. This release does not
+reload policy or fan out policy deltas from an offline maintenance process:
+
+```bash
+# Stop the running omenchatd process or service first.
+omenchatd rooms policy 1 announcement --confirm --home ~/.omenchatd
+omenchatd rooms list --json --home ~/.omenchatd
+# Restart omenchatd using the same service or run configuration.
+```
+
+Only `ordinary` and `announcement` are accepted. The policy and room revision
+change in one immediate transaction. Announcement rooms remain readable by
+members, while content publication is enforced server-side for moderators and
+administrators regardless of client capability negotiation.
+
+Headless installations can inspect the bounded administrative user projection
+and make an explicit stopped-server role change without enabling the optional
+TUI:
+
+```bash
+omenchatd users list --json --home ~/.omenchatd
+omenchatd users role 7 moderator --confirm --home ~/.omenchatd
+```
+
+Role vocabulary is exactly `standard`, `trusted`, `moderator`, or
+`administrator`. The JSON listing omits identity hashes and LXMF destinations.
+Role changes use the same exclusive maintenance-open boundary as room-policy
+changes and fail while omenchatd owns the database.
+
+Schema 12 also stores the future per-room slow-mode interval. Configuration is
+restart-only and confirmation-gated through the same exclusive maintenance
+boundary:
+
+```bash
+# Stop omenchatd first.
+omenchatd rooms set-slow-mode 1 30 --confirm --home ~/.omenchatd
+omenchatd rooms list --json --home ~/.omenchatd
+omenchatd rooms set-slow-mode 1 off --confirm --home ~/.omenchatd
+```
+
+Numeric intervals are whole seconds in `1..=86400`; `off` stores zero. The
+scalar and room revision change in one immediate transaction, while a no-op
+retains the revision. Output reports the prior and configured values and
+reports `enforcement=active` in canonical server builds. Room listings use
+`slow_mode_config`/`slow_mode_seconds` plus
+`slow_mode_enforcement=active`. A capable server accepts
+`room-slow-mode-v1` only when the client also negotiates durable mutations;
+legacy or non-negotiating sessions retain their prior room shape and behavior.
+Builds that deliberately omit `omenchat-slow-mode` preserve the stored scalar
+but report enforcement inactive.
+
+Schema 13 stores a nullable per-room upload file ceiling for
+`room-media-policy-v1`. `NULL` inherits the global server file ceiling,
+zero will disable room uploads, and positive values are constrained to at most
+10 MiB. Configuration is restart-only and confirmation-gated through the same
+exclusive maintenance boundary:
+
+```bash
+# Stop omenchatd first.
+omenchatd rooms set-upload-policy 1 262144 --confirm --home ~/.omenchatd
+omenchatd rooms list --json --home ~/.omenchatd
+omenchatd rooms set-upload-policy 1 disabled --confirm --home ~/.omenchatd
+omenchatd rooms set-upload-policy 1 inherit --confirm --home ~/.omenchatd
+```
+
+`inherit` stores `NULL`, `disabled` stores zero, and a numeric value must be in
+`1..=10485760`. The scalar and room revision change in one immediate
+transaction, while a no-op retains the revision. Output reports the prior,
+configured, and effective values and reports `enforcement=active` in canonical
+server builds.
+Human and JSON room listings are bounded to 1,024 rows and 1 MiB of retained
+room data, report truncation explicitly, and distinguish configured policy
+from the effective room/global minimum.
+
+Canonical omenchatd accepts the capability only from an authenticated Link that
+requested the complete dependency set. It resolves inherited, disabled, and
+room/global-minimum limits at both offer and Resource-publication boundaries.
+Legacy/non-negotiating peers retain global admission for wire compatibility;
+use the global ceiling when every peer must share one hard limit. Builds that
+deliberately omit `omenchat-room-media-policy` preserve stored values and
+report enforcement inactive. The optional TUI reports configured/effective
+policy and the real feature state; it does not edit policy while the server is
+running.
+
+To prepare a separate schema-12-compatible rollback copy while retaining the
+active schema-13 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema12-copy \
+  --to ~/.omenchatd/omenchat-schema12.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes only the dormant
+`upload_max_file_bytes` room column from a private staged copy. It retains
+slow-mode settings and admissions, announcement policy, the upload ledger,
+history, identities, and every earlier schema layer. It never edits the active
+database.
+
+To prepare a
+separate schema-11-compatible rollback copy while retaining the active
+schema-13 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema11-copy \
+  --to ~/.omenchatd/omenchat-schema11.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes only schema-12 slow-mode
+settings and admission state from a staged copy. It preserves announcement
+policy, moderation audit, and every earlier layer.
+
+To prepare a
+separate schema-10-compatible rollback copy while retaining the active
+schema-13 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema10-copy \
+  --to ~/.omenchatd/omenchat-schema10.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes schema-12 slow-mode
+storage and the schema-11 policy column from a staged copy, while preserving
+moderation-audit and every earlier layer.
+
+To prepare a separate schema-9-compatible rollback copy while retaining the
+active schema-13 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema9-copy \
+  --to ~/.omenchatd/omenchat-schema9.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes only schema-10
+client-visible moderation-audit rows and indexes from a staged copy. It
+preserves schema-9 pins and every earlier history, replay, identity, user,
+room, and upload layer. The capability remains dormant, so this stored audit
+is operator-recoverable state rather than active client-visible traffic.
+
+To prepare a separate schema-8-compatible rollback copy while retaining the
+active schema-13 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema8-copy \
+  --to ~/.omenchatd/omenchat-schema8.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes schema-10 moderation
+history and schema-9 pin state/audit objects from a staged copy and preserves
+history usage, event sequences, message revisions, reactions, and ordinary
+history.
+
+Schema-9 pin storage and its durable execution path are capability gated.
+omenchatd accepts `room-pins-v1` only beside a valid explicit
+`durable-mutations-v1` request with persistent client identity. Current
+moderator/administrator, membership, retained-target, replay, and bounded
+storage checks remain authoritative for every mutation.
+
+To prepare a separate schema-7-compatible rollback copy while retaining the
+active schema-13 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema7-copy \
+  --to ~/.omenchatd/omenchat-schema7.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes only schema-8 room-history
+usage metadata from a staged copy and preserves event sequences, message
+revisions, reactions, and ordinary history.
+
+To prepare a separate schema-6-compatible rollback copy while retaining the
+active schema-13 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema6-copy \
+  --to ~/.omenchatd/omenchat-schema6.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command removes schema-8 usage and
+schema-7 room-event sequence metadata from a staged copy, sets
+`user_version = 6`, and validates integrity and foreign keys before atomic
+publication. Message revisions, reactions, ordinary history, and the active
+database are preserved. Retention is not active, so exporting the accounting
+metadata cannot conceal prior compaction.
+
+To prepare a separate schema-5-compatible rollback copy while retaining the
+active schema-13 database, stop the server cleanly and run:
+
+```bash
+omenchatd database export-schema5-copy \
+  --to ~/.omenchatd/omenchat-schema5.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command refuses active WAL/SHM state,
+proves exclusive access, copies through SQLite's backup API, removes only the
+schema-6 message-revision tables and indexes in a staged transaction, sets
+`user_version = 5`, and validates integrity and foreign keys before atomic
+publication. The active database is never replaced or modified. Reaction
+state and ordinary history are preserved; dormant revision state is
+intentionally absent.
+
+For a deeper schema-4-compatible rollback copy, run:
+
+```bash
+omenchatd database export-schema4-copy \
+  --to ~/.omenchatd/omenchat-schema4.sqlite \
+  --confirm --home ~/.omenchatd
+```
+
+The destination must not exist. The command refuses active WAL/SHM state,
+proves exclusive access, copies through SQLite's backup API, removes the
+schema-6 message-revision layer and schema-5 reaction layer in a staged
+transaction, sets
+`user_version = 4`, and validates integrity and foreign keys before atomic
+publication. The active database is never replaced or modified. Reaction state
+is intentionally absent from the rollback copy; rooms, users, ordinary
+history, uploads, durable replay records, identities, and configuration remain.
 
 Available console commands:
 
@@ -212,6 +457,7 @@ delete-user 7
 prune-stale-users
 tcp-server 127.0.0.1:42420
 tcp-client gateway.example:42420
+tcp-client-delete gateway.example:42420
 show-config
 quit
 ```
@@ -419,27 +665,116 @@ priority survival, graceful drain, RSS/FD stability, and the 32 MiB per-writer
 retention cap. The delay is a reproducible slow-disk simulation, not a benchmark
 of a particular storage device.
 
-The schema currently uses SQLite `user_version = 3`. Version 2 added the upload
-ledger actor/time index used by quota planning. Version 3 adds the dormant,
+The schema currently uses SQLite `user_version = 13`. Version 2 added the upload
+ledger actor/time index used by quota planning. Version 3 adds the
 bounded-shape durable-mutation replay table, client-instance retirement table,
-and their indexes; no live request path reads or writes those tables until the
-capability is explicitly negotiated and activated. The isolated store boundary
-already enforces exact
+and their indexes. Version 4 adds nullable reply-event and bounded mention-ID
+metadata to room events plus a partial reply index. Existing event rows retain
+their original columns byte-for-byte and read as messages without metadata.
+The negotiated reply/mention path validates joined senders,
+same-room non-deleted reply targets, and current numeric mention membership in
+the same durable transaction that inserts the event and replay result. Its
+single event encoder preserves metadata across fan-out, inline history, and
+resource history; restart replay cannot duplicate the event. Version 5 adds
+constrained active-reaction and append-only reaction-audit tables plus their
+target/retention indexes. A dormant transactionally durable executor now
+implements bounded add/remove state, exact replay/conflict handling,
+incremental audit retention, authoritative inline/resource snapshots, and
+capability-scoped live fan-out. `reactions-v1` remains unadvertised and
+unaccepted, so negotiated production clients cannot reach that executor yet.
+Version 6 adds constrained message-revision current-state and append-only audit
+tables plus lookup/retention indexes. A dormant transactional executor now
+enforces author/moderator/mute policy, immutable originals, correction and
+storage ceilings, incremental audit pruning, reaction cleanup, exact durable
+replay, and inline/Resource snapshots. Migration and rollback/export support
+is active, but `message-revisions-v1` remains unrequested and unaccepted:
+normal clients cannot reach the executor, and no client UI action exists yet.
+Dormant Link-scoped plumbing is present for capability-filtered
+live events and history-following snapshots, but the production acceptance
+gate remains false; it does not activate the wire feature.
+Version 7 adds a persistent per-room event-ID high-water mark. Existing rooms
+seed it lazily from their indexed maximum on the first new event, so migration
+does not scan history. Event allocation advances the high-water mark and
+inserts the event in one immediate transaction; rollback can reuse only an ID
+that was never committed. Deleting retained history can no longer make a
+committed event ID reusable. Room-history retention remains disabled and no
+events are deleted by this schema change.
+Version 8 adds an empty per-room history item/byte usage ledger. Migration does
+not scan history. New events are accounted in their existing immediate
+transaction, while legacy rows advance by at most 256 per append or explicit
+maintenance call. The backfill cursor survives restart and retention remains
+disabled until accounting is complete. Accounting failure rolls back event
+insertion and sequence advancement.
+Versions 9 and 10 add bounded pin and moderation-audit storage. Version 11 adds
+the constrained announcement-room policy scalar, and version 12 adds the
+bounded slow-mode scalar plus its admission table and expiry index. Version 13
+adds only nullable, constrained `upload_max_file_bytes` room storage. The
+schema-13 value is dormant until capability negotiation and upload enforcement
+are activated together in a later qualified slice.
+The store also contains an explicit compaction primitive. It requires complete
+accounting, removes no more than 64 original events per immediate transaction,
+bounds dependent reply/reaction/revision work to 20,000 rows, and updates all
+projections and usage accounting atomically. Upload storage, durable replay,
+and event-ID sequences are preserved. Only live event admission calls it when
+the typed policy below is enabled; there is no startup sweep, timer, RPC
+compactor, or UI deletion control.
+Generated configuration includes:
+
+```toml
+[history_retention]
+enabled = false
+max_age_days = 365
+max_events_per_room = 100000
+max_bytes_per_room = 268435456
+```
+
+Enabled zero limits are rejected. Values above 3,650 days, 1,000,000 events,
+or 10 GiB are clamped to those documented maxima. `status` and `status --json`
+inspect at most 256 room usage ledgers through a read-only connection and
+report truncation plus complete/incomplete/missing accounting. They never
+advance backfill or compact history. Status reports configured admission
+behavior and explicitly says that it cannot observe live runtime activity.
+With `enabled = true`, only the live server store applies the policy. Ordinary
+and durable event insertions independently enforce age, item, and byte ceilings
+inside their existing transaction, deleting at most 64 older originals plus
+dependent projections. A sole newest event may exceed the byte ceiling.
+Incomplete accounting or saturation requiring another batch rejects the event
+and rolls back insertion and cleanup together. There is no startup sweep,
+timer, polling worker, RPC compactor, or TUI deletion action.
+
+For an upgraded room whose usage ledger needs more than one backfill batch,
+stop omenchatd and advance one 256-event metadata batch explicitly:
+
+```bash
+omenchatd database advance-history-usage \
+  --room-id 1 \
+  --confirm \
+  --home ~/.omenchatd
+```
+
+The command requires an existing current-schema database, updates only the
+selected room's usage metadata, and reports the cursor, captured target, item
+and byte totals, and completion state. Repeat it while the server remains
+stopped until `complete=true`, then inspect `status` before enabling retention.
+It never deletes or compacts room history.
+
+The isolated durable store boundary already enforces exact
 request replay, conflicting-hash refusal, a 64 KiB encoded-result ceiling,
 bounded global/per-identity item and byte budgets, and at most 128 incremental
 deletions per commit. Before deleting a replay result it permanently retires
 the associated authenticated identity/client-instance pair; all later requests
 from that instance return `Expired` without mutation execution, including after
 restart. Remembered instances are capped at 100,000 globally and 1,024 per
-identity, with capacity exhaustion failing closed. Activation remains blocked
-pending retention measurements and end-to-end mixed-version recovery tests.
-Protocol-v1 error numbers 1011 through 1015 are reserved for the dormant
-durable outcomes but are not emitted by live sessions. Older files are migrated
+identity, with capacity exhaustion failing closed. Protocol-v1 error numbers
+1011 through 1015 describe negotiated durable outcomes; ordinary sessions do
+not emit them. Error 1016 is the typed announcement-room publication
+restriction and can apply to legacy or durable mutations independently of
+capability negotiation. Older files are migrated
 transactionally. Files with
 a newer schema version are rejected without modification; run the matching or
 newer omenchatd rather than forcing the version backward.
 Migration of a non-empty older database first retains an online SQLite backup
-at `omenchat.sqlite.pre-v3-from-v<old>.bak`. The backup is owner-only on
+at `omenchat.sqlite.pre-v13-from-v<old>.bak`. The backup is owner-only on
 Unix and is never overwritten. If that path already exists or backup creation
 fails, startup aborts before changing the source database.
 Migration schema work and its version update are transactional. On failure the
@@ -448,6 +783,26 @@ and the completed pre-migration backup remains available.
 The confirmation-gated restore command described above validates and migrates
 that retained artifact through a staging database before replacement, and
 preserves the prior active database for rollback.
+The separate `export-schema12-copy` command removes only dormant per-room
+upload-ceiling storage while preserving slow-mode state and every earlier
+layer.
+The separate `export-schema11-copy` command removes only slow-mode settings and
+admission state while preserving announcement-room policy and every earlier
+layer.
+The separate `export-schema10-copy` command removes slow-mode and
+announcement-room
+policy storage while preserving moderation-audit and every earlier layer.
+The separate `export-schema9-copy` command removes only moderation-audit
+storage while preserving schema-9 pins and every earlier layer.
+`export-schema8-copy` removes moderation-audit and pin storage while preserving
+every schema-8 history layer. `export-schema7-copy` removes
+usage metadata while
+preserving event sequences and all history layers. `export-schema6-copy`
+provides a non-destructive downgrade artifact without usage or sequence
+metadata while preserving revisions, reactions, and history.
+`export-schema5-copy` omits revision state while preserving reactions.
+The deeper `export-schema4-copy` artifact omits both reactions and revisions.
+No export command edits the active schema-13 database.
 
 The SQLite store can compare its upload ledger with an identity directory and
 report missing, byte-mismatched, orphaned, and out-of-root paths without

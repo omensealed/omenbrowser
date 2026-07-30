@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 #[cfg(feature = "native-lxmf")]
 use std::path::PathBuf;
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "native-lxmf")]
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
@@ -219,8 +221,6 @@ pub struct NativeNetworkRuntime {
     #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_omenchat_link_coordinator: CleanOmenChatLinkCoordinator,
     #[cfg(not(all(feature = "native-rns-net", any())))]
-    clean_recent_omenchat_announces: Arc<Mutex<BTreeMap<String, CleanOmenChatAnnounce>>>,
-    #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
     #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_destination_app_data: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
@@ -272,14 +272,6 @@ impl CleanOmenChatLinkCoordinator {
             _ = cancel.cancelled() => Err(AppError::from(NativeRuntimeError::Cancelled)),
         }
     }
-}
-
-#[cfg(not(all(feature = "native-rns-net", any())))]
-#[derive(Clone, Copy, Debug)]
-struct CleanOmenChatAnnounce {
-    observed_at: tokio::time::Instant,
-    hops: u8,
-    iface: rns_transport::hash::AddressHash,
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -392,6 +384,9 @@ fn clean_direct_stamp_cost(
     app_data: Option<&[u8]>,
     reply_ticket: Option<&crate::messaging::NativeLxmfReplyTicket>,
     now: f64,
+    configured_max_cost: u8,
+    ask_above_cost: Option<u8>,
+    approved_cost: Option<u8>,
 ) -> AppResult<Option<u8>> {
     let valid_reply_ticket = match reply_ticket {
         Some(ticket)
@@ -408,26 +403,30 @@ fn clean_direct_stamp_cost(
         }
         None => false,
     };
+    let effective_max_cost =
+        configured_max_cost.min(crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST);
     match crate::runtime::native_lxmf::codec::delivery_announce_direct_stamp_policy(
         app_data,
         valid_reply_ticket,
     ) {
-        crate::runtime::native_lxmf::codec::DirectStampPolicy::Required { cost }
-            if cost <= crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST =>
-        {
+        crate::runtime::native_lxmf::codec::DirectStampPolicy::Required { cost } => {
+            if cost > effective_max_cost {
+                return Err(AppError::Unsupported(format!(
+                    "LXMF peer requires direct stamp cost {cost}, above the automatic ceiling {effective_max_cost}"
+                )));
+            }
+            if ask_above_cost.is_some_and(|threshold| cost > threshold)
+                && approved_cost != Some(cost)
+            {
+                return Err(AppError::Unsupported(format!(
+                    "LXMF peer requires direct stamp cost {cost}; explicit confirmation is required"
+                )));
+            }
             Ok(Some(cost))
         }
-        crate::runtime::native_lxmf::codec::DirectStampPolicy::Required { cost } => {
-            Err(AppError::Unsupported(format!(
-                "LXMF peer requires direct stamp cost {cost}, above the automatic safety ceiling {}",
-                crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST
-            )))
-        }
-        crate::runtime::native_lxmf::codec::DirectStampPolicy::Unsupported => {
-            Err(AppError::Unsupported(
-                "LXMF peer announced an unsupported direct stamp policy".into(),
-            ))
-        }
+        crate::runtime::native_lxmf::codec::DirectStampPolicy::Unsupported => Err(
+            AppError::Unsupported("LXMF peer announced an unsupported direct stamp policy".into()),
+        ),
         crate::runtime::native_lxmf::codec::DirectStampPolicy::Unknown
         | crate::runtime::native_lxmf::codec::DirectStampPolicy::NotRequired
         | crate::runtime::native_lxmf::codec::DirectStampPolicy::TicketAccepted => Ok(None),
@@ -499,6 +498,19 @@ fn clean_lxmf_direct_payload(delivery: &NativeLxmfSdkWireDelivery) -> Cow<'_, [u
 }
 
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+fn clean_lxmf_should_auto_fallback(
+    method: Option<&str>,
+    requested: bool,
+    submission_observed: bool,
+    propagation_node_available: bool,
+) -> bool {
+    method.unwrap_or("direct") == "direct"
+        && requested
+        && !submission_observed
+        && propagation_node_available
+}
+
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
 impl CleanReticulumLxmfWireSubmitter {
     fn new(
         transport: Arc<reticulum_rs::runtime::Transport>,
@@ -526,9 +538,10 @@ impl CleanReticulumLxmfWireSubmitter {
         })
     }
 
-    async fn submit_wire_async(
+    async fn submit_wire_once_async(
         &self,
         delivery: &NativeLxmfSdkWireDelivery,
+        submission_observed: &AtomicBool,
     ) -> AppResult<CleanLxmfSubmitOutcome> {
         let method = delivery.method.as_deref().unwrap_or("direct");
         if !matches!(method, "direct" | "propagated") {
@@ -590,7 +603,6 @@ impl CleanReticulumLxmfWireSubmitter {
                 self.timeout,
                 propagation_cancel,
                 Some(&self.event_tx),
-                None,
             )
             .await?;
             let wire = lxmf::WireMessage::unpack(delivery.wire_bytes.as_slice()).map_err(
@@ -704,7 +716,6 @@ impl CleanReticulumLxmfWireSubmitter {
             self.timeout,
             cancel,
             Some(&self.event_tx),
-            None,
         )
         .await?;
         let link = if method == "propagated" {
@@ -765,6 +776,7 @@ impl CleanReticulumLxmfWireSubmitter {
             &link,
             send_payload.as_ref(),
             |packet| {
+                submission_observed.store(true, Ordering::Release);
                 let packet_hash = hex_encode(packet.hash().as_slice());
                 self.pending_lxmf_proofs
                     .lock()
@@ -779,6 +791,7 @@ impl CleanReticulumLxmfWireSubmitter {
                 receipt_hash = Some(packet_hash);
             },
             |hash| {
+                submission_observed.store(true, Ordering::Release);
                 let hash = hex_encode(hash.as_slice());
                 let submitted_at = native_unix_timestamp();
                 self.pending_lxmf_proofs
@@ -858,6 +871,44 @@ impl CleanReticulumLxmfWireSubmitter {
             resource_hash,
             propagation_stamp,
         })
+    }
+
+    async fn submit_wire_async(
+        &self,
+        delivery: &NativeLxmfSdkWireDelivery,
+    ) -> AppResult<CleanLxmfSubmitOutcome> {
+        let submission_observed = AtomicBool::new(false);
+        let propagation_node_available = self
+            .outbound_propagation_node
+            .lock()
+            .expect("native propagation node lock")
+            .is_some();
+        match self
+            .submit_wire_once_async(delivery, &submission_observed)
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(direct_error)
+                if clean_lxmf_should_auto_fallback(
+                    delivery.method.as_deref(),
+                    delivery.try_propagation_on_fail,
+                    submission_observed.load(Ordering::Acquire),
+                    propagation_node_available,
+                ) =>
+            {
+                let mut propagated = delivery.clone();
+                propagated.method = Some("propagated".into());
+                propagated.try_propagation_on_fail = false;
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.9 LXMF safe automatic fallback destination={} message_id={} direct_error={direct_error}",
+                    delivery.destination_hash, delivery.message_id
+                )));
+                let propagation_observed = AtomicBool::new(false);
+                self.submit_wire_once_async(&propagated, &propagation_observed)
+                    .await
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -1014,8 +1065,6 @@ impl NativeNetworkRuntime {
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_omenchat_link_coordinator: CleanOmenChatLinkCoordinator::default(),
             #[cfg(not(all(feature = "native-rns-net", any())))]
-            clean_recent_omenchat_announces: Arc::new(Mutex::new(BTreeMap::new())),
-            #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_destination_identities: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_destination_app_data: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1062,8 +1111,6 @@ impl NativeNetworkRuntime {
             clean_omenchat_links: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_omenchat_link_coordinator: CleanOmenChatLinkCoordinator::default(),
-            #[cfg(not(all(feature = "native-rns-net", any())))]
-            clean_recent_omenchat_announces: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_destination_identities: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -1446,8 +1493,6 @@ impl NativeNetworkRuntime {
                 clean_destination_identities: self.clean_destination_identities.clone(),
                 #[cfg(not(all(feature = "native-rns-net", any())))]
                 clean_destination_app_data: self.clean_destination_app_data.clone(),
-                #[cfg(not(all(feature = "native-rns-net", any())))]
-                clean_recent_omenchat_announces: self.clean_recent_omenchat_announces.clone(),
                 event_tx: self.event_tx.clone(),
                 shutdown: shutdown.clone(),
             },
@@ -3063,8 +3108,6 @@ struct NativeAnnounceListenerState {
     clean_destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
     #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_destination_app_data: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
-    #[cfg(not(all(feature = "native-rns-net", any())))]
-    clean_recent_omenchat_announces: Arc<Mutex<BTreeMap<String, CleanOmenChatAnnounce>>>,
     event_tx: broadcast::Sender<RuntimeBusEvent>,
     shutdown: tokio_util::sync::CancellationToken,
 }
@@ -3119,8 +3162,6 @@ fn spawn_announce_listener(
         let clean_destination_identities = state.clean_destination_identities;
         #[cfg(not(all(feature = "native-rns-net", any())))]
         let clean_destination_app_data = state.clean_destination_app_data;
-        #[cfg(not(all(feature = "native-rns-net", any())))]
-        let clean_recent_omenchat_announces = state.clean_recent_omenchat_announces;
         let event_tx = state.event_tx;
         let shutdown = state.shutdown;
         let mut receiver = transport.recv_announces().await;
@@ -3133,10 +3174,6 @@ fn spawn_announce_listener(
                 Ok(event) => {
                     let hops = event.hops;
                     let iface = hex_encode(&event.interface);
-                    #[cfg(not(all(feature = "native-rns-net", any())))]
-                    let iface_hash = rns_transport::hash::AddressHash::new_from_slice(
-                        event.interface.as_slice(),
-                    );
                     #[cfg(not(all(feature = "native-rns-net", any())))]
                     let clean_destination_identity = {
                         let destination = event.destination.lock().await;
@@ -3188,20 +3225,6 @@ fn spawn_announce_listener(
                                 CLEAN_DESTINATION_APP_DATA_MAX_ITEM_BYTES
                             )));
                         }
-                    }
-                    #[cfg(not(all(feature = "native-rns-net", any())))]
-                    if payload.kind == DirectoryKind::OmenChat {
-                        insert_bounded_destination_cache(
-                            &mut clean_recent_omenchat_announces
-                                .lock()
-                                .expect("native recent OMENchat announce lock"),
-                            payload.destination_hash.clone(),
-                            CleanOmenChatAnnounce {
-                                observed_at: tokio::time::Instant::now(),
-                                hops,
-                                iface: iface_hash,
-                            },
-                        );
                     }
                     announces
                         .lock()
@@ -4281,6 +4304,12 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .send_propagated_lxmf_message(envelope, &identity_bytes, None)
                     .await;
             }
+            let propagation_fallback_node = envelope
+                .operation
+                .as_ref()
+                .is_none_or(|operation| operation.allow_propagation_fallback)
+                .then(|| self.selected_propagation_node())
+                .flatten();
             let peer_destination = parse_rns_net_destination_hash(&envelope.peer_hash)?;
             let handle = self
                 .rns_net
@@ -4362,7 +4391,6 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 let packet_hash_hex = hex_encode(&packet_hash);
                 let message_id = packet_hash_hex.clone();
                 let submitted_at = native_unix_timestamp();
-                let propagation_fallback_node = self.selected_propagation_node();
                 self.pending_lxmf_proofs
                     .lock()
                     .expect("native LXMF proof map lock")
@@ -4477,7 +4505,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }
             if !has_path {
                 handle.client.request_path(peer_destination).await?;
-                if self.selected_propagation_node().is_some() {
+                if propagation_fallback_node.is_some() {
                     return self
                         .send_propagated_lxmf_message(
                             envelope,
@@ -4506,7 +4534,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .await
             {
                 Ok(link) => link,
-                Err(error) if self.selected_propagation_node().is_some() => {
+                Err(error) if propagation_fallback_node.is_some() => {
                     return self
                         .send_propagated_lxmf_message(
                             envelope,
@@ -4527,7 +4555,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .await
                 {
                     Ok(()) => {}
-                    Err(error) if self.selected_propagation_node().is_some() => {
+                    Err(error) if propagation_fallback_node.is_some() => {
                         let _ = handle.client.teardown_link(link.link_id).await;
                         return self
                             .send_propagated_lxmf_message(
@@ -4544,7 +4572,6 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 let evidence_detail = format!(
                     "direct_transfer_state:link_packet_sent;direct_link_id:{link_hex};submitted_at:{submitted_at:.3};receipt_state:direct_link_packet_sent_peer_unconfirmed;delivery_state:peer_delivery_unconfirmed;direct_representation:link_packet"
                 );
-                let propagation_fallback_node = self.selected_propagation_node();
                 self.pending_lxmf_proofs
                     .lock()
                     .expect("native LXMF proof map lock")
@@ -4675,7 +4702,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 .await
             {
                 Ok(()) => {}
-                Err(error) if self.selected_propagation_node().is_some() => {
+                Err(error) if propagation_fallback_node.is_some() => {
                     let _ = handle.client.teardown_link(link.link_id).await;
                     return self
                         .send_propagated_lxmf_message(
@@ -4774,7 +4801,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             .into(),
                     ),
                 ]);
-            if let Some(propagation_node) = self.selected_propagation_node() {
+            if let Some(propagation_node) = propagation_fallback_node {
                 fields.insert(
                     "native_lxmf_propagation_fallback_available".into(),
                     "true".into(),
@@ -4970,6 +4997,21 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             app_data.as_deref(),
                             envelope.native_reply_ticket.as_ref(),
                             native_unix_timestamp(),
+                            envelope
+                                .operation
+                                .as_ref()
+                                .map(|operation| operation.max_automatic_direct_stamp_cost)
+                                .unwrap_or(
+                                    crate::messaging::OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
+                                ),
+                            envelope
+                                .operation
+                                .as_ref()
+                                .and_then(|operation| operation.ask_above_direct_stamp_cost),
+                            envelope
+                                .operation
+                                .as_ref()
+                                .and_then(|operation| operation.approved_direct_stamp_cost),
                         )?;
                         (cost, policy_source)
                     } else {
@@ -7636,7 +7678,6 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 Duration::from_secs(self.config.request_timeout_secs.max(1)),
                 cancel,
                 Some(&self.event_tx),
-                None,
             )
             .await
             {
@@ -8169,7 +8210,6 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }
             let destination_hash = parse_transport_destination_hash(destination_hash)?;
             let handle = self.active_transport()?;
-            let mut omenchat_announce_rx = self.event_tx.subscribe();
             let identity = clean_wait_for_destination_identity(
                 &handle.transport,
                 &handle.storage_path,
@@ -8188,20 +8228,8 @@ impl NetworkRuntime for NativeNetworkRuntime {
             )
             .map_err(AppError::from)?;
             let pre_wait_path_status = handle.transport.path_status(&destination_hash).await;
-            let needs_fresh_announce = !pre_wait_path_status.path_found
-                || pre_wait_path_status.hops.is_none_or(|hops| hops > 1);
+            let needs_path_discovery = !clean_omenchat_path_is_usable(&pre_wait_path_status);
             let destination_hex = destination_hash.to_hex_string();
-            if needs_fresh_announce && pre_wait_path_status.path_found {
-                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat found stale/high-hop cached path before discovery destination={} hops={:?} iface={}; explicit 0.9 path expiry remains behind the Phase 4 interoperability gate",
-                    destination_hex,
-                    pre_wait_path_status.hops,
-                    pre_wait_path_status
-                        .interface
-                        .map(|hash| hash.to_hex_string())
-                        .unwrap_or_else(|| "-".into())
-                )));
-            }
             let path_dispatch = clean_request_omenchat_paths_on_attached_interfaces(
                 &handle.transport,
                 destination_hash,
@@ -8230,44 +8258,12 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     "native Reticulum 0.9 OMENchat requested fresh path before clean link"
                 );
             }
-            let recent_announce = if needs_fresh_announce {
-                self.clean_recent_omenchat_announces
-                    .lock()
-                    .expect("native recent OMENchat announce lock")
-                    .get(&destination_hex)
-                    .copied()
-                    .filter(|announce| announce.observed_at.elapsed() <= Duration::from_secs(45))
-            } else {
-                None
-            };
-            if let Some(announce) = recent_announce {
-                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat recent announce evidence destination={} hops={} iface={}",
-                    destination_hex,
-                    announce.hops,
-                    announce.iface.to_hex_string()
-                )));
-            }
-            let fresh_announce_seen = if needs_fresh_announce {
-                recent_announce.is_some()
-                    || clean_wait_for_omenchat_fresh_announce(
-                        &mut omenchat_announce_rx,
-                        &destination_hex,
-                        timeout.min(Duration::from_secs(12)),
-                        cancel.clone(),
-                        Some(&self.event_tx),
-                    )
-                    .await?
-            } else {
-                false
-            };
             let has_path = clean_wait_for_destination_path(
                 &handle.transport,
                 destination_hash,
                 timeout.min(Duration::from_secs(10)),
                 cancel.clone(),
                 Some(&self.event_tx),
-                if needs_fresh_announce { Some(1) } else { None },
             )
             .await?;
             if !has_path {
@@ -8276,43 +8272,21 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     destination_hex
                 )));
             }
-            let status_after_wait = handle.transport.path_status(&destination_hash).await;
-            if needs_fresh_announce && status_after_wait.hops.is_none_or(|hops| hops > 1) {
-                let announce_detail = self
-                    .clean_recent_omenchat_announces
-                    .lock()
-                    .expect("native recent OMENchat announce lock")
-                    .get(&destination_hex)
-                    .copied()
-                    .filter(|announce| announce.observed_at.elapsed() <= Duration::from_secs(45))
-                    .map(|announce| {
-                        format!(
-                            "recent_announce_hops={} recent_announce_iface={}",
-                            announce.hops,
-                            announce.iface.to_hex_string()
-                        )
-                    })
-                    .unwrap_or_else(|| "recent_announce=none".into());
-                let message = format!(
-                    "OMENchat clean link blocked: only high-hop/stale path is known destination={} path_found={} hops={:?} next_hop={} iface={} fresh_announce_seen={} {}; wait for a low-hop server announce or verify gateway/IFAC alignment",
+            if needs_path_discovery {
+                let status = handle.transport.path_status(&destination_hash).await;
+                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+                    "native Reticulum 0.9 OMENchat discovered routed path destination={} hops={:?} next_hop={} iface={}",
                     destination_hex,
-                    status_after_wait.path_found,
-                    status_after_wait.hops,
-                    status_after_wait
+                    status.hops,
+                    status
                         .next_hop
                         .map(|hash| hash.to_hex_string())
                         .unwrap_or_else(|| "-".into()),
-                    status_after_wait
+                    status
                         .interface
                         .map(|hash| hash.to_hex_string())
-                        .unwrap_or_else(|| "-".into()),
-                    fresh_announce_seen,
-                    announce_detail
-                );
-                let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 {message}"
+                        .unwrap_or_else(|| "-".into())
                 )));
-                return Err(AppError::Runtime(message));
             }
             let _open_owner = self
                 .clean_omenchat_link_coordinator
@@ -9470,13 +9444,20 @@ async fn clean_wait_for_destination_app_data(
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
+fn clean_omenchat_path_is_usable(status: &rns_transport::transport::TransportPathStatus) -> bool {
+    // A routed Reticulum path is valid regardless of hop count. The transport
+    // owns PATHFINDER_M enforcement, route replacement, timeout expiry, and
+    // rediscovery after a pending link closes.
+    status.path_found
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
 async fn clean_wait_for_destination_path(
     transport: &Arc<reticulum_rs::runtime::Transport>,
     destination_hash: rns_transport::hash::AddressHash,
     timeout: Duration,
     cancel: CancellationToken,
     event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
-    max_hops: Option<u8>,
 ) -> AppResult<bool> {
     let initial_status = transport.path_status(&destination_hash).await;
     if let Some(event_tx) = event_tx {
@@ -9495,7 +9476,7 @@ async fn clean_wait_for_destination_path(
                 .unwrap_or_else(|| "-".into())
         )));
     }
-    if initial_status.path_found && max_hops.is_none_or(|hops| initial_status.hops <= Some(hops)) {
+    if clean_omenchat_path_is_usable(&initial_status) {
         return Ok(true);
     }
 
@@ -9523,12 +9504,11 @@ async fn clean_wait_for_destination_path(
                         .unwrap_or_else(|| "-".into())
                 )));
             }
-            return Ok(final_status.path_found
-                && max_hops.is_none_or(|hops| final_status.hops <= Some(hops)));
+            return Ok(clean_omenchat_path_is_usable(&final_status));
         }
         tokio::time::sleep((deadline - now).min(OMENCHAT_CLEAN_LINK_PATH_WAIT_STEP)).await;
         let status = transport.path_status(&destination_hash).await;
-        if status.path_found && max_hops.is_none_or(|hops| status.hops <= Some(hops)) {
+        if clean_omenchat_path_is_usable(&status) {
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
                     "native Reticulum 0.9 OMENchat clean path acquired destination={} hops={:?} next_hop={} iface={}",
@@ -9595,69 +9575,6 @@ async fn clean_request_omenchat_paths_on_attached_interfaces(
         )));
     }
     sent_or_queued
-}
-
-#[cfg(not(all(feature = "native-rns-net", any())))]
-async fn clean_wait_for_omenchat_fresh_announce(
-    receiver: &mut broadcast::Receiver<RuntimeBusEvent>,
-    destination_hex: &str,
-    timeout: Duration,
-    cancel: CancellationToken,
-    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
-) -> AppResult<bool> {
-    if let Some(event_tx) = event_tx {
-        let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-            "native Reticulum 0.9 OMENchat waiting for fresh announce before high-hop clean link destination={} timeout_ms={}",
-            destination_hex,
-            timeout.as_millis()
-        )));
-    }
-
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if cancel.is_cancelled() {
-            return Err(AppError::from(NativeRuntimeError::Cancelled));
-        }
-
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            if let Some(event_tx) = event_tx {
-                let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat fresh announce wait timed out destination={}",
-                    destination_hex
-                )));
-            }
-            return Ok(false);
-        }
-
-        let wait = (deadline - now).min(Duration::from_millis(250));
-        match tokio::time::timeout(wait, receiver.recv()).await {
-            Ok(Ok(RuntimeBusEvent::Announce(payload)))
-                if payload.kind == DirectoryKind::OmenChat
-                    && payload
-                        .destination_hash
-                        .eq_ignore_ascii_case(destination_hex) =>
-            {
-                if let Some(event_tx) = event_tx {
-                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                        "native Reticulum 0.9 OMENchat fresh announce observed destination={} display={}",
-                        destination_hex, payload.display_name
-                    )));
-                }
-                return Ok(true);
-            }
-            Ok(Ok(_)) | Err(_) => {}
-            Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
-                if let Some(event_tx) = event_tx {
-                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                        "native Reticulum 0.9 OMENchat fresh announce wait lagged destination={} skipped={}",
-                        destination_hex, skipped
-                    )));
-                }
-            }
-            Ok(Err(broadcast::error::RecvError::Closed)) => return Ok(false),
-        }
-    }
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -12154,6 +12071,37 @@ impl Default for NativeRuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    #[test]
+    fn clean_omenchat_accepts_known_routed_paths_without_app_hop_cutoff() {
+        let destination = rns_transport::hash::AddressHash::new_from_slice(&[1_u8; 16]);
+        let next_hop = rns_transport::hash::AddressHash::new_from_slice(&[2_u8; 16]);
+        let interface = rns_transport::hash::AddressHash::new_from_slice(&[3_u8; 16]);
+
+        for hops in [1, 3, 13, 127] {
+            let status = rns_transport::transport::TransportPathStatus {
+                destination,
+                path_found: true,
+                next_hop: Some(next_hop),
+                interface: Some(interface),
+                hops: Some(hops),
+            };
+            assert!(
+                clean_omenchat_path_is_usable(&status),
+                "{hops}-hop routed path should be delegated to Reticulum"
+            );
+        }
+
+        let unknown = rns_transport::transport::TransportPathStatus {
+            destination,
+            path_found: false,
+            next_hop: None,
+            interface: None,
+            hops: None,
+        };
+        assert!(!clean_omenchat_path_is_usable(&unknown));
+    }
     #[cfg(not(all(feature = "native-rns-net", any())))]
     use crate::browser::PageSource;
     use crate::config::AppPaths;
@@ -15103,6 +15051,23 @@ enable_transport = No
             .fields
             .get("native_lxmf_failure_reason")
             .is_some_and(|reason| reason.contains("direct path missing")));
+
+        let mut direct_only_operation = crate::messaging::OutboundOperationIdentity::generate();
+        direct_only_operation.allow_propagation_fallback = false;
+        let error = runtime
+            .send_message(MessageEnvelope {
+                peer_hash: peer_hash.into(),
+                title: "Direct only".into(),
+                body: "No propagation fallback".into(),
+                delivery_mode: crate::messaging::DeliveryMode::Direct,
+                include_ticket: false,
+                native_reply_ticket: None,
+                operation: Some(direct_only_operation),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect_err("direct-only send must not use selected propagation node");
+        assert!(error.to_string().contains("path is not known"));
     }
 
     #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
@@ -17127,6 +17092,7 @@ enable_transport = No
             message_id: "message-id".into(),
             destination_hash: "00112233445566778899aabbccddeeff".into(),
             method: Some("direct".into()),
+            try_propagation_on_fail: false,
             include_ticket: false,
             reply_ticket_used: false,
             direct_stamp: None,
@@ -17141,7 +17107,51 @@ enable_transport = No
 
     #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
     #[test]
+    fn clean_automatic_fallback_stops_at_submission_boundary() {
+        assert!(clean_lxmf_should_auto_fallback(
+            Some("direct"),
+            true,
+            false,
+            true
+        ));
+        assert!(!clean_lxmf_should_auto_fallback(
+            Some("direct"),
+            true,
+            true,
+            true
+        ));
+        assert!(!clean_lxmf_should_auto_fallback(
+            Some("direct"),
+            false,
+            false,
+            true
+        ));
+        assert!(!clean_lxmf_should_auto_fallback(
+            Some("propagated"),
+            true,
+            false,
+            true
+        ));
+        assert!(!clean_lxmf_should_auto_fallback(
+            Some("direct"),
+            true,
+            false,
+            false
+        ));
+    }
+
+    #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+    #[test]
     fn clean_direct_stamp_policy_enforces_ceiling_and_ticket_precedence() {
+        assert_eq!(
+            crate::directory::DEFAULT_AUTOMATIC_DIRECT_STAMP_COST,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST
+        );
+        assert_eq!(
+            crate::messaging::OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST
+        );
+
         fn app_data(cost: rmpv::Value) -> Vec<u8> {
             let mut bytes = Vec::new();
             rmpv::encode::write_value(
@@ -17156,25 +17166,86 @@ enable_transport = No
             crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
         ));
         assert_eq!(
-            clean_direct_stamp_cost(Some(&admitted), None, 1_000.0).expect("admitted cost"),
+            clean_direct_stamp_cost(
+                Some(&admitted),
+                None,
+                1_000.0,
+                crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+                None,
+                None,
+            )
+            .expect("admitted cost"),
             Some(crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST)
         );
         let over = app_data(rmpv::Value::from(
             crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST + 1,
         ));
-        assert!(clean_direct_stamp_cost(Some(&over), None, 1_000.0)
-            .expect_err("cost over ceiling")
-            .to_string()
-            .contains("safety ceiling"));
+        assert!(clean_direct_stamp_cost(
+            Some(&over),
+            None,
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            None,
+            None,
+        )
+        .expect_err("cost over ceiling")
+        .to_string()
+        .contains("automatic ceiling"));
+        assert!(
+            clean_direct_stamp_cost(Some(&admitted), None, 1_000.0, 4, None, None)
+                .expect_err("cost over per-peer ceiling")
+                .to_string()
+                .contains("automatic ceiling 4")
+        );
+        assert!(clean_direct_stamp_cost(
+            Some(&admitted),
+            None,
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            Some(4),
+            None,
+        )
+        .expect_err("unapproved cost")
+        .to_string()
+        .contains("explicit confirmation"));
+        assert_eq!(
+            clean_direct_stamp_cost(
+                Some(&admitted),
+                None,
+                1_000.0,
+                crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+                Some(4),
+                Some(crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST),
+            )
+            .expect("exact approved cost"),
+            Some(crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST)
+        );
+        assert!(clean_direct_stamp_cost(
+            Some(&admitted),
+            None,
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            Some(4),
+            Some(7),
+        )
+        .is_err());
         let unsupported = app_data(rmpv::Value::from(0_u8));
-        assert!(clean_direct_stamp_cost(Some(&unsupported), None, 1_000.0).is_err());
+        assert!(clean_direct_stamp_cost(
+            Some(&unsupported),
+            None,
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            None,
+            None,
+        )
+        .is_err());
 
         let ticket = crate::messaging::NativeLxmfReplyTicket {
             ticket: vec![0x44; 16],
             expires: 2_000.0,
         };
         assert_eq!(
-            clean_direct_stamp_cost(Some(&over), Some(&ticket), 1_000.0)
+            clean_direct_stamp_cost(Some(&over), Some(&ticket), 1_000.0, 0, Some(0), None)
                 .expect("ticket precedence"),
             None
         );
@@ -17182,7 +17253,15 @@ enable_transport = No
             expires: 999.0,
             ..ticket
         };
-        assert!(clean_direct_stamp_cost(Some(&admitted), Some(&expired), 1_000.0).is_err());
+        assert!(clean_direct_stamp_cost(
+            Some(&admitted),
+            Some(&expired),
+            1_000.0,
+            crate::runtime::native_lxmf::codec::CLEAN_DIRECT_STAMP_MAX_COST,
+            None,
+            None,
+        )
+        .is_err());
     }
 
     #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]

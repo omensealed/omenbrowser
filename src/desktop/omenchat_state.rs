@@ -297,6 +297,36 @@ impl DesktopApp {
     }
 
     #[cfg(feature = "chat-client")]
+    pub(in crate::desktop) fn omenchat_room_effective_upload_max_file_bytes(
+        &self,
+        session_id: ChatSessionId,
+        room_id: crate::chat::protocol::RoomId,
+    ) -> Option<u64> {
+        let global_max = self.omenchat_session_upload_max_file_bytes(session_id);
+        match self
+            .omenchat
+            .chat_client
+            .room_upload_policy(session_id, room_id)
+        {
+            Some(crate::chat::protocol::RoomUploadPolicyProjection::Disabled) => Some(0),
+            Some(policy) => global_max.and_then(|global| policy.effective_max_file_bytes(global)),
+            None => global_max,
+        }
+    }
+
+    #[cfg(feature = "chat-client")]
+    pub(in crate::desktop) fn omenchat_room_uploads_disabled(
+        &self,
+        session_id: ChatSessionId,
+        room_id: crate::chat::protocol::RoomId,
+    ) -> bool {
+        self.omenchat
+            .chat_client
+            .room_upload_policy(session_id, room_id)
+            .is_some_and(crate::chat::protocol::RoomUploadPolicyProjection::uploads_disabled)
+    }
+
+    #[cfg(feature = "chat-client")]
     pub(in crate::desktop) fn omenchat_session_upload_quota(
         &self,
         session_id: ChatSessionId,
@@ -311,7 +341,7 @@ impl DesktopApp {
     pub(in crate::desktop) fn mark_hidden_omenchat_room_unread(
         &mut self,
         session_id: ChatSessionId,
-        room_id: RoomId,
+        event: &crate::chat::ChatEvent,
     ) {
         if self
             .find_workspace_pane(&DesktopPane::OmenChat(session_id))
@@ -319,10 +349,17 @@ impl DesktopApp {
         {
             return;
         }
+        if !self
+            .omenchat
+            .chat_client
+            .event_allows_unread(session_id, event)
+        {
+            return;
+        }
         let Some(session) = self.omenchat.chat_client.session_mut(session_id) else {
             return;
         };
-        if session.active_room.room_id != room_id {
+        if session.active_room.room_id != event.room_id {
             self.persist_omenchat_session(session_id);
             return;
         }
@@ -330,11 +367,83 @@ impl DesktopApp {
         if let Some(room) = session
             .rooms
             .iter_mut()
-            .find(|room| room.room_id == room_id)
+            .find(|room| room.room_id == event.room_id)
         {
             room.unread = room.unread.saturating_add(1);
         }
         self.persist_omenchat_session(session_id);
+    }
+
+    #[cfg(feature = "chat-client")]
+    pub(in crate::desktop) fn update_toggle_omenchat_mute_except_mentions(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+    ) {
+        let Some((server_id, room_name)) =
+            self.omenchat
+                .chat_client
+                .session(session_id)
+                .and_then(|session| {
+                    session
+                        .rooms
+                        .iter()
+                        .find(|room| room.room_id == room_id)
+                        .or_else(|| {
+                            (session.active_room.room_id == room_id).then_some(&session.active_room)
+                        })
+                        .map(|room| (session.server.server_id.clone(), room.name.clone()))
+                })
+        else {
+            self.app.status.task = "cannot change notification policy: room is unavailable".into();
+            return;
+        };
+        if self
+            .omenchat
+            .chat_client
+            .local_user_id(session_id)
+            .is_none()
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "mute except mentions requires a negotiated local OMENchat user identity".into(),
+            );
+            return;
+        }
+        let enabled = !self
+            .omenchat
+            .chat_client
+            .room_mute_except_mentions(session_id, room_id);
+        if !self
+            .omenchat
+            .chat_client
+            .set_room_mute_except_mentions(session_id, room_id, enabled)
+        {
+            self.app.status.task = "cannot change notification policy: room is unavailable".into();
+            return;
+        }
+        let persist_result = self.omenchat.chat_store.as_mut().map_or(Ok(()), |store| {
+            store.set_room_mute_except_mentions(&server_id, room_id, enabled)
+        });
+        if let Err(error) = persist_result {
+            let _ = self
+                .omenchat
+                .chat_client
+                .set_room_mute_except_mentions(session_id, room_id, !enabled);
+            self.set_omenchat_session_status(
+                session_id,
+                format!("could not save notification policy: {error}"),
+            );
+            return;
+        }
+        self.set_omenchat_session_status(
+            session_id,
+            if enabled {
+                format!("#{room_name} will count only authoritative mentions as unread")
+            } else {
+                format!("#{room_name} will count all new events as unread")
+            },
+        );
     }
 
     #[cfg(feature = "chat-client")]
@@ -384,7 +493,15 @@ impl DesktopApp {
     ) {
         for event in events {
             match event {
+                ChatClientEvent::ServerOpened { session_id, server } => {
+                    self.bind_omenchat_invitation_room(*session_id, &server.destination);
+                }
+                ChatClientEvent::RoomsUpdated { session_id, rooms } => {
+                    self.consume_omenchat_invitation_room_catalog(*session_id, rooms);
+                }
                 ChatClientEvent::RoomJoined { session_id, .. } => {
+                    #[cfg(feature = "desktop-qr")]
+                    self.clear_omenchat_invitation_qr_for_session(*session_id);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     self.set_omenchat_connection_state(
                         *session_id,
@@ -449,11 +566,59 @@ impl DesktopApp {
                         ),
                     );
                 }
-                ChatClientEvent::UserUpdated { session_id, .. } => {
+                ChatClientEvent::UserUpdated { session_id, user } => {
+                    #[cfg(not(feature = "omenchat-moderation-audit"))]
+                    let _ = user;
+                    #[cfg(all(
+                        feature = "omenchat-moderation-audit",
+                        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                    ))]
+                    if self.omenchat.chat_client.local_user_id(*session_id) == Some(user.user_id)
+                        && !self
+                            .omenchat
+                            .chat_client
+                            .local_user_can_view_moderation_audit(*session_id)
+                    {
+                        self.omenchat
+                            .chat_client
+                            .clear_moderation_audit(*session_id);
+                        self.omenchat
+                            .omenchat_moderation_audit_requests
+                            .remove(session_id);
+                    }
                     self.persist_omenchat_session(*session_id);
                 }
+                ChatClientEvent::LocalUserBound {
+                    session_id,
+                    user_id,
+                } => {
+                    #[cfg(all(
+                        feature = "omenchat-moderation-audit",
+                        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                    ))]
+                    if self
+                        .omenchat
+                        .omenchat_moderation_audit_requests
+                        .get(session_id)
+                        .is_some_and(|request| request.owner_user_id != *user_id)
+                    {
+                        self.omenchat
+                            .chat_client
+                            .clear_moderation_audit(*session_id);
+                        self.omenchat
+                            .omenchat_moderation_audit_requests
+                            .remove(session_id);
+                    }
+                    if self
+                        .omenchat
+                        .chat_client
+                        .bind_local_user_id(*session_id, *user_id)
+                    {
+                        self.persist_omenchat_session(*session_id);
+                    }
+                }
                 ChatClientEvent::EventAppended { session_id, event } => {
-                    self.mark_hidden_omenchat_room_unread(*session_id, event.room_id);
+                    self.mark_hidden_omenchat_room_unread(*session_id, event);
                     if !is_omenchat_local_echo_event(event) {
                         self.persist_omenchat_session(*session_id);
                     }
@@ -469,6 +634,137 @@ impl DesktopApp {
                         }
                     }
                     self.persist_omenchat_session(*session_id);
+                }
+                ChatClientEvent::ReactionDeltaApplied {
+                    session_id,
+                    room_id,
+                    event,
+                } => {
+                    let server_id = self
+                        .omenchat
+                        .chat_client
+                        .session(*session_id)
+                        .map(|session| session.server.server_id.clone());
+                    if let (Some(store), Some(server_id)) =
+                        (self.omenchat.chat_store.as_mut(), server_id)
+                    {
+                        if let Err(error) = store.apply_reaction_event(&server_id, *room_id, *event)
+                        {
+                            tracing::warn!(
+                                "failed to persist received OMENchat reaction delta for session {session_id}: {error}"
+                            );
+                        }
+                    }
+                }
+                ChatClientEvent::ReactionSnapshotApplied {
+                    session_id,
+                    room_id,
+                    snapshot,
+                } => {
+                    let server_id = self
+                        .omenchat
+                        .chat_client
+                        .session(*session_id)
+                        .map(|session| session.server.server_id.clone());
+                    if let (Some(store), Some(server_id)) =
+                        (self.omenchat.chat_store.as_mut(), server_id)
+                    {
+                        if let Err(error) =
+                            store.replace_reaction_snapshot(&server_id, *room_id, snapshot.clone())
+                        {
+                            tracing::warn!(
+                                "failed to persist received OMENchat reaction snapshot for session {session_id}: {error}"
+                            );
+                        }
+                    }
+                }
+                ChatClientEvent::MessageRevisionDeltaApplied {
+                    session_id,
+                    room_id,
+                    event,
+                } => {
+                    let server_id = self
+                        .omenchat
+                        .chat_client
+                        .session(*session_id)
+                        .map(|session| session.server.server_id.clone());
+                    if let (Some(store), Some(server_id)) =
+                        (self.omenchat.chat_store.as_mut(), server_id)
+                    {
+                        if let Err(error) =
+                            store.apply_message_revision_event(&server_id, *room_id, event.clone())
+                        {
+                            tracing::warn!(
+                                "failed to persist received OMENchat message revision delta for session {session_id}: {error}"
+                            );
+                        }
+                    }
+                }
+                ChatClientEvent::MessageRevisionSnapshotApplied {
+                    session_id,
+                    room_id,
+                    snapshot,
+                } => {
+                    let server_id = self
+                        .omenchat
+                        .chat_client
+                        .session(*session_id)
+                        .map(|session| session.server.server_id.clone());
+                    if let (Some(store), Some(server_id)) =
+                        (self.omenchat.chat_store.as_mut(), server_id)
+                    {
+                        if let Err(error) = store.replace_message_revision_snapshot(
+                            &server_id,
+                            *room_id,
+                            snapshot.clone(),
+                        ) {
+                            tracing::warn!(
+                                "failed to persist received OMENchat message revision snapshot for session {session_id}: {error}"
+                            );
+                        }
+                    }
+                }
+                ChatClientEvent::PinDeltaApplied {
+                    session_id,
+                    room_id,
+                    event,
+                } => {
+                    let server_id = self
+                        .omenchat
+                        .chat_client
+                        .session(*session_id)
+                        .map(|session| session.server.server_id.clone());
+                    if let (Some(store), Some(server_id)) =
+                        (self.omenchat.chat_store.as_mut(), server_id)
+                    {
+                        if let Err(error) = store.apply_pin_event(&server_id, *room_id, *event) {
+                            tracing::warn!(
+                                "failed to persist received OMENchat pin delta for session {session_id}: {error}"
+                            );
+                        }
+                    }
+                }
+                ChatClientEvent::PinSnapshotApplied {
+                    session_id,
+                    room_id,
+                    snapshot,
+                } => {
+                    let server_id = self
+                        .omenchat
+                        .chat_client
+                        .session(*session_id)
+                        .map(|session| session.server.server_id.clone());
+                    if let (Some(store), Some(server_id)) =
+                        (self.omenchat.chat_store.as_mut(), server_id)
+                    {
+                        if let Err(error) =
+                            store.replace_pin_snapshot(&server_id, *room_id, snapshot.clone())
+                        {
+                            tracing::warn!(
+                                "failed to persist received OMENchat pin snapshot for session {session_id}: {error}"
+                            );
+                        }
+                    }
                 }
                 ChatClientEvent::HistorySynced { session_id, .. } => {
                     #[cfg(not(any(
@@ -503,6 +799,81 @@ impl DesktopApp {
                         feature = "chat-client-rns-clean"
                     )))]
                     let _ = (session_id, room_id);
+                }
+                #[cfg(all(
+                    feature = "omenchat-moderation-audit",
+                    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                ))]
+                ChatClientEvent::ModerationAuditPageApplied {
+                    session_id,
+                    room_id,
+                    page,
+                } => {
+                    let full_page = self
+                        .omenchat
+                        .omenchat_moderation_audit_requests
+                        .get_mut(session_id)
+                        .filter(|request| {
+                            request.room_id == *room_id
+                                && matches!(
+                                    request.state,
+                                    crate::chat::ChatModerationAuditRequestState::Receiving
+                                )
+                        })
+                        .map(|request| {
+                            let full_page = page.records.len() == usize::from(request.limit);
+                            if full_page {
+                                request.state =
+                                    crate::chat::ChatModerationAuditRequestState::Complete {
+                                        has_more: true,
+                                    };
+                            }
+                            full_page
+                        });
+                    if let Some(full_page) = full_page {
+                        self.set_omenchat_session_status(
+                            *session_id,
+                            if full_page {
+                                format!(
+                                    "received {} moderation audit record(s); older records may be available",
+                                    page.records.len()
+                                )
+                            } else {
+                                format!(
+                                    "received {} moderation audit record(s); waiting for end",
+                                    page.records.len()
+                                )
+                            },
+                        );
+                    }
+                }
+                #[cfg(all(
+                    feature = "omenchat-moderation-audit",
+                    any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                ))]
+                ChatClientEvent::ModerationAuditEnd {
+                    session_id,
+                    room_id,
+                } => {
+                    let Some(request) = self
+                        .omenchat
+                        .omenchat_moderation_audit_requests
+                        .get_mut(session_id)
+                        .filter(|request| request.room_id == *room_id)
+                    else {
+                        continue;
+                    };
+                    request.state =
+                        crate::chat::ChatModerationAuditRequestState::Complete { has_more: false };
+                    let record_count = self
+                        .omenchat
+                        .chat_client
+                        .moderation_audit_page(*session_id, *room_id)
+                        .map_or(0, |page| page.records.len());
+                    self.set_omenchat_session_status(
+                        *session_id,
+                        format!("moderation audit current: {record_count} record(s)"),
+                    );
                 }
                 ChatClientEvent::UploadAccepted {
                     session_id,
@@ -542,7 +913,9 @@ impl DesktopApp {
                         );
                     }
                 }
-                ChatClientEvent::UploadRejected { session_id, reason } => {
+                ChatClientEvent::UploadRejected {
+                    session_id, reason, ..
+                } => {
                     self.omenchat
                         .omenchat_pending_upload_sources
                         .retain(|(pending_session_id, _, _), _| *pending_session_id != *session_id);
@@ -601,6 +974,37 @@ impl DesktopApp {
                     session_id: Some(session_id),
                     message,
                 } => {
+                    #[cfg(all(
+                        feature = "omenchat-moderation-audit",
+                        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+                    ))]
+                    if message.to_ascii_lowercase().contains("moderation audit") {
+                        let room_id = self
+                            .omenchat
+                            .omenchat_moderation_audit_requests
+                            .get(session_id)
+                            .map(|request| request.room_id)
+                            .or_else(|| {
+                                self.omenchat
+                                    .chat_client
+                                    .session(*session_id)
+                                    .map(|session| session.active_room.room_id)
+                            });
+                        if let Some(room_id) = room_id {
+                            if let Some(request) = self
+                                .omenchat
+                                .omenchat_moderation_audit_requests
+                                .get_mut(session_id)
+                                .filter(|request| request.room_id == room_id)
+                            {
+                                request.state =
+                                    crate::chat::ChatModerationAuditRequestState::Failed(
+                                        crate::chat::bounded_chat_text(message, 512),
+                                    );
+                            }
+                        }
+                    }
+                    self.clear_omenchat_invitation_room_for_session(*session_id);
                     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
                     if matches!(
                         self.omenchat_connection_state(*session_id),
@@ -618,6 +1022,131 @@ impl DesktopApp {
                 }
                 _ => {}
             }
+        }
+        #[cfg(all(
+            feature = "omenchat-moderation-audit",
+            any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+        ))]
+        self.reconcile_omenchat_moderation_audit_authority();
+    }
+
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    fn reconcile_omenchat_moderation_audit_authority(&mut self) {
+        let invalid_sessions = self
+            .omenchat
+            .omenchat_moderation_audit_requests
+            .iter()
+            .filter_map(|(session_id, request)| {
+                let authority_is_current = self
+                    .omenchat
+                    .chat_client
+                    .session(*session_id)
+                    .is_some_and(|session| {
+                        session.active_room.room_id == request.room_id && session.active_room.joined
+                    })
+                    && self
+                        .omenchat
+                        .omenchat_live_state
+                        .moderation_audit_negotiated(*session_id)
+                    && self.omenchat.chat_client.local_user_id(*session_id)
+                        == Some(request.owner_user_id)
+                    && self
+                        .omenchat
+                        .chat_client
+                        .local_user_can_view_moderation_audit(*session_id);
+                (!authority_is_current).then_some(*session_id)
+            })
+            .collect::<Vec<_>>();
+        for session_id in invalid_sessions {
+            self.omenchat.chat_client.clear_moderation_audit(session_id);
+            self.omenchat
+                .omenchat_moderation_audit_requests
+                .remove(&session_id);
+        }
+    }
+
+    pub(in crate::desktop) fn bind_omenchat_invitation_room(
+        &mut self,
+        session_id: ChatSessionId,
+        server_destination: &str,
+    ) {
+        let Some(pending) = self.omenchat.omenchat_invitation_room.as_mut() else {
+            return;
+        };
+        if pending
+            .server_destination
+            .eq_ignore_ascii_case(server_destination)
+            && pending
+                .session_id
+                .is_none_or(|bound_session| bound_session == session_id)
+        {
+            pending.session_id = Some(session_id);
+        }
+    }
+
+    pub(in crate::desktop) fn clear_omenchat_invitation_room_for_destination(
+        &mut self,
+        server_destination: &str,
+    ) {
+        if self
+            .omenchat
+            .omenchat_invitation_room
+            .as_ref()
+            .is_some_and(|pending| {
+                pending
+                    .server_destination
+                    .eq_ignore_ascii_case(server_destination)
+            })
+        {
+            self.omenchat.omenchat_invitation_room = None;
+        }
+    }
+
+    pub(in crate::desktop) fn clear_omenchat_invitation_room_for_session(
+        &mut self,
+        session_id: ChatSessionId,
+    ) {
+        if self
+            .omenchat
+            .omenchat_invitation_room
+            .as_ref()
+            .is_some_and(|pending| pending.session_id == Some(session_id))
+        {
+            self.omenchat.omenchat_invitation_room = None;
+        }
+    }
+
+    pub(in crate::desktop) fn consume_omenchat_invitation_room_catalog(
+        &mut self,
+        session_id: ChatSessionId,
+        rooms: &[crate::chat::ChatRoomSummary],
+    ) {
+        let Some(pending) = self.omenchat.omenchat_invitation_room.as_ref() else {
+            return;
+        };
+        if pending.session_id != Some(session_id) {
+            return;
+        }
+        let room_id = pending.room_id;
+        let room_name = rooms
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .map(|room| room.name.clone());
+        self.omenchat.omenchat_invitation_room = None;
+        if let Some(room_name) = room_name {
+            self.join_omenchat_room(session_id, room_name.clone());
+            self.app.status.task =
+                format!("opened OMENchat invitation room #{room_name} ({room_id})");
+        } else {
+            self.set_omenchat_session_status(
+                session_id,
+                format!("invitation room {room_id} was not present in the authenticated catalog"),
+            );
+            self.app.status.task =
+                format!("OMENchat invitation room {room_id} is unavailable on this server");
         }
     }
 }

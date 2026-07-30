@@ -5,6 +5,7 @@ pub mod codec;
 pub mod commands;
 pub mod descriptor;
 pub mod handoff;
+pub mod invitation;
 pub mod model;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod mutation_intent_worker;
@@ -29,10 +30,17 @@ pub mod live;
 pub mod lxmf;
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+pub use client::DurableMutationRejectionReason;
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub use client::DurableMutationTerminalState;
 pub use client::{
     ChatClient, ChatClientEvent, ChatClientRequest, ChatConnectionState, ChatSessionId,
     ChatSessionView,
 };
 pub use descriptor::OmenChatDescriptor;
+pub use invitation::{
+    OmenChatInvitation, OmenChatInvitationError, OmenChatInvitationIdentityEvidence,
+    OmenChatInvitationKind, OmenChatInvitationPreview, OmenChatInvitationPreviewOwner,
+    OMENCHAT_INVITATION_MAX_BYTES,
+};
 pub use model::*;

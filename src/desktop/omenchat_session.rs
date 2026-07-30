@@ -5,12 +5,35 @@ use super::DesktopApp;
 
 impl DesktopApp {
     pub(in crate::desktop) fn close_omenchat_session(&mut self, session_id: ChatSessionId) {
+        self.clear_omenchat_invitation_room_for_session(session_id);
+        #[cfg(feature = "desktop-qr")]
+        self.clear_omenchat_invitation_qr_for_session(session_id);
         let server_id = self
             .omenchat
             .chat_client
             .session(session_id)
             .map(|session| session.server.server_id.clone());
         self.omenchat.chat_drafts.remove(&session_id);
+        self.omenchat.omenchat_reply_drafts.remove(&session_id);
+        self.omenchat.omenchat_selected_mentions.remove(&session_id);
+        #[cfg(all(
+            feature = "omenchat-moderation-audit",
+            any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+        ))]
+        self.omenchat
+            .omenchat_moderation_audit_requests
+            .remove(&session_id);
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        {
+            self.omenchat.omenchat_revision_drafts.remove(&session_id);
+            if self
+                .omenchat
+                .omenchat_revision_delete_confirmation
+                .is_some_and(|confirmation| confirmation.session_id == session_id)
+            {
+                self.omenchat.omenchat_revision_delete_confirmation = None;
+            }
+        }
         self.omenchat.omenchat_motds.remove(&session_id);
         for cache_key in self
             .omenchat
@@ -59,6 +82,10 @@ impl DesktopApp {
                 .omenchat_link_sessions
                 .retain(|_, stored_session_id| *stored_session_id != session_id);
             self.omenchat.omenchat_connection_states.remove(&session_id);
+            crate::operations::connection::remove_omenchat_connection(
+                &mut self.app.operation_history,
+                session_id,
+            );
         }
         self.omenchat.chat_client.remove_session(session_id);
         if let (Some(store), Some(server_id)) =
@@ -99,10 +126,31 @@ impl DesktopApp {
         session_id: ChatSessionId,
         state: crate::chat::ChatConnectionState,
     ) {
-        if self.omenchat.chat_client.session(session_id).is_some() {
+        #[cfg(feature = "omenchat-moderation-audit")]
+        if !matches!(state, crate::chat::ChatConnectionState::Joined) {
+            self.omenchat.chat_client.clear_moderation_audit(session_id);
+            self.omenchat
+                .omenchat_moderation_audit_requests
+                .remove(&session_id);
+        }
+        if let Some(destination) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.server.destination.clone())
+        {
             self.omenchat
                 .omenchat_connection_states
                 .insert(session_id, state);
+            if let Err(error) = crate::operations::connection::record_omenchat_connection_state(
+                &mut self.app.operation_history,
+                session_id,
+                &destination,
+                state,
+                i64::try_from(crate::app::current_epoch_ms()).unwrap_or(i64::MAX),
+            ) {
+                tracing::warn!("failed to project OMENchat connection state: {error}");
+            }
         }
     }
 

@@ -1,8 +1,9 @@
 # OMENchat durable mutation checkpoint
 
-Status: checkpoint accepted; negotiated room-text durable transmission, conservative restart recovery, and explicit retry active
+Status: checkpoint accepted; negotiated durable transmission for the admitted room-text, leave, and mutating-command families, conservative restart recovery, and explicit retry active
 Baseline: OMENbrowser/omenchatd v0.9.5-2, OMENchat protocol v1  
 Proposed capability: `durable-mutations-v1`
+Additive notice acknowledgement capability: `durable-room-notice-ack-v1`
 
 ## Observed boundary
 
@@ -42,9 +43,9 @@ creates the raw 16-byte value at the active identity-scoped
 owner-only on Unix, synchronized, concurrency-safe, and rejects symlinks,
 special files, wrong lengths, and permissive modes without rewriting them. The
 value is retained in live client state and transmitted only in a bounded
-`SessionOpen` capability request. Negotiated room-text sends use it as part of
-their persistent replay key; uncertain intents are retried only after an
-explicit, confirmed action.
+`SessionOpen` capability request. Negotiated room-message and `/me` room-action
+sends use it as part of their persistent replay key; uncertain intents are
+retried only after an explicit, confirmed action.
 
 `mutation_id` is a fresh random 128-bit value generated before each logical
 mutation is persisted and remains stable only for retries of that intent.
@@ -235,8 +236,11 @@ pruning. Worker replies are received through bounded blocking tasks rather than
 blocking the Iced update path or an arbitrary Tokio worker. State transitions
 are monotonic: prepared may become uncertain,
 expired, or abandoned; uncertain may become acknowledged, conflict, expired,
-or abandoned; terminal states never regress. Negotiated room-text sends now
-use this owner; other mutations remain on the unchanged legacy path.
+or abandoned; terminal states never regress. Negotiated room-message,
+`/me` room-action, `/notice`, `/part`, `/topic`, `/create`, `/role`, `/unban`,
+`/kick`, `/ban`, `/mute`, and `/unmute` sends now use this owner.
+Identity-prefix-only administration targets remain on the legacy path because
+the returned result cannot prove the selected identity.
 
 Desktop restart recovery is deliberately read-only. The first OMENchat
 maintenance deadline submits one bounded recovery command and never transmits
@@ -247,9 +251,14 @@ identifiers. Redacted session diagnostics report prepared, uncertain,
 past-expiry, and worker-queue counts. Recovery failure is visible and does not
 fall back to automatic resend.
 
-The guarded terminal-resolution UI is active for recovered room-text intents.
-It renders no more than four entries per server, bounds each preview, and requires
-confirmation. `Stop Tracking` records `abandoned` without asserting whether an
+The guarded terminal-resolution UI is active for every currently negotiated
+durable operation. It renders no more than four entries per server and requires
+confirmation. Rows contain only a semantic operation kind, public server label,
+room scope, prepared/uncertain state, and relative expiry; mutation identifiers,
+request hashes, and message/command bodies are not rendered. The production
+retry guard determines whether Send/Retry is available. When it is unavailable,
+the row shows a redacted reason and only permits stopping local tracking.
+`Stop Tracking` records `abandoned` without asserting whether an
 uncertain server commit occurred. `Finalize Expired` rechecks the persisted
 deadline before recording `expired`. Both operations use the bounded owner and
 send no frame. Missing records and concurrent terminal transitions are handled
@@ -379,8 +388,8 @@ construction and parsing enforce canonical scalar/container/value/depth limits
 before the extension can be connected to either live codec. Only a client with
 a persistent instance identity advertises the capability, and only an explicit
 matching `SessionAccept` activates it for that Link. Legacy frames remain
-unchanged. Negotiated room-text sends and explicit retries use the durable
-envelope; legacy and downgraded sessions do not.
+unchanged. Negotiated admitted mutation families and explicit retries use the
+durable envelope; legacy and downgraded sessions do not.
 
 ## Required test matrix
 
@@ -457,15 +466,17 @@ verification, permission and membership validation, transactional room-event
 commit, reversible rate admission, exact origin response, and one-time fan-out.
 Only after that passes may the server advertise acceptance.
 
-That inactive session-level executor is now implemented for room messages and
-actions. Canonical hash and body validation occurs before replay admission.
+That inactive session-level executor is now implemented for room messages,
+actions, and notices. Canonical hash and body validation occurs before replay
+admission.
 Only a replay miss enters the immediate transaction and evaluates room/user
 policy, reversible rate admission, membership, event insertion, exact
 acknowledgement encoding, and replay publication. Stored terminal rejections
 remain stable even if policy later changes. A first commit returns one event
 for fan-out; replay returns no event. Restart, conflict, malformed hash,
 permission change, rate, and duplicate cases pass. Client envelope dispatch is
-active only for negotiated, persistently owned room text.
+active only for negotiated, persistently owned room messages, room actions, and
+room notices.
 
 The live envelope-routing gate is now implemented behind the authenticated
 binding. Tagged malformed envelopes fail with 1012; valid envelopes without a
@@ -476,19 +487,38 @@ and broadcasts its event; exact replay sends the original acknowledgement and
 has no broadcast. Tests cover duplicate delivery under a different sequence,
 malformed and unbound requests, and legacy isolation. Production capability
 acceptance is now on for a valid negotiated request. The browser reaches this
-route only for ordinary room-text sends after its intent is persisted as
-uncertain; other mutation actions remain legacy.
+route only for ordinary room-message, `/me` room-action, `/notice`, `/part`,
+`/topic`, `/create`, `/role`, `/unban`, `/kick`, `/ban`, `/mute`, and
+`/unmute` sends after their intent is persisted as uncertain. Durable
+notices additionally require `durable-room-notice-ack-v1` and use the
+already-defined kind-3
+`MessageAck`; older, legacy, and downgraded notices retain their protocol-v1
+`RoomEvent` response and are not placed in the durable intent store.
 
-The live client has a guarded durable-send boundary for
-room messages and actions. It accepts only an intent already persisted in the
-`sent_uncertain` state and verifies negotiated session, persistent client
-instance, server destination, active room, operation, body shape, sequence, and
-pending-echo budgets before sending the canonical envelope. A matching
-`MessageAck` reports the fixed mutation identifier so the desktop owner can
-transition the intent to `acknowledged`. Missing negotiation and merely
-`prepared` intents fail before transport output. Ordinary negotiated room-text
-sends call this boundary only through the bounded persistence worker, and no
-uncertain intent is automatically replayed.
+The live client has guarded durable-send boundaries for room messages, actions,
+notices, room leaves, topic updates, room creation, role changes, unban, and
+active-peer moderation operations. They accept only an intent already
+persisted in the `sent_uncertain` state and verify negotiated session,
+persistent client instance, server destination, operation, body shape,
+sequence, and bounded pending-correlation budgets before sending the canonical
+envelope. Text and topic operations additionally require the active room.
+PartRoom requires its stored room to remain in the same server session's
+bounded catalog, which permits an explicit retry after the active room changed
+without permitting cross-server reuse. A matching `MessageAck` acknowledges
+text operations; PartRoom and topic require their exact
+sequence/room/command/returned-room `CommandResult`. Create requires the exact
+sequence, roomless result, command tag, and server-normalized requested room
+name. Role and unban require the exact sequence, room, command tag,
+catalog-known numeric user ID or display name, and requested role or cleared-ban
+state. Kick, ban, mute, and unmute use the same user boundary and require the
+requested status semantics; kick and ban remove the exact target from the live
+catalog only after the matching result. Identity-prefix
+targets remain legacy because identity hashes are absent from the result. Missing negotiation and
+merely `prepared` intents fail before transport output. Ordinary negotiated
+room-message, `/me`, `/notice`, `/part`, `/topic`, `/create`, `/role`,
+`/unban`, `/kick`, `/ban`, `/mute`, and `/unmute` sends call these
+boundaries only through the bounded persistence worker, and no uncertain intent
+is automatically replayed.
 
 `PartRoom` now uses the same durable replay authority. Its membership deletion,
 departure event, exact legacy-compatible `CommandResult`, and replay record are
@@ -498,6 +528,12 @@ membership and event changes. First execution performs live room cleanup and
 one user-list update. If origin delivery failed after commit, replay returns the
 original result and repairs stale live room ownership; fan-out occurs only when
 that ownership was still present.
+
+The desktop activation preserves local room membership until that exact
+`CommandResult` arrives. Sending or losing the response therefore cannot make
+the UI claim that the leave completed. An uncertain PartRoom intent is
+recovered after restart without transmission and can only be resent through
+the existing explicit confirmation flow.
 
 `RoomNotice` is now covered by the transaction-backed room-event executor. It
 retains moderator/admin authorization decisions, uses reversible bounded
@@ -517,6 +553,23 @@ room audit event, retain the exact origin result, and return a bounded list of
 live effects only on first execution. The internal dispatch list is bounded by
 command semantics rather than a queue.
 
+Desktop activation covers `topic` and `create`. The client stores the
+normalized command and canonical hash before transport and retains prior local
+state until the exact result is correlated. Mismatched command or returned-room
+shapes are ignored without losing the pending intent. Create uses a roomless
+request and correlates the introduced room by the server-normalized requested
+name rather than approximating topic's room-ID rule. Restart recovery remains
+visible and non-transmitting.
+
+Desktop activation also covers `role` and `unban` when the target can be
+correlated from the existing result as a catalog-known numeric user ID or exact
+display name.
+Role aliases are canonicalized before persistence. The original room remains
+the audit scope for explicit retry even when another room later becomes active.
+Returned user identity and role/status semantics must match before the intent
+is acknowledged or local catalog state changes. Identity-prefix-only targets
+retain the legacy command path rather than weakening correlation.
+
 The command executor now also covers active-peer `kick`, `ban`, `mute`, and
 `unmute`. Target resolution retains the existing room-presence, self-target,
 moderator/admin, and protected-admin rules. Target status mutation, room audit
@@ -524,7 +577,10 @@ event, exact result, and replay publication share one transaction. First
 execution owns the bounded user/event broadcasts. `kick` and `ban` also own one
 target-identity disconnect, which live orchestration applies immediately after
 commit and before response I/O; replay has no disconnect identity and therefore
-cannot close a replacement Link. The server-side operation set proposed by the
-capability is staged, but capability acceptance remains blocked on activating
-the browser's bounded persistent-intent owner and negotiated send/recovery
-path, followed by mixed-version and failure-boundary validation.
+cannot close a replacement Link. The desktop activates this subset for
+catalog-known numeric IDs or exact display targets. It persists the canonical
+command before transport, retains uncertain results across restart without
+automatic resend, and acknowledges only an exact sequence, room, command,
+target, and requested status result. Identity-prefix-only targets remain
+legacy because the result cannot prove the selected identity. Lost-response
+coverage proves replay cannot disconnect a replacement Link.

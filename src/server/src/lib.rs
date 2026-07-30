@@ -22,6 +22,20 @@ mod tui_layout;
 mod tui_text;
 pub mod upload;
 
+pub(crate) const SLOW_MODE_ENFORCEMENT_STATUS: &str = if cfg!(feature = "omenchat-slow-mode") {
+    "active"
+} else {
+    "inactive"
+};
+pub(crate) const ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS: &str =
+    if cfg!(feature = "omenchat-room-media-policy") {
+        "active"
+    } else {
+        "inactive"
+    };
+const ROOM_STATUS_MAX_ITEMS: usize = 1_024;
+const ROOM_STATUS_MAX_BYTES: usize = 1024 * 1024;
+
 use error::ServerResult;
 use std::io::Read;
 use std::path::PathBuf;
@@ -37,14 +51,32 @@ pub enum CliCommand {
     DoctorJson(ServerOptions),
     UploadsRepairLedger(ServerOptions),
     DatabaseRestoreMigrationBackup(ServerOptions, DatabaseRestoreOptions),
+    DatabaseExportSchemaFour(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaFive(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaSix(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaSeven(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaEight(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaNine(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaTen(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaEleven(ServerOptions, DatabaseExportOptions),
+    DatabaseExportSchemaTwelve(ServerOptions, DatabaseExportOptions),
+    DatabaseAdvanceHistoryUsage(ServerOptions, DatabaseHistoryUsageOptions),
     ConfigShow(ServerOptions),
     ConfigSet(ServerOptions, ConfigSetOptions),
     RoomsList(ServerOptions),
+    RoomsListJson(ServerOptions),
     RoomsAdd(ServerOptions, RoomAddOptions),
     RoomsSetTopic(ServerOptions, RoomTopicOptions),
+    RoomsSetPolicy(ServerOptions, RoomPolicyOptions),
+    RoomsSetSlowMode(ServerOptions, RoomSlowModeOptions),
+    RoomsSetUploadPolicy(ServerOptions, RoomUploadPolicyOptions),
     RoomsArchive(ServerOptions, RoomSelectOptions),
+    UsersListJson(ServerOptions),
+    UsersSetRole(ServerOptions, UserRoleOptions),
+    InterfacesList(ServerOptions),
     InterfacesTcpServer(ServerOptions, TcpServerOverride),
     InterfacesTcpClient(ServerOptions, TcpClientOverride),
+    InterfacesDeleteTcpClient(ServerOptions, TcpClientOverride),
     Invalid(String),
     Help,
     Version,
@@ -80,6 +112,16 @@ pub struct DatabaseRestoreOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseExportOptions {
+    pub destination: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseHistoryUsageOptions {
+    pub room_id: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomAddOptions {
     pub name: String,
     pub topic: Option<String>,
@@ -92,8 +134,60 @@ pub struct RoomTopicOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomPolicyOptions {
+    pub room_id: i64,
+    pub announcement_only: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomSlowModeOptions {
+    pub room_id: i64,
+    pub seconds: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomUploadPolicyOptions {
+    pub room_id: i64,
+    pub max_file_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomSelectOptions {
     pub room_id: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdministrativeUserRole {
+    Standard,
+    Trusted,
+    Moderator,
+    Administrator,
+}
+
+impl AdministrativeUserRole {
+    fn bits(self) -> u64 {
+        match self {
+            Self::Standard => 0,
+            Self::Trusted => 1,
+            Self::Moderator => 1 | (1 << 1),
+            Self::Administrator => 1 | (1 << 1) | (1 << 2),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Trusted => "trusted",
+            Self::Moderator => "moderator",
+            Self::Administrator => "administrator",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserRoleOptions {
+    pub user_id: i64,
+    pub role: AdministrativeUserRole,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +252,7 @@ impl CliCommand {
             "database" => parse_database_command(args),
             "config" => parse_config_command(args),
             "rooms" => parse_rooms_command(args),
+            "users" => parse_users_command(args),
             "interfaces" => parse_interfaces_command(args),
             "-h" | "--help" | "help" => Self::Help,
             "-V" | "--version" | "version" => Self::Version,
@@ -189,6 +284,27 @@ impl Omenchatd {
                 Ok(())
             }
             CliCommand::Run(options) => {
+                #[cfg(all(
+                    feature = "live-reticulum",
+                    feature = "omenchat-slow-mode-qualification"
+                ))]
+                let qualification_slow_mode_transition_seconds =
+                    std::env::var("OMENCHATD_QUALIFICATION_SLOW_MODE_TRANSITION")
+                        .ok()
+                        .map(|value| {
+                            value.parse::<u32>().map_err(|_| {
+                                error::ServerError::Message(
+                                    "qualification slow-mode transition must be integer seconds"
+                                        .into(),
+                                )
+                            })
+                        })
+                        .transpose()?;
+                #[cfg(all(
+                    feature = "live-reticulum",
+                    not(feature = "omenchat-slow-mode-qualification")
+                ))]
+                let qualification_slow_mode_transition_seconds: Option<u32> = None;
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
                 if let Some(tcp_server) = options.tcp_server.as_ref() {
@@ -199,7 +315,10 @@ impl Omenchatd {
                 }
                 #[cfg(feature = "live-reticulum")]
                 {
-                    reticulum_live::run_live_server(config)
+                    reticulum_live::run_live_server(
+                        config,
+                        qualification_slow_mode_transition_seconds,
+                    )
                 }
                 #[cfg(all(not(feature = "live-reticulum"), all(feature = "live-rns-net", any())))]
                 {
@@ -279,6 +398,189 @@ impl Omenchatd {
                 );
                 Ok(())
             }
+            CliCommand::DatabaseExportSchemaFour(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_four_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-4 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-4 copy: {}", report.destination.display());
+                println!(
+                    "Reaction state is intentionally absent; the active database was not modified."
+                );
+                Ok(())
+            }
+            CliCommand::DatabaseExportSchemaFive(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_five_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-5 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-5 copy: {}", report.destination.display());
+                println!(
+                    "Message revision state is intentionally absent; reaction state is preserved; the active database was not modified."
+                );
+                Ok(())
+            }
+            CliCommand::DatabaseExportSchemaSix(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_six_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-6 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-6 copy: {}", report.destination.display());
+                println!(
+                    "Room event sequence metadata is intentionally absent; message revisions, reactions, and ordinary history are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
+            CliCommand::DatabaseExportSchemaSeven(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_seven_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-7 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-7 copy: {}", report.destination.display());
+                println!(
+                    "Room history usage metadata is intentionally absent; event sequences, message revisions, reactions, and ordinary history are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
+            CliCommand::DatabaseExportSchemaEight(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_eight_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-8 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-8 copy: {}", report.destination.display());
+                println!(
+                    "Pin state is intentionally absent; history usage, event sequences, message revisions, reactions, and ordinary history are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
+            CliCommand::DatabaseExportSchemaNine(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_nine_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-9 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-9 copy: {}", report.destination.display());
+                println!(
+                    "Moderation-audit history is intentionally absent; pin state and all earlier schema layers are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
+            CliCommand::DatabaseExportSchemaTen(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_ten_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-10 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-10 copy: {}", report.destination.display());
+                println!(
+                    "Announcement-room policy is intentionally absent; moderation-audit history and all earlier schema layers are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
+            CliCommand::DatabaseExportSchemaEleven(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_eleven_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-11 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-11 copy: {}", report.destination.display());
+                println!(
+                    "Slow-mode settings and admission state are intentionally absent; announcement-room policy and all earlier schema layers are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
+            CliCommand::DatabaseExportSchemaTwelve(options, export) => {
+                let config = config_from_options(&options)?;
+                let report = crate::database_recovery::export_schema_twelve_copy(
+                    &config.database_path,
+                    &export.destination,
+                )?;
+                println!(
+                    "exported omenchatd schema-12 compatible copy from schema v{}",
+                    report.source_version
+                );
+                println!("source database: {}", config.database_path.display());
+                println!("schema-12 copy: {}", report.destination.display());
+                println!(
+                    "Room media-policy settings are intentionally absent; slow-mode state and all earlier schema layers are preserved; the active database was not modified."
+                );
+                Ok(())
+            }
+            CliCommand::DatabaseAdvanceHistoryUsage(options, history) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(crate::error::ServerError::Message(
+                        "room history usage maintenance refused: database file is missing; run `omenchatd init` only when creating a new server home"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let usage = database.advance_room_history_usage(history.room_id)?;
+                println!(
+                    "room {} history usage: events={} bytes={} cursor={} target={} complete={}",
+                    history.room_id,
+                    usage.event_count,
+                    usage.retained_bytes,
+                    usage.backfill_through_event_id,
+                    usage.backfill_target_event_id,
+                    usage.backfill_complete
+                );
+                if usage.backfill_complete {
+                    println!("History usage accounting is complete. No history was deleted.");
+                } else {
+                    println!(
+                        "One bounded accounting batch completed. Stop omenchatd and repeat this command for room {} before enabling retention.",
+                        history.room_id
+                    );
+                }
+                Ok(())
+            }
             CliCommand::ConfigShow(options) => {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
@@ -318,14 +620,35 @@ impl Omenchatd {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
                 let database = admin_db::AdminDatabase::open(&config.database_path)?;
-                for room in database.list_rooms()? {
+                let rooms = database.list_rooms()?;
+                let (rooms, truncated) = bounded_room_status_rows(&rooms);
+                for room in rooms {
+                    println!("{}", room_status_line(room, config.upload_max_file_bytes)?);
+                }
+                if truncated {
                     println!(
-                        "#{name}\troom_id={room_id}\ttopic={topic}",
-                        name = room.name,
-                        room_id = room.room_id,
-                        topic = room.topic.unwrap_or_default()
+                        "room_status_truncated=true item_limit={ROOM_STATUS_MAX_ITEMS} byte_limit={ROOM_STATUS_MAX_BYTES}"
                     );
                 }
+                Ok(())
+            }
+            CliCommand::RoomsListJson(options) => {
+                let config = config_from_options(&options)?;
+                config::init_files(&config)?;
+                let database = admin_db::AdminDatabase::open(&config.database_path)?;
+                let rooms = database.list_rooms()?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&room_status_json(
+                        &rooms,
+                        config.upload_max_file_bytes
+                    )?)
+                    .map_err(|error| {
+                        crate::error::ServerError::Message(format!(
+                            "room status JSON encoding failed: {error}"
+                        ))
+                    })?
+                );
                 Ok(())
             }
             CliCommand::RoomsAdd(options, room) => {
@@ -346,6 +669,86 @@ impl Omenchatd {
                 println!("room topic updated: id={}", room.room_id);
                 Ok(())
             }
+            CliCommand::RoomsSetPolicy(options, room) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "room policy update refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let room_id = u32::try_from(room.room_id)
+                    .map_err(|_| error::ServerError::Message("room not found".into()))?;
+                let updated =
+                    database.set_room_announcement_policy(room_id, room.announcement_only)?;
+                println!(
+                    "room policy updated: id={} policy={} revision={}",
+                    updated.room_id,
+                    if updated.policy_bits == 0 {
+                        "ordinary"
+                    } else {
+                        "announcement"
+                    },
+                    updated.room_revision
+                );
+                Ok(())
+            }
+            CliCommand::RoomsSetSlowMode(options, room) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "room slow-mode update refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let room_id = u32::try_from(room.room_id)
+                    .map_err(|_| error::ServerError::Message("room not found".into()))?;
+                let update = database.set_room_slow_mode_seconds(room_id, room.seconds)?;
+                println!(
+                    "room slow mode stored: id={} previous={} configured={} revision={} changed={} enforcement={}",
+                    update.room.room_id,
+                    slow_mode_label(update.previous_seconds),
+                    slow_mode_label(update.room.slow_mode_seconds),
+                    update.room.room_revision,
+                    update.previous_seconds != update.room.slow_mode_seconds,
+                    SLOW_MODE_ENFORCEMENT_STATUS
+                );
+                Ok(())
+            }
+            CliCommand::RoomsSetUploadPolicy(options, room) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "room upload-policy update refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let room_id = u32::try_from(room.room_id)
+                    .map_err(|_| error::ServerError::Message("room not found".into()))?;
+                let update =
+                    database.set_room_upload_max_file_bytes(room_id, room.max_file_bytes)?;
+                let effective = store::EffectiveRoomUploadPolicy::resolve(
+                    update.room.upload_max_file_bytes,
+                    config.upload_max_file_bytes,
+                )?;
+                println!(
+                    "room upload policy stored: id={} previous={} configured={} effective={} revision={} changed={} enforcement={}",
+                    update.room.room_id,
+                    room_upload_policy_config_label(update.previous_max_file_bytes),
+                    room_upload_policy_config_label(update.room.upload_max_file_bytes),
+                    effective_room_upload_policy_label(effective),
+                    update.room.room_revision,
+                    update.previous_max_file_bytes != update.room.upload_max_file_bytes,
+                    ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS
+                );
+                Ok(())
+            }
             CliCommand::RoomsArchive(options, room) => {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
@@ -354,6 +757,63 @@ impl Omenchatd {
                     .map_err(|_| error::ServerError::Message("room not found".into()))?;
                 database.archive_room(room_id)?;
                 println!("room archived: id={}", room.room_id);
+                Ok(())
+            }
+            CliCommand::UsersListJson(options) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "user listing refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database = admin_db::AdminDatabase::open_read_only(&config.database_path)?;
+                let users = database
+                    .list_users()?
+                    .into_iter()
+                    .map(|user| {
+                        serde_json::json!({
+                            "user_id": user.user.user_id,
+                            "display_name": user.user.display_name,
+                            "role_bits": user.user.role_bits,
+                            "status_bits": user.user.status_bits,
+                            "first_seen_at": user.first_seen_at,
+                            "last_seen_at": user.last_seen_at,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema_version": 1,
+                        "users": users,
+                    }))
+                    .map_err(|error| {
+                        crate::error::ServerError::Message(format!(
+                            "user status JSON encoding failed: {error}"
+                        ))
+                    })?
+                );
+                Ok(())
+            }
+            CliCommand::UsersSetRole(options, user) => {
+                let config = config_from_options(&options)?;
+                if !config.database_path.is_file() {
+                    return Err(error::ServerError::Message(
+                        "user role update refused: database file is missing; initialize the server home first"
+                            .into(),
+                    ));
+                }
+                let database =
+                    admin_db::AdminDatabase::open_existing_for_maintenance(&config.database_path)?;
+                let user_id = u32::try_from(user.user_id)
+                    .map_err(|_| error::ServerError::Message("user was not found".into()))?;
+                let updated = database.set_user_role_bits(user_id, user.role.bits())?;
+                println!(
+                    "user role updated: id={} role={}",
+                    updated.user_id,
+                    user.role.label()
+                );
                 Ok(())
             }
             CliCommand::InterfacesTcpServer(options, tcp_server) => {
@@ -366,8 +826,48 @@ impl Omenchatd {
             CliCommand::InterfacesTcpClient(options, tcp_client) => {
                 let config = config_from_options(&options)?;
                 config::init_files(&config)?;
-                config::write_reticulum_tcp_client_config(&config, &tcp_client)?;
-                println!("updated {}", config.reticulum_config_file().display());
+                let name = config::add_reticulum_tcp_client_config(&config, &tcp_client)?;
+                println!(
+                    "added {name}: {}:{}",
+                    tcp_client.target_host, tcp_client.target_port
+                );
+                Ok(())
+            }
+            CliCommand::InterfacesList(options) => {
+                let config = config_from_options(&options)?;
+                config::init_files(&config)?;
+                let interfaces = config::list_reticulum_tcp_client_configs(&config)?;
+                if interfaces.is_empty() {
+                    println!("no TCP client interfaces configured");
+                } else {
+                    for interface in interfaces {
+                        println!(
+                            "{}\t{}:{}\tifac={}",
+                            interface.name,
+                            interface.target_host,
+                            interface.target_port,
+                            if interface.ifac_configured {
+                                "configured"
+                            } else {
+                                "none"
+                            }
+                        );
+                    }
+                }
+                Ok(())
+            }
+            CliCommand::InterfacesDeleteTcpClient(options, tcp_client) => {
+                let config = config_from_options(&options)?;
+                config::init_files(&config)?;
+                let removed = config::delete_reticulum_tcp_client_config(
+                    &config,
+                    &tcp_client.target_host,
+                    tcp_client.target_port,
+                )?;
+                println!(
+                    "removed {removed} TCP client interface(s) for {}:{}",
+                    tcp_client.target_host, tcp_client.target_port
+                );
                 Ok(())
             }
             CliCommand::Invalid(error) => Err(crate::error::ServerError::Message(error)),
@@ -428,33 +928,136 @@ fn parse_uploads_command(args: impl IntoIterator<Item = String>) -> CliCommand {
 
 fn parse_database_command(args: impl IntoIterator<Item = String>) -> CliCommand {
     let mut args = args.into_iter();
-    if args.next().as_deref() != Some("restore-migration-backup") {
+    let Some(command) = args.next() else {
         return CliCommand::Help;
-    }
+    };
     let mut confirmed = false;
-    let mut backup = None;
+    let mut path = None;
+    let mut room_id = None;
     let mut options = ServerOptions::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--confirm" => confirmed = true,
-            "--from" => backup = args.next().map(PathBuf::from),
+            "--from" if command == "restore-migration-backup" => {
+                path = args.next().map(PathBuf::from)
+            }
+            "--to"
+                if matches!(
+                    command.as_str(),
+                    "export-schema4-copy"
+                        | "export-schema5-copy"
+                        | "export-schema6-copy"
+                        | "export-schema7-copy"
+                        | "export-schema8-copy"
+                        | "export-schema9-copy"
+                        | "export-schema10-copy"
+                        | "export-schema11-copy"
+                        | "export-schema12-copy"
+                ) =>
+            {
+                path = args.next().map(PathBuf::from)
+            }
+            "--room-id" if command == "advance-history-usage" => {
+                let Some(value) = args.next() else {
+                    return CliCommand::Invalid(
+                        "history usage maintenance requires --room-id <positive-id>".into(),
+                    );
+                };
+                room_id = match value.parse::<u32>() {
+                    Ok(value) if value > 0 => Some(value),
+                    _ => {
+                        return CliCommand::Invalid(
+                            "history usage maintenance requires --room-id <positive-id>".into(),
+                        );
+                    }
+                };
+            }
             "--home" => options.home = args.next().map(PathBuf::from),
             other => {
-                return CliCommand::Invalid(format!("unknown database restore option: {other}"));
+                return CliCommand::Invalid(format!(
+                    "unknown database maintenance option: {other}"
+                ));
             }
         }
     }
     if !confirmed {
         return CliCommand::Invalid(
-            "database restore requires --confirm and must be run while omenchatd is stopped".into(),
+            "database maintenance requires --confirm and must be run while omenchatd is stopped"
+                .into(),
         );
     }
-    let Some(backup) = backup else {
-        return CliCommand::Invalid(
+    match (command.as_str(), path) {
+        ("restore-migration-backup", Some(backup)) => {
+            CliCommand::DatabaseRestoreMigrationBackup(options, DatabaseRestoreOptions { backup })
+        }
+        ("restore-migration-backup", None) => CliCommand::Invalid(
             "database restore requires --from <generated-migration-backup>".into(),
-        );
-    };
-    CliCommand::DatabaseRestoreMigrationBackup(options, DatabaseRestoreOptions { backup })
+        ),
+        ("export-schema4-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaFour(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema4-copy", None) => {
+            CliCommand::Invalid("schema-4 export requires --to <new-database-path>".into())
+        }
+        ("export-schema5-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaFive(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema5-copy", None) => {
+            CliCommand::Invalid("schema-5 export requires --to <new-database-path>".into())
+        }
+        ("export-schema6-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaSix(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema6-copy", None) => {
+            CliCommand::Invalid("schema-6 export requires --to <new-database-path>".into())
+        }
+        ("export-schema7-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaSeven(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema7-copy", None) => {
+            CliCommand::Invalid("schema-7 export requires --to <new-database-path>".into())
+        }
+        ("export-schema8-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaEight(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema8-copy", None) => {
+            CliCommand::Invalid("schema-8 export requires --to <new-database-path>".into())
+        }
+        ("export-schema9-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaNine(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema9-copy", None) => {
+            CliCommand::Invalid("schema-9 export requires --to <new-database-path>".into())
+        }
+        ("export-schema10-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaTen(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema10-copy", None) => {
+            CliCommand::Invalid("schema-10 export requires --to <new-database-path>".into())
+        }
+        ("export-schema11-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaEleven(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema11-copy", None) => {
+            CliCommand::Invalid("schema-11 export requires --to <new-database-path>".into())
+        }
+        ("export-schema12-copy", Some(destination)) => {
+            CliCommand::DatabaseExportSchemaTwelve(options, DatabaseExportOptions { destination })
+        }
+        ("export-schema12-copy", None) => {
+            CliCommand::Invalid("schema-12 export requires --to <new-database-path>".into())
+        }
+        ("advance-history-usage", _) => match room_id {
+            Some(room_id) => CliCommand::DatabaseAdvanceHistoryUsage(
+                options,
+                DatabaseHistoryUsageOptions { room_id },
+            ),
+            None => CliCommand::Invalid(
+                "history usage maintenance requires --room-id <positive-id>".into(),
+            ),
+        },
+        _ => CliCommand::Help,
+    }
 }
 
 fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
@@ -463,7 +1066,14 @@ fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
         return CliCommand::Help;
     };
     match command.as_str() {
-        "list" => CliCommand::RoomsList(parse_options(args)),
+        "list" => {
+            let (options, json) = parse_machine_output_options(args);
+            if json {
+                CliCommand::RoomsListJson(options)
+            } else {
+                CliCommand::RoomsList(options)
+            }
+        }
         "add" => {
             let (options, room) = parse_room_add_options(args);
             match room {
@@ -478,11 +1088,69 @@ fn parse_rooms_command(args: impl IntoIterator<Item = String>) -> CliCommand {
                 None => CliCommand::Help,
             }
         }
+        "policy" => {
+            let (options, room) = parse_room_policy_options(args);
+            match room {
+                Some(room) => CliCommand::RoomsSetPolicy(options, room),
+                None => CliCommand::Invalid(
+                    "room policy requires <room_id> ordinary|announcement --confirm and must be run while omenchatd is stopped"
+                        .into(),
+                ),
+            }
+        }
+        "set-slow-mode" => {
+            let (options, room) = parse_room_slow_mode_options(args);
+            match room {
+                Some(room) => CliCommand::RoomsSetSlowMode(options, room),
+                None => CliCommand::Invalid(format!(
+                    "room slow mode requires <room_id> off|<1..={}> --confirm and must be run while omenchatd is stopped",
+                    crate::protocol::ROOM_SLOW_MODE_MAX_SECONDS
+                )),
+            }
+        }
+        "set-upload-policy" => {
+            let (options, room) = parse_room_upload_policy_options(args);
+            match room {
+                Some(room) => CliCommand::RoomsSetUploadPolicy(options, room),
+                None => CliCommand::Invalid(format!(
+                    "room upload policy requires <room_id> inherit|disabled|<1..={}> --confirm and must be run while omenchatd is stopped",
+                    crate::protocol::ROOM_UPLOAD_MAX_FILE_BYTES
+                )),
+            }
+        }
         "archive" => {
             let (options, room) = parse_room_select_options(args);
             match room {
                 Some(room) => CliCommand::RoomsArchive(options, room),
                 None => CliCommand::Help,
+            }
+        }
+        _ => CliCommand::Help,
+    }
+}
+
+fn parse_users_command(args: impl IntoIterator<Item = String>) -> CliCommand {
+    let mut args = args.into_iter();
+    let Some(command) = args.next() else {
+        return CliCommand::Help;
+    };
+    match command.as_str() {
+        "list" => {
+            let (options, json) = parse_machine_output_options(args);
+            if json {
+                CliCommand::UsersListJson(options)
+            } else {
+                CliCommand::Invalid("user listing requires --json".into())
+            }
+        }
+        "role" => {
+            let (options, user) = parse_user_role_options(args);
+            match user {
+                Some(user) => CliCommand::UsersSetRole(options, user),
+                None => CliCommand::Invalid(
+                    "user role requires <user_id> standard|trusted|moderator|administrator --confirm and must be run while omenchatd is stopped"
+                        .into(),
+                ),
             }
         }
         _ => CliCommand::Help,
@@ -495,6 +1163,7 @@ fn parse_interfaces_command(args: impl IntoIterator<Item = String>) -> CliComman
         return CliCommand::Help;
     };
     match command.as_str() {
+        "list" => CliCommand::InterfacesList(parse_options(args)),
         "tcp-server" => {
             let Some(value) = args.next() else {
                 return CliCommand::Help;
@@ -515,6 +1184,27 @@ fn parse_interfaces_command(args: impl IntoIterator<Item = String>) -> CliComman
             apply_ifac_options(&mut tcp_client, ifac);
             CliCommand::InterfacesTcpClient(options, tcp_client)
         }
+        "delete-tcp-client" => {
+            let Some(value) = args.next() else {
+                return CliCommand::Help;
+            };
+            let Some(tcp_client) = parse_tcp_client_override(&value) else {
+                return CliCommand::Help;
+            };
+            CliCommand::InterfacesDeleteTcpClient(parse_options(args), tcp_client)
+        }
+        "delete" => {
+            if args.next().as_deref() != Some("tcp-client") {
+                return CliCommand::Help;
+            }
+            let Some(value) = args.next() else {
+                return CliCommand::Help;
+            };
+            let Some(tcp_client) = parse_tcp_client_override(&value) else {
+                return CliCommand::Help;
+            };
+            CliCommand::InterfacesDeleteTcpClient(parse_options(args), tcp_client)
+        }
         _ => CliCommand::Help,
     }
 }
@@ -530,7 +1220,7 @@ fn apply_config_limit_patch(config: &mut config::ServerConfig, patch: &ConfigSet
         config.limits.join_backlog_events = size.clamp(0, 500);
     }
     if let Some(bytes) = patch.large_batch_threshold_bytes {
-        config.limits.large_batch_threshold_bytes = bytes.clamp(256, 1_048_576);
+        config.limits.large_batch_threshold_bytes = bytes.clamp(1, 1_048_576);
     }
     if let Some(rate) = patch.rate_messages_per_minute {
         config.limits.rate_messages_per_minute = rate.min(600);
@@ -727,6 +1417,276 @@ fn parse_room_select_options(
     )
 }
 
+fn parse_room_policy_options(
+    args: impl IntoIterator<Item = String>,
+) -> (ServerOptions, Option<RoomPolicyOptions>) {
+    let mut options = ServerOptions::default();
+    let mut room_id = None;
+    let mut policy = None;
+    let mut confirmed = false;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => options.home = args.next().map(PathBuf::from),
+            "--confirm" => confirmed = true,
+            "ordinary" if policy.is_none() => policy = Some(false),
+            "announcement" if policy.is_none() => policy = Some(true),
+            value if room_id.is_none() => {
+                room_id = value.parse::<i64>().ok().filter(|value| *value > 0)
+            }
+            _ => return (options, None),
+        }
+    }
+    (
+        options,
+        confirmed
+            .then_some(())
+            .and(room_id)
+            .zip(policy)
+            .map(|(room_id, announcement_only)| RoomPolicyOptions {
+                room_id,
+                announcement_only,
+            }),
+    )
+}
+
+fn parse_room_slow_mode_options(
+    args: impl IntoIterator<Item = String>,
+) -> (ServerOptions, Option<RoomSlowModeOptions>) {
+    let mut options = ServerOptions::default();
+    let mut confirmed = false;
+    let mut positional = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => {
+                let Some(path) = args.next() else {
+                    return (options, None);
+                };
+                options.home = Some(PathBuf::from(path));
+            }
+            "--confirm" => confirmed = true,
+            value if !value.starts_with("--") => positional.push(value.to_owned()),
+            _ => return (options, None),
+        }
+    }
+    let [room_id, interval] = positional.as_slice() else {
+        return (options, None);
+    };
+    let room_id = room_id.parse::<i64>().ok().filter(|value| *value > 0);
+    let seconds = match interval.as_str() {
+        "off" => Some(0),
+        value => value
+            .parse::<u32>()
+            .ok()
+            .filter(|seconds| (1..=crate::protocol::ROOM_SLOW_MODE_MAX_SECONDS).contains(seconds)),
+    };
+    (
+        options,
+        confirmed
+            .then_some(())
+            .and(room_id)
+            .zip(seconds)
+            .map(|(room_id, seconds)| RoomSlowModeOptions { room_id, seconds }),
+    )
+}
+
+fn parse_room_upload_policy_options(
+    args: impl IntoIterator<Item = String>,
+) -> (ServerOptions, Option<RoomUploadPolicyOptions>) {
+    let mut options = ServerOptions::default();
+    let mut confirmed = false;
+    let mut positional = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => {
+                let Some(path) = args.next() else {
+                    return (options, None);
+                };
+                options.home = Some(PathBuf::from(path));
+            }
+            "--confirm" => confirmed = true,
+            value if !value.starts_with("--") => positional.push(value.to_owned()),
+            _ => return (options, None),
+        }
+    }
+    let [room_id, policy] = positional.as_slice() else {
+        return (options, None);
+    };
+    let room_id = room_id.parse::<i64>().ok().filter(|value| *value > 0);
+    let max_file_bytes = match policy.as_str() {
+        "inherit" => Some(None),
+        "disabled" => Some(Some(0)),
+        value => value
+            .parse::<u64>()
+            .ok()
+            .filter(|bytes| (1..=crate::protocol::ROOM_UPLOAD_MAX_FILE_BYTES).contains(bytes))
+            .map(Some),
+    };
+    (
+        options,
+        confirmed
+            .then_some(())
+            .and(room_id)
+            .zip(max_file_bytes)
+            .map(|(room_id, max_file_bytes)| RoomUploadPolicyOptions {
+                room_id,
+                max_file_bytes,
+            }),
+    )
+}
+
+fn slow_mode_label(seconds: u32) -> String {
+    if seconds == 0 {
+        "off".into()
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+pub(crate) fn room_upload_policy_config_label(configured: Option<u64>) -> String {
+    match configured {
+        None => "inherit".into(),
+        Some(0) => "disabled".into(),
+        Some(bytes) => format!("{bytes}B"),
+    }
+}
+
+fn effective_room_upload_policy_label(policy: store::EffectiveRoomUploadPolicy) -> String {
+    match policy {
+        store::EffectiveRoomUploadPolicy::Disabled => "disabled".into(),
+        store::EffectiveRoomUploadPolicy::MaximumFileBytes(bytes) => format!("{bytes}B"),
+    }
+}
+
+fn effective_room_upload_max_file_bytes(policy: store::EffectiveRoomUploadPolicy) -> Option<u64> {
+    match policy {
+        store::EffectiveRoomUploadPolicy::Disabled => None,
+        store::EffectiveRoomUploadPolicy::MaximumFileBytes(bytes) => Some(bytes),
+    }
+}
+
+fn bounded_room_status_rows(rooms: &[store::ServerRoom]) -> (Vec<&store::ServerRoom>, bool) {
+    let mut rows = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for room in rooms {
+        let room_bytes = room
+            .name
+            .len()
+            .saturating_add(room.topic.as_ref().map_or(0, String::len))
+            .saturating_add(std::mem::size_of::<store::ServerRoom>());
+        if rows.len() >= ROOM_STATUS_MAX_ITEMS
+            || bytes.saturating_add(room_bytes) > ROOM_STATUS_MAX_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        bytes = bytes.saturating_add(room_bytes);
+        rows.push(room);
+    }
+    (rows, truncated)
+}
+
+fn room_status_line(room: &store::ServerRoom, global_max_file_bytes: u64) -> ServerResult<String> {
+    let effective = store::EffectiveRoomUploadPolicy::resolve(
+        room.upload_max_file_bytes,
+        global_max_file_bytes,
+    )?;
+    Ok(format!(
+        "#{name}\troom_id={room_id}\tpolicy={policy}\tslow_mode_config={slow_mode}\tslow_mode_enforcement={enforcement}\tupload_policy_config={upload_config}\tupload_policy_effective={upload_effective}\tupload_policy_enforcement={upload_enforcement}\trevision={revision}\ttopic={topic}",
+        name = room.name,
+        room_id = room.room_id,
+        policy = if room.policy_bits == 0 {
+            "ordinary"
+        } else {
+            "announcement"
+        },
+        slow_mode = slow_mode_label(room.slow_mode_seconds),
+        enforcement = SLOW_MODE_ENFORCEMENT_STATUS,
+        upload_config = room_upload_policy_config_label(room.upload_max_file_bytes),
+        upload_effective = effective_room_upload_policy_label(effective),
+        upload_enforcement = ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS,
+        revision = room.room_revision,
+        topic = room.topic.as_deref().unwrap_or_default()
+    ))
+}
+
+fn room_status_json(
+    rooms: &[store::ServerRoom],
+    global_max_file_bytes: u64,
+) -> ServerResult<serde_json::Value> {
+    let (rooms, truncated) = bounded_room_status_rows(rooms);
+    let rooms = rooms
+        .iter()
+        .map(|room| {
+            let effective = store::EffectiveRoomUploadPolicy::resolve(
+                room.upload_max_file_bytes,
+                global_max_file_bytes,
+            )?;
+            Ok(serde_json::json!({
+                "room_id": room.room_id,
+                "name": room.name,
+                "topic": room.topic,
+                "policy": if room.policy_bits == 0 {
+                    "ordinary"
+                } else {
+                    "announcement"
+                },
+                "policy_bits": room.policy_bits,
+                "slow_mode_seconds": room.slow_mode_seconds,
+                "slow_mode_enforcement": SLOW_MODE_ENFORCEMENT_STATUS,
+                "upload_max_file_bytes": room.upload_max_file_bytes,
+                "upload_policy_config": room_upload_policy_config_label(room.upload_max_file_bytes),
+                "upload_effective_max_file_bytes": effective_room_upload_max_file_bytes(effective),
+                "upload_policy_effective": effective_room_upload_policy_label(effective),
+                "upload_policy_enforcement": ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS,
+                "room_revision": room.room_revision,
+            }))
+        })
+        .collect::<ServerResult<Vec<_>>>()?;
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "truncated": truncated,
+        "item_limit": ROOM_STATUS_MAX_ITEMS,
+        "byte_limit": ROOM_STATUS_MAX_BYTES,
+        "rooms": rooms,
+    }))
+}
+
+fn parse_user_role_options(
+    args: impl IntoIterator<Item = String>,
+) -> (ServerOptions, Option<UserRoleOptions>) {
+    let mut options = ServerOptions::default();
+    let mut user_id = None;
+    let mut role = None;
+    let mut confirmed = false;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => options.home = args.next().map(PathBuf::from),
+            "--confirm" => confirmed = true,
+            "standard" if role.is_none() => role = Some(AdministrativeUserRole::Standard),
+            "trusted" if role.is_none() => role = Some(AdministrativeUserRole::Trusted),
+            "moderator" if role.is_none() => role = Some(AdministrativeUserRole::Moderator),
+            "administrator" if role.is_none() => role = Some(AdministrativeUserRole::Administrator),
+            value if user_id.is_none() => {
+                user_id = value.parse::<i64>().ok().filter(|value| *value > 0)
+            }
+            _ => return (options, None),
+        }
+    }
+    (
+        options,
+        confirmed
+            .then_some(())
+            .and(user_id)
+            .zip(role)
+            .map(|(user_id, role)| UserRoleOptions { user_id, role }),
+    )
+}
+
 fn parse_tcp_server_override(value: &str) -> Option<TcpServerOverride> {
     let (listen_ip, port) = value.rsplit_once(':')?;
     let listen_port = port.parse::<u16>().ok()?;
@@ -868,18 +1828,35 @@ fn print_help() {
     println!("  doctor [--home <path>] [--json]");
     println!("  uploads repair-ledger --confirm [--home <path>]  # server must be stopped");
     println!("  database restore-migration-backup --from <path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema10-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema11-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema12-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema9-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema8-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema7-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema6-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema5-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database export-schema4-copy --to <new-path> --confirm [--home <path>]  # server must be stopped");
+    println!("  database advance-history-usage --room-id <id> --confirm [--home <path>]  # one metadata-only batch; server must be stopped");
     println!("  config show [--home <path>]");
     println!(
         "  config set [--home <path>] [--name <name>] [--operator-label <label>] [--motd <text>] [--announce-interval <minutes>]"
     );
     println!("             [--max-message-bytes <bytes>] [--history-batch-size <count>] [--join-backlog-events <count>]");
     println!("             [--large-batch-threshold-bytes <bytes>] [--rate-messages-per-minute <count>] [--rate-commands-per-minute <count>]");
-    println!("  rooms list [--home <path>]");
+    println!("  rooms list [--home <path>] [--json]");
     println!("  rooms add <name> [--topic <topic>] [--home <path>]");
     println!("  rooms topic <room_id> [--topic <topic>] [--home <path>]");
+    println!("  rooms policy <room_id> ordinary|announcement --confirm [--home <path>]  # server must be stopped");
+    println!("  rooms set-slow-mode <room_id> off|<seconds> --confirm [--home <path>]  # 1..=86400; server must be stopped");
+    println!("  rooms set-upload-policy <room_id> inherit|disabled|<bytes> --confirm [--home <path>]  # 1..=10485760; server must be stopped; enforcement inactive");
     println!("  rooms archive <room_id> [--home <path>]");
+    println!("  users list --json [--home <path>]");
+    println!("  users role <user_id> standard|trusted|moderator|administrator --confirm [--home <path>]  # server must be stopped");
+    println!("  interfaces list [--home <path>]");
     println!("  interfaces tcp-server <listen_ip:port> [--home <path>]");
-    println!("  interfaces tcp-client <host:port> [--home <path>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]");
+    println!("  interfaces tcp-client <host:port> [--home <path>] [--network-name <name>] [--passphrase-file <path>|--passphrase-stdin|--passphrase-prompt]  # add without replacing existing clients");
+    println!("  interfaces delete tcp-client <host:port> [--home <path>]");
     println!("  --passphrase <pass> is deprecated because argv may be visible to other processes");
     if cfg!(feature = "tui") {
         println!("  tui [--home <path>]");
@@ -957,6 +1934,21 @@ fn runtime_mode_label() -> &'static str {
 fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
     let room_result = config::list_rooms(config);
     let room_count = room_result.as_ref().map(Vec::len).ok();
+    let history_accounting = store::OmenchatStore::open_read_only(&config.database_path)
+        .and_then(|store| store.room_history_maintenance_status(256))
+        .map(|status| {
+            serde_json::json!({
+                "state": "available",
+                "inspected_rooms": status.inspected_rooms,
+                "more_rooms": status.more_rooms,
+                "complete_ledgers": status.complete_ledgers,
+                "incomplete_ledgers": status.incomplete_ledgers,
+                "missing_ledgers": status.missing_ledgers,
+                "accounted_events": status.accounted_events,
+                "accounted_bytes": status.accounted_bytes,
+            })
+        })
+        .unwrap_or_else(|_| serde_json::json!({ "state": "unavailable" }));
     let public_addresses = config::render_public_addresses(config)
         .lines()
         .filter(|line| {
@@ -981,7 +1973,7 @@ fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
             "version": env!("CARGO_PKG_VERSION"),
         },
         "dependency_train": {
-            "reticulum_rs": "0.9.5",
+            "reticulum_rs": "0.9.6",
             "lxmf": null,
         },
         "runtime": {
@@ -1008,6 +2000,15 @@ fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
         "rooms": {
             "catalog": if room_result.is_ok() { "ok" } else { "error" },
             "count": room_count,
+        },
+        "history_retention": {
+            "enabled": config.history_retention.enabled,
+            "admission_compaction_enabled": config.history_retention.enabled,
+            "runtime_activity_observable": false,
+            "max_age_days": config.history_retention.max_age_days,
+            "max_events_per_room": config.history_retention.max_events_per_room,
+            "max_bytes_per_room": config.history_retention.max_bytes_per_room,
+            "accounting": history_accounting,
         },
         "limits": {
             "max_message_bytes": config.limits.max_message_bytes,
@@ -1466,8 +2467,25 @@ mod tests {
             status_value["application"]["version"],
             env!("CARGO_PKG_VERSION")
         );
-        assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.5");
+        assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.6");
         assert_eq!(status_value["runtime"]["mode"], runtime_mode_label());
+        assert_eq!(status_value["history_retention"]["enabled"], false);
+        assert_eq!(
+            status_value["history_retention"]["admission_compaction_enabled"],
+            false
+        );
+        assert_eq!(
+            status_value["history_retention"]["runtime_activity_observable"],
+            false
+        );
+        assert_eq!(
+            status_value["history_retention"]["accounting"]["state"],
+            "available"
+        );
+        assert_eq!(
+            status_value["history_retention"]["accounting"]["missing_ledgers"],
+            1
+        );
 
         let doctor = render_doctor_json(&config).expect("doctor json");
         let doctor_value: serde_json::Value = serde_json::from_str(&doctor).expect("valid doctor");
@@ -1635,6 +2653,123 @@ mod tests {
                 }
             )
         );
+        assert!(matches!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "set-slow-mode".to_string(),
+                "7".to_string(),
+                "30".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        for invalid in ["0", "86401", "invalid"] {
+            assert!(matches!(
+                CliCommand::parse([
+                    "rooms".to_string(),
+                    "set-slow-mode".to_string(),
+                    "7".to_string(),
+                    invalid.to_string(),
+                    "--confirm".to_string(),
+                ]),
+                CliCommand::Invalid(message) if message.contains("1..=86400")
+            ));
+        }
+        for invalid_args in [
+            vec!["rooms", "set-slow-mode", "off", "7", "--confirm"],
+            vec!["rooms", "set-slow-mode", "7", "30", "--confirm", "--home"],
+        ] {
+            assert!(matches!(
+                CliCommand::parse(invalid_args.into_iter().map(str::to_owned)),
+                CliCommand::Invalid(message) if message.contains("1..=86400")
+            ));
+        }
+        assert_eq!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "set-slow-mode".to_string(),
+                "7".to_string(),
+                "30".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::RoomsSetSlowMode(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                RoomSlowModeOptions {
+                    room_id: 7,
+                    seconds: 30,
+                }
+            )
+        );
+        assert!(matches!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "set-upload-policy".to_string(),
+                "7".to_string(),
+                "disabled".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        for invalid in ["0", "10485761", "invalid"] {
+            assert!(matches!(
+                CliCommand::parse([
+                    "rooms".to_string(),
+                    "set-upload-policy".to_string(),
+                    "7".to_string(),
+                    invalid.to_string(),
+                    "--confirm".to_string(),
+                ]),
+                CliCommand::Invalid(message) if message.contains("1..=10485760")
+            ));
+        }
+        for (value, expected) in [
+            ("inherit", None),
+            ("disabled", Some(0)),
+            ("262144", Some(262_144)),
+        ] {
+            assert_eq!(
+                CliCommand::parse([
+                    "rooms".to_string(),
+                    "set-upload-policy".to_string(),
+                    "7".to_string(),
+                    value.to_string(),
+                    "--confirm".to_string(),
+                    "--home".to_string(),
+                    "/tmp/omenchatd-admin".to_string(),
+                ]),
+                CliCommand::RoomsSetUploadPolicy(
+                    ServerOptions {
+                        home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                        tcp_server: None,
+                        tcp_client: None,
+                    },
+                    RoomUploadPolicyOptions {
+                        room_id: 7,
+                        max_file_bytes: expected,
+                    }
+                )
+            );
+        }
+        assert_eq!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "set-slow-mode".to_string(),
+                "7".to_string(),
+                "off".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::RoomsSetSlowMode(
+                ServerOptions::default(),
+                RoomSlowModeOptions {
+                    room_id: 7,
+                    seconds: 0,
+                }
+            )
+        );
         assert_eq!(
             CliCommand::parse([
                 "rooms".to_string(),
@@ -1744,6 +2879,107 @@ mod tests {
                 }
             )
         );
+        assert_eq!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::RoomsListJson(ServerOptions {
+                home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                tcp_server: None,
+                tcp_client: None,
+            })
+        );
+
+        assert!(matches!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "policy".to_string(),
+                "7".to_string(),
+                "announcement".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "policy".to_string(),
+                "7".to_string(),
+                "unsupported".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("ordinary|announcement")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "rooms".to_string(),
+                "policy".to_string(),
+                "7".to_string(),
+                "announcement".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::RoomsSetPolicy(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                RoomPolicyOptions {
+                    room_id: 7,
+                    announcement_only: true,
+                }
+            )
+        );
+        assert_eq!(
+            CliCommand::parse([
+                "users".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::UsersListJson(ServerOptions {
+                home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                tcp_server: None,
+                tcp_client: None,
+            })
+        );
+        assert_eq!(
+            CliCommand::parse([
+                "users".to_string(),
+                "role".to_string(),
+                "12".to_string(),
+                "moderator".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-admin".to_string(),
+            ]),
+            CliCommand::UsersSetRole(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                UserRoleOptions {
+                    user_id: 12,
+                    role: AdministrativeUserRole::Moderator,
+                }
+            )
+        );
+        assert!(matches!(
+            CliCommand::parse([
+                "users".to_string(),
+                "role".to_string(),
+                "12".to_string(),
+                "moderator".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
     }
 
     #[test]
@@ -1787,6 +3023,47 @@ mod tests {
             CliCommand::InterfacesTcpClient(
                 ServerOptions {
                     home: Some(PathBuf::from("/tmp/omenchatd-admin")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                TcpClientOverride {
+                    target_host: "gateway.example".into(),
+                    target_port: 42420,
+                    network_name: None,
+                    passphrase: None,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_parses_interface_list_and_tcp_client_delete_commands() {
+        let home = PathBuf::from("/tmp/omenchatd-admin");
+        assert_eq!(
+            CliCommand::parse([
+                "interfaces".into(),
+                "list".into(),
+                "--home".into(),
+                home.display().to_string(),
+            ]),
+            CliCommand::InterfacesList(ServerOptions {
+                home: Some(home.clone()),
+                tcp_server: None,
+                tcp_client: None,
+            })
+        );
+        assert_eq!(
+            CliCommand::parse([
+                "interfaces".into(),
+                "delete".into(),
+                "tcp-client".into(),
+                "gateway.example:42420".into(),
+                "--home".into(),
+                home.display().to_string(),
+            ]),
+            CliCommand::InterfacesDeleteTcpClient(
+                ServerOptions {
+                    home: Some(home),
                     tcp_server: None,
                     tcp_client: None,
                 },
@@ -1848,6 +3125,84 @@ mod tests {
                 tcp_client: None,
             })
         );
+    }
+
+    #[test]
+    fn room_status_projections_report_bounded_media_policy_feature_state_without_secrets() {
+        let room = crate::store::ServerRoom {
+            room_id: 7,
+            name: "field".into(),
+            topic: Some("Operations".into()),
+            room_revision: 4,
+            policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 30,
+            upload_max_file_bytes: Some(256 * 1024),
+        };
+        let human = room_status_line(&room, 512 * 1024).expect("human room status");
+        assert!(human.contains("policy=announcement"));
+        assert!(human.contains("slow_mode_config=30s"));
+        assert!(human.contains(&format!(
+            "slow_mode_enforcement={SLOW_MODE_ENFORCEMENT_STATUS}"
+        )));
+        assert!(human.contains("upload_policy_config=262144B"));
+        assert!(human.contains("upload_policy_effective=262144B"));
+        assert!(human.contains(&format!(
+            "upload_policy_enforcement={ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS}"
+        )));
+        assert!(human.contains("revision=4"));
+        let json = room_status_json(&[room], 512 * 1024).expect("JSON room status");
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["truncated"], false);
+        assert_eq!(json["rooms"][0]["slow_mode_seconds"], 30);
+        assert_eq!(
+            json["rooms"][0]["slow_mode_enforcement"],
+            SLOW_MODE_ENFORCEMENT_STATUS
+        );
+        assert_eq!(json["rooms"][0]["upload_max_file_bytes"], 256 * 1024);
+        assert_eq!(
+            json["rooms"][0]["upload_effective_max_file_bytes"],
+            256 * 1024
+        );
+        assert_eq!(
+            json["rooms"][0]["upload_policy_enforcement"],
+            ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS
+        );
+        assert_eq!(json["rooms"][0]["policy"], "announcement");
+        assert!(json.to_string().len() < 1_024);
+    }
+
+    #[test]
+    fn room_status_projection_has_item_and_byte_ceilings() {
+        let rooms = (0..=ROOM_STATUS_MAX_ITEMS)
+            .map(|index| crate::store::ServerRoom {
+                room_id: index as u32 + 1,
+                name: format!("room-{index}"),
+                topic: Some("bounded".into()),
+                room_revision: 0,
+                policy_bits: 0,
+                slow_mode_seconds: 0,
+                upload_max_file_bytes: None,
+            })
+            .collect::<Vec<_>>();
+        let json = room_status_json(&rooms, 512 * 1024).expect("bounded room status");
+        assert_eq!(json["truncated"], true);
+        assert_eq!(
+            json["rooms"].as_array().expect("room array").len(),
+            ROOM_STATUS_MAX_ITEMS
+        );
+
+        let oversized = vec![crate::store::ServerRoom {
+            room_id: 1,
+            name: "large".into(),
+            topic: Some("x".repeat(ROOM_STATUS_MAX_BYTES + 1)),
+            room_revision: 0,
+            policy_bits: 0,
+            slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
+        }];
+        let json = room_status_json(&oversized, 512 * 1024).expect("byte-bounded room status");
+        assert_eq!(json["truncated"], true);
+        assert!(json["rooms"].as_array().expect("room array").is_empty());
     }
 
     #[test]
@@ -1915,6 +3270,536 @@ mod tests {
     }
 
     #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_four_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema4-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema4.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema4-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema4-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema4.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaFour(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema4.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_five_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema5-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema5.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema5-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema5-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema5.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaFive(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema5.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_six_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema6-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema6.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema6-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema6-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema6.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaSix(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema6.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_seven_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema7-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema7.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema7-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema7-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema7.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaSeven(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema7.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_eight_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema8-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema8.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema8-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema8-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema8.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaEight(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema8.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_nine_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema9-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema9.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema9-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema9-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema9.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaNine(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema9.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_ten_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema10-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema10.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema10-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema10-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema10.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaTen(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema10.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_eleven_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema11-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema11.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema11-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema11-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema11.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaEleven(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema11.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_new_destination_and_confirmation_for_schema_twelve_export() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema12-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema12.sqlite".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema12-copy".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--to")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "export-schema12-copy".to_string(),
+                "--to".to_string(),
+                "/tmp/omenchat-schema12.sqlite".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-export".to_string(),
+            ]),
+            CliCommand::DatabaseExportSchemaTwelve(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-export")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseExportOptions {
+                    destination: PathBuf::from("/tmp/omenchat-schema12.sqlite"),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn cli_requires_room_and_confirmation_for_history_usage_maintenance() {
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "advance-history-usage".to_string(),
+                "--room-id".to_string(),
+                "7".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--confirm")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "advance-history-usage".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("--room-id")
+        ));
+        assert!(matches!(
+            CliCommand::parse([
+                "database".to_string(),
+                "advance-history-usage".to_string(),
+                "--room-id".to_string(),
+                "0".to_string(),
+                "--confirm".to_string(),
+            ]),
+            CliCommand::Invalid(message) if message.contains("positive-id")
+        ));
+        assert_eq!(
+            CliCommand::parse([
+                "database".to_string(),
+                "advance-history-usage".to_string(),
+                "--room-id".to_string(),
+                "7".to_string(),
+                "--confirm".to_string(),
+                "--home".to_string(),
+                "/tmp/omenchatd-history-usage".to_string(),
+            ]),
+            CliCommand::DatabaseAdvanceHistoryUsage(
+                ServerOptions {
+                    home: Some(PathBuf::from("/tmp/omenchatd-history-usage")),
+                    tcp_server: None,
+                    tcp_client: None,
+                },
+                DatabaseHistoryUsageOptions { room_id: 7 },
+            )
+        );
+    }
+
+    #[test]
+    fn cli_history_usage_maintenance_advances_one_bounded_batch_per_invocation() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-history-usage-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let store = crate::store::OmenchatStore::open(&config.database_path)
+            .expect("migrate current database");
+        drop(store);
+        let missing = Omenchatd
+            .run(CliCommand::DatabaseAdvanceHistoryUsage(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseHistoryUsageOptions { room_id: 99 },
+            ))
+            .expect_err("unknown room must fail")
+            .to_string();
+        assert!(missing.contains("room 99 was not found"), "{missing}");
+        let store = crate::store::OmenchatStore::open(&config.database_path)
+            .expect("reopen current database");
+        for event_id in 1..=300 {
+            store
+                .append_event(
+                    1,
+                    None,
+                    crate::store::ServerRoomEventKind::Message {
+                        body: format!("legacy-{event_id}"),
+                    },
+                )
+                .expect("seed history");
+        }
+        drop(store);
+        let fixture = rusqlite::Connection::open(&config.database_path).expect("fixture database");
+        fixture
+            .execute(
+                "UPDATE room_history_usage
+                 SET event_count = 0, retained_bytes = 0,
+                     backfill_through_event_id = 0,
+                     backfill_target_event_id = 300,
+                     backfill_complete = 0
+                 WHERE room_id = 1",
+                [],
+            )
+            .expect("reset usage fixture");
+        drop(fixture);
+
+        let command = || {
+            CliCommand::DatabaseAdvanceHistoryUsage(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseHistoryUsageOptions { room_id: 1 },
+            )
+        };
+        Omenchatd
+            .run(command())
+            .expect("first bounded maintenance batch");
+        let store =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("inspect first batch");
+        let first = store
+            .room_history_usage(1)
+            .expect("usage")
+            .expect("usage row");
+        assert_eq!(first.event_count, 256);
+        assert_eq!(first.backfill_through_event_id, 256);
+        assert!(!first.backfill_complete);
+        drop(store);
+
+        Omenchatd
+            .run(command())
+            .expect("final bounded maintenance batch");
+        let store =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("inspect final batch");
+        let complete = store
+            .room_history_usage(1)
+            .expect("usage")
+            .expect("usage row");
+        assert_eq!(complete.event_count, 300);
+        assert_eq!(complete.backfill_through_event_id, 300);
+        assert!(complete.backfill_complete);
+        assert_eq!(
+            store
+                .latest_events(1, 400)
+                .expect("preserved history")
+                .len(),
+            300
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).expect("remove isolated history usage home");
+    }
+
+    #[test]
     fn cli_database_restore_uses_only_the_selected_isolated_home() {
         let root = std::env::temp_dir().join(format!(
             "omenchatd-cli-database-restore-{}-{}",
@@ -1978,6 +3863,250 @@ mod tests {
     }
 
     #[test]
+    fn cli_schema_four_export_uses_only_the_selected_isolated_home() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-database-export-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let current = crate::store::OmenchatStore::open(&config.database_path)
+            .expect("open current database");
+        current
+            .ensure_room("exported-cli", None)
+            .expect("current marker");
+        drop(current);
+        let destination = root.join("operator-schema4.sqlite");
+
+        Omenchatd
+            .run(CliCommand::DatabaseExportSchemaFour(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseExportOptions {
+                    destination: destination.clone(),
+                },
+            ))
+            .expect("CLI schema four export");
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("exported database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("exported version"),
+            4
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM rooms WHERE name = 'exported-cli'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("exported marker"),
+            1
+        );
+        drop(exported);
+
+        let active =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("active current database");
+        assert!(active
+            .room_by_name("exported-cli")
+            .expect("active marker")
+            .is_some());
+        drop(active);
+        std::fs::remove_dir_all(root).expect("remove isolated CLI export home");
+    }
+
+    #[test]
+    fn cli_schema_eleven_export_preserves_active_source_and_room_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-schema11-export-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let current =
+            crate::store::OmenchatStore::open(&config.database_path).expect("current database");
+        let room = current
+            .ensure_room("schema11-cli", None)
+            .expect("current room");
+        current
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+        current
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("slow mode");
+        drop(current);
+
+        let destination = root.join("operator-schema11.sqlite");
+        Omenchatd
+            .run(CliCommand::DatabaseExportSchemaEleven(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseExportOptions {
+                    destination: destination.clone(),
+                },
+            ))
+            .expect("CLI schema eleven export");
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("exported database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("exported version"),
+            11
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT policy_bits FROM rooms WHERE name = 'schema11-cli'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("exported policy"),
+            1
+        );
+        drop(exported);
+
+        let active =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("active current database");
+        assert_eq!(
+            active
+                .room_by_id(room.room_id)
+                .expect("active room")
+                .expect("room")
+                .slow_mode_seconds,
+            30
+        );
+        drop(active);
+        std::fs::remove_dir_all(root).expect("remove isolated CLI export home");
+    }
+
+    #[test]
+    fn cli_schema_twelve_export_preserves_slow_mode_and_active_media_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-schema12-export-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let current =
+            crate::store::OmenchatStore::open(&config.database_path).expect("current database");
+        let room = current
+            .ensure_room("schema12-cli", None)
+            .expect("current room");
+        current
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+        current
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("slow mode");
+        drop(current);
+        let connection =
+            rusqlite::Connection::open(&config.database_path).expect("media-policy fixture");
+        connection
+            .execute(
+                "UPDATE rooms
+                 SET upload_max_file_bytes = 262144,
+                     room_revision = room_revision + 1
+                 WHERE room_id = ?1",
+                [room.room_id],
+            )
+            .expect("dormant media policy");
+        drop(connection);
+
+        let destination = root.join("operator-schema12.sqlite");
+        Omenchatd
+            .run(CliCommand::DatabaseExportSchemaTwelve(
+                ServerOptions {
+                    home: Some(root.clone()),
+                    ..ServerOptions::default()
+                },
+                DatabaseExportOptions {
+                    destination: destination.clone(),
+                },
+            ))
+            .expect("CLI schema twelve export");
+
+        let exported = rusqlite::Connection::open_with_flags(
+            &destination,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("exported database");
+        assert_eq!(
+            exported
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("exported version"),
+            12
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT policy_bits, slow_mode_seconds
+                     FROM rooms WHERE name = 'schema12-cli'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                )
+                .expect("exported policies"),
+            (1, 30)
+        );
+        assert_eq!(
+            exported
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('rooms')
+                     WHERE name = 'upload_max_file_bytes'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("media-policy column"),
+            0
+        );
+        drop(exported);
+
+        let active =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("active current database");
+        let active_room = active
+            .room_by_id(room.room_id)
+            .expect("active room lookup")
+            .expect("active room");
+        assert_eq!(
+            active_room.policy_bits,
+            crate::protocol::ROOM_POLICY_ANNOUNCEMENT
+        );
+        assert_eq!(active_room.slow_mode_seconds, 30);
+        assert_eq!(active_room.upload_max_file_bytes, Some(262_144));
+        drop(active);
+        std::fs::remove_dir_all(root).expect("remove isolated CLI export home");
+    }
+
+    #[test]
     fn cli_room_mutations_use_the_initialized_administrative_database_path() {
         let root = std::env::temp_dir().join(format!(
             "omenchatd-cli-admin-db-{}-{}",
@@ -2024,6 +4153,123 @@ mod tests {
             Some("Incidents".into())
         );
         Omenchatd
+            .run(CliCommand::RoomsSetPolicy(
+                options.clone(),
+                RoomPolicyOptions {
+                    room_id: room.0,
+                    announcement_only: true,
+                },
+            ))
+            .expect("update room policy through administrative database");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open current policy database");
+        let policy_room = database
+            .room_by_id(room.0 as u32)
+            .expect("policy room lookup")
+            .expect("policy room");
+        assert_eq!(
+            policy_room.policy_bits,
+            crate::protocol::ROOM_POLICY_ANNOUNCEMENT
+        );
+        assert_eq!(policy_room.room_revision, 2);
+        drop(database);
+        Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options.clone(),
+                RoomSlowModeOptions {
+                    room_id: room.0,
+                    seconds: 30,
+                },
+            ))
+            .expect("enable room slow mode through administrative database");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open current slow-mode database");
+        let slow_room = database
+            .room_by_id(room.0 as u32)
+            .expect("slow-mode room lookup")
+            .expect("slow-mode room");
+        assert_eq!(slow_room.slow_mode_seconds, 30);
+        assert_eq!(slow_room.room_revision, 3);
+        drop(database);
+        Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options.clone(),
+                RoomSlowModeOptions {
+                    room_id: room.0,
+                    seconds: 30,
+                },
+            ))
+            .expect("idempotent room slow mode update");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open idempotent slow-mode database");
+        let unchanged = database
+            .room_by_id(room.0 as u32)
+            .expect("unchanged room lookup")
+            .expect("unchanged room");
+        assert_eq!(unchanged.slow_mode_seconds, 30);
+        assert_eq!(unchanged.room_revision, 3);
+        drop(database);
+        Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options.clone(),
+                RoomSlowModeOptions {
+                    room_id: room.0,
+                    seconds: 0,
+                },
+            ))
+            .expect("disable room slow mode");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open disabled slow-mode database");
+        let disabled = database
+            .room_by_id(room.0 as u32)
+            .expect("disabled room lookup")
+            .expect("disabled room");
+        assert_eq!(disabled.slow_mode_seconds, 0);
+        assert_eq!(disabled.room_revision, 4);
+        drop(database);
+        Omenchatd
+            .run(CliCommand::RoomsSetUploadPolicy(
+                options.clone(),
+                RoomUploadPolicyOptions {
+                    room_id: room.0,
+                    max_file_bytes: Some(262_144),
+                },
+            ))
+            .expect("set room upload policy");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open upload-policy database");
+        let limited = database
+            .room_by_id(room.0 as u32)
+            .expect("upload-policy room lookup")
+            .expect("upload-policy room");
+        assert_eq!(limited.upload_max_file_bytes, Some(262_144));
+        assert_eq!(limited.room_revision, 5);
+        drop(database);
+        Omenchatd
+            .run(CliCommand::RoomsSetUploadPolicy(
+                options.clone(),
+                RoomUploadPolicyOptions {
+                    room_id: room.0,
+                    max_file_bytes: None,
+                },
+            ))
+            .expect("inherit room upload policy");
+        let database =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("open inherited upload-policy database");
+        let inherited = database
+            .room_by_id(room.0 as u32)
+            .expect("inherited room lookup")
+            .expect("inherited room");
+        assert_eq!(inherited.upload_max_file_bytes, None);
+        assert_eq!(inherited.room_revision, 6);
+        drop(database);
+        Omenchatd
             .run(CliCommand::RoomsArchive(
                 options,
                 RoomSelectOptions { room_id: room.0 },
@@ -2034,6 +4280,173 @@ mod tests {
             .iter()
             .any(|(_, name, _)| name == "ops"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn slow_mode_cli_refuses_active_writer_then_updates_selected_home() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-slow-mode-exclusive-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let store = crate::store::OmenchatStore::open(&config.database_path).expect("store");
+        let room = store.ensure_room("slow-cli", None).expect("room");
+        drop(store);
+        let writer = rusqlite::Connection::open(&config.database_path).expect("writer");
+        writer
+            .execute_batch("BEGIN IMMEDIATE;")
+            .expect("active write transaction");
+        let options = ServerOptions {
+            home: Some(root.clone()),
+            ..ServerOptions::default()
+        };
+        let error = Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options.clone(),
+                RoomSlowModeOptions {
+                    room_id: i64::from(room.room_id),
+                    seconds: 30,
+                },
+            ))
+            .expect_err("active writer must block maintenance")
+            .to_string();
+        assert!(error.contains("exclusive access"));
+        writer.execute_batch("ROLLBACK;").expect("release writer");
+        drop(writer);
+
+        Omenchatd
+            .run(CliCommand::RoomsSetSlowMode(
+                options,
+                RoomSlowModeOptions {
+                    room_id: i64::from(room.room_id),
+                    seconds: 30,
+                },
+            ))
+            .expect("stopped-server update");
+        let store = crate::store::OmenchatStore::open_read_only(&config.database_path)
+            .expect("read-only verification store");
+        let updated = store
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("room");
+        assert_eq!(updated.slow_mode_seconds, 30);
+        assert_eq!(updated.room_revision, room.room_revision + 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn upload_policy_cli_refuses_active_writer_then_updates_selected_home() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-upload-policy-exclusive-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let store = crate::store::OmenchatStore::open(&config.database_path).expect("store");
+        let room = store.ensure_room("uploads-cli", None).expect("room");
+        drop(store);
+        let writer = rusqlite::Connection::open(&config.database_path).expect("writer");
+        writer
+            .execute_batch("BEGIN IMMEDIATE;")
+            .expect("active write transaction");
+        let options = ServerOptions {
+            home: Some(root.clone()),
+            ..ServerOptions::default()
+        };
+        let error = Omenchatd
+            .run(CliCommand::RoomsSetUploadPolicy(
+                options.clone(),
+                RoomUploadPolicyOptions {
+                    room_id: i64::from(room.room_id),
+                    max_file_bytes: Some(262_144),
+                },
+            ))
+            .expect_err("active writer must block maintenance")
+            .to_string();
+        assert!(error.contains("exclusive access"));
+        writer.execute_batch("ROLLBACK;").expect("release writer");
+        drop(writer);
+
+        Omenchatd
+            .run(CliCommand::RoomsSetUploadPolicy(
+                options,
+                RoomUploadPolicyOptions {
+                    room_id: i64::from(room.room_id),
+                    max_file_bytes: Some(262_144),
+                },
+            ))
+            .expect("stopped-server update");
+        let store = crate::store::OmenchatStore::open_read_only(&config.database_path)
+            .expect("read-only verification store");
+        let updated = store
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("room");
+        assert_eq!(updated.upload_max_file_bytes, Some(262_144));
+        assert_eq!(updated.room_revision, room.room_revision + 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn headless_user_role_maintenance_uses_the_selected_existing_database() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-cli-user-role-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let config = config::ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("initialize isolated home");
+        let store =
+            crate::store::OmenchatStore::open(&config.database_path).expect("initialize database");
+        let user = store
+            .ensure_user(&[9; 16], "Moderator fixture", None)
+            .expect("seed user");
+        drop(store);
+        let options = ServerOptions {
+            home: Some(root.clone()),
+            ..ServerOptions::default()
+        };
+
+        Omenchatd
+            .run(CliCommand::UsersListJson(options.clone()))
+            .expect("headless user listing");
+        Omenchatd
+            .run(CliCommand::UsersSetRole(
+                options,
+                UserRoleOptions {
+                    user_id: i64::from(user.user_id),
+                    role: AdministrativeUserRole::Moderator,
+                },
+            ))
+            .expect("headless role update");
+
+        let store =
+            crate::store::OmenchatStore::open_existing_for_maintenance(&config.database_path)
+                .expect("inspect role update");
+        assert_eq!(
+            store
+                .user_by_identity(&[9; 16])
+                .expect("user lookup")
+                .expect("updated user")
+                .role_bits,
+            AdministrativeUserRole::Moderator.bits()
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).expect("remove isolated user role home");
     }
 
     #[test]

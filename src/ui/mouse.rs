@@ -92,6 +92,8 @@ pub enum MouseAction {
     ToggleMessageDeliveryMode,
     ToggleMessageTicket,
     SendMessageDraft,
+    ConfirmDirectStamp,
+    CancelDirectStamp,
 }
 
 pub fn action_for_click(app: &App, terminal: Rect, column: u16, row: u16) -> Option<MouseAction> {
@@ -503,7 +505,17 @@ fn message_action(app: &App, workspace: Rect, column: u16, row: u16) -> Option<M
         2 => Some(MouseAction::FocusMessageBody),
         3 => {
             let relative = column.saturating_sub(composer.x);
-            if relative < 20 {
+            if app
+                .active_conversation()
+                .direct_stamp_confirmation
+                .is_some()
+            {
+                if relative < 40 {
+                    Some(MouseAction::ConfirmDirectStamp)
+                } else {
+                    Some(MouseAction::CancelDirectStamp)
+                }
+            } else if relative < 20 {
                 Some(MouseAction::ToggleMessageDeliveryMode)
             } else if relative < 40 {
                 Some(MouseAction::ToggleMessageTicket)
@@ -646,6 +658,26 @@ mod tests {
         assert_eq!(
             action_for_click(&app, terminal, workspace_x + 45, composer_y + 3),
             Some(MouseAction::SendMessageDraft)
+        );
+
+        let conversation = &mut app.workspace.conversations[app.workspace.active_conversation];
+        conversation.direct_stamp_confirmation = Some(crate::messaging::DirectStampConfirmation {
+            peer_hash: conversation.peer_hash.clone(),
+            title: conversation.draft_title.clone(),
+            body: conversation.draft_body.clone(),
+            attachments: conversation.attachments.clone(),
+            delivery_mode: conversation.delivery_mode.clone(),
+            include_ticket: conversation.include_ticket,
+            advertised_cost: 8,
+            ask_above: 4,
+        });
+        assert_eq!(
+            action_for_click(&app, terminal, workspace_x + 4, composer_y + 3),
+            Some(MouseAction::ConfirmDirectStamp)
+        );
+        assert_eq!(
+            action_for_click(&app, terminal, workspace_x + 45, composer_y + 3),
+            Some(MouseAction::CancelDirectStamp)
         );
     }
 

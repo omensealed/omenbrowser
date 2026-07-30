@@ -27,6 +27,7 @@ use crate::live::ActiveLinkSummary;
 use crate::live::ClosedLinkSummary;
 #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::live::LiveServerStats;
+use crate::protocol::RoomPolicyProjection;
 use crate::store::{ServerAdminUser, ServerRoom, ServerUser};
 use crate::tui_format::{
     current_unix_secs, human_age, human_age_duration, human_bytes, human_system_time_local,
@@ -91,7 +92,14 @@ const ADMIN_USER_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const ADMIN_USER_CACHE_ITEMS: usize = 4_096;
 const ADMIN_USER_CACHE_BYTES: usize = 2 * 1024 * 1024;
 
-type AdminRoomRow = (i64, String, Option<String>);
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdminRoomRow {
+    room_id: i64,
+    name: String,
+    topic: Option<String>,
+    policy: RoomPolicyProjection,
+    upload_max_file_bytes: Option<u64>,
+}
 
 enum PendingRoomDatabase {
     Refresh(AdminDatabaseResponse<Vec<ServerRoom>>),
@@ -147,11 +155,22 @@ enum UserDatabaseCompletion {
 }
 
 fn bounded_admin_room_rows(rooms: Vec<ServerRoom>) -> (Vec<AdminRoomRow>, bool) {
-    bounded_admin_room_cache(
-        rooms
-            .into_iter()
-            .map(|room| (room.room_id as i64, room.name, room.topic)),
-    )
+    let mut invalid = false;
+    let rows = rooms.into_iter().filter_map(|room| {
+        let policy =
+            RoomPolicyProjection::new(room.policy_bits, room.slow_mode_seconds).map_err(|_| {
+                invalid = true;
+            });
+        policy.ok().map(|policy| AdminRoomRow {
+            room_id: room.room_id as i64,
+            name: room.name,
+            topic: room.topic,
+            policy,
+            upload_max_file_bytes: room.upload_max_file_bytes,
+        })
+    });
+    let (rows, truncated) = bounded_admin_room_cache(rows);
+    (rows, invalid || truncated)
 }
 
 fn bounded_admin_room_cache(
@@ -160,11 +179,12 @@ fn bounded_admin_room_cache(
     let mut rows = Vec::new();
     let mut bytes = 0usize;
     let mut truncated = false;
-    for (room_id, name, topic) in rooms {
-        let room_bytes = name
+    for room in rooms {
+        let room_bytes = room
+            .name
             .len()
-            .saturating_add(topic.as_ref().map_or(0, String::len))
-            .saturating_add(std::mem::size_of::<i64>());
+            .saturating_add(room.topic.as_ref().map_or(0, String::len))
+            .saturating_add(std::mem::size_of::<AdminRoomRow>());
         if rows.len() >= ADMIN_ROOM_CACHE_ITEMS
             || bytes.saturating_add(room_bytes) > ADMIN_ROOM_CACHE_BYTES
         {
@@ -172,9 +192,28 @@ fn bounded_admin_room_cache(
             break;
         }
         bytes = bytes.saturating_add(room_bytes);
-        rows.push((room_id, name, topic));
+        rows.push(room);
     }
     (rows, truncated)
+}
+
+fn room_policy_status(policy: RoomPolicyProjection, upload_max_file_bytes: Option<u64>) -> String {
+    let publication = if policy.announcement_only() {
+        "announcement"
+    } else {
+        "ordinary"
+    };
+    let slow_mode = if policy.slow_mode_enabled() {
+        format!("{}s", policy.slow_mode_seconds())
+    } else {
+        "off".into()
+    };
+    format!(
+        "Publication policy: {publication}\nSlow mode: {slow_mode} configured · enforcement {}\nUpload policy: {} configured · enforcement {}",
+        crate::SLOW_MODE_ENFORCEMENT_STATUS,
+        crate::room_upload_policy_config_label(upload_max_file_bytes),
+        crate::ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS,
+    )
 }
 
 fn bounded_admin_user_rows(users: Vec<ServerAdminUser>) -> (Vec<AdminUserRow>, bool) {
@@ -828,7 +867,7 @@ impl AdminTui {
                 self.status = format!("room topic update failed for #{name}: {error}");
             }
             RoomDatabaseCompletion::Archive(room_id, name, Ok(())) => {
-                self.rooms.retain(|(id, _, _)| *id != room_id);
+                self.rooms.retain(|room| room.room_id != room_id);
                 self.selected_room = self.selected_room.min(self.rooms.len().saturating_sub(1));
                 append_admin_log(
                     &self.config,
@@ -1042,16 +1081,28 @@ impl AdminTui {
 
     fn upsert_cached_room(&mut self, room: ServerRoom) -> bool {
         let room_id = room.room_id as i64;
-        self.rooms.retain(|(id, _, _)| *id != room_id);
-        self.rooms.push((room_id, room.name, room.topic));
-        self.rooms
-            .sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+        self.rooms.retain(|room| room.room_id != room_id);
+        let Ok(policy) = RoomPolicyProjection::new(room.policy_bits, room.slow_mode_seconds) else {
+            return true;
+        };
+        self.rooms.push(AdminRoomRow {
+            room_id,
+            name: room.name,
+            topic: room.topic,
+            policy,
+            upload_max_file_bytes: room.upload_max_file_bytes,
+        });
+        self.rooms.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then(left.room_id.cmp(&right.room_id))
+        });
         let (rooms, truncated) = bounded_admin_room_cache(std::mem::take(&mut self.rooms));
         self.rooms = rooms;
         self.selected_room = self
             .rooms
             .iter()
-            .position(|(id, _, _)| *id == room_id)
+            .position(|room| room.room_id == room_id)
             .unwrap_or_else(|| self.selected_room.min(self.rooms.len().saturating_sub(1)));
         truncated
     }
@@ -1559,7 +1610,7 @@ impl AdminTui {
             let room_names = self
                 .rooms
                 .iter()
-                .map(|(room_id, name, _)| (*room_id, name.clone()))
+                .map(|room| (room.room_id, room.name.clone()))
                 .collect::<BTreeMap<_, _>>();
             let room_counts = live.runtime.live_server.active_room_counts();
             if room_counts.is_empty() {
@@ -1781,7 +1832,7 @@ impl AdminTui {
             .rooms
             .iter()
             .enumerate()
-            .map(|(index, (room_id, name, topic))| {
+            .map(|(index, room)| {
                 let marker = if index == self.selected_room {
                     ">"
                 } else {
@@ -1789,9 +1840,9 @@ impl AdminTui {
                 };
                 ListItem::new(room_list_label(
                     marker,
-                    *room_id,
-                    name,
-                    topic.as_deref(),
+                    room.room_id,
+                    &room.name,
+                    room.topic.as_deref(),
                     room_list_width,
                 ))
             })
@@ -1807,8 +1858,12 @@ impl AdminTui {
             ])
             .split(columns[1]);
         let selected = self.rooms.get(self.selected_room);
-        let details = if let Some((room_id, name, topic)) = selected {
-            selected_room_text(*room_id, name, topic.as_deref())
+        let details = if let Some(room) = selected {
+            format!(
+                "{}\n{}",
+                selected_room_text(room.room_id, &room.name, room.topic.as_deref()),
+                room_policy_status(room.policy, room.upload_max_file_bytes)
+            )
         } else {
             "No rooms yet.".to_string()
         };
@@ -1820,7 +1875,7 @@ impl AdminTui {
         );
         frame.render_widget(
             Paragraph::new(room_action_guide_text(
-                selected.map(|(room_id, name, topic)| (*room_id, name.as_str(), topic.as_deref())),
+                selected.map(|room| (room.room_id, room.name.as_str(), room.topic.as_deref())),
                 self.pending_archive_room_id,
             ))
             .block(admin_block("Action Guide"))
@@ -1828,7 +1883,7 @@ impl AdminTui {
             right[1],
         );
         let actions = room_actions(
-            selected.map(|(room_id, name, topic)| (*room_id, name.as_str(), topic.as_deref())),
+            selected.map(|room| (room.room_id, room.name.as_str(), room.topic.as_deref())),
             self.pending_archive_room_id,
         );
         self.render_action_list(frame, right[2], "Room Actions", &actions);
@@ -2473,11 +2528,14 @@ impl AdminTui {
             self.status = "select the Rooms panel before editing a room topic".into();
             return;
         }
-        let Some((_, _, topic)) = self.rooms.get(self.selected_room) else {
+        let Some(room) = self.rooms.get(self.selected_room) else {
             self.status = "no room selected".into();
             return;
         };
-        self.start_input(InputMode::EditRoomTopic, topic.clone().unwrap_or_default());
+        self.start_input(
+            InputMode::EditRoomTopic,
+            room.topic.clone().unwrap_or_default(),
+        );
     }
 
     fn archive_selected_room(&mut self) -> ServerResult<()> {
@@ -2485,12 +2543,12 @@ impl AdminTui {
             self.status = "select the Rooms panel before archiving a room".into();
             return Ok(());
         }
-        let Some((room_id, name, _)) = self.rooms.get(self.selected_room) else {
+        let Some(room) = self.rooms.get(self.selected_room) else {
             self.status = "no room selected".into();
             return Ok(());
         };
-        let room_id = *room_id;
-        let name = name.clone();
+        let room_id = room.room_id;
+        let name = room.name.clone();
         if room_id == 1 {
             self.pending_archive_room_id = None;
             self.status =
@@ -2696,7 +2754,7 @@ impl AdminTui {
             }
             InputMode::EditLargeBatchThresholdBytes => {
                 let bytes = parse_limit_input(&value, "large batch threshold bytes")?;
-                self.config.limits.large_batch_threshold_bytes = bytes.clamp(256, 1_048_576);
+                self.config.limits.large_batch_threshold_bytes = bytes.clamp(1, 1_048_576);
                 self.config.save()?;
                 append_admin_log(
                     &self.config,
@@ -2764,29 +2822,29 @@ impl AdminTui {
             InputMode::EditTcpClient => {
                 let tcp_client = parse_tcp_client_override(&value)
                     .ok_or_else(|| ServerError::Message("invalid gateway host:port".into()))?;
-                config::write_reticulum_tcp_client_config(&self.config, &tcp_client)?;
+                let name = config::add_reticulum_tcp_client_config(&self.config, &tcp_client)?;
                 append_admin_log(
                     &self.config,
                     format!(
-                        "admin wrote TCPClientInterface target={}:{}",
-                        tcp_client.target_host, tcp_client.target_port
+                        "admin added TCPClientInterface name={} target={}:{}",
+                        name, tcp_client.target_host, tcp_client.target_port
                     ),
                 );
                 self.status = format!(
-                    "gateway saved: {}:{}; restart live server, then check Monitoring",
-                    tcp_client.target_host, tcp_client.target_port
+                    "gateway added as {name}: {}:{}; restart live server, then check Monitoring",
+                    tcp_client.target_host, tcp_client.target_port,
                 );
                 self.input_mode = InputMode::Navigate;
             }
             InputMode::EditRoomTopic => {
-                let Some((room_id, name, _)) = self.rooms.get(self.selected_room) else {
+                let Some(room) = self.rooms.get(self.selected_room) else {
                     self.status = "no room selected".into();
                     self.input_mode = InputMode::Navigate;
                     self.input.clear();
                     return Ok(());
                 };
-                let room_id = *room_id;
-                let name = name.clone();
+                let room_id = room.room_id;
+                let name = room.name.clone();
                 let topic = (!value.is_empty()).then_some(value);
                 if self.pending_room_database.is_some() {
                     self.status = "another room database operation is still in progress".into();
@@ -2927,13 +2985,13 @@ impl AdminTui {
         self.select_user_index(previous, &users);
     }
 
-    fn select_room_index(&mut self, index: usize, rooms: &[(i64, String, Option<String>)]) {
-        let Some((room_id, name, _)) = rooms.get(index) else {
+    fn select_room_index(&mut self, index: usize, rooms: &[AdminRoomRow]) {
+        let Some(room) = rooms.get(index) else {
             return;
         };
         self.selected_room = index;
         self.pending_archive_room_id = None;
-        self.status = format!("selected room #{name} (id {room_id})");
+        self.status = format!("selected room #{} (id {})", room.name, room.room_id);
     }
 
     fn select_user_index(&mut self, index: usize, users: &[AdminUserRow]) {
@@ -3349,7 +3407,7 @@ const USER_DELETE_MIN_AGE_SECS: i64 = 86_400;
 #[cfg(test)]
 fn setup_checklist(config: &ServerConfig) -> Vec<SetupChecklistItem> {
     let rooms = config::list_rooms(config).unwrap_or_default();
-    setup_checklist_with_rooms(config, &rooms)
+    setup_checklist_with_rooms(config, &configured_admin_room_rows(&rooms))
 }
 
 fn setup_checklist_with_rooms(
@@ -3387,7 +3445,7 @@ fn setup_checklist_with_rooms(
         .unwrap_or(false);
     let reticulum_detail =
         reticulum_interface_summary(reticulum_config_contents.as_deref(), &reticulum_config);
-    let lobby_ready = rooms.iter().any(|(_, name, _)| name == "lobby");
+    let lobby_ready = rooms.iter().any(|room| room.name == "lobby");
 
     vec![
         SetupChecklistItem {
@@ -3443,7 +3501,11 @@ fn setup_checklist_with_rooms(
 #[cfg(test)]
 fn overview_operator_summary_text(config: &ServerConfig, live_status: &str) -> String {
     let rooms = config::list_rooms(config).unwrap_or_default();
-    overview_operator_summary_text_with_rooms(config, live_status, &rooms)
+    overview_operator_summary_text_with_rooms(
+        config,
+        live_status,
+        &configured_admin_room_rows(&rooms),
+    )
 }
 
 fn overview_operator_summary_text_with_rooms(
@@ -3513,7 +3575,7 @@ fn room_actions(
 #[cfg(test)]
 fn setup_next_steps_text(config: &ServerConfig) -> String {
     let rooms = config::list_rooms(config).unwrap_or_default();
-    setup_next_steps_text_with_rooms(config, &rooms)
+    setup_next_steps_text_with_rooms(config, &configured_admin_room_rows(&rooms))
 }
 
 fn setup_next_steps_text_with_rooms(config: &ServerConfig, rooms: &[AdminRoomRow]) -> String {
@@ -4484,7 +4546,7 @@ fn apply_admin_command_with_database(
         "set-large-batch-threshold-bytes" => {
             let value =
                 parse_usize_arg(&mut parts, "usage: set-large-batch-threshold-bytes <bytes>")?;
-            config.limits.large_batch_threshold_bytes = value.clamp(256, 1_048_576);
+            config.limits.large_batch_threshold_bytes = value.clamp(1, 1_048_576);
             config.save()?;
             append_admin_log(
                 config,
@@ -4560,15 +4622,44 @@ fn apply_admin_command_with_database(
             };
             let tcp_client = parse_tcp_client_override(value)
                 .ok_or_else(|| ServerError::Message("invalid gateway host:port".into()))?;
-            config::write_reticulum_tcp_client_config(config, &tcp_client)?;
+            let name = config::add_reticulum_tcp_client_config(config, &tcp_client)?;
             append_admin_log(
                 config,
                 format!(
-                    "admin console wrote TCPClientInterface target={}:{}",
+                    "admin console added TCPClientInterface name={} target={}:{}",
+                    name, tcp_client.target_host, tcp_client.target_port
+                ),
+            );
+            println!(
+                "added {name}: {}:{}",
+                tcp_client.target_host, tcp_client.target_port
+            );
+            Ok(AdminConsoleAction::Continue)
+        }
+        "tcp-client-delete" => {
+            let Some(value) = parts.next() else {
+                return Err(ServerError::Message(
+                    "usage: tcp-client-delete <gateway_host:port>".into(),
+                ));
+            };
+            let tcp_client = parse_tcp_client_override(value)
+                .ok_or_else(|| ServerError::Message("invalid gateway host:port".into()))?;
+            let removed = config::delete_reticulum_tcp_client_config(
+                config,
+                &tcp_client.target_host,
+                tcp_client.target_port,
+            )?;
+            append_admin_log(
+                config,
+                format!(
+                    "admin console removed {removed} TCPClientInterface target={}:{}",
                     tcp_client.target_host, tcp_client.target_port
                 ),
             );
-            println!("updated {}", config.reticulum_config_file().display());
+            println!(
+                "removed {removed} TCP client interface(s) for {}:{}",
+                tcp_client.target_host, tcp_client.target_port
+            );
             Ok(AdminConsoleAction::Continue)
         }
         "ban-user" => {
@@ -4800,7 +4891,7 @@ fn print_setup_checklist_with_rooms(config: &ServerConfig, rooms: &[AdminRoomRow
 #[cfg(test)]
 fn setup_checklist_text(config: &ServerConfig) -> String {
     let rooms = config::list_rooms(config).unwrap_or_default();
-    setup_checklist_text_with_rooms(config, &rooms)
+    setup_checklist_text_with_rooms(config, &configured_admin_room_rows(&rooms))
 }
 
 fn setup_checklist_text_with_rooms(config: &ServerConfig, rooms: &[AdminRoomRow]) -> String {
@@ -4835,12 +4926,17 @@ fn rooms_text_from(rooms: &[ServerRoom]) -> String {
 
 fn rooms_text_from_rows(rooms: &[AdminRoomRow]) -> String {
     let mut text = String::new();
-    for (room_id, name, topic) in rooms {
+    for room in rooms {
         text.push_str(&room_console_row_text(&RoomConsoleRowText {
-            room_id: *room_id,
-            name,
-            topic: topic.as_deref().unwrap_or_default(),
+            room_id: room.room_id,
+            name: &room.name,
+            topic: room.topic.as_deref().unwrap_or_default(),
         }));
+        text.push_str("  ");
+        text.push_str(
+            &room_policy_status(room.policy, room.upload_max_file_bytes).replace('\n', " | "),
+        );
+        text.push('\n');
     }
     text
 }
@@ -4848,7 +4944,31 @@ fn rooms_text_from_rows(rooms: &[AdminRoomRow]) -> String {
 fn admin_room_rows(rooms: &[ServerRoom]) -> Vec<AdminRoomRow> {
     rooms
         .iter()
-        .map(|room| (room.room_id as i64, room.name.clone(), room.topic.clone()))
+        .filter_map(|room| {
+            RoomPolicyProjection::new(room.policy_bits, room.slow_mode_seconds)
+                .ok()
+                .map(|policy| AdminRoomRow {
+                    room_id: room.room_id as i64,
+                    name: room.name.clone(),
+                    topic: room.topic.clone(),
+                    policy,
+                    upload_max_file_bytes: room.upload_max_file_bytes,
+                })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn configured_admin_room_rows(rooms: &[(i64, String, Option<String>)]) -> Vec<AdminRoomRow> {
+    rooms
+        .iter()
+        .map(|(room_id, name, topic)| AdminRoomRow {
+            room_id: *room_id,
+            name: name.clone(),
+            topic: topic.clone(),
+            policy: RoomPolicyProjection::default(),
+            upload_max_file_bytes: None,
+        })
         .collect()
 }
 
@@ -5479,7 +5599,7 @@ mod tests {
         app.selected_room = app
             .rooms
             .iter()
-            .position(|(_, name, _)| name == "ops")
+            .position(|room| room.name == "ops")
             .expect("ops room");
 
         app.start_selected_room_topic_edit();
@@ -5495,7 +5615,7 @@ mod tests {
         app.selected_room = app
             .rooms
             .iter()
-            .position(|(_, name, _)| name == "ops")
+            .position(|room| room.name == "ops")
             .expect("ops room");
         app.archive_selected_room().expect("arm archive");
         assert!(app.status.contains("archive armed"));
@@ -5523,7 +5643,7 @@ mod tests {
         app.selected_room = app
             .rooms
             .iter()
-            .position(|(_, name, _)| name == "ops")
+            .position(|room| room.name == "ops")
             .expect("ops room");
         let locker = rusqlite::Connection::open(&app.config.database_path).expect("locker");
         locker
@@ -5555,6 +5675,9 @@ mod tests {
                 name: format!("room-{index}"),
                 topic: Some("topic".into()),
                 room_revision: 0,
+                policy_bits: 0,
+                slow_mode_seconds: 0,
+                upload_max_file_bytes: None,
             })
             .collect();
         let (rows, truncated) = bounded_admin_room_rows(rooms);
@@ -5566,9 +5689,60 @@ mod tests {
             name: "large".into(),
             topic: Some("x".repeat(ADMIN_ROOM_CACHE_BYTES + 1)),
             room_revision: 0,
+            policy_bits: 0,
+            slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
         }]);
         assert!(truncated);
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn dashboard_room_projection_reports_configured_policy_and_enforcement() {
+        let (rows, truncated) = bounded_admin_room_rows(vec![ServerRoom {
+            room_id: 7,
+            name: "field".into(),
+            topic: Some("Operations".into()),
+            room_revision: 4,
+            policy_bits: crate::protocol::ROOM_POLICY_ANNOUNCEMENT,
+            slow_mode_seconds: 30,
+            upload_max_file_bytes: Some(262_144),
+        }]);
+        assert!(!truncated);
+        let room = rows.first().expect("projected room");
+        assert!(room.policy.announcement_only());
+        assert_eq!(room.policy.slow_mode_seconds(), 30);
+        assert_eq!(
+            room_policy_status(room.policy, room.upload_max_file_bytes),
+            format!(
+                "Publication policy: announcement\nSlow mode: 30s configured · enforcement {}\nUpload policy: 262144B configured · enforcement {}",
+                crate::SLOW_MODE_ENFORCEMENT_STATUS,
+                crate::ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS,
+            )
+        );
+        let console = rooms_text_from_rows(&rows);
+        assert!(console.contains("Publication policy: announcement"));
+        assert!(console.contains(&format!(
+            "Slow mode: 30s configured · enforcement {}",
+            crate::SLOW_MODE_ENFORCEMENT_STATUS
+        )));
+        assert!(console.contains(&format!(
+            "Upload policy: 262144B configured · enforcement {}",
+            crate::ROOM_MEDIA_POLICY_ENFORCEMENT_STATUS
+        )));
+        assert!(console.len() < 1_024);
+
+        let (invalid, truncated) = bounded_admin_room_rows(vec![ServerRoom {
+            room_id: 8,
+            name: "invalid".into(),
+            topic: None,
+            room_revision: 1,
+            policy_bits: crate::protocol::ROOM_POLICY_KNOWN_MASK << 1,
+            slow_mode_seconds: 0,
+            upload_max_file_bytes: None,
+        }]);
+        assert!(truncated);
+        assert!(invalid.is_empty());
     }
 
     #[test]
@@ -5665,7 +5839,7 @@ mod tests {
         app.selected_room = app
             .rooms
             .iter()
-            .position(|(_, name, _)| name == "ops")
+            .position(|room| room.name == "ops")
             .expect("ops room");
         app.start_selected_room_topic_edit();
         app.input = "New".into();
@@ -5676,7 +5850,7 @@ mod tests {
         app.selected_room = app
             .rooms
             .iter()
-            .position(|(_, name, _)| name == "ops")
+            .position(|room| room.name == "ops")
             .expect("ops room");
         app.archive_selected_room().expect("arm archive");
         assert!(app.status.contains("hide it from clients"));
@@ -5689,7 +5863,7 @@ mod tests {
         app.selected_room = app
             .rooms
             .iter()
-            .position(|(room_id, _, _)| *room_id == 1)
+            .position(|room| room.room_id == 1)
             .expect("lobby room");
         app.archive_selected_room().expect("archive lobby");
         assert!(app.status.contains("#lobby is protected"));
@@ -6037,7 +6211,10 @@ mod tests {
 
         app.start_input(InputMode::EditTcpClient, "gateway.example:42420".into());
         app.commit_input().expect("tcp client");
-        assert!(app.status.contains("gateway saved: gateway.example:42420"));
+        assert!(app
+            .status
+            .contains("gateway added as OMENchat TCP Client 1"));
+        assert!(app.status.contains("gateway.example:42420"));
         assert!(app.status.contains("restart live server"));
         assert!(app.status.contains("check Monitoring"));
 

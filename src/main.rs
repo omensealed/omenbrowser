@@ -1,13 +1,11 @@
 use anyhow::Context;
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-use std::collections::{BTreeMap, VecDeque};
+
+mod omenchat_smoke;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use omenbrowser_rs::app::{App, SmokePathWarmup};
 use omenbrowser_rs::browser::BrowserAddress;
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-use omenbrowser_rs::chat::rns::ChatLinkTransport;
 use omenbrowser_rs::cli_network::TcpClientOverride;
 use omenbrowser_rs::cli_overrides::SmokeOverrides;
 use omenbrowser_rs::cli_redaction::{
@@ -22,8 +20,6 @@ use omenbrowser_rs::config::{AppConfig, AppPaths};
 #[cfg(feature = "desktop-ui")]
 use omenbrowser_rs::desktop;
 use omenbrowser_rs::interfaces::ReticulumInterfaceProfile;
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-use omenbrowser_rs::runtime::{CancellationToken, RuntimeBusEvent};
 use omenbrowser_rs::storage::settings::RuntimeBackendSetting;
 #[cfg(feature = "tui")]
 use omenbrowser_rs::ui;
@@ -196,6 +192,18 @@ async fn async_main() -> anyhow::Result<()> {
             destination,
             room,
             message,
+            local_display_name,
+            announcement_rejection_smoke,
+            announcement_upload_rejection_smoke,
+            room_media_policy_upload_rejection_smoke,
+            slow_mode_rejection_smoke,
+            slow_mode_delta_seconds,
+            reaction_smoke,
+            revision_smoke,
+            pin_smoke,
+            moderation_audit_smoke,
+            moderation_audit_target,
+            moderation_audit_expect_record,
             upload_file,
             fetch_upload_filename,
             fetch_upload_bytes,
@@ -208,10 +216,22 @@ async fn async_main() -> anyhow::Result<()> {
             stdout,
             overrides,
         } => {
-            run_omenchat_smoke_command(OmenChatSmokeCommandInput {
+            omenchat_smoke::run(OmenChatSmokeCommandInput {
                 destination,
                 room,
                 message,
+                local_display_name,
+                announcement_rejection_smoke,
+                announcement_upload_rejection_smoke,
+                room_media_policy_upload_rejection_smoke,
+                slow_mode_rejection_smoke,
+                slow_mode_delta_seconds,
+                reaction_smoke,
+                revision_smoke,
+                pin_smoke,
+                moderation_audit_smoke,
+                moderation_audit_target,
+                moderation_audit_expect_record,
                 upload_file,
                 fetch_upload_filename,
                 fetch_upload_bytes,
@@ -356,6 +376,18 @@ enum CliCommand {
         destination: String,
         room: String,
         message: String,
+        local_display_name: String,
+        announcement_rejection_smoke: bool,
+        announcement_upload_rejection_smoke: bool,
+        room_media_policy_upload_rejection_smoke: bool,
+        slow_mode_rejection_smoke: bool,
+        slow_mode_delta_seconds: Option<u32>,
+        reaction_smoke: bool,
+        revision_smoke: bool,
+        pin_smoke: bool,
+        moderation_audit_smoke: bool,
+        moderation_audit_target: Option<String>,
+        moderation_audit_expect_record: bool,
         upload_file: Option<PathBuf>,
         fetch_upload_filename: Option<String>,
         fetch_upload_bytes: Option<u64>,
@@ -421,6 +453,18 @@ struct OmenChatSmokeCommandInput {
     destination: String,
     room: String,
     message: String,
+    local_display_name: String,
+    announcement_rejection_smoke: bool,
+    announcement_upload_rejection_smoke: bool,
+    room_media_policy_upload_rejection_smoke: bool,
+    slow_mode_rejection_smoke: bool,
+    slow_mode_delta_seconds: Option<u32>,
+    reaction_smoke: bool,
+    revision_smoke: bool,
+    pin_smoke: bool,
+    moderation_audit_smoke: bool,
+    moderation_audit_target: Option<String>,
+    moderation_audit_expect_record: bool,
     upload_file: Option<PathBuf>,
     fetch_upload_filename: Option<String>,
     fetch_upload_bytes: Option<u64>,
@@ -507,6 +551,18 @@ impl CliCommand {
         let mut omenchat_smoke_destination = None;
         let mut omenchat_room = "lobby".to_string();
         let mut omenchat_message = "OMENchat smoke test from OMENbrowser_rs".to_string();
+        let mut omenchat_local_display_name = "OMENbrowser_rs smoke".to_string();
+        let mut omenchat_announcement_rejection_smoke = false;
+        let mut omenchat_announcement_upload_rejection_smoke = false;
+        let mut omenchat_room_media_policy_upload_rejection_smoke = false;
+        let mut omenchat_slow_mode_rejection_smoke = false;
+        let mut omenchat_slow_mode_delta_seconds = None;
+        let mut omenchat_reaction_smoke = false;
+        let mut omenchat_revision_smoke = false;
+        let mut omenchat_pin_smoke = false;
+        let mut omenchat_moderation_audit_smoke = false;
+        let mut omenchat_moderation_audit_target = None;
+        let mut omenchat_moderation_audit_expect_record = false;
         let mut omenchat_upload_file = None;
         let mut omenchat_fetch_upload_filename = None;
         let mut omenchat_fetch_upload_bytes = None;
@@ -591,6 +647,51 @@ impl CliCommand {
                     omenchat_message = args
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("{arg} requires a message body"))?;
+                }
+                "--omenchat-local-display-name" => {
+                    omenchat_local_display_name = args.next().ok_or_else(|| {
+                        anyhow::anyhow!("{arg} requires an OMENchat display name")
+                    })?;
+                }
+                "--omenchat-announcement-rejection-smoke" => {
+                    omenchat_announcement_rejection_smoke = true;
+                }
+                "--omenchat-announcement-upload-rejection-smoke" => {
+                    omenchat_announcement_upload_rejection_smoke = true;
+                }
+                "--omenchat-room-media-policy-upload-rejection-smoke" => {
+                    omenchat_room_media_policy_upload_rejection_smoke = true;
+                }
+                "--omenchat-slow-mode-rejection-smoke" => {
+                    omenchat_slow_mode_rejection_smoke = true;
+                }
+                "--omenchat-slow-mode-delta-smoke" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires seconds"))?;
+                    omenchat_slow_mode_delta_seconds = Some(value.parse().map_err(|_| {
+                        anyhow::anyhow!("{arg} requires an integer number of seconds")
+                    })?);
+                }
+                "--omenchat-reaction-smoke" => {
+                    omenchat_reaction_smoke = true;
+                }
+                "--omenchat-revision-smoke" => {
+                    omenchat_revision_smoke = true;
+                }
+                "--omenchat-pin-smoke" => {
+                    omenchat_pin_smoke = true;
+                }
+                "--omenchat-moderation-audit-smoke" => {
+                    omenchat_moderation_audit_smoke = true;
+                }
+                "--omenchat-moderation-audit-target" => {
+                    omenchat_moderation_audit_target = Some(args.next().ok_or_else(|| {
+                        anyhow::anyhow!("{arg} requires an active user display name")
+                    })?);
+                }
+                "--omenchat-moderation-audit-expect-record" => {
+                    omenchat_moderation_audit_expect_record = true;
                 }
                 "--omenchat-upload-file" | "--upload-file" => {
                     let value = args
@@ -839,11 +940,133 @@ impl CliCommand {
                 overrides: Box::new(overrides),
             })
         } else if let Some(destination) = omenchat_smoke_destination {
+            if omenchat_slow_mode_delta_seconds.is_some_and(|seconds| {
+                !(1..=omenchat_protocol::ROOM_SLOW_MODE_MAX_SECONDS).contains(&seconds)
+            }) {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-slow-mode-delta-smoke seconds are outside protocol bounds"
+                ));
+            }
+            if omenchat_announcement_rejection_smoke && omenchat_announcement_upload_rejection_smoke
+            {
+                return Err(anyhow::anyhow!(
+                    "choose only one OMENchat announcement rejection smoke mode"
+                ));
+            }
+            if omenchat_room_media_policy_upload_rejection_smoke
+                && (omenchat_announcement_rejection_smoke
+                    || omenchat_announcement_upload_rejection_smoke
+                    || omenchat_slow_mode_rejection_smoke
+                    || omenchat_slow_mode_delta_seconds.is_some()
+                    || omenchat_moderation_audit_smoke
+                    || omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_none()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-room-media-policy-upload-rejection-smoke requires one upload file and is an isolated qualification case"
+                ));
+            }
+            if omenchat_slow_mode_rejection_smoke
+                && (omenchat_announcement_rejection_smoke
+                    || omenchat_announcement_upload_rejection_smoke
+                    || omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_some()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-slow-mode-rejection-smoke is an isolated qualification case"
+                ));
+            }
+            if omenchat_slow_mode_delta_seconds.is_some()
+                && (omenchat_slow_mode_rejection_smoke
+                    || omenchat_announcement_rejection_smoke
+                    || omenchat_announcement_upload_rejection_smoke
+                    || omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_some()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-slow-mode-delta-smoke is an isolated qualification case"
+                ));
+            }
+            if omenchat_moderation_audit_smoke
+                && (omenchat_slow_mode_rejection_smoke
+                    || omenchat_slow_mode_delta_seconds.is_some()
+                    || omenchat_announcement_rejection_smoke
+                    || omenchat_announcement_upload_rejection_smoke
+                    || omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_some()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-moderation-audit-smoke is an isolated qualification case"
+                ));
+            }
+            if omenchat_moderation_audit_target.is_some() && !omenchat_moderation_audit_smoke {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-moderation-audit-target requires --omenchat-moderation-audit-smoke"
+                ));
+            }
+            if omenchat_moderation_audit_expect_record && !omenchat_moderation_audit_smoke {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-moderation-audit-expect-record requires --omenchat-moderation-audit-smoke"
+                ));
+            }
+            if omenchat_announcement_rejection_smoke
+                && (omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_some()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-announcement-rejection-smoke is an isolated authorization case"
+                ));
+            }
+            if omenchat_announcement_upload_rejection_smoke
+                && (omenchat_reaction_smoke
+                    || omenchat_revision_smoke
+                    || omenchat_pin_smoke
+                    || omenchat_upload_file.is_none()
+                    || omenchat_fetch_upload_filename.is_some()
+                    || omenchat_reconnect_ready_file.is_some())
+            {
+                return Err(anyhow::anyhow!(
+                    "--omenchat-announcement-upload-rejection-smoke requires one upload file and is an isolated authorization case"
+                ));
+            }
             overrides.ensure_runtime_backend(RuntimeBackendSetting::Reticulum);
             Ok(Self::OmenChatSmoke {
                 destination,
                 room: omenchat_room,
                 message: omenchat_message,
+                local_display_name: omenchat_local_display_name,
+                announcement_rejection_smoke: omenchat_announcement_rejection_smoke,
+                announcement_upload_rejection_smoke: omenchat_announcement_upload_rejection_smoke,
+                room_media_policy_upload_rejection_smoke:
+                    omenchat_room_media_policy_upload_rejection_smoke,
+                slow_mode_rejection_smoke: omenchat_slow_mode_rejection_smoke,
+                slow_mode_delta_seconds: omenchat_slow_mode_delta_seconds,
+                reaction_smoke: omenchat_reaction_smoke,
+                revision_smoke: omenchat_revision_smoke,
+                pin_smoke: omenchat_pin_smoke,
+                moderation_audit_smoke: omenchat_moderation_audit_smoke,
+                moderation_audit_target: omenchat_moderation_audit_target,
+                moderation_audit_expect_record: omenchat_moderation_audit_expect_record,
                 upload_file: omenchat_upload_file,
                 fetch_upload_filename: omenchat_fetch_upload_filename,
                 fetch_upload_bytes: omenchat_fetch_upload_bytes,
@@ -1115,1397 +1338,6 @@ async fn run_native_smoke_command(input: NativeSmokeCommandInput) -> anyhow::Res
     }
 
     Ok(())
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-#[derive(Clone, Debug, Default)]
-struct OmenChatSmokeTransport {
-    incoming_frames: VecDeque<Vec<u8>>,
-    resources: BTreeMap<String, Vec<u8>>,
-    pending_resource_offers: BTreeMap<String, VecDeque<Vec<u8>>>,
-    outgoing_frames: Vec<Vec<u8>>,
-    outgoing_resources: Vec<(String, Vec<u8>)>,
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-impl OmenChatSmokeTransport {
-    fn push_incoming_frame(&mut self, frame: Vec<u8>) {
-        self.incoming_frames.push_back(frame);
-    }
-
-    fn push_resource(&mut self, metadata: Option<Vec<u8>>, data: Vec<u8>) {
-        let Some(resource_id) =
-            omenbrowser_rs::chat::rns::resource_id_from_metadata(metadata.as_deref())
-        else {
-            return;
-        };
-        self.resources.insert(resource_id.clone(), data);
-        if let Some(mut offers) = self.pending_resource_offers.remove(&resource_id) {
-            while let Some(frame) = offers.pop_back() {
-                self.incoming_frames.push_front(frame);
-            }
-        }
-    }
-
-    fn take_outgoing_frames(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.outgoing_frames)
-    }
-
-    fn take_outgoing_resources(&mut self) -> Vec<(String, Vec<u8>)> {
-        std::mem::take(&mut self.outgoing_resources)
-    }
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-impl ChatLinkTransport for OmenChatSmokeTransport {
-    fn send_frame(&mut self, frame_bytes: Vec<u8>) -> anyhow::Result<()> {
-        self.outgoing_frames.push(frame_bytes);
-        Ok(())
-    }
-
-    fn send_resource(&mut self, resource_id: &str, payload: Vec<u8>) -> anyhow::Result<()> {
-        self.outgoing_resources
-            .push((resource_id.to_owned(), payload));
-        Ok(())
-    }
-
-    fn recv_frame(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
-        Ok(self.incoming_frames.pop_front())
-    }
-
-    fn fetch_resource(&mut self, resource_id: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        Ok(self.resources.get(resource_id).cloned())
-    }
-
-    fn defer_resource_offer(
-        &mut self,
-        resource_id: &str,
-        frame_bytes: Vec<u8>,
-    ) -> anyhow::Result<()> {
-        self.pending_resource_offers
-            .entry(resource_id.to_owned())
-            .or_default()
-            .push_back(frame_bytes);
-        Ok(())
-    }
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-async fn run_omenchat_smoke_command(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> {
-    use omenbrowser_rs::chat::{
-        ChatClient, ChatClientEvent, ChatClientRequest, OmenChatDescriptor,
-    };
-
-    let OmenChatSmokeCommandInput {
-        destination,
-        room,
-        message,
-        upload_file,
-        fetch_upload_filename,
-        fetch_upload_bytes,
-        reconnect_ready_file,
-        reconnect_wait_secs,
-        link_timeout_secs,
-        response_wait_secs,
-        warmup,
-        output,
-        stdout,
-        overrides,
-    } = input;
-    parse_16_byte_hex_hash(&destination)?;
-
-    let mut config = load_config_for_smoke(overrides.app_root().cloned())
-        .context("failed to load OMENchat smoke app configuration")?;
-    let known_destinations_path = overrides.known_destinations_path().cloned();
-    let interface_override = apply_smoke_overrides(&mut config, overrides.clone());
-    let default_output = output.is_none() && !stdout;
-    let diagnostics_dir = config.paths.diagnostics_dir.clone();
-    let mut app = App::try_new(config).context("failed to initialize application services")?;
-    let mut runtime_events = app
-        .runtime
-        .subscribe_events()
-        .ok_or_else(|| anyhow::anyhow!("configured runtime does not expose runtime events"))?;
-
-    let mut stages = Vec::new();
-    app.start_runtime_for_smoke_test_with_interfaces(interface_override)
-        .await
-        .context("failed to start runtime for OMENchat smoke")?;
-    stages.push(serde_json::json!({
-        "stage": "runtime_start",
-        "ok": true,
-        "status": app.runtime_status,
-    }));
-
-    if let Some(path) = known_destinations_path.clone() {
-        let loaded = app
-            .preload_known_destinations_for_smoke_test(&path)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to preload known destinations from {}",
-                    path.display()
-                )
-            })?;
-        stages.push(serde_json::json!({
-            "stage": "known_destinations_preload",
-            "ok": true,
-            "path": path,
-            "loaded": loaded,
-        }));
-    }
-
-    if let Some(warmup) = warmup {
-        let requested = app
-            .runtime
-            .request_path(&destination, "omenchat_smoke", true)
-            .await;
-        stages.push(serde_json::json!({
-            "stage": "path_request",
-            "ok": requested.is_ok(),
-            "queued": requested.as_ref().ok().copied(),
-            "error": requested.err().map(|error| error.to_string()),
-            "wait_secs": warmup.wait_secs,
-        }));
-        let warmup_events = collect_runtime_trace(
-            &mut runtime_events,
-            Duration::from_secs(warmup.wait_secs),
-            Some(&destination),
-        )
-        .await;
-        stages.push(serde_json::json!({
-            "stage": "path_wait",
-            "ok": true,
-            "events": warmup_events,
-        }));
-    }
-
-    let opened = match app
-        .runtime
-        .open_omenchat_link(
-            &destination,
-            Duration::from_secs(link_timeout_secs),
-            CancellationToken::new(),
-        )
-        .await
-    {
-        Ok(opened) => {
-            stages.push(serde_json::json!({
-                "stage": "link_open",
-                "ok": true,
-                "link_id": hex_bytes(&opened.link_id),
-                "rtt_millis": opened.rtt_millis,
-            }));
-            opened
-        }
-        Err(error) => {
-            stages.push(serde_json::json!({
-                "stage": "link_open",
-                "ok": false,
-                "error": error.to_string(),
-            }));
-            let report = omenchat_smoke_report(
-                false,
-                "link_open",
-                &destination,
-                &room,
-                &message,
-                stages,
-                None,
-            );
-            write_omenchat_smoke_report(report, output, stdout, default_output, &diagnostics_dir)?;
-            let _ = app.runtime.stop_runtime().await;
-            return Ok(());
-        }
-    };
-
-    let mut client = ChatClient::new();
-    let mut live_state = omenbrowser_rs::chat::live::LiveChatClientState::default();
-    let mut transport = OmenChatSmokeTransport::default();
-    let descriptor = OmenChatDescriptor {
-        server_destination: destination.clone(),
-        display_name: Some("OMENchat smoke".into()),
-        local_display_name: Some("OMENbrowser_rs smoke".into()),
-        rooms_hint: vec![room.clone()],
-        ..OmenChatDescriptor::default()
-    };
-    let open_events = omenbrowser_rs::chat::live::handle_live_request(
-        &mut client,
-        &mut live_state,
-        &mut transport,
-        ChatClientRequest::OpenServer(descriptor.clone()),
-    );
-    let session_id = open_events.iter().find_map(|event| match event {
-        ChatClientEvent::ServerOpened { session_id, .. } => Some(*session_id),
-        _ => None,
-    });
-    stages.push(serde_json::json!({
-        "stage": "session_open_frames",
-        "ok": session_id.is_some(),
-        "events": open_events.iter().map(format_chat_event).collect::<Vec<_>>(),
-    }));
-    send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
-
-    let Some(session_id) = session_id else {
-        let report = omenchat_smoke_report(
-            false,
-            "session_open",
-            &destination,
-            &room,
-            &message,
-            stages,
-            None,
-        );
-        write_omenchat_smoke_report(report, output, stdout, default_output, &diagnostics_dir)?;
-        let _ = app.runtime.close_omenchat_link(opened.link_id).await;
-        let _ = app.runtime.stop_runtime().await;
-        return Ok(());
-    };
-
-    let join_events = wait_for_omenchat_condition(
-        &*app.runtime,
-        &mut runtime_events,
-        &mut client,
-        &mut live_state,
-        &mut transport,
-        OmenChatWaitOptions {
-            link_id: opened.link_id,
-            session_id,
-            wait: Duration::from_secs(response_wait_secs),
-        },
-        |client| {
-            client
-                .session(session_id)
-                .is_some_and(|session| session.active_room.joined)
-        },
-    )
-    .await;
-    send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
-    let joined = client
-        .session(session_id)
-        .is_some_and(|session| session.active_room.joined);
-    stages.push(serde_json::json!({
-        "stage": "join_wait",
-        "ok": joined,
-        "events": join_events,
-    }));
-
-    if joined {
-        let send_events = omenbrowser_rs::chat::live::handle_live_request(
-            &mut client,
-            &mut live_state,
-            &mut transport,
-            ChatClientRequest::SendMessage {
-                session_id,
-                room: room.clone(),
-                body: message.clone(),
-            },
-        );
-        stages.push(serde_json::json!({
-            "stage": "message_send_frame",
-            "ok": !send_events.iter().any(|event| matches!(event, ChatClientEvent::Error { .. })),
-            "events": send_events.iter().map(format_chat_event).collect::<Vec<_>>(),
-        }));
-        send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
-    }
-
-    let message_events = if joined {
-        wait_for_omenchat_condition(
-            &*app.runtime,
-            &mut runtime_events,
-            &mut client,
-            &mut live_state,
-            &mut transport,
-            OmenChatWaitOptions {
-                link_id: opened.link_id,
-                session_id,
-                wait: Duration::from_secs(response_wait_secs),
-            },
-            |client| omenchat_session_contains_message(client, session_id, &message),
-        )
-        .await
-    } else {
-        Vec::new()
-    };
-    let message_seen = omenchat_session_contains_message(&client, session_id, &message);
-    stages.push(serde_json::json!({
-        "stage": "message_echo_wait",
-        "ok": message_seen,
-        "events": message_events,
-    }));
-
-    let mut upload_ok = true;
-    if joined && message_seen {
-        if let Some(upload_file) = upload_file {
-            let upload_bytes = std::fs::read(&upload_file).with_context(|| {
-                format!(
-                    "failed to read OMENchat smoke upload file {}",
-                    upload_file.display()
-                )
-            })?;
-            let upload_filename = upload_file
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or("omenchat-smoke-upload.bin")
-                .to_owned();
-            let upload_len = upload_bytes.len() as u64;
-            let send_upload_events = omenbrowser_rs::chat::live::handle_live_request(
-                &mut client,
-                &mut live_state,
-                &mut transport,
-                ChatClientRequest::SendUpload {
-                    session_id,
-                    room: room.clone(),
-                    filename: upload_filename.clone(),
-                    content_type: Some("application/octet-stream".into()),
-                    bytes: upload_bytes.clone(),
-                },
-            );
-            stages.push(serde_json::json!({
-                "stage": "upload_offer_frame",
-                "ok": !send_upload_events.iter().any(|event| matches!(event, ChatClientEvent::Error { .. })),
-                "filename": upload_filename.clone(),
-                "bytes": upload_len,
-                "events": send_upload_events.iter().map(format_chat_event).collect::<Vec<_>>(),
-            }));
-            send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
-
-            let upload_complete_events = wait_for_omenchat_condition(
-                &*app.runtime,
-                &mut runtime_events,
-                &mut client,
-                &mut live_state,
-                &mut transport,
-                OmenChatWaitOptions {
-                    link_id: opened.link_id,
-                    session_id,
-                    wait: Duration::from_secs(response_wait_secs),
-                },
-                |client| {
-                    omenchat_session_upload_resource_id(
-                        client,
-                        session_id,
-                        &upload_filename,
-                        Some(upload_len),
-                    )
-                    .is_some()
-                },
-            )
-            .await;
-            let upload_resource_id = omenchat_session_upload_resource_id(
-                &client,
-                session_id,
-                &upload_filename,
-                Some(upload_len),
-            );
-            let upload_completed = upload_resource_id.is_some()
-                && omenchat_smoke_events_contain_decoded_event(
-                    &upload_complete_events,
-                    "upload_completed",
-                );
-            stages.push(serde_json::json!({
-                "stage": "upload_complete_wait",
-                "ok": upload_completed,
-                "resource_id": upload_resource_id.clone(),
-                "events": upload_complete_events,
-            }));
-
-            if let Some(resource_id) = upload_resource_id {
-                let (upload_resource_available, fetch_stages) =
-                    run_omenchat_smoke_upload_fetch(OmenchatSmokeUploadFetch {
-                        runtime: &*app.runtime,
-                        runtime_events: &mut runtime_events,
-                        link_id: opened.link_id,
-                        client: &mut client,
-                        live_state: &mut live_state,
-                        transport: &mut transport,
-                        session_id,
-                        room: &room,
-                        resource_id,
-                        filename: &upload_filename,
-                        bytes: Some(upload_len),
-                        wait: Duration::from_secs(response_wait_secs),
-                    })
-                    .await?;
-                stages.extend(fetch_stages);
-                upload_ok = upload_completed && upload_resource_available;
-            } else {
-                upload_ok = false;
-            }
-        }
-    }
-
-    if joined && message_seen {
-        if let Some(fetch_filename) = fetch_upload_filename {
-            let existing_resource_id = omenchat_session_upload_resource_id(
-                &client,
-                session_id,
-                &fetch_filename,
-                fetch_upload_bytes,
-            );
-            stages.push(serde_json::json!({
-                "stage": "existing_upload_lookup",
-                "ok": existing_resource_id.is_some(),
-                "filename": fetch_filename.clone(),
-                "bytes": fetch_upload_bytes,
-                "resource_id": existing_resource_id.clone(),
-            }));
-            if let Some(resource_id) = existing_resource_id {
-                let (fetched_existing_upload, fetch_stages) =
-                    run_omenchat_smoke_upload_fetch(OmenchatSmokeUploadFetch {
-                        runtime: &*app.runtime,
-                        runtime_events: &mut runtime_events,
-                        link_id: opened.link_id,
-                        client: &mut client,
-                        live_state: &mut live_state,
-                        transport: &mut transport,
-                        session_id,
-                        room: &room,
-                        resource_id,
-                        filename: &fetch_filename,
-                        bytes: fetch_upload_bytes,
-                        wait: Duration::from_secs(response_wait_secs),
-                    })
-                    .await?;
-                stages.extend(fetch_stages);
-                upload_ok = upload_ok && fetched_existing_upload;
-            } else {
-                upload_ok = false;
-            }
-        }
-    }
-
-    let mut active_link_id = opened.link_id;
-    let mut reconnect_ok = true;
-    if joined && message_seen {
-        if let Some(ready_file) = reconnect_ready_file.as_deref() {
-            let (passed, reconnected_link, reconnect_stages) =
-                run_omenchat_continuous_reconnect_smoke(OmenChatContinuousReconnectSmoke {
-                    runtime: &*app.runtime,
-                    runtime_events: &mut runtime_events,
-                    client: &mut client,
-                    live_state: &mut live_state,
-                    transport: &mut transport,
-                    descriptor,
-                    old_link_id: opened.link_id,
-                    session_id,
-                    room: &room,
-                    message: &message,
-                    ready_file,
-                    wait: Duration::from_secs(reconnect_wait_secs),
-                    link_timeout: Duration::from_secs(link_timeout_secs),
-                    response_wait: Duration::from_secs(response_wait_secs),
-                })
-                .await?;
-            reconnect_ok = passed;
-            stages.extend(reconnect_stages);
-            if let Some(link_id) = reconnected_link {
-                active_link_id = link_id;
-            }
-        }
-    }
-
-    let session_summary = client.session(session_id).map(|session| {
-        serde_json::json!({
-            "session_id": session.session_id,
-            "server": {
-                "server_id": session.server.server_id.clone(),
-                "destination": session.server.destination.clone(),
-                "display_name": session.server.display_name.clone(),
-            },
-            "room": {
-                "server_id": session.active_room.server_id.clone(),
-                "room_id": session.active_room.room_id,
-                "name": session.active_room.name.clone(),
-                "unread": session.active_room.unread,
-                "joined": session.active_room.joined,
-            },
-            "user_count": session.users.len(),
-            "event_count": session.events.len(),
-            "status": session.status.clone(),
-        })
-    });
-    let outcome = joined && message_seen && upload_ok && reconnect_ok;
-    let failed_stage = if !joined {
-        "join_wait"
-    } else if !message_seen {
-        "message_echo_wait"
-    } else if !upload_ok {
-        "upload_fetch_wait"
-    } else if !reconnect_ok {
-        "continuous_reconnect"
-    } else {
-        "complete"
-    };
-    let report = omenchat_smoke_report(
-        outcome,
-        failed_stage,
-        &destination,
-        &room,
-        &message,
-        stages,
-        session_summary,
-    );
-    write_omenchat_smoke_report(report, output, stdout, default_output, &diagnostics_dir)?;
-    let _ = app.runtime.close_omenchat_link(active_link_id).await;
-    let _ = app.runtime.stop_runtime().await;
-    Ok(())
-}
-
-#[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
-async fn run_omenchat_smoke_command(_input: OmenChatSmokeCommandInput) -> anyhow::Result<()> {
-    anyhow::bail!("OMENchat smoke requires --features chat-client-rns or chat-client-rns-clean")
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-async fn send_omenchat_smoke_outgoing(
-    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
-    link_id: [u8; 16],
-    transport: &mut OmenChatSmokeTransport,
-) -> anyhow::Result<()> {
-    for frame in transport.take_outgoing_frames() {
-        runtime
-            .send_omenchat_frame(link_id, frame)
-            .await
-            .context("failed to send OMENchat smoke frame")?;
-    }
-    for (resource_id, payload) in transport.take_outgoing_resources() {
-        runtime
-            .send_omenchat_resource(link_id, resource_id, payload)
-            .await
-            .context("failed to send OMENchat smoke resource")?;
-    }
-    Ok(())
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-#[derive(Clone, Copy)]
-struct OmenChatWaitOptions {
-    link_id: [u8; 16],
-    session_id: omenbrowser_rs::chat::ChatSessionId,
-    wait: Duration,
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-async fn wait_for_omenchat_condition(
-    runtime: &dyn omenbrowser_rs::runtime::NetworkRuntime,
-    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
-    client: &mut omenbrowser_rs::chat::ChatClient,
-    live_state: &mut omenbrowser_rs::chat::live::LiveChatClientState,
-    transport: &mut OmenChatSmokeTransport,
-    options: OmenChatWaitOptions,
-    condition: impl Fn(&omenbrowser_rs::chat::ChatClient) -> bool,
-) -> Vec<serde_json::Value> {
-    let OmenChatWaitOptions {
-        link_id,
-        session_id,
-        wait,
-    } = options;
-    let deadline = tokio::time::Instant::now() + wait;
-    let mut events = Vec::new();
-    while tokio::time::Instant::now() < deadline && !condition(client) {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let received = tokio::time::timeout(remaining, runtime_events.recv()).await;
-        let event = match received {
-            Ok(Ok(event)) => event,
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(count))) => {
-                events.push(serde_json::json!({
-                    "event": "lagged",
-                    "count": count,
-                }));
-                continue;
-            }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                events.push(serde_json::json!({"event": "closed"}));
-                break;
-            }
-            Err(_) => {
-                events.push(serde_json::json!({"event": "timeout"}));
-                break;
-            }
-        };
-        match event {
-            RuntimeBusEvent::OmenChatLinkData(data) if data.link_id == link_id => {
-                let bytes = data.frame_bytes.len();
-                transport.push_incoming_frame(data.frame_bytes);
-                let decoded = omenbrowser_rs::chat::live::drain_live_events_with_state(
-                    client,
-                    live_state,
-                    transport,
-                    Some(session_id),
-                );
-                events.push(serde_json::json!({
-                    "event": "link_data",
-                    "bytes": bytes,
-                    "decoded": decoded.iter().map(format_chat_event).collect::<Vec<_>>(),
-                }));
-                if let Err(error) = send_omenchat_smoke_outgoing(runtime, link_id, transport).await
-                {
-                    events.push(serde_json::json!({
-                        "event": "flush_error",
-                        "error": error.to_string(),
-                    }));
-                    break;
-                }
-            }
-            RuntimeBusEvent::OmenChatResourceData(data) if data.link_id == link_id => {
-                let bytes = data.data.len();
-                let metadata_len = data.metadata.as_ref().map_or(0, Vec::len);
-                transport.push_resource(data.metadata, data.data);
-                let decoded = omenbrowser_rs::chat::live::drain_live_events_with_state(
-                    client,
-                    live_state,
-                    transport,
-                    Some(session_id),
-                );
-                events.push(serde_json::json!({
-                    "event": "resource_data",
-                    "bytes": bytes,
-                    "metadata_len": metadata_len,
-                    "decoded": decoded.iter().map(format_chat_event).collect::<Vec<_>>(),
-                }));
-                if let Err(error) = send_omenchat_smoke_outgoing(runtime, link_id, transport).await
-                {
-                    events.push(serde_json::json!({
-                        "event": "flush_error",
-                        "error": error.to_string(),
-                    }));
-                    break;
-                }
-            }
-            RuntimeBusEvent::Debug(message) => {
-                events.push(serde_json::json!({"event": "debug", "message": message}));
-            }
-            RuntimeBusEvent::Error(message) => {
-                events.push(serde_json::json!({"event": "error", "message": message}));
-            }
-            RuntimeBusEvent::PathUpdated(path) => {
-                events.push(serde_json::json!({"event": "path", "value": path}));
-            }
-            RuntimeBusEvent::Announce(announce) => {
-                events.push(serde_json::json!({"event": "announce", "value": announce}));
-            }
-            _ => {}
-        }
-    }
-    events
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-struct OmenChatContinuousReconnectSmoke<'a> {
-    runtime: &'a dyn omenbrowser_rs::runtime::NetworkRuntime,
-    runtime_events: &'a mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
-    client: &'a mut omenbrowser_rs::chat::ChatClient,
-    live_state: &'a mut omenbrowser_rs::chat::live::LiveChatClientState,
-    transport: &'a mut OmenChatSmokeTransport,
-    descriptor: omenbrowser_rs::chat::OmenChatDescriptor,
-    old_link_id: [u8; 16],
-    session_id: omenbrowser_rs::chat::ChatSessionId,
-    room: &'a str,
-    message: &'a str,
-    ready_file: &'a std::path::Path,
-    wait: Duration,
-    link_timeout: Duration,
-    response_wait: Duration,
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-async fn run_omenchat_continuous_reconnect_smoke(
-    input: OmenChatContinuousReconnectSmoke<'_>,
-) -> anyhow::Result<(bool, Option<[u8; 16]>, Vec<serde_json::Value>)> {
-    use omenbrowser_rs::chat::{ChatClientEvent, ChatClientRequest};
-
-    create_omenchat_reconnect_ready_file(input.ready_file)?;
-    let deadline = tokio::time::Instant::now() + input.wait;
-    let mut stages = Vec::new();
-    let mut close_seen = false;
-    while tokio::time::Instant::now() < deadline && !close_seen {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match tokio::time::timeout(remaining, input.runtime_events.recv()).await {
-            Ok(Ok(RuntimeBusEvent::OmenChatLinkClosed(closed)))
-                if closed.link_id == input.old_link_id =>
-            {
-                close_seen = true;
-                stages.push(serde_json::json!({
-                    "stage": "continuous_link_close_wait",
-                    "ok": true,
-                    "reason": closed.reason,
-                }));
-            }
-            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
-        }
-    }
-    if !close_seen {
-        stages.push(serde_json::json!({
-            "stage": "continuous_link_close_wait",
-            "ok": false,
-            "reason": "old link did not close before the bounded deadline",
-        }));
-        return Ok((false, None, stages));
-    }
-
-    let mut opened = None;
-    let mut attempts = 0u8;
-    while tokio::time::Instant::now() < deadline && attempts < 6 {
-        attempts = attempts.saturating_add(1);
-        let _ = input
-            .runtime
-            .request_path(
-                &input.descriptor.server_destination,
-                "omenchat_continuous_reconnect_smoke",
-                true,
-            )
-            .await;
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let attempt_timeout = input.link_timeout.min(remaining);
-        if attempt_timeout.is_zero() {
-            break;
-        }
-        match input
-            .runtime
-            .open_omenchat_link(
-                &input.descriptor.server_destination,
-                attempt_timeout,
-                CancellationToken::new(),
-            )
-            .await
-        {
-            Ok(link) => {
-                stages.push(serde_json::json!({
-                    "stage": "continuous_link_reopen",
-                    "ok": true,
-                    "attempt": attempts,
-                    "link_changed": link.link_id != input.old_link_id,
-                }));
-                opened = Some(link);
-                break;
-            }
-            Err(error) => {
-                stages.push(serde_json::json!({
-                    "stage": "continuous_link_reopen_attempt",
-                    "ok": false,
-                    "attempt": attempts,
-                    "error": error.to_string(),
-                }));
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
-            }
-        }
-    }
-    let Some(opened) = opened else {
-        stages.push(serde_json::json!({
-            "stage": "continuous_link_reopen",
-            "ok": false,
-            "attempts": attempts,
-        }));
-        return Ok((false, None, stages));
-    };
-
-    *input.transport = OmenChatSmokeTransport::default();
-    let reconnect_events = omenbrowser_rs::chat::live::reconnect_live_server(
-        input.client,
-        input.live_state,
-        input.transport,
-        input.session_id,
-        input.descriptor,
-    );
-    let reconnect_started = !reconnect_events
-        .iter()
-        .any(|event| matches!(event, ChatClientEvent::Error { .. }));
-    stages.push(serde_json::json!({
-        "stage": "continuous_session_reconnect",
-        "ok": reconnect_started,
-        "events": reconnect_events.iter().map(format_chat_event).collect::<Vec<_>>(),
-    }));
-    send_omenchat_smoke_outgoing(input.runtime, opened.link_id, input.transport).await?;
-
-    let reconnect_message = format!("{} (after continuous reconnect)", input.message);
-    let send_events = omenbrowser_rs::chat::live::handle_live_request(
-        input.client,
-        input.live_state,
-        input.transport,
-        ChatClientRequest::SendMessage {
-            session_id: input.session_id,
-            room: input.room.to_owned(),
-            body: reconnect_message.clone(),
-        },
-    );
-    let send_ok = !send_events
-        .iter()
-        .any(|event| matches!(event, ChatClientEvent::Error { .. }));
-    stages.push(serde_json::json!({
-        "stage": "continuous_message_send",
-        "ok": send_ok,
-        "events": send_events.iter().map(format_chat_event).collect::<Vec<_>>(),
-    }));
-    send_omenchat_smoke_outgoing(input.runtime, opened.link_id, input.transport).await?;
-
-    let message_events = wait_for_omenchat_condition(
-        input.runtime,
-        input.runtime_events,
-        input.client,
-        input.live_state,
-        input.transport,
-        OmenChatWaitOptions {
-            link_id: opened.link_id,
-            session_id: input.session_id,
-            wait: input.response_wait,
-        },
-        |client| omenchat_session_contains_message(client, input.session_id, &reconnect_message),
-    )
-    .await;
-    let message_seen =
-        omenchat_session_contains_message(input.client, input.session_id, &reconnect_message);
-    stages.push(serde_json::json!({
-        "stage": "continuous_message_echo_wait",
-        "ok": message_seen,
-        "events": message_events,
-    }));
-    Ok((
-        reconnect_started && send_ok && message_seen && opened.link_id != input.old_link_id,
-        Some(opened.link_id),
-        stages,
-    ))
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn create_omenchat_reconnect_ready_file(path: &std::path::Path) -> anyhow::Result<()> {
-    use std::io::Write;
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("OMENchat reconnect marker needs an existing parent"))?;
-    if !parent.is_dir() {
-        anyhow::bail!("OMENchat reconnect marker parent is not a directory");
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .context("failed to create OMENchat reconnect ready marker")?;
-    file.write_all(b"ready\n")
-        .context("failed to write OMENchat reconnect ready marker")?;
-    file.sync_all()
-        .context("failed to sync OMENchat reconnect ready marker")
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-struct OmenchatSmokeUploadFetch<'a> {
-    runtime: &'a dyn omenbrowser_rs::runtime::NetworkRuntime,
-    runtime_events: &'a mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
-    link_id: [u8; 16],
-    client: &'a mut omenbrowser_rs::chat::ChatClient,
-    live_state: &'a mut omenbrowser_rs::chat::live::LiveChatClientState,
-    transport: &'a mut OmenChatSmokeTransport,
-    session_id: omenbrowser_rs::chat::ChatSessionId,
-    room: &'a str,
-    resource_id: String,
-    filename: &'a str,
-    bytes: Option<u64>,
-    wait: Duration,
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-async fn run_omenchat_smoke_upload_fetch(
-    input: OmenchatSmokeUploadFetch<'_>,
-) -> anyhow::Result<(bool, Vec<serde_json::Value>)> {
-    let request_upload_events = omenbrowser_rs::chat::live::handle_live_request(
-        input.client,
-        input.live_state,
-        input.transport,
-        omenbrowser_rs::chat::ChatClientRequest::RequestUpload {
-            session_id: input.session_id,
-            room: input.room.to_owned(),
-            resource_id: input.resource_id.clone(),
-        },
-    );
-    let mut stages = vec![serde_json::json!({
-        "stage": "upload_fetch_frame",
-        "ok": !request_upload_events.iter().any(|event| matches!(event, omenbrowser_rs::chat::ChatClientEvent::Error { .. })),
-        "resource_id": input.resource_id,
-        "filename": input.filename,
-        "bytes": input.bytes,
-        "events": request_upload_events.iter().map(format_chat_event).collect::<Vec<_>>(),
-    })];
-    send_omenchat_smoke_outgoing(input.runtime, input.link_id, input.transport).await?;
-
-    let upload_fetch_events = wait_for_omenchat_condition(
-        input.runtime,
-        input.runtime_events,
-        input.client,
-        input.live_state,
-        input.transport,
-        OmenChatWaitOptions {
-            link_id: input.link_id,
-            session_id: input.session_id,
-            wait: input.wait,
-        },
-        |client| {
-            omenchat_session_upload_resource_received(client, input.session_id, input.filename)
-        },
-    )
-    .await;
-    let upload_resource_available =
-        omenchat_session_upload_resource_received(input.client, input.session_id, input.filename)
-            && omenchat_smoke_events_contain_decoded_event(
-                &upload_fetch_events,
-                "upload_resource_available",
-            );
-    stages.push(serde_json::json!({
-        "stage": "upload_fetch_wait",
-        "ok": upload_resource_available,
-        "filename": input.filename,
-        "bytes": input.bytes,
-        "events": upload_fetch_events,
-    }));
-    Ok((upload_resource_available, stages))
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-async fn collect_runtime_trace(
-    runtime_events: &mut tokio::sync::broadcast::Receiver<RuntimeBusEvent>,
-    wait: Duration,
-    destination_filter: Option<&str>,
-) -> Vec<serde_json::Value> {
-    let deadline = tokio::time::Instant::now() + wait;
-    let mut events = Vec::new();
-    while tokio::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let received = tokio::time::timeout(remaining, runtime_events.recv()).await;
-        let event = match received {
-            Ok(Ok(event)) => event,
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(count))) => {
-                events.push(serde_json::json!({"event": "lagged", "count": count}));
-                continue;
-            }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
-            Err(_) => break,
-        };
-        match event {
-            RuntimeBusEvent::PathUpdated(path)
-                if destination_filter.is_none_or(|destination| {
-                    path.destination_hash.eq_ignore_ascii_case(destination)
-                }) =>
-            {
-                let known = path.known;
-                events.push(serde_json::json!({"event": "path", "value": path}));
-                if known {
-                    break;
-                }
-            }
-            RuntimeBusEvent::Announce(announce)
-                if destination_filter.is_none_or(|destination| {
-                    announce.destination_hash.eq_ignore_ascii_case(destination)
-                }) =>
-            {
-                events.push(serde_json::json!({"event": "announce", "value": announce}));
-            }
-            RuntimeBusEvent::Debug(message) => {
-                events.push(serde_json::json!({"event": "debug", "message": message}));
-            }
-            RuntimeBusEvent::Error(message) => {
-                events.push(serde_json::json!({"event": "error", "message": message}));
-            }
-            _ => {}
-        }
-    }
-    events
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn omenchat_session_contains_message(
-    client: &omenbrowser_rs::chat::ChatClient,
-    session_id: omenbrowser_rs::chat::ChatSessionId,
-    message: &str,
-) -> bool {
-    client.session(session_id).is_some_and(|session| {
-        session.events.iter().any(|event| {
-            if event.event_id > u64::MAX.saturating_sub(1_000_000) {
-                return false;
-            }
-            matches!(
-                &event.kind,
-                omenbrowser_rs::chat::ChatEventKind::Message { body }
-                    | omenbrowser_rs::chat::ChatEventKind::Action { body }
-                    | omenbrowser_rs::chat::ChatEventKind::Notice { body }
-                    | omenbrowser_rs::chat::ChatEventKind::System { body }
-                    if body == message
-            )
-        })
-    })
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn omenchat_session_upload_resource_id(
-    client: &omenbrowser_rs::chat::ChatClient,
-    session_id: omenbrowser_rs::chat::ChatSessionId,
-    filename: &str,
-    bytes: Option<u64>,
-) -> Option<String> {
-    client.session(session_id).and_then(|session| {
-        session
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.kind {
-                omenbrowser_rs::chat::ChatEventKind::Upload {
-                    resource_id,
-                    filename: event_filename,
-                    bytes: event_bytes,
-                } if event_filename == filename
-                    && bytes.is_none_or(|bytes| *event_bytes == bytes) =>
-                {
-                    Some(resource_id.clone())
-                }
-                _ => None,
-            })
-    })
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn omenchat_session_upload_resource_received(
-    client: &omenbrowser_rs::chat::ChatClient,
-    session_id: omenbrowser_rs::chat::ChatSessionId,
-    filename: &str,
-) -> bool {
-    client.session(session_id).is_some_and(|session| {
-        session.status.starts_with("upload resource received:") && session.status.contains(filename)
-    })
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn omenchat_smoke_events_contain_decoded_event(
-    events: &[serde_json::Value],
-    event_name: &str,
-) -> bool {
-    events.iter().any(|entry| {
-        entry
-            .get("decoded")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|decoded| {
-                decoded.iter().any(|event| {
-                    event.get("event").and_then(serde_json::Value::as_str) == Some(event_name)
-                })
-            })
-    })
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_json::Value {
-    match event {
-        omenbrowser_rs::chat::ChatClientEvent::ServerOpened { session_id, server } => {
-            serde_json::json!({
-                "event": "server_opened",
-                "session_id": session_id,
-                "server": {
-                    "server_id": server.server_id.clone(),
-                    "destination": server.destination.clone(),
-                    "display_name": server.display_name.clone(),
-                }
-            })
-        }
-        omenbrowser_rs::chat::ChatClientEvent::RoomJoined {
-            session_id,
-            room,
-            users,
-            latest_events,
-        } => serde_json::json!({
-            "event": "room_joined",
-            "session_id": session_id,
-            "room": {
-                "server_id": room.server_id.clone(),
-                "room_id": room.room_id,
-                "name": room.name.clone(),
-                "unread": room.unread,
-                "joined": room.joined,
-            },
-            "users": users.len(),
-            "latest_events": latest_events.len(),
-        }),
-        omenbrowser_rs::chat::ChatClientEvent::EventAppended { session_id, event } => {
-            serde_json::json!({
-                "event": "event_appended",
-                "session_id": session_id,
-                "chat_event": format_chat_timeline_event(event),
-            })
-        }
-        omenbrowser_rs::chat::ChatClientEvent::DurableMutationAcknowledged {
-            session_id,
-            mutation_id,
-        } => serde_json::json!({
-            "event": "durable_mutation_acknowledged",
-            "session_id": session_id,
-            "mutation_id": mutation_id
-                .as_bytes()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>(),
-        }),
-        omenbrowser_rs::chat::ChatClientEvent::DurableMutationTerminal {
-            session_id,
-            mutation_id,
-            state,
-        } => serde_json::json!({
-            "event": "durable_mutation_terminal",
-            "session_id": session_id,
-            "mutation_id": mutation_id
-                .as_bytes()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>(),
-            "state": match state {
-                omenbrowser_rs::chat::DurableMutationTerminalState::Conflict => "conflict",
-                omenbrowser_rs::chat::DurableMutationTerminalState::Expired => "expired",
-            },
-        }),
-        omenbrowser_rs::chat::ChatClientEvent::HistoryPrepended { session_id, events } => {
-            serde_json::json!({"event": "history_prepended", "session_id": session_id, "events": events.len()})
-        }
-        omenbrowser_rs::chat::ChatClientEvent::HistorySynced {
-            session_id,
-            room_id,
-        } => {
-            serde_json::json!({"event": "history_synced", "session_id": session_id, "room_id": room_id})
-        }
-        omenbrowser_rs::chat::ChatClientEvent::HistorySyncNeeded {
-            session_id,
-            room_id,
-        } => {
-            serde_json::json!({"event": "history_sync_needed", "session_id": session_id, "room_id": room_id})
-        }
-        omenbrowser_rs::chat::ChatClientEvent::RoomsUpdated { session_id, rooms } => {
-            serde_json::json!({"event": "rooms_updated", "session_id": session_id, "rooms": rooms.len()})
-        }
-        omenbrowser_rs::chat::ChatClientEvent::ServerMotd { session_id, motd } => {
-            serde_json::json!({"event": "server_motd", "session_id": session_id, "motd": motd})
-        }
-        omenbrowser_rs::chat::ChatClientEvent::ServerPolicy {
-            session_id,
-            upload_quota_bytes,
-            upload_max_file_bytes,
-            ping_interval_seconds,
-        } => {
-            serde_json::json!({
-                "event": "server_policy",
-                "session_id": session_id,
-                "upload_quota_bytes": upload_quota_bytes,
-                "upload_max_file_bytes": upload_max_file_bytes,
-                "ping_interval_seconds": ping_interval_seconds,
-            })
-        }
-        omenbrowser_rs::chat::ChatClientEvent::UserUpdated { session_id, user } => {
-            serde_json::json!({
-                "event": "user_updated",
-                "session_id": session_id,
-                "user": {
-                    "server_id": user.server_id.clone(),
-                    "user_id": user.user_id,
-                    "display_name": user.display_name.clone(),
-                    "role_bits": user.role_bits,
-                    "status_bits": user.status_bits,
-                    "lxmf_available": user.lxmf_available,
-                }
-            })
-        }
-        omenbrowser_rs::chat::ChatClientEvent::UploadAccepted {
-            session_id,
-            resource_id,
-            filename,
-            bytes,
-        } => {
-            serde_json::json!({
-                "event": "upload_accepted",
-                "session_id": session_id,
-                "resource_id": resource_id,
-                "filename": filename,
-                "bytes": bytes,
-            })
-        }
-        omenbrowser_rs::chat::ChatClientEvent::UploadRejected { session_id, reason } => {
-            serde_json::json!({
-                "event": "upload_rejected",
-                "session_id": session_id,
-                "reason": reason,
-            })
-        }
-        omenbrowser_rs::chat::ChatClientEvent::UploadCompleted {
-            session_id,
-            resource_id,
-            filename,
-            bytes,
-        } => {
-            serde_json::json!({
-                "event": "upload_completed",
-                "session_id": session_id,
-                "resource_id": resource_id,
-                "filename": filename,
-                "bytes": bytes,
-            })
-        }
-        omenbrowser_rs::chat::ChatClientEvent::UploadResourceAvailable {
-            session_id,
-            resource_id,
-            filename,
-            content_type,
-            bytes,
-        } => {
-            serde_json::json!({
-                "event": "upload_resource_available",
-                "session_id": session_id,
-                "resource_id": resource_id,
-                "filename": filename,
-                "content_type": content_type,
-                "bytes": bytes.len(),
-            })
-        }
-        omenbrowser_rs::chat::ChatClientEvent::UploadResourceProgress {
-            session_id,
-            resource_id,
-            filename,
-            received,
-            total,
-        } => {
-            serde_json::json!({
-                "event": "upload_resource_progress",
-                "session_id": session_id,
-                "resource_id": resource_id,
-                "filename": filename,
-                "received": received,
-                "total": total,
-            })
-        }
-        omenbrowser_rs::chat::ChatClientEvent::Error {
-            session_id,
-            message,
-        } => serde_json::json!({"event": "error", "session_id": session_id, "message": message}),
-    }
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn format_chat_timeline_event(event: &omenbrowser_rs::chat::ChatEvent) -> serde_json::Value {
-    let (kind, body) = match &event.kind {
-        omenbrowser_rs::chat::ChatEventKind::Message { body } => ("message", body.as_str()),
-        omenbrowser_rs::chat::ChatEventKind::Action { body } => ("action", body.as_str()),
-        omenbrowser_rs::chat::ChatEventKind::Notice { body } => ("notice", body.as_str()),
-        omenbrowser_rs::chat::ChatEventKind::System { body } => ("system", body.as_str()),
-        omenbrowser_rs::chat::ChatEventKind::Upload { filename, .. } => {
-            ("upload", filename.as_str())
-        }
-    };
-    let mut value = serde_json::json!({
-        "server_id": event.server_id.clone(),
-        "room_id": event.room_id,
-        "event_id": event.event_id,
-        "actor_user_id": event.actor_user_id,
-        "at_unix": event.at_unix,
-        "kind": kind,
-        "body": body,
-    });
-    if let omenbrowser_rs::chat::ChatEventKind::Upload {
-        resource_id,
-        filename,
-        bytes,
-    } = &event.kind
-    {
-        value["resource_id"] = serde_json::json!(resource_id);
-        value["filename"] = serde_json::json!(filename);
-        value["bytes"] = serde_json::json!(bytes);
-    }
-    value
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn omenchat_smoke_report(
-    ok: bool,
-    stage: &str,
-    destination: &str,
-    room: &str,
-    message: &str,
-    stages: Vec<serde_json::Value>,
-    session: Option<serde_json::Value>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "report": "omenchat_smoke",
-        "classification": {
-            "outcome": if ok { "pass" } else { "fail" },
-            "stage": stage,
-            "reason": if ok {
-                "OMENchat Link opened, room joined, and message echo was observed"
-            } else {
-                "OMENchat smoke did not complete all required stages"
-            },
-            "next_step": if ok {
-                "test from the desktop OMENchat pane"
-            } else {
-                "inspect stages; common blockers are missing destination key/path, no server announce, or Link response timeout"
-            },
-        },
-        "destination": destination,
-        "room": room,
-        "message": message,
-        "stages": stages,
-        "session": session,
-    })
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn write_omenchat_smoke_report(
-    report: serde_json::Value,
-    output: Option<PathBuf>,
-    stdout: bool,
-    default_output: bool,
-    diagnostics_dir: &std::path::Path,
-) -> anyhow::Result<()> {
-    let content =
-        serde_json::to_string_pretty(&report).context("failed to render OMENchat smoke JSON")?;
-    let outcome = report
-        .pointer("/classification/outcome")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-    let stage = report
-        .pointer("/classification/stage")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-    if stdout {
-        eprintln!("OMENchat smoke: {outcome} at {stage}");
-        println!("{content}");
-    }
-    if let Some(path) = output
-        .or_else(|| default_output.then(|| default_omenchat_smoke_report_path(diagnostics_dir)))
-    {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create output directory {}", parent.display())
-            })?;
-        }
-        std::fs::write(&path, content.as_bytes())
-            .with_context(|| format!("failed to write OMENchat smoke report {}", path.display()))?;
-        if stdout {
-            eprintln!("{}", path.display());
-        } else {
-            println!("{}", path.display());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn default_omenchat_smoke_report_path(diagnostics_dir: &std::path::Path) -> PathBuf {
-    let epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    diagnostics_dir.join(format!("omenchat-smoke-{epoch}.json"))
-}
-
-#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 async fn run_lxmf_interop_command(input: LxmfInteropCommandInput) -> anyhow::Result<()> {
@@ -5001,6 +3833,9 @@ mod tests {
             "lobby".to_string(),
             "--omenchat-message".to_string(),
             "hello smoke".to_string(),
+            "--omenchat-reaction-smoke".to_string(),
+            "--omenchat-revision-smoke".to_string(),
+            "--omenchat-pin-smoke".to_string(),
             "--path-wait".to_string(),
             "3".to_string(),
             "--tcp-client".to_string(),
@@ -5019,6 +3854,18 @@ mod tests {
                 destination: FIXTURE_DESTINATION_HASH.into(),
                 room: "lobby".into(),
                 message: "hello smoke".into(),
+                local_display_name: "OMENbrowser_rs smoke".into(),
+                announcement_rejection_smoke: false,
+                announcement_upload_rejection_smoke: false,
+                room_media_policy_upload_rejection_smoke: false,
+                slow_mode_rejection_smoke: false,
+                slow_mode_delta_seconds: None,
+                reaction_smoke: true,
+                revision_smoke: true,
+                pin_smoke: true,
+                moderation_audit_smoke: false,
+                moderation_audit_target: None,
+                moderation_audit_expect_record: false,
                 upload_file: None,
                 fetch_upload_filename: None,
                 fetch_upload_bytes: None,
@@ -5041,6 +3888,48 @@ mod tests {
                 ),
             }
         );
+    }
+
+    #[test]
+    fn cli_parses_isolated_moderation_audit_smoke() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-moderation-audit-smoke".to_string(),
+            "--omenchat-moderation-audit-target".to_string(),
+            "Target User".to_string(),
+            "--omenchat-moderation-audit-expect-record".to_string(),
+            "--omenchat-local-display-name".to_string(),
+            "Audit Moderator".to_string(),
+        ])
+        .expect("parse");
+
+        assert!(matches!(
+            parsed,
+            CliCommand::OmenChatSmoke {
+                moderation_audit_smoke: true,
+                moderation_audit_target: Some(target),
+                moderation_audit_expect_record: true,
+                local_display_name,
+                reaction_smoke: false,
+                revision_smoke: false,
+                pin_smoke: false,
+                ..
+            } if target == "Target User" && local_display_name == "Audit Moderator"
+        ));
+        assert!(CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-moderation-audit-smoke".to_string(),
+            "--omenchat-pin-smoke".to_string(),
+        ])
+        .is_err());
+        assert!(CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-moderation-audit-expect-record".to_string(),
+        ])
+        .is_err());
     }
 
     #[test]
@@ -5070,20 +3959,154 @@ mod tests {
         assert_eq!(reconnect_wait_secs, 45);
     }
 
-    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     #[test]
-    fn omenchat_reconnect_ready_marker_is_create_new_and_isolated() {
-        let root = std::env::temp_dir().join(format!(
-            "omenbrowser-reconnect-marker-{}",
-            std::process::id()
+    fn cli_keeps_announcement_rejection_smoke_isolated() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-announcement-rejection-smoke".to_string(),
+        ])
+        .expect("parse announcement rejection smoke");
+        assert!(matches!(
+            parsed,
+            CliCommand::OmenChatSmoke {
+                announcement_rejection_smoke: true,
+                ..
+            }
         ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir(&root).expect("create isolated marker root");
-        let marker = root.join("ready");
-        create_omenchat_reconnect_ready_file(&marker).expect("create ready marker");
-        assert_eq!(std::fs::read(&marker).expect("read marker"), b"ready\n");
-        assert!(create_omenchat_reconnect_ready_file(&marker).is_err());
-        std::fs::remove_dir_all(root).expect("remove isolated marker root");
+
+        let error = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-announcement-rejection-smoke".to_string(),
+            "--omenchat-reaction-smoke".to_string(),
+        ])
+        .expect_err("mixed authorization and mutation smoke must fail");
+        assert!(error
+            .to_string()
+            .contains("is an isolated authorization case"));
+    }
+
+    #[test]
+    fn cli_keeps_slow_mode_rejection_smoke_isolated() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-slow-mode-rejection-smoke".to_string(),
+        ])
+        .expect("parse slow-mode rejection smoke");
+        assert!(matches!(
+            parsed,
+            CliCommand::OmenChatSmoke {
+                slow_mode_rejection_smoke: true,
+                ..
+            }
+        ));
+
+        let error = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-slow-mode-rejection-smoke".to_string(),
+            "--omenchat-reaction-smoke".to_string(),
+        ])
+        .expect_err("mixed slow-mode and reaction smoke must fail");
+        assert!(error.to_string().contains("isolated qualification case"));
+
+        let delta = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-slow-mode-delta-smoke".to_string(),
+            "30".to_string(),
+        ])
+        .expect("parse slow-mode delta smoke");
+        assert!(matches!(
+            delta,
+            CliCommand::OmenChatSmoke {
+                slow_mode_delta_seconds: Some(30),
+                ..
+            }
+        ));
+        let mixed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-slow-mode-delta-smoke".to_string(),
+            "30".to_string(),
+            "--omenchat-slow-mode-rejection-smoke".to_string(),
+        ])
+        .expect_err("mixed slow-mode qualification cases must fail");
+        assert!(mixed.to_string().contains("isolated qualification case"));
+    }
+
+    #[test]
+    fn cli_requires_one_upload_for_announcement_upload_rejection() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-announcement-upload-rejection-smoke".to_string(),
+            "--omenchat-upload-file".to_string(),
+            "/tmp/rejected.bin".to_string(),
+        ])
+        .expect("parse announcement upload rejection");
+        assert!(matches!(
+            parsed,
+            CliCommand::OmenChatSmoke {
+                announcement_upload_rejection_smoke: true,
+                ..
+            }
+        ));
+
+        let error = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-announcement-upload-rejection-smoke".to_string(),
+        ])
+        .expect_err("missing upload must fail");
+        assert!(error.to_string().contains("requires one upload file"));
+    }
+
+    #[test]
+    fn cli_keeps_room_media_policy_upload_rejection_isolated() {
+        let parsed = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-room-media-policy-upload-rejection-smoke".to_string(),
+            "--omenchat-upload-file".to_string(),
+            "/tmp/rejected.bin".to_string(),
+        ])
+        .expect("parse room media-policy upload rejection");
+        assert!(matches!(
+            parsed,
+            CliCommand::OmenChatSmoke {
+                room_media_policy_upload_rejection_smoke: true,
+                ..
+            }
+        ));
+
+        for extra in [
+            "--omenchat-announcement-upload-rejection-smoke",
+            "--omenchat-reaction-smoke",
+        ] {
+            let mut args = vec![
+                "--omenchat-smoke".to_string(),
+                FIXTURE_DESTINATION_HASH.to_string(),
+                "--omenchat-room-media-policy-upload-rejection-smoke".to_string(),
+                "--omenchat-upload-file".to_string(),
+                "/tmp/rejected.bin".to_string(),
+            ];
+            args.push(extra.to_string());
+            let error = CliCommand::parse(args).expect_err("invalid mixed qualification must fail");
+            assert!(error.to_string().contains("isolated qualification case"));
+        }
+
+        let missing_upload = CliCommand::parse([
+            "--omenchat-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--omenchat-room-media-policy-upload-rejection-smoke".to_string(),
+        ])
+        .expect_err("missing upload must fail");
+        assert!(missing_upload
+            .to_string()
+            .contains("requires one upload file"));
     }
 
     #[test]

@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
 
-use crate::{ClientInstanceId, FrameBody, FrameValue, DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME};
+use crate::{
+    ClientInstanceId, FrameBody, FrameValue, ANNOUNCEMENT_ROOMS_CAPABILITY,
+    DURABLE_MUTATION_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY,
+    REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY, ROOM_SLOW_MODE_CAPABILITY,
+};
 
 pub const SESSION_CAPABILITY_MAX_ITEMS: usize = 64;
 pub const SESSION_CAPABILITY_MAX_BYTES: usize = 128;
@@ -193,6 +197,26 @@ fn validate_capability_list(capabilities: &[String]) -> Result<(), SessionNegoti
             return Err(SessionNegotiationError::DuplicateCapability);
         }
     }
+    if unique.contains(REPLY_MENTIONS_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
+        return Err(SessionNegotiationError::MissingCapabilityDependency);
+    }
+    if unique.contains(REACTIONS_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
+        return Err(SessionNegotiationError::MissingReactionsDependency);
+    }
+    if unique.contains(MESSAGE_REVISIONS_CAPABILITY)
+        && !unique.contains(DURABLE_MUTATION_CAPABILITY)
+    {
+        return Err(SessionNegotiationError::MissingMessageRevisionsDependency);
+    }
+    if unique.contains(ROOM_SLOW_MODE_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
+        return Err(SessionNegotiationError::MissingSlowModeDependency);
+    }
+    if unique.contains(ROOM_MEDIA_POLICY_CAPABILITY)
+        && (!unique.contains(ANNOUNCEMENT_ROOMS_CAPABILITY)
+            || !unique.contains(ROOM_SLOW_MODE_CAPABILITY))
+    {
+        return Err(SessionNegotiationError::MissingMediaPolicyDependency);
+    }
     Ok(())
 }
 
@@ -230,6 +254,18 @@ pub enum SessionNegotiationError {
     CapabilityName,
     #[error("session capability names must be unique")]
     DuplicateCapability,
+    #[error("{REPLY_MENTIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
+    MissingCapabilityDependency,
+    #[error("{REACTIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
+    MissingReactionsDependency,
+    #[error("{MESSAGE_REVISIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
+    MissingMessageRevisionsDependency,
+    #[error("{ROOM_SLOW_MODE_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
+    MissingSlowModeDependency,
+    #[error(
+        "{ROOM_MEDIA_POLICY_CAPABILITY} requires {ANNOUNCEMENT_ROOMS_CAPABILITY} and {ROOM_SLOW_MODE_CAPABILITY}"
+    )]
+    MissingMediaPolicyDependency,
     #[error(transparent)]
     Durable(#[from] crate::DurableMutationError),
 }
@@ -237,6 +273,7 @@ pub enum SessionNegotiationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ANNOUNCEMENT_ROOMS_CAPABILITY;
 
     fn current_session_open() -> FrameBody {
         FrameBody::Fields(vec![
@@ -360,5 +397,136 @@ mod tests {
             with_session_accept_negotiation(current_session_accept(), &invalid),
             Err(SessionNegotiationError::CapabilityName)
         );
+    }
+
+    #[test]
+    fn reply_mentions_capability_requires_durable_mutations() {
+        let missing_base = SessionAcceptNegotiation {
+            accepted_capabilities: vec![REPLY_MENTIONS_CAPABILITY.into()],
+        };
+        assert_eq!(
+            with_session_accept_negotiation(current_session_accept(), &missing_base),
+            Err(SessionNegotiationError::MissingCapabilityDependency)
+        );
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                REPLY_MENTIONS_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("dependent capability set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn reactions_capability_requires_durable_mutations() {
+        let missing_base = SessionAcceptNegotiation {
+            accepted_capabilities: vec![REACTIONS_CAPABILITY.into()],
+        };
+        assert_eq!(
+            with_session_accept_negotiation(current_session_accept(), &missing_base),
+            Err(SessionNegotiationError::MissingReactionsDependency)
+        );
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                REACTIONS_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("dependent capability set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn message_revisions_capability_requires_durable_mutations() {
+        let missing_base = SessionAcceptNegotiation {
+            accepted_capabilities: vec![MESSAGE_REVISIONS_CAPABILITY.into()],
+        };
+        assert_eq!(
+            with_session_accept_negotiation(current_session_accept(), &missing_base),
+            Err(SessionNegotiationError::MissingMessageRevisionsDependency)
+        );
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                MESSAGE_REVISIONS_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("dependent capability set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn slow_mode_capability_requires_durable_mutations() {
+        let missing_base = SessionAcceptNegotiation {
+            accepted_capabilities: vec![ROOM_SLOW_MODE_CAPABILITY.into()],
+        };
+        assert_eq!(
+            with_session_accept_negotiation(current_session_accept(), &missing_base),
+            Err(SessionNegotiationError::MissingSlowModeDependency)
+        );
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                ROOM_SLOW_MODE_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("dependent capability set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn media_policy_capability_requires_cumulative_room_shapes() {
+        for capabilities in [
+            vec![ROOM_MEDIA_POLICY_CAPABILITY.into()],
+            vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                ROOM_SLOW_MODE_CAPABILITY.into(),
+                ROOM_MEDIA_POLICY_CAPABILITY.into(),
+            ],
+            vec![
+                ANNOUNCEMENT_ROOMS_CAPABILITY.into(),
+                ROOM_MEDIA_POLICY_CAPABILITY.into(),
+            ],
+        ] {
+            let incomplete = SessionAcceptNegotiation {
+                accepted_capabilities: capabilities,
+            };
+            assert_eq!(
+                with_session_accept_negotiation(current_session_accept(), &incomplete),
+                Err(SessionNegotiationError::MissingMediaPolicyDependency)
+            );
+        }
+
+        let complete = SessionAcceptNegotiation {
+            accepted_capabilities: vec![
+                DURABLE_MUTATION_CAPABILITY.into(),
+                ANNOUNCEMENT_ROOMS_CAPABILITY.into(),
+                ROOM_SLOW_MODE_CAPABILITY.into(),
+                ROOM_MEDIA_POLICY_CAPABILITY.into(),
+            ],
+        };
+        let body = with_session_accept_negotiation(current_session_accept(), &complete)
+            .expect("complete media-policy dependency set");
+        assert_eq!(parse_session_accept_negotiation(&body), Ok(Some(complete)));
+    }
+
+    #[test]
+    fn announcement_room_evidence_is_an_independent_dormant_capability() {
+        let negotiation = SessionOpenNegotiation {
+            requested_capabilities: vec![ANNOUNCEMENT_ROOMS_CAPABILITY.into()],
+            client_instance_id: None,
+        };
+        let body = with_session_open_negotiation(current_session_open(), &negotiation)
+            .expect("independent announcement-room capability");
+        assert_eq!(parse_session_open_negotiation(&body), Ok(Some(negotiation)));
     }
 }

@@ -59,6 +59,22 @@ impl DesktopApp {
                 self.update_cycle_directory_delivery(index);
                 Ok(Task::none())
             }
+            Message::Directory(DirectoryMessage::CycleFallback(index)) => {
+                self.update_cycle_directory_fallback(index);
+                Ok(Task::none())
+            }
+            Message::Directory(DirectoryMessage::CycleDirectStampLimit(index)) => {
+                self.update_cycle_directory_direct_stamp_limit(index);
+                Ok(Task::none())
+            }
+            Message::Directory(DirectoryMessage::CycleDirectStampConfirmation(index)) => {
+                self.update_cycle_directory_direct_stamp_confirmation(index);
+                Ok(Task::none())
+            }
+            Message::Directory(DirectoryMessage::CycleReplyTicketPreference(index)) => {
+                self.update_cycle_directory_reply_ticket_preference(index);
+                Ok(Task::none())
+            }
             Message::Directory(DirectoryMessage::RequestPath(index)) => {
                 self.update_request_directory_path(index);
                 Ok(Task::none())
@@ -162,6 +178,31 @@ impl DesktopApp {
     pub(super) fn update_cycle_directory_delivery(&mut self, index: usize) {
         if self.app.select_directory_entry(index) {
             self.app.cycle_selected_directory_preferred_delivery();
+        }
+    }
+
+    pub(super) fn update_cycle_directory_fallback(&mut self, index: usize) {
+        if self.app.select_directory_entry(index) {
+            self.app.cycle_selected_directory_delivery_fallback();
+        }
+    }
+
+    pub(super) fn update_cycle_directory_direct_stamp_limit(&mut self, index: usize) {
+        if self.app.select_directory_entry(index) {
+            self.app.cycle_selected_directory_direct_stamp_limit();
+        }
+    }
+
+    pub(super) fn update_cycle_directory_direct_stamp_confirmation(&mut self, index: usize) {
+        if self.app.select_directory_entry(index) {
+            self.app
+                .cycle_selected_directory_direct_stamp_confirmation();
+        }
+    }
+
+    pub(super) fn update_cycle_directory_reply_ticket_preference(&mut self, index: usize) {
+        if self.app.select_directory_entry(index) {
+            self.app.cycle_selected_directory_reply_ticket_preference();
         }
     }
 

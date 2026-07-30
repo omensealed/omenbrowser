@@ -197,12 +197,7 @@ fn maybe_offer_resource<T: OmenchatTransport>(
     response: &Frame,
     transport: &mut T,
 ) -> ServerResult<()> {
-    if !matches!(
-        response.op,
-        ChatOp::HistoryResourceOffer
-            | ChatOp::UserListSnapshotResource
-            | ChatOp::UploadResourceOffer
-    ) {
+    if !response_carries_resource(response.op) {
         return Ok(());
     }
     if response.op == ChatOp::UploadResourceOffer {
@@ -236,13 +231,29 @@ fn maybe_offer_resource<T: OmenchatTransport>(
     Ok(())
 }
 
+fn response_carries_resource(op: ChatOp) -> bool {
+    matches!(
+        op,
+        ChatOp::HistoryResourceOffer
+            | ChatOp::UserListSnapshotResource
+            | ChatOp::ReactionSnapshotResource
+            | ChatOp::MessageRevisionSnapshotResource
+            | ChatOp::ModerationAuditResource
+            | ChatOp::UploadResourceOffer
+    )
+}
+
 pub(crate) fn release_response_resource(
     engine: &SessionEngine,
     response: &Frame,
 ) -> ServerResult<()> {
     let resource_id = match response.op {
         ChatOp::UploadResourceOffer => upload_resource_id_from_offer(response),
-        ChatOp::HistoryResourceOffer | ChatOp::UserListSnapshotResource => Some(
+        ChatOp::HistoryResourceOffer
+        | ChatOp::UserListSnapshotResource
+        | ChatOp::ReactionSnapshotResource
+        | ChatOp::MessageRevisionSnapshotResource
+        | ChatOp::ModerationAuditResource => Some(
             decode_resource_offer_body(&response.body)
                 .map_err(|error| {
                     crate::error::ServerError::Message(format!(
@@ -299,6 +310,12 @@ mod tests {
             resource_metadata("history:7:fixture"),
             b"omenchat-resource:history:7:fixture"
         );
+    }
+
+    #[test]
+    fn moderation_audit_resource_uses_the_payload_bridge() {
+        assert!(response_carries_resource(ChatOp::ModerationAuditResource));
+        assert!(!response_carries_resource(ChatOp::ModerationAuditInline));
     }
     use crate::protocol::batch::decode_compressed_values_payload;
     use crate::protocol::codec::encode_frame;

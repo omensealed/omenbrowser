@@ -1,7 +1,8 @@
 use crate::app::DirectoryScope;
 use crate::directory::{
-    DirectoryEntry, DirectoryKind, PropagationNodeCompatibility, PropagationNodeFreshness,
-    PropagationNodePathState, PropagationNodeRecord,
+    DirectoryEntry, DirectoryKind, PropagationNodeCompatibility, PropagationNodeEvidence,
+    PropagationNodeFreshness, PropagationNodePathState, PropagationNodeRecord,
+    PropagationNodeRefreshEvidence, PropagationNodeSelection, PropagationNodeSyncEvidence,
 };
 
 pub(in crate::desktop) fn directory_kind_title(kind: &DirectoryKind) -> &'static str {
@@ -118,10 +119,38 @@ pub(in crate::desktop) fn directory_selected_state_lines(entry: &DirectoryEntry)
         DirectoryKind::Peer => {
             let preferred_delivery = entry
                 .preferred_delivery
-                .as_ref()
-                .map(|delivery| format!("{delivery:?}"))
+                .map(|delivery| delivery.label().to_string())
                 .unwrap_or_else(|| "default".into());
             lines.push(format!("preferred LXMF delivery: {preferred_delivery}"));
+            lines.push(format!(
+                "direct failure: {}",
+                entry.delivery_fallback.label()
+            ));
+            lines.push(format!(
+                "automatic direct stamp limit: {}",
+                entry
+                    .max_automatic_direct_stamp_cost
+                    .map(|cost| cost.to_string())
+                    .unwrap_or_else(|| format!(
+                        "default ({})",
+                        crate::directory::DEFAULT_AUTOMATIC_DIRECT_STAMP_COST
+                    ))
+            ));
+            lines.push(format!(
+                "direct stamp confirmation: {}",
+                entry
+                    .ask_above_direct_stamp_cost
+                    .map(|cost| format!("ask above {cost}"))
+                    .unwrap_or_else(|| "disabled".into())
+            ));
+            lines.push(format!(
+                "reply ticket default: {}",
+                match entry.offer_reply_ticket {
+                    Some(true) => "offer",
+                    Some(false) => "do not offer",
+                    None => "default (off)",
+                }
+            ));
         }
         DirectoryKind::Propagation => {
             lines.push(format!("propagation candidate rank: {sort_rank}"));
@@ -152,22 +181,92 @@ pub(in crate::desktop) fn propagation_node_state_lines(
         .advertised_stamp_cost
         .map(|cost| cost.to_string())
         .unwrap_or_else(|| "unknown".into());
-    vec![
+    let announce_age = node
+        .announce_age_seconds
+        .map(|seconds| format!("{seconds}s"))
+        .unwrap_or_else(|| "unknown".into());
+    let mut lines = vec![
         format!(
-            "selected={} | freshness={} | path={}",
-            node.selected,
+            "selection={} | freshness={} | announce age={} | path={}",
+            propagation_selection_label(node.selection),
             propagation_freshness_label(node.freshness),
+            announce_age,
             propagation_path_label(node.path_state)
         ),
         format!(
-            "compatibility={} | advertised stamp cost={stamp_cost}",
-            propagation_compatibility_label(node.compatibility)
+            "compatibility={} | evidence={} | advertised stamp cost={stamp_cost}",
+            propagation_compatibility_label(node.compatibility),
+            propagation_evidence_label(node.evidence)
         ),
         format!(
             "identity: {identity} | display name authenticated={}",
             node.display_name_authenticated
         ),
-    ]
+    ];
+    lines.push(format!(
+        "refresh={} | observed={} | cooldown snapshot={}",
+        node.refresh
+            .map(propagation_refresh_label)
+            .unwrap_or("none"),
+        node.refresh_observed_epoch_ms
+            .map(|epoch| epoch.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        node.refresh_cooldown_remaining_seconds
+            .map(|seconds| format!("{seconds}s"))
+            .unwrap_or_else(|| "ready".into())
+    ));
+    lines.push(format!(
+        "sync={} | last={} | last successful={}",
+        node.sync.map(propagation_sync_label).unwrap_or("never"),
+        node.last_sync_epoch_ms
+            .map(|epoch| epoch.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        node.last_successful_sync_epoch_ms
+            .map(|epoch| epoch.to_string())
+            .unwrap_or_else(|| "never".into())
+    ));
+    if let Some(error) = &node.last_sync_error {
+        lines.push(format!("last sync error: {error}"));
+    }
+    lines
+}
+
+fn propagation_selection_label(value: PropagationNodeSelection) -> &'static str {
+    match value {
+        PropagationNodeSelection::Candidate => "candidate",
+        PropagationNodeSelection::Pinned => "pinned",
+    }
+}
+
+fn propagation_evidence_label(value: PropagationNodeEvidence) -> &'static str {
+    match value {
+        PropagationNodeEvidence::Ready => "ready",
+        PropagationNodeEvidence::UnverifiedIdentity => "unverified identity",
+        PropagationNodeEvidence::StaleAnnounce => "stale announce",
+        PropagationNodeEvidence::UnknownAnnounceAge => "unknown announce age",
+        PropagationNodeEvidence::PathNotKnown => "path not known",
+        PropagationNodeEvidence::PathUnknown => "path not checked",
+    }
+}
+
+fn propagation_refresh_label(value: PropagationNodeRefreshEvidence) -> &'static str {
+    match value {
+        PropagationNodeRefreshEvidence::Running => "running",
+        PropagationNodeRefreshEvidence::Refreshed => "refreshed",
+        PropagationNodeRefreshEvidence::NoPath => "no path",
+        PropagationNodeRefreshEvidence::Cancelled => "cancelled",
+        PropagationNodeRefreshEvidence::TimedOut => "timed out",
+        PropagationNodeRefreshEvidence::Failed => "failed",
+    }
+}
+
+fn propagation_sync_label(value: PropagationNodeSyncEvidence) -> &'static str {
+    match value {
+        PropagationNodeSyncEvidence::Queued => "queued",
+        PropagationNodeSyncEvidence::Running => "running",
+        PropagationNodeSyncEvidence::Succeeded => "succeeded",
+        PropagationNodeSyncEvidence::Failed => "failed",
+    }
 }
 
 fn propagation_freshness_label(value: PropagationNodeFreshness) -> &'static str {

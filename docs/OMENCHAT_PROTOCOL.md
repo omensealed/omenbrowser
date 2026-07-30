@@ -9,10 +9,10 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-### v0.6.0-1 / v0.9.6-3 compatibility boundary
+### v0.6.0-1 / v0.9.6-4 compatibility boundary
 
 The application release number does not version the OMENchat wire protocol.
-The v0.9.6-3 release retains protocol version `1`, protocol name
+The v0.9.6-4 release retains protocol version `1`, protocol name
 `omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
 legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
 
@@ -150,7 +150,8 @@ The destination hash identifies the chat server.
 ### Capability negotiation boundary
 
 Current activation note: the paragraphs below retain the staged design history,
-but negotiated room-text durable transmission is now active. The browser
+but the negotiated room text, leave, and supported mutating-command families
+documented below now use durable transmission. The browser
 advertises only when the authenticated identity owns a healthy persistent
 intent worker and client-instance ID. omenchatd accepts only on the
 authenticated Link that requested it. Legacy, downgraded, unknown, and
@@ -186,6 +187,54 @@ complete; the client may correct the request and retry `SessionOpen` on that
 Link. Handshake completion requires an actual `SessionAccept`, not merely an
 inbound frame carrying the `SessionOpen` operation number.
 
+The shared contract also reserves operations 35–39 and the dependent
+`message-revisions-v1` capability for the reviewed correction/tombstone design.
+Its request, acknowledgement, event, and explicit-target snapshot codecs are
+bounded and byte-fixture tested, but the production client does not request the
+capability and omenchatd does not accept it. These known operation numbers are
+a dormant compatibility reservation, not available message-edit behavior.
+Ordinary protocol-v1 history and messages remain unchanged.
+
+The shared contract also contains the production `room-media-policy-v1`
+vocabulary. It reserves no operation number. Canonical current clients and
+servers request and accept it only with `durable-mutations-v1`,
+`announcement-rooms-v1`, and `room-slow-mode-v1`, and therefore selects the
+cumulative seven-field room value:
+
+```text
+[room_id, name, topic_or_nil, room_revision, policy_bits,
+ slow_mode_seconds, room_upload_max_file_bytes_or_nil]
+```
+
+The final scalar is `nil` for inherited server policy, zero for disabled room
+uploads, or at most 10 MiB. The typed upload-rejection extension keeps
+the existing reason/quota/incoming fields and appends a numeric reason code.
+Exact fixtures pass in both independent codecs. Qualification clients and
+servers prove request/acceptance, authenticated-Link shape ownership,
+identity replacement cleanup, reconnect cleanup, and current/current
+projection over a real isolated Link. Canonical profiles now activate that
+reviewed boundary. omenchatd schema 13 stores the nullable room ceiling and
+provides a guarded schema-12 copy export.
+
+The production server applies room upload admission only when the
+current authenticated Link owns negotiated media-policy authority. It rechecks
+the same authority at Resource publication. Negotiated disabled and over-limit
+rejections append stable numeric codes `1` and `2`; the client exposes the
+typed code only for a negotiated session and treats unknown codes as generic
+rejection. Non-negotiating peers retain the exact three-field rejection and
+legacy admission behavior.
+
+The shared client projection distinguishes absent negotiation from inherited,
+disabled, and bounded room policy. Seven-field negotiation carries that
+projection into the desktop client's existing 256-room-per-session map. Static
+Iced presentation shows the effective room/server minimum and disables Attach
+for authoritative disabled evidence. Production runtime shape selection
+produces that evidence only after all cumulative capabilities are accepted.
+Current/current Resource, rejection, restart, adjacent fallback, GUI, and
+bounded-process gates passed before activation. Receiver-side Resource
+cancellation remains unavailable through the locked upstream public API and is
+not presented as a supported action.
+
 The browser persists the client-instance value under its active identity-scoped
 application storage and retains it in live client state. Invalid, unsafe, or
 overly permissive stored state disables durable negotiation instead of
@@ -196,14 +245,31 @@ destination, authenticated identity binding, stable client/mutation IDs,
 canonical request hash and body, expiry, state, and local correlation before it
 can be handed to a transport owner. Recovery length-preflights SQLite values
 before allocation and then revalidates frame metadata, canonical hashing, and
-retained-byte accounting. Negotiated room-text sends call this boundary before
-transport; other mutation types retain their current legacy path.
+retained-byte accounting. Negotiated room-message, `/me` room-action,
+`/notice`, `/part`, `/topic`, `/create`, `/role`, `/unban`, `/kick`, `/ban`,
+`/mute`, and `/unmute` sends call this boundary before transport. A durable
+notice activates
+only when the server also accepts `durable-room-notice-ack-v1` and then receives
+a kind-3 `MessageAck`. An older, ordinary, or downgraded protocol-v1 notice
+retains its legacy `RoomEvent` response and is never persisted as a durable
+notice intent. Identity-prefix-only administration targets retain their legacy
+path because the result does not expose the identity hash needed for exact
+correlation.
 Prepared intents can move only to uncertain, expired, or abandoned; uncertain
 intents can move only to acknowledged, conflict, expired, or abandoned.
 Terminal states cannot regress. Recovery returns only prepared/uncertain rows,
 and incremental maintenance removes at most 128 terminal rows older than 30
 days. A dedicated 32-request/2-MiB storage owner starts only when its identity
 and persistent client-instance prerequisites are satisfied.
+
+Recovered intents are presented without their mutation identifier, request
+hash, or message/command body. Each bounded row shows only a semantic operation
+kind, public server label, room scope, prepared/uncertain state, and relative
+expiry. Send/retry is offered only when the same production guard confirms the
+original identity, client instance, server, room, live transport, negotiated
+capability, and absence of an in-process pending result. An unavailable retry
+shows the redacted reason and retains only the explicit stop-tracking action.
+Nothing is resent automatically.
 
 The dormant server store also has deterministic post-retention behavior. Before
 pruning any durable result, it permanently retires that authenticated
@@ -264,6 +330,12 @@ For durable `PartRoom`, membership deletion, the departure event, the exact
 legacy-compatible `CommandResult`, and replay publication commit atomically.
 Only first execution changes live room ownership and emits a refreshed user
 list. Replay returns the retained result without repeating those effects.
+The negotiated desktop sender persists an empty-body PartRoom intent before
+transport and does not change local membership on queue admission or frame
+send. Only a matching Link sequence, room identity, `part` command, and returned
+room identity retires the pending intent and applies the server result. A lost
+result remains uncertain across reconnect or restart and requires an explicit
+user retry; it is never resent automatically.
 
 Durable `RoomNotice` retains the moderator/admin decision and exact origin room
 event in the same transaction as event insertion. Only first execution is
@@ -282,8 +354,25 @@ resolve only active room peers and commit the target status change, audit event,
 and exact result together. First execution emits the bounded deltas; `kick` and
 `ban` additionally carry a one-use target-identity disconnect effect that runs
 immediately after commit and before response I/O. Replay cannot disconnect a
-replacement Link. Capability acceptance remains disabled until the browser's
-persistent intent owner and negotiated send/recovery path are live.
+replacement Link.
+
+The negotiated desktop sender activates `topic`, `create`, `role`, `unban`,
+`kick`, `ban`, `mute`, and `unmute` from this command family. It persists the
+normalized `topic` command under the active room before
+transport, retains the prior local topic while the result is uncertain, and
+accepts only an exact sequence, room, command name, and returned room identity.
+`create` is persisted with no request room and adds no room locally until the
+exact sequence, roomless result, command name, and server-normalized requested
+room name match. Role and unban results must match the original room,
+catalog-known numeric user ID or exact display name, and requested role or
+cleared-ban state. Active-peer moderation uses the same user correlation and
+requires the requested ban/mute state. Kick has no durable user-state bit, so
+its exact correlated result removes the target from the active user list.
+Kick and ban disconnect only the identity selected during first execution;
+replay cannot disconnect a replacement Link.
+Identity-prefix-only targets remain on the legacy path because the command
+result does not expose identity hashes. Old or downgraded peers retain the
+protocol-v1 command path. `rooms` remains read-only.
 
 ## Operation correlation and same-link replay
 

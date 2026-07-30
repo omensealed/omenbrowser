@@ -1,7 +1,9 @@
 use super::*;
 use crate::directory::{
-    DirectoryEntry, PreferredDelivery, PropagationNodeCompatibility, PropagationNodeFreshness,
-    PropagationNodePathState, PropagationNodeRecord, TrustLevel,
+    DeliveryFallbackPolicy, DirectoryEntry, PreferredDelivery, PropagationNodeCompatibility,
+    PropagationNodeEvidence, PropagationNodeFreshness, PropagationNodePathState,
+    PropagationNodeRecord, PropagationNodeRefreshEvidence, PropagationNodeSelection,
+    PropagationNodeSyncEvidence, TrustLevel,
 };
 
 const FIXTURE_LXMF_PEER_HASH: &str = "00112233445566778899aabbccddeeff";
@@ -179,8 +181,25 @@ fn directory_selected_state_lines_are_kind_specific() {
     let mut peer = DirectoryEntry::new("peer.hash", "Peer", DirectoryKind::Peer);
     peer.preferred_delivery = Some(PreferredDelivery::Propagated);
     let peer_lines = directory_selected_state_lines(&peer).join("\n");
-    assert!(peer_lines.contains("preferred LXMF delivery: Propagated"));
+    assert!(peer_lines.contains("preferred LXMF delivery: propagated preferred"));
+    assert!(peer_lines.contains("direct failure: ask before fallback"));
+    assert!(peer_lines.contains("automatic direct stamp limit: default (8)"));
+    assert!(peer_lines.contains("direct stamp confirmation: disabled"));
+    assert!(peer_lines.contains("reply ticket default: default (off)"));
     assert!(!peer_lines.contains("identify on connect"));
+
+    peer.preferred_delivery = Some(PreferredDelivery::DirectOnly);
+    let peer_lines = directory_selected_state_lines(&peer).join("\n");
+    assert!(peer_lines.contains("preferred LXMF delivery: direct only"));
+    peer.delivery_fallback = DeliveryFallbackPolicy::Automatic;
+    peer.max_automatic_direct_stamp_cost = Some(2);
+    peer.ask_above_direct_stamp_cost = Some(1);
+    peer.offer_reply_ticket = Some(true);
+    let peer_lines = directory_selected_state_lines(&peer).join("\n");
+    assert!(peer_lines.contains("direct failure: automatic safe fallback"));
+    assert!(peer_lines.contains("automatic direct stamp limit: 2"));
+    assert!(peer_lines.contains("direct stamp confirmation: ask above 1"));
+    assert!(peer_lines.contains("reply ticket default: offer"));
 
     let mut omenchat = DirectoryEntry::new("chat.hash", "Chat", DirectoryKind::OmenChat);
     omenchat.identity_hash = Some("00112233445566778899aabbccddeeff".into());
@@ -200,19 +219,35 @@ fn propagation_node_state_lines_keep_unknown_and_negative_evidence_distinct() {
         display_name: FIXTURE_LXMF_PEER_HASH.into(),
         display_name_authenticated: false,
         selected: true,
+        selection: PropagationNodeSelection::Pinned,
         saved: true,
         trusted: false,
         trust_level: TrustLevel::Unknown,
         last_seen: 0.0,
+        announce_age_seconds: None,
         freshness: PropagationNodeFreshness::Unknown,
         path_state: PropagationNodePathState::NotKnown,
         advertised_stamp_cost: None,
         compatibility: PropagationNodeCompatibility::Unknown,
+        evidence: PropagationNodeEvidence::UnverifiedIdentity,
+        refresh: Some(PropagationNodeRefreshEvidence::NoPath),
+        refresh_observed_epoch_ms: Some(10),
+        refresh_cooldown_remaining_seconds: Some(3),
+        sync: Some(PropagationNodeSyncEvidence::Failed),
+        last_sync_epoch_ms: Some(20),
+        last_successful_sync_epoch_ms: Some(5),
+        last_sync_error: Some("path unavailable".into()),
     };
     let lines = propagation_node_state_lines(&record).join("\n");
-    assert!(lines.contains("selected=true | freshness=unknown | path=not-known"));
-    assert!(lines.contains("compatibility=unknown | advertised stamp cost=unknown"));
+    assert!(lines
+        .contains("selection=pinned | freshness=unknown | announce age=unknown | path=not-known"));
+    assert!(lines.contains(
+        "compatibility=unknown | evidence=unverified identity | advertised stamp cost=unknown"
+    ));
     assert!(lines.contains("identity: unknown | display name authenticated=false"));
+    assert!(lines.contains("refresh=no path | observed=10 | cooldown snapshot=3s"));
+    assert!(lines.contains("sync=failed | last=20 | last successful=5"));
+    assert!(lines.contains("last sync error: path unavailable"));
 }
 
 #[test]

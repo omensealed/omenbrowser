@@ -6,7 +6,7 @@ pub mod service;
 pub mod store;
 
 #[allow(unused_imports)]
-pub use conversation::{Conversation, ConversationThread};
+pub use conversation::{Conversation, ConversationThread, DirectStampConfirmation};
 #[allow(unused_imports)]
 pub use conversation::{MessageSendState, PreparedRetryOperation};
 #[allow(unused_imports)]
@@ -18,9 +18,9 @@ pub use lxmf_router::{
 pub use message::{
     AttachmentSummary, DeliveryMode, DeliveryState, MessageEnvelope, MessageSummary,
     NativeLxmfReplyTicket, OutboundOperationIdentity, TransportMethod, OUTBOUND_CORRELATION_FIELD,
-    OUTBOUND_CREATED_AT_FIELD, OUTBOUND_DEFAULT_TTL_MS, OUTBOUND_EXPIRES_AT_FIELD,
-    OUTBOUND_IDEMPOTENCY_FIELD, OUTBOUND_MAX_TTL_MS, OUTBOUND_MIN_TTL_MS,
-    OUTBOUND_OPERATION_ID_MAX_BYTES, OUTBOUND_TTL_FIELD,
+    OUTBOUND_CREATED_AT_FIELD, OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
+    OUTBOUND_DEFAULT_TTL_MS, OUTBOUND_EXPIRES_AT_FIELD, OUTBOUND_IDEMPOTENCY_FIELD,
+    OUTBOUND_MAX_TTL_MS, OUTBOUND_MIN_TTL_MS, OUTBOUND_OPERATION_ID_MAX_BYTES, OUTBOUND_TTL_FIELD,
 };
 #[allow(unused_imports)]
 pub use service::{LxmfCancellationUpdate, MessagingService, OutboundComposeRequest};

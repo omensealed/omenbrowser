@@ -26,6 +26,7 @@ impl DesktopApp {
                 "Menu",
                 Message::Shell(ShellMessage::ToggleNavigation)
             ),
+            subtle_button("Commands", Message::Shell(ShellMessage::OpenCommandPalette)),
             container(text(runtime_icon).font(emoji_font())).width(Length::Fixed(18.0)),
             row![
                 text(format!("{ICON_STATUS_IDENTITY} ")).font(nerd_icon_font()),
@@ -105,34 +106,35 @@ impl DesktopApp {
         .height(Length::Fill)
         .into();
 
-        let overlay: Element<'_, Message> =
-            if let Some(prompt) = &self.clearweb.external_link_prompt {
-                container(opaque(external_link_prompt_view(
-                    prompt,
-                    &self.clearweb.external_browsers,
-                    self.app
-                        .settings
-                        .clearweb
-                        .preferred_external_browser_command
-                        .as_deref(),
-                    self.app.settings.clearweb.socks_proxy_enabled,
-                    self.clearweb.clearweb_proxy_endpoint.as_ref(),
-                )))
-                .padding(Padding {
-                    right: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
-                    bottom: ui_size(60) as f32,
-                    left: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
-                    ..Padding::default()
-                })
-                .align_right(Length::Fill)
-                .align_bottom(Length::Fill)
+        let overlay: Element<'_, Message> = if self.ui.command_palette_open {
+            command_palette_overlay(self)
+        } else if let Some(prompt) = &self.clearweb.external_link_prompt {
+            container(opaque(external_link_prompt_view(
+                prompt,
+                &self.clearweb.external_browsers,
+                self.app
+                    .settings
+                    .clearweb
+                    .preferred_external_browser_command
+                    .as_deref(),
+                self.app.settings.clearweb.socks_proxy_enabled,
+                self.clearweb.clearweb_proxy_endpoint.as_ref(),
+            )))
+            .padding(Padding {
+                right: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
+                bottom: ui_size(60) as f32,
+                left: f32::from(DESKTOP_SHELL_PADDING + DESKTOP_PANEL_PADDING),
+                ..Padding::default()
+            })
+            .align_right(Length::Fill)
+            .align_bottom(Length::Fill)
+            .into()
+        } else {
+            container(text(""))
+                .width(Length::Fill)
+                .height(Length::Fill)
                 .into()
-            } else {
-                container(text(""))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            };
+        };
         stack([shell, overlay]).into()
     }
 

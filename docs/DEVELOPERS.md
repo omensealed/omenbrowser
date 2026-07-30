@@ -40,7 +40,9 @@ unknown product identity.
 `desktop-product-static-media` retains live networking and OMENchat but excludes
 the optional `iced_gif` decoder/widget. Keep GIF-specific code behind
 `chat-client-gif`; the static image fallback must continue to compile and pass
-its cache-worker regression.
+its cache-worker regression. Both canonical products enable `desktop-qr`, which
+uses Iced's locked QR encoder only for bounded OMENchat invitation generation.
+Do not add camera capture or image QR decoding to this feature.
 
 OMENbrowser desktop icons come from the curated private-use glyph constants in
 `src/desktop/icons.rs` and the system Nerd Font detection/fallback in

@@ -22,6 +22,10 @@ use super::omenchat_media_format::inline_media_size;
 pub(in crate::desktop) use super::omenchat_media_format::{
     gif_image_descriptor_count, image_dimensions_from_bytes,
 };
+
+#[cfg(feature = "omenchat-room-media-policy-qualification")]
+const QUALIFICATION_OMENCHAT_UPLOAD_PATH_ENV: &str =
+    "OMENBROWSER_QUALIFICATION_OMENCHAT_UPLOAD_PATH";
 #[cfg(test)]
 pub(in crate::desktop) use super::omenchat_media_format::{
     read_media_header_bytes, scale_media_dimensions,
@@ -35,9 +39,20 @@ pub(in crate::desktop) fn omenchat_upload_cache_key(
 }
 
 pub(in crate::desktop) fn pick_omenchat_upload_file() -> Result<Option<PathBuf>, String> {
+    #[cfg(feature = "omenchat-room-media-policy-qualification")]
+    if let Some(path) =
+        qualification_omenchat_upload_path(std::env::var_os(QUALIFICATION_OMENCHAT_UPLOAD_PATH_ENV))
+    {
+        return Ok(Some(path));
+    }
     Ok(rfd::FileDialog::new()
         .set_title("Select OMENchat upload")
         .pick_file())
+}
+
+#[cfg(feature = "omenchat-room-media-policy-qualification")]
+fn qualification_omenchat_upload_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 #[derive(Clone)]

@@ -3,7 +3,7 @@ members = ["crates/omen-ifac-tcp", "crates/omenchat-protocol"]
 
 [package]
 name = "omenchatd"
-version = "0.9.6-3"
+version = "0.9.6-4"
 edition = "2021"
 rust-version = "1.85"
 description = "Standalone OMENchat server"
@@ -19,8 +19,27 @@ default = []
 live-rns-net = []
 live-reticulum = ["dep:rand_core", "dep:reticulum-rs", "dep:rns_transport", "dep:tokio", "dep:tokio-util", "dep:omen-ifac-tcp", "dep:sha2"]
 tui = ["dep:crossterm", "dep:ratatui"]
-server-headless = ["live-reticulum"]
+server-headless = ["live-reticulum", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-room-media-policy", "omenchat-moderation-audit"]
 server-full = ["server-headless", "tui"]
+# Capability-negotiated room policy projection. Authorization remains active
+# for every peer, including legacy peers that receive four-field room values.
+omenchat-announcement-rooms = []
+# Capability-negotiated durable room slow-mode enforcement. Legacy peers retain
+# byte-exact four-field room values and never receive implicit enforcement.
+omenchat-slow-mode = []
+# Non-product interoperability hooks for deterministic live qualification.
+omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
+# Capability-negotiated per-room upload admission. Legacy peers retain their
+# prior admission behavior and byte-exact room values.
+omenchat-room-media-policy = ["omenchat-announcement-rooms", "omenchat-slow-mode"]
+# Non-product deterministic process hooks for the production capability.
+omenchat-room-media-policy-qualification = ["omenchat-room-media-policy"]
+# Capability-negotiated, bounded, read-only moderation audit.
+omenchat-moderation-audit = []
+# Non-product process qualification for the real capability boundary.
+omenchat-moderation-audit-qualification = ["omenchat-moderation-audit"]
+# Non-product hook that forces only moderation-audit pages through Resource.
+omenchat-moderation-audit-resource-qualification = ["omenchat-moderation-audit-qualification"]
 
 [[bin]]
 name = "omenchatd"

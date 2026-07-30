@@ -1,13 +1,15 @@
 use rusqlite::OptionalExtension;
 
 use super::{
-    append_event_in_transaction, current_unix_seconds, ensure_user_on, join_room_on,
-    normalize_room_name, room_from_row, user_from_row, OmenchatStore, ServerRoom, ServerRoomEvent,
-    ServerRoomEventKind, ServerUser,
+    append_event_in_transaction, append_event_with_metadata_in_transaction, current_unix_seconds,
+    ensure_user_on, join_room_on, normalize_room_name, room_from_row, user_from_row, OmenchatStore,
+    ServerRoom, ServerRoomEvent, ServerRoomEventKind, ServerUser,
 };
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::codec::decode_frame;
-use crate::protocol::{ClientInstanceId, MutationId, RequestHash, RoomId, UserId};
+use crate::protocol::{
+    ClientInstanceId, EventId, MutationId, RequestHash, RichMessageEventMetadata, RoomId, UserId,
+};
 
 /// Maximum encoded origin response retained for one durable mutation.
 pub const MAX_DURABLE_RESULT_BYTES: usize = 64 * 1024;
@@ -99,6 +101,12 @@ pub enum DurableRoomEventPlan<A> {
         admission: A,
         result_frame: Vec<u8>,
     },
+    RichEvent {
+        actor_user_id: Option<UserId>,
+        kind: ServerRoomEventKind,
+        metadata: RichMessageEventMetadata,
+        admission: A,
+    },
     Response {
         result_frame: Vec<u8>,
     },
@@ -169,7 +177,8 @@ impl OmenchatStore {
     ) -> ServerResult<Option<ServerRoom>> {
         transaction
             .query_row(
-                "SELECT room_id, name, topic, room_revision
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                        upload_max_file_bytes
                  FROM rooms WHERE room_id = ?1 AND archived = 0",
                 [room_id],
                 room_from_row,
@@ -226,7 +235,8 @@ impl OmenchatStore {
         )?;
         transaction
             .query_row(
-                "SELECT room_id, name, topic, room_revision
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                        upload_max_file_bytes
                  FROM rooms WHERE name = ?1 AND archived = 0",
                 [&room_name],
                 room_from_row,
@@ -302,8 +312,43 @@ impl OmenchatStore {
         room_id: RoomId,
         actor_user_id: Option<UserId>,
         kind: ServerRoomEventKind,
+        retention: super::RoomHistoryRetentionPolicy,
     ) -> ServerResult<ServerRoomEvent> {
-        append_event_in_transaction(transaction, room_id, actor_user_id, kind)
+        append_event_in_transaction(transaction, room_id, actor_user_id, kind, retention)
+    }
+
+    pub(crate) fn durable_room_event_exists(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        event_id: EventId,
+    ) -> ServerResult<bool> {
+        transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM room_events
+                   WHERE room_id = ?1 AND event_id = ?2 AND deleted = 0
+                 )",
+                (room_id, event_id),
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn durable_room_has_member(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        user_id: UserId,
+    ) -> ServerResult<bool> {
+        transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM room_members
+                   WHERE room_id = ?1 AND user_id = ?2
+                 )",
+                (room_id, user_id),
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn commit_durable_mutation_effect_result<P, E>(
@@ -377,8 +422,13 @@ impl OmenchatStore {
                     kind,
                     admission,
                 } => {
-                    let event =
-                        append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
+                    let event = append_event_in_transaction(
+                        transaction,
+                        room_id,
+                        actor_user_id,
+                        kind,
+                        self.history_retention,
+                    )?;
                     let result_frame = encode_result(&event)?;
                     stored_event = Some(event);
                     stored_admission = Some(admission);
@@ -390,8 +440,32 @@ impl OmenchatStore {
                     admission,
                     result_frame,
                 } => {
-                    let event =
-                        append_event_in_transaction(transaction, room_id, actor_user_id, kind)?;
+                    let event = append_event_in_transaction(
+                        transaction,
+                        room_id,
+                        actor_user_id,
+                        kind,
+                        self.history_retention,
+                    )?;
+                    stored_event = Some(event);
+                    stored_admission = Some(admission);
+                    Ok(result_frame)
+                }
+                DurableRoomEventPlan::RichEvent {
+                    actor_user_id,
+                    kind,
+                    metadata,
+                    admission,
+                } => {
+                    let event = append_event_with_metadata_in_transaction(
+                        transaction,
+                        room_id,
+                        actor_user_id,
+                        kind,
+                        Some(metadata),
+                        self.history_retention,
+                    )?;
+                    let result_frame = encode_result(&event)?;
                     stored_event = Some(event);
                     stored_admission = Some(admission);
                     Ok(result_frame)
@@ -846,6 +920,7 @@ mod tests {
     use super::*;
     use crate::protocol::codec::encode_frame;
     use crate::protocol::{ChatOp, Frame, FrameBody, FrameValue};
+    use crate::store::slow_mode::{admit_room_publication, SlowModeAdmission};
 
     fn key_with_client<'a>(
         identity_hash: &'a [u8],
@@ -1049,6 +1124,87 @@ mod tests {
         assert_eq!(conflict, DurableRoomEventCommit::Conflict);
         assert_eq!(
             store.latest_events(room.room_id, 10).expect("events").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn durable_room_event_and_retention_compaction_commit_once_together() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("durable-retention", None).expect("room");
+        for body in ["old-one", "old-two"] {
+            store
+                .append_event(
+                    room.room_id,
+                    None,
+                    ServerRoomEventKind::Message { body: body.into() },
+                )
+                .expect("seed");
+        }
+        let store = store.with_room_history_retention(crate::store::RoomHistoryRetentionPolicy {
+            enabled: true,
+            max_age_days: 3_650,
+            max_events_per_room: 1,
+            max_bytes_per_room: u64::MAX,
+        });
+        let identity = [31; 16];
+        let stored = store
+            .commit_durable_room_event_result(
+                key(&identity, 1),
+                request_hash(1),
+                room.room_id,
+                |_| {
+                    Ok(DurableRoomEventPlan::Event {
+                        actor_user_id: None,
+                        kind: ServerRoomEventKind::Message {
+                            body: "durable newest".into(),
+                        },
+                        admission: (),
+                    })
+                },
+                |event| room_event_result(41, event),
+            )
+            .expect("durable compacting commit");
+        let result_frame = match stored {
+            DurableRoomEventCommit::Stored {
+                result_frame,
+                event,
+                admission: (),
+                ..
+            } => {
+                assert_eq!(event.event_id, 3);
+                result_frame
+            }
+            other => panic!("unexpected durable retention result: {other:?}"),
+        };
+        assert_eq!(
+            store
+                .latest_events(room.room_id, 10)
+                .expect("compacted history")
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(
+            store
+                .commit_durable_room_event_result(
+                    key(&identity, 1),
+                    request_hash(1),
+                    room.room_id,
+                    |_| -> ServerResult<DurableRoomEventPlan<()>> {
+                        panic!("replay must not append or compact")
+                    },
+                    |_| -> ServerResult<Vec<u8>> { panic!("replay must not encode") },
+                )
+                .expect("durable replay"),
+            DurableRoomEventCommit::Replayed { result_frame }
+        );
+        assert_eq!(
+            store
+                .latest_events(room.room_id, 10)
+                .expect("history")
+                .len(),
             1
         );
     }
@@ -1271,6 +1427,59 @@ mod tests {
             })
             .expect("replay count");
         assert_eq!(effects, 0);
+        assert_eq!(replay_rows, 0);
+    }
+
+    #[test]
+    fn invalid_durable_result_rolls_back_event_replay_and_slow_mode_deadline() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("slow-rollback", None).expect("room");
+        store
+            .set_room_slow_mode_seconds(room.room_id, 30)
+            .expect("slow mode");
+        let user = store
+            .ensure_user(&[12; 16], "Slow User", None)
+            .expect("user");
+        let identity = [12; 16];
+        let error = store
+            .commit_durable_room_event_result(
+                key(&identity, 12),
+                request_hash(12),
+                room.room_id,
+                |transaction| {
+                    assert!(matches!(
+                        admit_room_publication(transaction, room.room_id, user.user_id, 100)?,
+                        SlowModeAdmission::Admitted {
+                            not_before_unix: 130,
+                            ..
+                        }
+                    ));
+                    Ok(DurableRoomEventPlan::Event {
+                        actor_user_id: Some(user.user_id),
+                        kind: ServerRoomEventKind::Message {
+                            body: "must rollback".into(),
+                        },
+                        admission: (),
+                    })
+                },
+                |_| Ok(vec![0xc0]),
+            )
+            .expect_err("invalid result must roll back atomic publication");
+        assert!(error.to_string().contains("valid bounded OMENchat frame"));
+        assert_eq!(
+            store.slow_mode_admission_count().expect("admission count"),
+            0
+        );
+        assert!(store
+            .latest_events(room.room_id, 10)
+            .expect("events")
+            .is_empty());
+        let replay_rows: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM durable_mutation_results", [], |row| {
+                row.get(0)
+            })
+            .expect("replay count");
         assert_eq!(replay_rows, 0);
     }
 

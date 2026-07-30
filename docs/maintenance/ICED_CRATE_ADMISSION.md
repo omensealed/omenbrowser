@@ -1,6 +1,6 @@
 # Iced Crate Admission Record
 
-Reviewed on 2026-07-14 against the locked Rust 1.97 build and the Phase 5
+Reviewed on 2026-07-26 against the locked Rust 1.97 build and the Phase 5
 criteria in the approved v0.6.0-1 review. This is a release-input inventory,
 not permission to activate a dormant feature in a product alias.
 
@@ -10,6 +10,7 @@ not permission to activate a dormant feature in a product alias.
 |---|---:|---|---|---|
 | `iced` | 0.14.0 | MIT / 1.88 | Animated and static-media products | Admitted. It is the desktop UI framework and uses explicit features with defaults disabled. Removing it requires replacing the desktop UI and is outside this release. |
 | `iced_gif` | 0.14.0 | MIT / not declared | Animated product only | Admitted only behind `chat-client-gif`. OMENbrowser uses bounded in-memory `Frames::from_bytes`; the unused default `async-fs` feature is disabled. The crate requires an async backend to compile its unused path loader, so its `tokio` feature reuses the product's existing Tokio runtime. `desktop-product-static-media` is the tested removal path. |
+| `qrcode` (through Iced) | 0.13.0 | MIT OR Apache-2.0 / not declared | Animated and static-media products | Admitted through Iced's `qr_code` feature for one bounded OMENchat invitation QR. Input is the canonical no-secret URI capped at 2 KiB; one ephemeral owner retains one encoded matrix/cache and has explicit close/session/room cleanup. There is no camera, image decoder, permission, network, or native-library surface. Removal is the `desktop-qr` product edges plus the QR owner/view; text copy remains the fallback. |
 | `iced_aw` | 0.14.1 | MIT / 1.88 | Not in either product | Hold as a dormant, default-off candidate. There are no application call sites, so enabling `desktop-widgets` in a product needs a concrete workflow and new measurements. Removal is the feature/dependency edge plus its lock subtree. |
 | `iced_drop` | 0.2.37 | MIT / not declared | Not in either product | Hold. There is no attachment/import drop workflow or source call site. Defaults are explicitly disabled; `helpers` is isolated behind `desktop-dnd`. |
 | `iced_anim` | 0.3.1 | MIT / not declared | Not in either product | Hold. There is no source call site and reduced motion is implemented without it. Defaults are explicitly disabled and it remains behind `desktop-animations`. |
@@ -40,6 +41,8 @@ success remains the Windows/macOS CI gate.
   `iced-code-editor` enters the canonical animated product;
 - `iced_gif`, its required Tokio compatibility feature, or its former default
   `async-fs` feature enters an invalid graph;
+- either canonical product loses `desktop-qr`, Iced's QR feature, or the locked
+  `qrcode 0.13.0` encoder;
 - either canonical product activates unmaintained `rustybuzz` or loses its
   maintained `harfrust` and `skrifa` text-shaping/scaling path;
 - either product activates the test/dev-only `iced_beacon` serialization edge

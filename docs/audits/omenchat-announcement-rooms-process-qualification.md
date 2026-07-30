@@ -1,0 +1,296 @@
+# OMENchat announcement-room process qualification
+
+Date: 2026-07-27
+
+Baseline: `release/v0.9.6-4` through `f0060b7`, plus this negotiated process
+qualification unit
+
+Verdict: current/current member rejection plus moderator message/Resource
+publication and restart persistence pass over real isolated Reticulum Links.
+Explicit qualification binaries also negotiate `announcement-rooms-v1`,
+observe authoritative policy, and prevent publication before transmission on
+both the initial and replacement Links. Canonical product aliases remain
+dormant.
+
+## Scope and invariant
+
+This unit extends the existing release OMENchat smoke rather than adding
+another process harness. The opt-in
+`--announcement-rejection-smoke` case:
+
+1. creates isolated browser and omenchatd roots;
+2. starts omenchatd once so its normal owner performs schema migration;
+3. stops the server and applies the confirmation-gated lobby policy;
+4. starts the server and joins with a standard member over a real Link;
+5. sends one explicit room message;
+6. requires typed room-policy error `1016`;
+7. requires that no committed server event with that message exists; and
+8. optionally restarts omenchatd, reopens the same browser identity root on a
+   new Link, and repeats those assertions.
+
+The mode is intentionally incompatible with upload, multi-client,
+continuous-client, reaction, revision, and pin smoke options. It may be
+combined only with `--restart-server`. This keeps one authorization risk class
+per run and prevents an expected rejection from being mistaken for a normal
+message-echo success.
+
+The wait owner now exits promptly only on the typed announcement-policy error.
+Other operation errors remain observable without incorrectly terminating an
+unrelated message wait. The wait remains bounded by the existing response
+deadline and does not add a worker, channel, timer, retry, cache, or retained
+history.
+
+The separate `--announcement-negotiation-smoke` case originally used binaries
+built with the independent qualification feature, since promoted to the
+canonical `omenchat-announcement-rooms` feature. It configures
+the same isolated announcement room, then additionally requires:
+
+- explicit `announcement-rooms-v1` negotiation;
+- the authoritative announcement policy bit in the joined room;
+- the exact local preflight policy error;
+- no queued publication frame; and
+- no committed message.
+
+This is not described as a server delivery or rejection receipt. It is an
+authoritative negotiated policy preflight. The ordinary
+`--announcement-rejection-smoke` case remains a distinct regression gate and
+still requires typed server error `1016`; therefore the new local outcome
+cannot weaken the non-negotiated server-enforcement proof.
+
+The companion `--announcement-moderator-smoke` case registers exactly one
+isolated client while the lobby is ordinary, stops omenchatd, uses the
+headless-safe redacted user listing and confirmation-gated role command,
+applies moderator role and announcement policy, then restarts. It deliberately
+uses the unchanged normal smoke expectation: the message must be committed and
+echoed, and an optional upload must complete and be fetched through a
+Reticulum Resource.
+
+Every announcement-policy process mode first attempts the same confirmation-
+gated policy command while omenchatd is live. The harness requires nonzero
+status and the exact exclusive-maintenance refusal before it permits the
+existing orderly stop, maintenance, and restart sequence. This proves that the
+operator contract is restart-only; it does not add live reload, an IPC
+maintenance path, or policy-delta fanout.
+
+## Process result
+
+Passed locally with current debug binaries:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:42527 \
+  --path-wait 20 \
+  --out /tmp/omenbrowser-announcement-process \
+  --message 'announcement policy qualification' \
+  --announcement-rejection-smoke \
+  --restart-server
+```
+
+Both the initial and post-restart reports recorded:
+
+- outcome `pass`;
+- `announcement_rejected: true`;
+- `committed_message_seen: false`;
+- a joined lobby session; and
+- no automatic uncertain-mutation replay.
+
+The restart was orderly, the destination remained stable, schema-11 policy
+remained `announcement`, and the second browser process reused the original
+isolated identity root while establishing a new Link. The second message was a
+new explicit smoke operation, not an automatic retry of the first operation.
+
+The first attempted run correctly failed before networking because the harness
+tried stopped-server maintenance against schema version 0. The final harness
+preserves that fail-closed rule by performing a bounded initialization
+start/stop before policy maintenance.
+
+The negotiated qualification binaries passed the same real-Link boundary,
+including an orderly server restart and replacement Link:
+
+```bash
+cargo build --locked --no-default-features \
+  --features desktop-product \
+  --bin omenbrowser_rs
+cargo build --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features \
+  --features server-headless \
+  --bin omenchatd
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out /tmp/omenbrowser-announcement-negotiated-qualification \
+  --message 'negotiated announcement qualification' \
+  --announcement-negotiation-smoke \
+  --restart-server
+```
+
+Both reports recorded negotiated capability and policy evidence, a local
+policy block, `outgoing_frame_queued: false`, and
+`committed_message_seen: false`. The restart was orderly and the destination
+stable. A separate canonical build/run of
+`--announcement-rejection-smoke` still passed by receiving the typed server
+rejection, proving both enforcement lanes.
+
+The moderator/resource case also passed locally:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out /tmp/omenbrowser-announcement-moderator \
+  --message 'announcement moderator qualification' \
+  --announcement-moderator-smoke \
+  --upload-file fixtures/omenchat/v0_6_0_1_wire.rs \
+  --restart-server
+```
+
+The initial report passed with a committed message, `upload_completed`, and
+`upload_resource_available`; the post-restart report passed with another
+committed message. The stop was orderly, destination stable, and both
+moderator role and announcement policy survived. The canonical
+`server-headless` binary was used.
+
+The first moderator attempt exposed that the older pin-smoke setup depended on
+the optional TUI. The final headless administration adds only:
+
+```text
+omenchatd users list --json --home <root>
+omenchatd users role <id> standard|trusted|moderator|administrator \
+  --confirm --home <root>
+```
+
+Listing is read-only and omits identity hashes/LXMF destinations. Role changes
+require an existing current database and its exclusive stopped-server
+maintenance lock. No dependency or product feature changed.
+
+The shared harness refactor also exposed an overly broad early-stop condition
+from the preceding rejection-smoke unit: any decoded error could stop a later
+message wait. A real pin smoke produced an unrelated snapshot-ordering error
+before its message echo and demonstrated the regression. The wait now
+short-circuits only for the exact typed announcement restriction. The canonical
+headless pin smoke then passed, and the member announcement-rejection smoke
+was rerun successfully.
+
+The standard-member upload boundary passed over a real Link with the same
+873-byte deterministic fixture:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out /tmp/omenbrowser-announcement-upload-rejection \
+  --message 'announcement upload rejection qualification' \
+  --announcement-upload-rejection-smoke \
+  --upload-file fixtures/omenchat/v0_6_0_1_wire.rs \
+  --restart-server
+```
+
+Initial and post-restart reports both passed with:
+
+- typed announcement-policy rejection;
+- `upload_accepted: false`;
+- `upload_completed: false`; and
+- `committed_upload_seen: false`.
+
+The isolated server reported `tracked=0 files/0 B` and
+`disk=0 files/0 B`, all discrepancy counters zero, and no regular file in its
+upload root. The check runs before and after restart. The normal
+machine-readable doctor intentionally omits private detail, so this local
+isolated harness reads the existing human detail rather than weakening
+redaction.
+
+All three process modes also record:
+
+```text
+live_policy_maintenance_refused: 1
+```
+
+The rejected live command leaves policy unchanged. The stopped-server command
+then commits policy plus room revision atomically, and only the subsequent
+server process observes that state. v0.9.6-4 intentionally has no live policy
+reload or cross-process delta-fanout contract.
+
+The restart-only assertion was rerun locally in both distinct harness setup
+paths. The standard-member case included an orderly restart; the moderator
+case included a message plus the deterministic 873-byte Resource:
+
+```text
+member/restart: outcome pass, live_policy_maintenance_refused 1,
+                restart_destination_stable 1, restart_stop orderly
+moderator:      outcome pass, live_policy_maintenance_refused 1
+```
+
+In both runs stderr contained the expected stopped-server guidance and the
+subsequent offline policy command succeeded. The upload-rejection mode shares
+the standard-member policy setup branch; its publication and restart
+boundaries were already qualified above.
+
+## Deterministic and adjacent evidence
+
+Focused tests passed:
+
+```text
+cargo test --locked --no-default-features --features desktop-product \
+  announcement_policy_clears_on_replacement_link_and_requires_renegotiation \
+  --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  announcement_rejection_evidence_requires_the_typed_policy_error \
+  --bin omenbrowser_rs -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  announcement_policy_projects_only_when_requested_and_clears_on_loss \
+  --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  v0_9_6_3_ordinary_message_remains_byte_exact --lib -- --nocapture
+cargo test --locked -p omenchat-protocol room_policy -- --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  announcement_room --lib -- --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  v0_9_6_3_ordinary_message_remains_byte_exact --lib -- --nocapture
+```
+
+Results were respectively 1, 1, 1, 1, 3, 4, and 1 passing tests. The
+replacement-Link test drives the production reconnect/retirement path with a
+captured transport. It proves policy evidence clears before the replacement
+session opens, remains absent when the replacement does not accept the
+capability, and returns only after a fresh explicit request/accept. This is
+deterministic same-process lifecycle evidence, not a real Reticulum Link claim.
+The adjacent
+`v0.9.6-3` ordinary frame remains byte-exact in both independent codecs.
+Because that release cannot request `announcement-rooms-v1`, policy is never
+projected to it and four-field room values remain the compatibility contract.
+Server authorization still applies to all clients regardless of negotiation.
+
+This is deterministic adjacent-format evidence, not adjacent-binary live
+announcement traffic. An old browser has no expected-policy-rejection smoke
+mode, and an old server has neither schema-11 policy nor capability support.
+Running a negotiated policy case against either peer would fabricate a feature
+they cannot advertise. Live adjacent ordinary traffic remains covered by the
+existing mixed-release harness.
+
+## Compatibility, storage, and rollback
+
+Canonical production capability request and acceptance vectors are unchanged. Protocol
+version, database schema, identity ownership, state paths, ordinary room
+behavior, and packaged feature profiles are unchanged. The only persistent
+write in this smoke is inside its disposable server root.
+
+Rollback removes the negotiated smoke oracle/shell option and this evidence.
+It does not alter the already-qualified schema-11 policy, server
+authorization, or opt-in qualification feature boundary.
+
+## Remaining activation gates
+
+- negotiated current/current five-field room catalog/delta and replacement-Link
+  process traffic;
+- native GUI member/moderator observation;
+- joint review before production request/acceptance activation.

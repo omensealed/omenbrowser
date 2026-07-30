@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::{RoomId, UserId};
-use crate::store::{OmenchatStore, ServerAdminUser, ServerRoom, ServerUser};
+use crate::store::{
+    OmenchatStore, RoomHistoryUsage, RoomSlowModeUpdate, RoomUploadPolicyUpdate, ServerAdminUser,
+    ServerRoom, ServerUser,
+};
 
 const ADMIN_DATABASE_QUEUE_ITEMS: usize = 16;
 const ADMIN_DATABASE_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -64,10 +67,10 @@ enum AdminDatabaseOpenMode {
 /// The handle never moves a `rusqlite::Connection` onto a caller thread. Work
 /// is admitted with `try_send`, so overload is explicit and cannot create an
 /// unbounded waiter or blocking-task queue.
-#[derive(Clone)]
 pub struct AdminDatabase {
-    jobs: mpsc::SyncSender<AdminDatabaseJob>,
+    jobs: Option<mpsc::SyncSender<AdminDatabaseJob>>,
     metrics: Arc<AdminDatabaseMetrics>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 pub struct AdminDatabaseResponse<R> {
@@ -111,7 +114,7 @@ impl AdminDatabase {
         let metrics = Arc::new(AdminDatabaseMetrics::default());
         let worker_metrics = metrics.clone();
         let path = path.to_path_buf();
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("omenchatd-admin-db".into())
             .spawn(move || {
                 let opened = match mode {
@@ -132,7 +135,11 @@ impl AdminDatabase {
                 }
             })?;
         match ready_rx.recv_timeout(ADMIN_DATABASE_OPEN_TIMEOUT) {
-            Ok(Ok(())) => Ok(Self { jobs, metrics }),
+            Ok(Ok(())) => Ok(Self {
+                jobs: Some(jobs),
+                metrics,
+                worker: Some(worker),
+            }),
             Ok(Err(error)) => Err(error),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(ServerError::Message(format!(
                 "administrative database open exceeded {} seconds",
@@ -172,6 +179,32 @@ impl AdminDatabase {
         self.call(move |store| store.update_room_topic(room_id, topic.as_deref()))
     }
 
+    pub fn set_room_announcement_policy(
+        &self,
+        room_id: RoomId,
+        announcement_only: bool,
+    ) -> ServerResult<ServerRoom> {
+        self.call(move |store| store.set_room_announcement_policy(room_id, announcement_only))
+    }
+
+    pub fn set_room_slow_mode_seconds(
+        &self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<RoomSlowModeUpdate> {
+        self.call(move |store| store.update_room_slow_mode_seconds(room_id, slow_mode_seconds))
+    }
+
+    pub fn set_room_upload_max_file_bytes(
+        &self,
+        room_id: RoomId,
+        upload_max_file_bytes: Option<u64>,
+    ) -> ServerResult<RoomUploadPolicyUpdate> {
+        self.call(move |store| {
+            store.update_room_upload_max_file_bytes(room_id, upload_max_file_bytes)
+        })
+    }
+
     pub fn request_update_room_topic(
         &self,
         room_id: RoomId,
@@ -182,6 +215,10 @@ impl AdminDatabase {
 
     pub fn archive_room(&self, room_id: RoomId) -> ServerResult<()> {
         self.call(move |store| store.archive_room(room_id))
+    }
+
+    pub fn advance_room_history_usage(&self, room_id: RoomId) -> ServerResult<RoomHistoryUsage> {
+        self.call(move |store| store.advance_room_history_usage(room_id))
     }
 
     pub fn request_archive_room(&self, room_id: RoomId) -> ServerResult<AdminDatabaseResponse<()>> {
@@ -336,7 +373,10 @@ impl AdminDatabase {
             let _ = response_tx.send(operation(store));
         });
         self.metrics.queued.fetch_add(1, Ordering::AcqRel);
-        match self.jobs.try_send(job) {
+        let jobs = self.jobs.as_ref().ok_or_else(|| {
+            ServerError::Message("administrative database worker is stopped".into())
+        })?;
+        match jobs.try_send(job) {
             Ok(()) => Ok(response_rx),
             Err(mpsc::TrySendError::Full(_)) => {
                 self.metrics.queued.fetch_sub(1, Ordering::AcqRel);
@@ -351,6 +391,20 @@ impl AdminDatabase {
                 Err(ServerError::Message(
                     "administrative database worker is stopped".into(),
                 ))
+            }
+        }
+    }
+}
+
+impl Drop for AdminDatabase {
+    fn drop(&mut self) {
+        // Close admission before joining so the worker finishes any already
+        // admitted bounded work, drops its SQLite connection, and releases
+        // file locks before this owner returns.
+        self.jobs.take();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                eprintln!("omenchatd administrative database worker panicked during shutdown");
             }
         }
     }
@@ -495,6 +549,25 @@ mod tests {
     }
 
     #[test]
+    fn dropping_owner_joins_worker_and_releases_maintenance_lock() {
+        let root = isolated_path("drop-join");
+        let config = crate::config::ServerConfig::for_root(root.clone());
+        crate::config::init_files(&config).expect("initialize server home");
+        let store = OmenchatStore::open(&config.database_path).expect("migrate database");
+        drop(store);
+
+        let database = AdminDatabase::open_existing_for_maintenance(&config.database_path)
+            .expect("maintenance database");
+        database.list_rooms().expect("worker operation");
+        drop(database);
+
+        let reopened = OmenchatStore::open_existing_for_maintenance(&config.database_path)
+            .expect("maintenance lock released synchronously");
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn typed_user_operations_run_on_owned_worker_connection() {
         let root = isolated_path("users");
         let config = crate::config::ServerConfig::for_root(root.clone());
@@ -634,6 +707,7 @@ mod tests {
                 .expect("queued reply")
                 .expect("queued result");
         }
+        await_completed(&database, (ADMIN_DATABASE_QUEUE_ITEMS + 1) as u64);
         let metrics = database.metrics();
         assert_eq!(metrics.completed, (ADMIN_DATABASE_QUEUE_ITEMS + 1) as u64);
         assert_eq!(metrics.rejected, 1);

@@ -66,6 +66,13 @@ pub(in crate::desktop) enum DesktopPane {
     OmenChat(ChatSessionId),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) enum DesktopWorkspacePreset {
+    BrowserFocus,
+    MessagesFocus,
+    BrowserAndMessages,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::desktop) struct ExternalLinkPrompt {
     pub(in crate::desktop) url: String,
@@ -123,6 +130,19 @@ pub(in crate::desktop) enum RuntimeMessage {
 }
 
 #[derive(Clone, Debug)]
+pub(in crate::desktop) enum HistorySearchMessage {
+    QueryChanged(String),
+    CycleSource,
+    SubmitCurrent,
+    Submit(crate::history_search::LocalHistorySearchQuery),
+    Jump(crate::history_search::LocalHistoryResultKey),
+    Completed {
+        generation: u64,
+        result: Result<crate::history_search::LocalHistorySearchPage, String>,
+    },
+}
+
+#[derive(Clone, Debug)]
 pub(in crate::desktop) enum IdentityMessage {
     Create,
     ActivateManaged(String),
@@ -162,6 +182,10 @@ pub(in crate::desktop) enum DirectoryMessage {
     ToggleTrust(usize),
     ToggleIdentify(usize),
     CycleDelivery(usize),
+    CycleFallback(usize),
+    CycleDirectStampLimit(usize),
+    CycleDirectStampConfirmation(usize),
+    CycleReplyTicketPreference(usize),
     RequestPath(usize),
     RefreshPropagation(usize),
     CancelPropagationRefresh,
@@ -202,6 +226,7 @@ pub(in crate::desktop) enum InterfaceMessage {
 #[derive(Clone, Debug)]
 pub(in crate::desktop) enum DiagnosticsMessage {
     Show,
+    CopyOperationDiagnostics(crate::operations::OperationId),
     PreviewManagedConfig,
     ExportManagedConfig,
     PreviewBundle,
@@ -223,6 +248,7 @@ pub(in crate::desktop) enum DiagnosticsMessage {
 pub(in crate::desktop) enum WorkspacePaneMessage {
     NewConversation,
     CloseConversationTab(u64),
+    ApplyPreset(DesktopWorkspacePreset),
     Clicked(pane_grid::Pane),
     Dragged(pane_grid::DragEvent),
     Resized(pane_grid::ResizeEvent),
@@ -236,6 +262,11 @@ pub(in crate::desktop) enum WorkspacePaneMessage {
 pub(in crate::desktop) enum ShellMessage {
     SwitchSection(WorkspaceSection),
     ToggleNavigation,
+    OpenCommandPalette,
+    CloseCommandPalette,
+    CommandPaletteQueryChanged(String),
+    ExecuteFirstCommandPaletteResult,
+    ExecuteCommandPalette(CommandPaletteCommand),
     WorkspaceScrollTick,
     InternalEventsReady,
     PersistenceDeadlineReached,
@@ -250,6 +281,20 @@ pub(in crate::desktop) enum ShellMessage {
         outcome: ShutdownOutcome,
     },
     KeyboardModifiersChanged(keyboard::Modifiers),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::desktop) enum CommandPaletteCommand {
+    OpenBrowser,
+    OpenMessages,
+    OpenDirectory,
+    OpenNetworkDoctor,
+    OpenDiagnostics,
+    OpenMonitoring,
+    NewBrowserTab,
+    RequestActiveBrowserPath,
+    InspectActiveBrowserPath,
+    CopyActiveIdentityHash,
 }
 
 #[derive(Clone, Debug)]
@@ -333,6 +378,8 @@ pub(in crate::desktop) enum ConversationMessage {
     TogglePaneDeliveryMode(u64),
     TogglePaneTicket(u64),
     SendPaneDraft(u64),
+    ConfirmPaneDirectStamp(u64),
+    CancelPaneDirectStamp(u64),
     PrepareLatestRetryForConversation(u64),
     SendLatestRetryForConversation(u64),
     SelectPaneRow {
@@ -395,10 +442,16 @@ pub(in crate::desktop) enum OmenChatMessage {
     NewPane,
     ServerEntryChanged(String),
     OpenServerEntry,
+    ConfirmInvitation,
+    CancelInvitation,
     ToggleRooms,
     JoinRoom {
         session_id: ChatSessionId,
         room: String,
+    },
+    ToggleMuteExceptMentions {
+        session_id: ChatSessionId,
+        room_id: RoomId,
     },
     DraftChanged {
         session_id: ChatSessionId,
@@ -413,7 +466,62 @@ pub(in crate::desktop) enum OmenChatMessage {
         session_id: ChatSessionId,
         room_id: RoomId,
     },
+    JumpToEvent {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
+    BeginReply {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
+    CancelReply(ChatSessionId),
+    ToggleMention {
+        session_id: ChatSessionId,
+        user_id: u32,
+    },
+    ClearMentions(ChatSessionId),
     SendDraft(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ToggleReaction {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+        token: crate::chat::protocol::ReactionToken,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    TogglePin {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+        action: crate::chat::protocol::PinAction,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    BeginMessageCorrection {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    MessageCorrectionChanged {
+        session_id: ChatSessionId,
+        value: String,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    SubmitMessageCorrection(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    CancelMessageCorrection(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    BeginMessageDeletion {
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        event_id: u64,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ConfirmMessageDeletion,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    CancelMessageDeletion,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     BeginMutationResolution {
         mutation_id: crate::chat::protocol::MutationId,
@@ -423,6 +531,8 @@ pub(in crate::desktop) enum OmenChatMessage {
     ConfirmMutationResolution,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     CancelMutationResolution,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ToggleRecoveredMutationReview(String),
     ResendLocalEcho {
         session_id: ChatSessionId,
         room_id: RoomId,
@@ -431,6 +541,21 @@ pub(in crate::desktop) enum OmenChatMessage {
         action: bool,
     },
     LoadOlderHistory(ChatSessionId),
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    RefreshModerationAudit(ChatSessionId),
+    #[cfg(all(
+        feature = "omenchat-moderation-audit",
+        any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
+    ))]
+    LoadOlderModerationAudit(ChatSessionId),
+    CopyInvitation(ChatSessionId),
+    #[cfg(feature = "desktop-qr")]
+    ToggleInvitationQr(ChatSessionId),
+    #[cfg(feature = "desktop-qr")]
+    CloseInvitationQr,
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     CopySessionDiagnostics(ChatSessionId),
     CloseSession(ChatSessionId),
@@ -486,6 +611,12 @@ pub(in crate::desktop) enum OmenChatMutationCompletionMessage {
         next: crate::chat::mutation_intents::OutboundMutationState,
         result: Result<crate::chat::mutation_intents::IntentTransition, String>,
     },
+    Rejected {
+        session_id: ChatSessionId,
+        mutation_id: crate::chat::protocol::MutationId,
+        reason: crate::chat::DurableMutationRejectionReason,
+        result: Result<crate::chat::mutation_intents::IntentRemoval, String>,
+    },
     Resolved {
         mutation_id: crate::chat::protocol::MutationId,
         next: crate::chat::mutation_intents::OutboundMutationState,
@@ -536,6 +667,7 @@ pub(in crate::desktop) enum Message {
     Clearweb(ClearwebMessage),
     ExternalBrowser(ExternalBrowserMessage),
     Runtime(RuntimeMessage),
+    HistorySearch(Box<HistorySearchMessage>),
     #[cfg(test)]
     TestUnhandledRouting,
 }

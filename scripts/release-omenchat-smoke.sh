@@ -21,6 +21,19 @@ keep_roots=0
 multi_client=0
 restart_server=0
 continuous_client_reconnect=0
+announcement_rejection_smoke=0
+announcement_negotiation_smoke=0
+announcement_upload_rejection_smoke=0
+announcement_moderator_smoke=0
+slow_mode_rejection_smoke=0
+slow_mode_seconds=30
+room_media_policy_smoke_bytes=""
+room_media_policy_upload_rejection_smoke=0
+live_policy_maintenance_refused="not-run"
+reaction_smoke=0
+revision_smoke=0
+pin_smoke=0
+moderation_audit_smoke=0
 
 usage() {
   cat <<'USAGE'
@@ -53,6 +66,23 @@ Options:
   --restart-server     Gracefully restart omenchatd, reuse the first browser root, and rerun smoke
   --continuous-client-reconnect
                        Keep one browser smoke process alive while omenchatd restarts
+  --announcement-rejection-smoke
+                       Configure lobby read-only and prove a member message is rejected without commit
+  --announcement-negotiation-smoke
+                       Require negotiated room-policy evidence and prove local preflight blocks the message
+  --announcement-upload-rejection-smoke
+                       Configure lobby read-only and prove a member upload is rejected before acceptance
+  --announcement-moderator-smoke
+                       Promote the isolated client, configure lobby read-only, and prove moderator publication
+  --slow-mode-rejection-smoke
+                       Qualification build only: commit once, restart, and prove typed slow-mode rejection
+  --room-media-policy-smoke BYTES
+                       Negotiate, project, and enforce this room upload ceiling
+  --reaction-smoke     Exercise negotiated durable reactions and authoritative snapshot recovery
+  --revision-smoke     Exercise negotiated durable corrections, tombstones, replay, and Resource recovery
+  --pin-smoke          Exercise moderator-only durable pin replay, snapshots, no-op, and unpin
+  --moderation-audit-smoke
+                       Qualification build only: perform an authorized bounded audit read
   --keep-roots         Leave generated browser/server roots in place
   -h, --help           Show this help
 
@@ -136,6 +166,49 @@ while [[ $# -gt 0 ]]; do
       continuous_client_reconnect=1
       shift
       ;;
+    --announcement-rejection-smoke)
+      announcement_rejection_smoke=1
+      shift
+      ;;
+    --announcement-negotiation-smoke)
+      announcement_rejection_smoke=1
+      announcement_negotiation_smoke=1
+      shift
+      ;;
+    --announcement-upload-rejection-smoke)
+      announcement_upload_rejection_smoke=1
+      shift
+      ;;
+    --announcement-moderator-smoke)
+      announcement_moderator_smoke=1
+      shift
+      ;;
+    --slow-mode-rejection-smoke)
+      slow_mode_rejection_smoke=1
+      restart_server=1
+      shift
+      ;;
+    --room-media-policy-smoke)
+      room_media_policy_smoke_bytes="${2:-}"
+      shift 2
+      ;;
+    --reaction-smoke)
+      reaction_smoke=1
+      shift
+      ;;
+    --revision-smoke)
+      revision_smoke=1
+      shift
+      ;;
+    --pin-smoke)
+      pin_smoke=1
+      shift
+      ;;
+    --moderation-audit-smoke)
+      moderation_audit_smoke=1
+      restart_server=1
+      shift
+      ;;
     --keep-roots)
       keep_roots=1
       shift
@@ -198,9 +271,74 @@ if [[ -n "$server_large_batch_threshold_bytes" ]] \
   echo "--server-large-batch-threshold-bytes must be a positive integer" >&2
   exit 2
 fi
+if [[ -n "$room_media_policy_smoke_bytes" ]] \
+  && { ! [[ "$room_media_policy_smoke_bytes" =~ ^[0-9]+$ ]] \
+    || [[ "$room_media_policy_smoke_bytes" -gt 10485760 ]]; }; then
+  echo "--room-media-policy-smoke must be an integer from 0 through 10485760 bytes" >&2
+  exit 2
+fi
 if [[ "$restart_server" -eq 1 && "$continuous_client_reconnect" -eq 1 ]]; then
   echo "--restart-server and --continuous-client-reconnect are separate cases" >&2
   exit 2
+fi
+if [[ "$announcement_rejection_smoke" -eq 1 ]] \
+  && [[ "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
+    || -n "$upload_file" ]]; then
+  echo "--announcement-rejection-smoke is an isolated authorization case; combine it only with --restart-server" >&2
+  exit 2
+fi
+if [[ "$announcement_upload_rejection_smoke" -eq 1 ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 || "$announcement_moderator_smoke" -eq 1 \
+    || "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
+    || -z "$upload_file" ]]; then
+  echo "--announcement-upload-rejection-smoke requires --upload-file and is an isolated authorization case; combine it only with --restart-server" >&2
+  exit 2
+fi
+if [[ "$announcement_moderator_smoke" -eq 1 ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 \
+    || "$announcement_upload_rejection_smoke" -eq 1 || "$continuous_client_reconnect" -eq 1 \
+    || "$multi_client" -eq 1 || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 \
+    || "$pin_smoke" -eq 1 ]]; then
+  echo "--announcement-moderator-smoke is an isolated authorization case; combine it only with --upload-file and/or --restart-server" >&2
+  exit 2
+fi
+if [[ "$slow_mode_rejection_smoke" -eq 1 ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 \
+    || "$announcement_upload_rejection_smoke" -eq 1 \
+    || "$announcement_moderator_smoke" -eq 1 \
+    || "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
+    || -n "$upload_file" ]]; then
+  echo "--slow-mode-rejection-smoke is an isolated qualification case" >&2
+  exit 2
+fi
+if [[ "$moderation_audit_smoke" -eq 1 ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 \
+    || "$announcement_upload_rejection_smoke" -eq 1 \
+    || "$announcement_moderator_smoke" -eq 1 \
+    || "$slow_mode_rejection_smoke" -eq 1 \
+    || "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 \
+    || -n "$upload_file" ]]; then
+  echo "--moderation-audit-smoke is an isolated qualification case" >&2
+  exit 2
+fi
+if [[ -n "$room_media_policy_smoke_bytes" ]] \
+  && [[ "$announcement_rejection_smoke" -eq 1 \
+    || "$announcement_upload_rejection_smoke" -eq 1 \
+    || "$announcement_moderator_smoke" -eq 1 \
+    || "$slow_mode_rejection_smoke" -eq 1 \
+    || "$moderation_audit_smoke" -eq 1 \
+    || "$continuous_client_reconnect" -eq 1 || "$multi_client" -eq 1 \
+    || "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 ]]; then
+  echo "--room-media-policy-smoke is an isolated qualification case" >&2
+  exit 2
+fi
+if [[ ( "$reaction_smoke" -eq 1 || "$revision_smoke" -eq 1 || "$pin_smoke" -eq 1 ) \
+  && -z "$server_large_batch_threshold_bytes" ]]; then
+  server_large_batch_threshold_bytes=1
 fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -241,21 +379,169 @@ if [[ -n "$passphrase_file" ]]; then
 fi
 
 server_pid=""
+bootstrap_pid=""
 client_pid=""
+moderation_target_pid=""
 cleanup() {
   if [[ -n "$client_pid" ]] && kill -0 "$client_pid" 2>/dev/null; then
     kill "$client_pid" 2>/dev/null || true
     wait "$client_pid" 2>/dev/null || true
   fi
+  if [[ -n "$moderation_target_pid" ]] && kill -0 "$moderation_target_pid" 2>/dev/null; then
+    kill "$moderation_target_pid" 2>/dev/null || true
+    wait "$moderation_target_pid" 2>/dev/null || true
+  fi
   if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$bootstrap_pid" ]] && kill -0 "$bootstrap_pid" 2>/dev/null; then
+    kill "$bootstrap_pid" 2>/dev/null || true
+    wait "$bootstrap_pid" 2>/dev/null || true
   fi
   if [[ "$keep_roots" -eq 0 ]]; then
     rm -rf "$server_home" "$browser_root" "$browser_root_2"
   fi
 }
 trap cleanup EXIT
+
+verify_empty_server_upload_state() {
+  local label="$1"
+  "$server_bin" doctor --home "$server_home" \
+    > "$run_dir/omenchatd-upload-rejection-doctor-${label}.txt"
+  if ! grep -Fq \
+    '[PASS] upload ledger: tracked=0 files/0 B disk=0 files/0 B missing=0 mismatched=0 orphan=0 unsafe=0' \
+    "$run_dir/omenchatd-upload-rejection-doctor-${label}.txt"; then
+    echo "rejected upload changed the upload ledger" >&2
+    cat "$run_dir/omenchatd-upload-rejection-doctor-${label}.txt" >&2
+    return 1
+  fi
+  if [[ -d "$server_home/uploads" ]] \
+    && find "$server_home/uploads" -type f -print -quit | grep -q .; then
+    echo "rejected upload created a server file" >&2
+    return 1
+  fi
+}
+
+verify_announcement_negotiation_report() {
+  local report="$1"
+  python3 - "$report" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+stages = {
+    stage.get("stage"): stage
+    for stage in report.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+capabilities = stages.get("capability_observation", {})
+send = stages.get("message_send_frame", {})
+blocked = stages.get("announcement_rejection_wait", {})
+if capabilities.get("announcement_rooms_negotiated") is not True:
+    raise SystemExit("announcement-rooms-v1 was not negotiated")
+if capabilities.get("announcement_policy_observed") is not True:
+    raise SystemExit("authoritative announcement policy was not observed")
+if send.get("announcement_local_policy_blocked") is not True:
+    raise SystemExit("client did not report the authoritative local policy block")
+if send.get("outgoing_frame_queued") is not False:
+    raise SystemExit("client queued a publication frame despite authoritative policy")
+if blocked.get("committed_message_seen") is not False:
+    raise SystemExit("announcement-room message was committed")
+PY
+}
+
+verify_slow_mode_qualification_report() {
+  local report="$1"
+  local expect_rejection="$2"
+  local expected_seconds="$3"
+  python3 - "$report" "$expect_rejection" "$expected_seconds" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expect_rejection = sys.argv[2] == "1"
+expected_seconds = int(sys.argv[3])
+stages = {
+    stage.get("stage"): stage
+    for stage in report.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+capabilities = stages.get("capability_observation", {})
+if capabilities.get("slow_mode_negotiated") is not True:
+    raise SystemExit("room-slow-mode-v1 was not negotiated")
+if capabilities.get("slow_mode_seconds") != expected_seconds:
+    raise SystemExit("the six-field room catalog did not project configured slow mode")
+if expect_rejection:
+    rejection = stages.get("slow_mode_rejection_wait", {})
+    if rejection.get("slow_mode_rejected") is not True:
+        raise SystemExit("typed slow-mode rejection was not observed")
+    if rejection.get("committed_message_seen") is not False:
+        raise SystemExit("slow-mode rejected message was committed")
+else:
+    message = stages.get("message_echo_wait", {})
+    if message.get("committed_message_seen") is not True:
+        raise SystemExit("initial slow-mode admission was not committed")
+PY
+}
+
+verify_slow_mode_delta_report() {
+  local report="$1"
+  local expected_seconds="$2"
+  python3 - "$report" "$expected_seconds" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_seconds = int(sys.argv[2])
+stages = {
+    stage.get("stage"): stage
+    for stage in report.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+delta = stages.get("slow_mode_delta_wait", {})
+if delta.get("ok") is not True:
+    raise SystemExit("live slow-mode room delta was not observed")
+if delta.get("initial_seconds") != 0:
+    raise SystemExit("slow-mode transition did not start from the disabled policy")
+if delta.get("final_seconds") != expected_seconds:
+    raise SystemExit("slow-mode room delta did not project the committed interval")
+if not delta.get("events"):
+    raise SystemExit("slow-mode transition has no real-Link event evidence")
+PY
+}
+
+verify_room_media_policy_report() {
+  local report="$1"
+  local expected_bytes="$2"
+  python3 - "$report" "$expected_bytes" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_bytes = int(sys.argv[2])
+stages = {
+    stage.get("stage"): stage
+    for stage in report.get("stages", [])
+    if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+}
+capabilities = stages.get("capability_observation", {})
+if capabilities.get("room_media_policy_negotiated") is not True:
+    raise SystemExit("room-media-policy-v1 was not negotiated")
+if capabilities.get("announcement_rooms_negotiated") is not True:
+    raise SystemExit("room media policy omitted announcement-rooms-v1")
+if capabilities.get("slow_mode_negotiated") is not True:
+    raise SystemExit("room media policy omitted room-slow-mode-v1")
+if capabilities.get("durable_mutations_negotiated") is not True:
+    raise SystemExit("room media policy omitted durable-mutations-v1")
+if capabilities.get("room_upload_max_file_bytes") != expected_bytes:
+    raise SystemExit("the seven-field room catalog did not project the configured upload ceiling")
+PY
+}
 
 echo "== Initializing isolated omenchatd =="
 "$server_bin" init --home "$server_home" "${server_interface_args[@]}" \
@@ -272,6 +558,37 @@ if [[ -n "$server_large_batch_threshold_bytes" ]]; then
     --large-batch-threshold-bytes "$server_large_batch_threshold_bytes" \
     >> "$run_dir/omenchatd-config.txt"
 fi
+if [[ -n "$room_media_policy_smoke_bytes" ]]; then
+  echo "== Bootstrapping isolated omenchatd database for stopped-server room policy =="
+  "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+    > "$run_dir/omenchatd-bootstrap.log" 2>&1 &
+  bootstrap_pid="$!"
+  for _ in {1..80}; do
+    if grep -q 'live server ready' "$run_dir/omenchatd-bootstrap.log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$bootstrap_pid" 2>/dev/null; then
+      echo "omenchatd exited before bootstrap completed" >&2
+      tail -n 80 "$run_dir/omenchatd-bootstrap.log" >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if ! grep -q 'live server ready' "$run_dir/omenchatd-bootstrap.log" 2>/dev/null; then
+    echo "omenchatd bootstrap did not become ready in time" >&2
+    exit 1
+  fi
+  kill -TERM "$bootstrap_pid"
+  wait "$bootstrap_pid"
+  bootstrap_pid=""
+  room_media_policy_config="$room_media_policy_smoke_bytes"
+  if [[ "$room_media_policy_smoke_bytes" -eq 0 ]]; then
+    room_media_policy_config="disabled"
+  fi
+  "$server_bin" rooms set-upload-policy 1 "$room_media_policy_config" \
+    --confirm --home "$server_home" \
+    >> "$run_dir/omenchatd-config.txt"
+fi
 
 "$server_bin" status --home "$server_home" > "$run_dir/omenchatd-status.txt"
 destination="$(
@@ -283,9 +600,15 @@ if [[ -z "$destination" ]]; then
   echo "could not parse OMENchat destination from omenchatd status" >&2
   exit 1
 fi
-
 echo "== Starting isolated omenchatd =="
-"$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+qualification_server_env=()
+if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+  qualification_server_env=(
+    env "OMENCHATD_QUALIFICATION_SLOW_MODE_TRANSITION=$slow_mode_seconds"
+  )
+fi
+"${qualification_server_env[@]}" "$server_bin" run --home "$server_home" \
+  "${server_interface_args[@]}" \
   > "$run_dir/omenchatd-run.log" 2>&1 &
 server_pid="$!"
 
@@ -307,6 +630,81 @@ if ! grep -q 'live server ready' "$run_dir/omenchatd-run.log" 2>/dev/null; then
   exit 1
 fi
 
+if [[ "$announcement_rejection_smoke" -eq 1 \
+  || "$announcement_upload_rejection_smoke" -eq 1 \
+  || "$announcement_moderator_smoke" -eq 1 ]]; then
+  echo "== Proving live room policy maintenance is refused =="
+  set +e
+  "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-live-room-policy.stdout" \
+    2> "$run_dir/omenchatd-live-room-policy.stderr"
+  live_policy_status=$?
+  set -e
+  if [[ "$live_policy_status" -eq 0 ]]; then
+    echo "room policy maintenance unexpectedly succeeded while omenchatd was live" >&2
+    exit 1
+  fi
+  if ! grep -Fq \
+    'database maintenance could not obtain exclusive access; ensure omenchatd is stopped' \
+    "$run_dir/omenchatd-live-room-policy.stderr"; then
+    echo "live room policy maintenance failed for an unexpected reason" >&2
+    cat "$run_dir/omenchatd-live-room-policy.stderr" >&2
+    exit 1
+  fi
+  live_policy_maintenance_refused=1
+fi
+
+if [[ "$announcement_rejection_smoke" -eq 1 \
+  || "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+  echo "== Stopping initialized omenchatd for room policy maintenance =="
+  kill "$server_pid"
+  for _ in {1..80}; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  if kill -0 "$server_pid" 2>/dev/null; then
+    echo "omenchatd did not stop before room policy maintenance" >&2
+    exit 1
+  fi
+  set +e
+  wait "$server_pid"
+  policy_stop_status=$?
+  set -e
+  case "$policy_stop_status" in
+    0|143) ;;
+    *)
+      echo "omenchatd returned unexpected policy-maintenance stop status $policy_stop_status" >&2
+      exit 1
+      ;;
+  esac
+  server_pid=""
+
+  echo "== Configuring isolated lobby as an announcement room =="
+  "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-room-policy.txt"
+
+  echo "== Restarting isolated omenchatd with qualified room policy =="
+  "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+    > "$run_dir/omenchatd-run-policy-restart.log" 2>&1 &
+  server_pid="$!"
+  for _ in {1..80}; do
+    if grep -q 'live server ready' "$run_dir/omenchatd-run-policy-restart.log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "omenchatd exited after room policy maintenance" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if ! grep -q 'live server ready' "$run_dir/omenchatd-run-policy-restart.log" 2>/dev/null; then
+    echo "omenchatd did not restart after room policy maintenance" >&2
+    exit 1
+  fi
+fi
+
 echo "== Creating isolated browser identity =="
 "$browser_bin" \
   --generate-native-identity "OMENchat Release Smoke" \
@@ -315,12 +713,151 @@ echo "== Creating isolated browser identity =="
   > "$run_dir/browser-identity.json" \
   2> "$run_dir/browser-identity.stderr"
 
+if [[ "$pin_smoke" -eq 1 || "$announcement_moderator_smoke" -eq 1 \
+  || "$moderation_audit_smoke" -eq 1 ]]; then
+  if [[ "$pin_smoke" -eq 1 ]]; then
+    moderator_mode="pin"
+  elif [[ "$moderation_audit_smoke" -eq 1 ]]; then
+    moderator_mode="moderation-audit"
+  else
+    moderator_mode="announcement"
+  fi
+  echo "== Registering isolated ${moderator_mode}-smoke moderator identity =="
+  "$browser_bin" \
+    --omenchat-smoke "$destination" \
+    "${client_interface_args[@]}" \
+    --path-wait "$path_wait" \
+    --app-root "$browser_root" \
+    --omenchat-message "${message} (moderator registration)" \
+    --output "$run_dir/omenchat-${moderator_mode}-registration.json" \
+    > "$run_dir/omenchat-${moderator_mode}-registration.stdout" \
+    2> "$run_dir/omenchat-${moderator_mode}-registration.stderr"
+  if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-${moderator_mode}-registration.json"; then
+    echo "OMENchat ${moderator_mode} moderator registration did not report pass" >&2
+    cat "$run_dir/omenchat-${moderator_mode}-registration.stderr" >&2
+    exit 1
+  fi
+
+  kill "$server_pid"
+  for _ in {1..80}; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  if kill -0 "$server_pid" 2>/dev/null; then
+    echo "omenchatd did not stop before ${moderator_mode} role assignment" >&2
+    exit 1
+  fi
+  wait "$server_pid" || true
+  server_pid=""
+
+  "$server_bin" users list --json --home "$server_home" \
+    > "$run_dir/omenchatd-${moderator_mode}-users.json"
+  moderator_user_id="$(python3 -c \
+    'import json,sys; users=json.load(open(sys.argv[1], encoding="utf-8"))["users"]; print(users[0]["user_id"] if len(users) == 1 else "")' \
+    "$run_dir/omenchatd-${moderator_mode}-users.json")"
+  if [[ -z "$moderator_user_id" ]]; then
+    echo "could not identify isolated ${moderator_mode}-smoke user" >&2
+    cat "$run_dir/omenchatd-${moderator_mode}-users.json" >&2
+    exit 1
+  fi
+  "$server_bin" users role "$moderator_user_id" moderator --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-${moderator_mode}-role.txt"
+  if ! grep -q "user role updated: id=$moderator_user_id role=moderator" "$run_dir/omenchatd-${moderator_mode}-role.txt"; then
+    echo "isolated ${moderator_mode}-smoke moderator assignment failed" >&2
+    cat "$run_dir/omenchatd-${moderator_mode}-role.txt" >&2
+    exit 1
+  fi
+  if [[ "$announcement_moderator_smoke" -eq 1 ]]; then
+    "$server_bin" rooms policy 1 announcement --confirm --home "$server_home" \
+      > "$run_dir/omenchatd-announcement-room-policy.txt"
+  fi
+
+  "$server_bin" run --home "$server_home" "${server_interface_args[@]}" \
+    > "$run_dir/omenchatd-run-${moderator_mode}-role-restart.log" 2>&1 &
+  server_pid="$!"
+  for _ in {1..80}; do
+    if grep -q 'live server ready' "$run_dir/omenchatd-run-${moderator_mode}-role-restart.log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "omenchatd exited after ${moderator_mode} role assignment" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if ! grep -q 'live server ready' "$run_dir/omenchatd-run-${moderator_mode}-role-restart.log" 2>/dev/null; then
+    echo "omenchatd did not restart after ${moderator_mode} role assignment" >&2
+    exit 1
+  fi
+fi
+
+moderation_audit_target=""
+if [[ "$moderation_audit_smoke" -eq 1 ]]; then
+  moderation_audit_target="OMEN audit target"
+  echo "== Starting isolated moderation-audit target identity =="
+  mkdir -p "$browser_root_2"
+  "$browser_bin" \
+    --generate-native-identity "OMENchat Moderation Audit Target" \
+    --app-root "$browser_root_2" \
+    --stdout \
+    > "$run_dir/browser-identity-2.json" \
+    2> "$run_dir/browser-identity-2.stderr"
+  "$browser_bin" \
+    --omenchat-smoke "$destination" \
+    "${client_interface_args[@]}" \
+    --path-wait "$path_wait" \
+    --app-root "$browser_root_2" \
+    --omenchat-local-display-name "$moderation_audit_target" \
+    --omenchat-message "${message} (moderation target)" \
+    --omenchat-reconnect-ready-file "$run_dir/moderation-target-ready" \
+    --omenchat-reconnect-wait 120 \
+    --output "$run_dir/omenchat-moderation-target.json" \
+    > "$run_dir/omenchat-moderation-target.stdout" \
+    2> "$run_dir/omenchat-moderation-target.stderr" &
+  moderation_target_pid="$!"
+  for _ in {1..480}; do
+    if [[ -f "$run_dir/moderation-target-ready" ]]; then
+      break
+    fi
+    if ! kill -0 "$moderation_target_pid" 2>/dev/null; then
+      echo "moderation-audit target exited before its joined Link was ready" >&2
+      cat "$run_dir/omenchat-moderation-target.stderr" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if [[ ! -f "$run_dir/moderation-target-ready" ]]; then
+    echo "moderation-audit target did not become ready in time" >&2
+    exit 1
+  fi
+fi
+
 echo "== Running OMENchat client smoke =="
 restart_destination_stable=0
 restart_stop="not-run"
 upload_args=()
 if [[ -n "$upload_file" ]]; then
   upload_args=(--omenchat-upload-file "$upload_file")
+fi
+room_media_policy_rejection_args=()
+if [[ -n "$room_media_policy_smoke_bytes" && -n "$upload_file" ]]; then
+  if stat -c %s "$upload_file" >/dev/null 2>&1; then
+    upload_bytes="$(stat -c %s "$upload_file")"
+  else
+    upload_bytes="$(wc -c < "$upload_file" | tr -d '[:space:]')"
+  fi
+  if [[ "$upload_bytes" -gt "$room_media_policy_smoke_bytes" ]]; then
+    room_media_policy_upload_rejection_smoke=1
+    room_media_policy_rejection_args=(
+      --omenchat-room-media-policy-upload-rejection-smoke
+    )
+  fi
+fi
+restart_upload_args=()
+if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+  restart_upload_args=("${upload_args[@]}")
 fi
 continuous_args=()
 if [[ "$continuous_client_reconnect" -eq 1 ]]; then
@@ -329,12 +866,51 @@ if [[ "$continuous_client_reconnect" -eq 1 ]]; then
     --omenchat-reconnect-wait 75
   )
 fi
+reaction_args=()
+if [[ "$reaction_smoke" -eq 1 ]]; then
+  reaction_args=(--omenchat-reaction-smoke --omenchat-response-wait 30)
+fi
+revision_args=()
+if [[ "$revision_smoke" -eq 1 ]]; then
+  revision_args=(--omenchat-revision-smoke --omenchat-response-wait 30)
+fi
+pin_args=()
+if [[ "$pin_smoke" -eq 1 ]]; then
+  pin_args=(--omenchat-pin-smoke --omenchat-response-wait 30)
+fi
+moderation_audit_args=()
+if [[ "$moderation_audit_smoke" -eq 1 ]]; then
+  moderation_audit_args=(
+    --omenchat-moderation-audit-smoke
+    --omenchat-moderation-audit-target "$moderation_audit_target"
+    --omenchat-response-wait 30
+  )
+fi
+announcement_rejection_args=()
+if [[ "$announcement_rejection_smoke" -eq 1 ]]; then
+  announcement_rejection_args=(--omenchat-announcement-rejection-smoke)
+elif [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+  announcement_rejection_args=(--omenchat-announcement-upload-rejection-smoke)
+fi
+slow_mode_rejection_args=()
+slow_mode_delta_args=()
+if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+  slow_mode_rejection_args=(--omenchat-slow-mode-rejection-smoke)
+  slow_mode_delta_args=(--omenchat-slow-mode-delta-smoke "$slow_mode_seconds")
+fi
 "$browser_bin" \
   --omenchat-smoke "$destination" \
   "${client_interface_args[@]}" \
   --path-wait "$path_wait" \
   --app-root "$browser_root" \
   --omenchat-message "$message" \
+  "${announcement_rejection_args[@]}" \
+  "${room_media_policy_rejection_args[@]}" \
+  "${slow_mode_delta_args[@]}" \
+  "${reaction_args[@]}" \
+  "${revision_args[@]}" \
+  "${pin_args[@]}" \
+  "${moderation_audit_args[@]}" \
   "${upload_args[@]}" \
   "${continuous_args[@]}" \
   --output "$run_dir/omenchat-smoke.json" \
@@ -432,17 +1008,81 @@ if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke.json"; then
   cat "$run_dir/omenchat-smoke.stderr" >&2
   exit 1
 fi
-continuous_link_closed=0
-continuous_link_reopened=0
-continuous_session_reconnected=0
-continuous_message_echoed=0
-if [[ "$continuous_client_reconnect" -eq 1 ]]; then
+if [[ "$announcement_negotiation_smoke" -eq 1 ]]; then
+  verify_announcement_negotiation_report "$run_dir/omenchat-smoke.json"
+fi
+if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+  verify_slow_mode_qualification_report \
+    "$run_dir/omenchat-smoke.json" 0 "$slow_mode_seconds"
+  verify_slow_mode_delta_report \
+    "$run_dir/omenchat-smoke.json" "$slow_mode_seconds"
+
+  echo "== Proving external live slow-mode maintenance remains refused =="
+  set +e
+  "$server_bin" rooms set-slow-mode 1 "$slow_mode_seconds" --confirm --home "$server_home" \
+    > "$run_dir/omenchatd-live-room-policy.stdout" \
+    2> "$run_dir/omenchatd-live-room-policy.stderr"
+  live_policy_status=$?
+  set -e
+  if [[ "$live_policy_status" -eq 0 ]] || ! grep -Fq \
+    'database maintenance could not obtain exclusive access; ensure omenchatd is stopped' \
+    "$run_dir/omenchatd-live-room-policy.stderr"; then
+    echo "external live slow-mode maintenance did not fail at the exclusive-access boundary" >&2
+    exit 1
+  fi
+  live_policy_maintenance_refused=1
+fi
+if [[ -n "$room_media_policy_smoke_bytes" ]]; then
+  verify_room_media_policy_report \
+    "$run_dir/omenchat-smoke.json" "$room_media_policy_smoke_bytes"
+fi
+if [[ "$room_media_policy_upload_rejection_smoke" -eq 1 ]]; then
+  verify_empty_server_upload_state "room-media-policy"
+fi
+if [[ "$moderation_audit_smoke" -eq 1 ]]; then
   python3 - "$run_dir/omenchat-smoke.json" <<'PY'
 import json
 import pathlib
 import sys
 
 report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+stages = {stage.get("stage"): stage for stage in report.get("stages", []) if isinstance(stage, dict)}
+capability = stages.get("capability_observation", {})
+page = stages.get("moderation_audit_read", {})
+if capability.get("moderation_audit_negotiated") is not True:
+    raise SystemExit("moderation audit capability was not negotiated")
+if page.get("ok") is not True or page.get("expected_record") is not True or page.get("end_seen") is not True:
+    raise SystemExit("authorized non-empty moderation audit evidence was incomplete")
+PY
+  kill "$moderation_target_pid"
+  wait "$moderation_target_pid" 2>/dev/null || true
+  moderation_target_pid=""
+  moderation_audit_args=(
+    --omenchat-moderation-audit-smoke
+    --omenchat-moderation-audit-expect-record
+    --omenchat-response-wait 30
+  )
+fi
+server_upload_rejection_clean="not-run"
+if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+  verify_empty_server_upload_state "initial"
+  server_upload_rejection_clean=1
+fi
+continuous_link_closed=0
+continuous_link_reopened=0
+continuous_session_reconnected=0
+continuous_message_echoed=0
+continuous_reaction_recovered=0
+if [[ "$continuous_client_reconnect" -eq 1 ]]; then
+  python3 - "$run_dir/omenchat-smoke.json" "$reaction_smoke" "$revision_smoke" "$pin_smoke" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+reaction_smoke = sys.argv[2] == "1"
+revision_smoke = sys.argv[3] == "1"
+pin_smoke = sys.argv[4] == "1"
 stages = {
     stage.get("stage"): stage
     for stage in report.get("stages", [])
@@ -459,11 +1099,53 @@ if any(stages.get(name, {}).get("ok") is not True for name in required):
     raise SystemExit("continuous reconnect stage evidence was incomplete")
 if stages["continuous_link_reopen"].get("link_changed") is not True:
     raise SystemExit("continuous reconnect reused the closed link identifier")
+if reaction_smoke:
+    reaction_required = (
+        "continuous_reaction_capability",
+        "continuous_reaction_lost_ack",
+        "continuous_reaction_exact_replay",
+        "continuous_reaction_resource_snapshot",
+        "continuous_reaction_noop_add",
+        "continuous_reaction_remove",
+        "continuous_reaction_remove_snapshot",
+        "continuous_reaction_intent_persistence",
+    )
+    if any(stages.get(name, {}).get("ok") is not True for name in reaction_required):
+        raise SystemExit("replacement-link reaction evidence was incomplete")
+if revision_smoke:
+    revision_required = (
+        "continuous_revision_capability",
+        "continuous_revision_lost_ack",
+        "continuous_revision_exact_replay",
+        "continuous_revision_correction_resource_snapshot",
+        "continuous_revision_tombstone",
+        "continuous_revision_tombstone_resource_snapshot",
+        "continuous_revision_intent_persistence",
+    )
+    if any(stages.get(name, {}).get("ok") is not True for name in revision_required):
+        raise SystemExit("replacement-link revision evidence was incomplete")
+if pin_smoke:
+    pin_required = (
+        "continuous_pin_capability",
+        "continuous_pin_authority_sync",
+        "continuous_pin_lost_ack",
+        "continuous_pin_exact_replay",
+        "continuous_pin_snapshot",
+        "continuous_pin_noop",
+        "continuous_pin_unpin",
+        "continuous_pin_unpin_snapshot",
+        "continuous_pin_intent_persistence",
+    )
+    if any(stages.get(name, {}).get("ok") is not True for name in pin_required):
+        raise SystemExit("replacement-link pin evidence was incomplete")
 PY
   continuous_link_closed=1
   continuous_link_reopened=1
   continuous_session_reconnected=1
   continuous_message_echoed=1
+  if [[ "$reaction_smoke" -eq 1 ]]; then
+    continuous_reaction_recovered=1
+  fi
 fi
 
 if [[ "$restart_server" -eq 1 ]]; then
@@ -538,6 +1220,13 @@ if [[ "$restart_server" -eq 1 ]]; then
     --path-wait "$path_wait" \
     --app-root "$browser_root" \
     --omenchat-message "${message} (after server restart)" \
+    "${announcement_rejection_args[@]}" \
+    "${slow_mode_rejection_args[@]}" \
+    "${reaction_args[@]}" \
+    "${revision_args[@]}" \
+    "${pin_args[@]}" \
+    "${moderation_audit_args[@]}" \
+    "${restart_upload_args[@]}" \
     --output "$run_dir/omenchat-smoke-restart.json" \
     > "$run_dir/omenchat-smoke-restart.stdout" \
     2> "$run_dir/omenchat-smoke-restart.stderr"
@@ -546,6 +1235,55 @@ if [[ "$restart_server" -eq 1 ]]; then
     echo "post-restart OMENchat smoke did not report pass" >&2
     cat "$run_dir/omenchat-smoke-restart.stderr" >&2
     exit 1
+  fi
+  if [[ "$announcement_negotiation_smoke" -eq 1 ]]; then
+    verify_announcement_negotiation_report "$run_dir/omenchat-smoke-restart.json"
+  fi
+  if [[ -n "$room_media_policy_smoke_bytes" ]]; then
+    verify_room_media_policy_report \
+      "$run_dir/omenchat-smoke-restart.json" "$room_media_policy_smoke_bytes"
+  fi
+  if [[ "$announcement_upload_rejection_smoke" -eq 1 ]]; then
+    verify_empty_server_upload_state "restart"
+  fi
+  if [[ "$slow_mode_rejection_smoke" -eq 1 ]]; then
+    verify_slow_mode_qualification_report \
+      "$run_dir/omenchat-smoke-restart.json" 1 "$slow_mode_seconds"
+
+    echo "== Waiting for bounded slow-mode expiry =="
+    sleep "$((slow_mode_seconds + 1))"
+    "$browser_bin" \
+      --omenchat-smoke "$restart_destination" \
+      "${client_interface_args[@]}" \
+      --path-wait "$path_wait" \
+      --app-root "$browser_root" \
+      --omenchat-message "${message} (after slow-mode expiry)" \
+      --output "$run_dir/omenchat-smoke-expiry.json" \
+      > "$run_dir/omenchat-smoke-expiry.stdout" \
+      2> "$run_dir/omenchat-smoke-expiry.stderr"
+    if ! grep -q '"outcome": "pass"' "$run_dir/omenchat-smoke-expiry.json"; then
+      echo "post-expiry OMENchat smoke did not report pass" >&2
+      cat "$run_dir/omenchat-smoke-expiry.stderr" >&2
+      exit 1
+    fi
+    verify_slow_mode_qualification_report \
+      "$run_dir/omenchat-smoke-expiry.json" 0 "$slow_mode_seconds"
+  fi
+  if [[ "$moderation_audit_smoke" -eq 1 ]]; then
+    python3 - "$run_dir/omenchat-smoke-restart.json" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+stages = {stage.get("stage"): stage for stage in report.get("stages", []) if isinstance(stage, dict)}
+capability = stages.get("capability_observation", {})
+page = stages.get("moderation_audit_read", {})
+if capability.get("moderation_audit_negotiated") is not True:
+    raise SystemExit("post-restart moderation audit capability was not negotiated")
+if page.get("ok") is not True or page.get("record_count", 0) < 1 or page.get("end_seen") is not True:
+    raise SystemExit("post-restart persisted moderation audit evidence was incomplete")
+PY
   fi
 fi
 
@@ -580,6 +1318,8 @@ if [[ "$multi_client" -eq 1 ]]; then
     --path-wait "$path_wait" \
     --app-root "$browser_root_2" \
     --omenchat-message "$second_message" \
+    "${reaction_args[@]}" \
+    "${revision_args[@]}" \
     "${second_upload_args[@]}" \
     --output "$run_dir/omenchat-smoke-2.json" \
     > "$run_dir/omenchat-smoke-2.stdout" \
@@ -614,19 +1354,34 @@ ifac: $([[ -n "$network_name$passphrase" ]] && printf 'configured' || printf 'no
 browser_bin: $browser_bin
 server_bin: $server_bin
 browser_root: $browser_root
-browser_root_2: $([[ "$multi_client" -eq 1 ]] && printf '%s' "$browser_root_2" || printf 'not-run')
+browser_root_2: $([[ "$multi_client" -eq 1 || "$moderation_audit_smoke" -eq 1 ]] && printf '%s' "$browser_root_2" || printf 'not-run')
 server_home: $server_home
 multi_client: $multi_client
 restart_server: $restart_server
 continuous_client_reconnect: $continuous_client_reconnect
+announcement_rejection_smoke: $announcement_rejection_smoke
+announcement_negotiation_smoke: $announcement_negotiation_smoke
+announcement_upload_rejection_smoke: $announcement_upload_rejection_smoke
+announcement_moderator_smoke: $announcement_moderator_smoke
+slow_mode_rejection_smoke: $slow_mode_rejection_smoke
+slow_mode_seconds: $([[ "$slow_mode_rejection_smoke" -eq 1 ]] && printf '%s' "$slow_mode_seconds" || printf 'not-run')
+room_media_policy_smoke_bytes: $([[ -n "$room_media_policy_smoke_bytes" ]] && printf '%s' "$room_media_policy_smoke_bytes" || printf 'not-run')
+room_media_policy_upload_rejection_smoke: $room_media_policy_upload_rejection_smoke
+live_policy_maintenance_refused: $live_policy_maintenance_refused
+reaction_smoke: $reaction_smoke
+revision_smoke: $revision_smoke
+pin_smoke: $pin_smoke
+moderation_audit_smoke: $moderation_audit_smoke
 continuous_link_closed: $continuous_link_closed
 continuous_link_reopened: $continuous_link_reopened
 continuous_session_reconnected: $continuous_session_reconnected
 continuous_message_echoed: $continuous_message_echoed
+continuous_reaction_recovered: $continuous_reaction_recovered
 restart_destination_stable: $restart_destination_stable
 restart_stop: $restart_stop
 server_large_batch_threshold_bytes: $([[ -n "$server_large_batch_threshold_bytes" ]] && printf '%s' "$server_large_batch_threshold_bytes" || printf 'default')
 upload_file: $([[ -n "$upload_file" ]] && printf '%s' "$upload_file" || printf 'not-run')
+server_upload_rejection_clean: $server_upload_rejection_clean
 EOF
 
 echo "$run_dir"

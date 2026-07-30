@@ -45,16 +45,155 @@ five-second caches; moderation mutations and transactional stale-user pruning
 complete asynchronously through the same worker. The command-driven line
 console waits synchronously on that same bounded owner. Upload-ledger repair
 still uses its existing synchronous maintenance path.
-The current schema is recorded as SQLite `user_version = 3`. Version 2 adds an
-actor/time index for upload quota planning. Version 3 adds the dormant
-durable-mutation replay table and creation-order index; the live protocol does
-not use them until explicit capability activation. Existing version-0 through
-version-2 databases migrate in one immediate transaction. A database from a
+The current schema is recorded as SQLite `user_version = 8`. Version 2 adds an
+actor/time index for upload quota planning. Version 3 adds the
+durable-mutation replay table and creation-order index. Version 4 adds nullable
+reply-event and bounded mention-ID metadata plus a partial reply index. The
+negotiated durable server path validates same-room live
+reply targets and current numeric mention membership transactionally and uses
+one encoder for fan-out and both history forms. Existing version-0 through
+version-4 databases migrate
+in one immediate transaction. A database from a
 newer omenchatd version is refused without modification instead of being
 silently downgraded.
+
+Version 5 adds the constrained `room_reactions` active-state table and
+`room_reaction_events` append-only audit table plus target/retention indexes.
+The server executor couples add/remove effects to durable replay,
+enforces active/audit bounds, creates authoritative bounded snapshots, and
+limits reaction-event fan-out to capability-bound Links. omenchatd now accepts
+`reactions-v1` only when an identified Link explicitly requests it together
+with `durable-mutations-v1`; base and legacy Links receive no reaction state.
+Version 6 adds constrained dormant current-state and append-only audit tables
+for the reserved `message-revisions-v1` contract. Migration and recovery
+support and a bounded transactional server executor are present. The executor
+enforces authorization, revision/storage ceilings, exact replay, reaction
+cleanup, and explicit-target snapshots. The capability is not requested or
+accepted, so normal clients cannot reach it and no client action is enabled.
+Dormant Link-scoped event and history-snapshot plumbing exists behind that
+disabled acceptance gate; its presence does not advertise or activate the
+wire feature.
+Version 7 adds a persistent per-room event-ID high-water mark. Existing rooms
+seed it lazily from the indexed maximum when their next event is committed, so
+migration does not scan history. Allocation and insertion share one immediate
+transaction. Deleting newest or all retained rows therefore cannot reuse a
+committed event ID, while a rolled-back allocation remains safely reusable.
+Integer exhaustion fails closed. Retention remains disabled and schema 7 does
+not delete history.
+Version 8 adds an initially empty per-room history usage ledger. Existing
+history is not scanned during migration. New events update stable item/byte
+totals in their existing immediate transaction, and legacy rows advance by at
+most 256 per append or explicit maintenance call. Backfill target and cursor
+survive restart, and retention remains unavailable until accounting is
+complete. Accounting failure rolls back event insertion and sequence
+advancement.
+An explicit store-only compaction primitive can remove at most 64 original
+events in one immediate transaction after accounting is complete. It bounds
+dependent reply/reaction/revision work to 20,000 rows, atomically cleans those
+projections and the usage ledger, preserves upload and durable-replay records,
+and leaves the event-ID high-water mark intact. No runtime configuration,
+admission path, timer, protocol capability, command, or UI invokes it yet, so
+upgrading still does not delete room history.
+The server configuration now records a typed `[history_retention]` policy. Its
+compatibility default is disabled with ceilings of 365 days, 100,000 events,
+and 256 MiB per room. Enabled zero limits are rejected, and documented hard
+maxima prevent an unbounded policy. `status` and `status --json` perform a
+read-only inspection of at most 256 room ledgers and report omitted rooms plus
+complete/incomplete/missing accounting. They do not advance accounting or
+delete data. Status reports configured admission behavior but does not claim to
+observe whether a live runtime is currently active.
+When enabled, the policy is attached only to the live server store. Every
+ordinary and durable room-event insertion evaluates age, item, and byte
+ceilings in its existing immediate transaction and removes at most 64 older
+originals with their dependent projections. A single newest event may exceed
+the byte ceiling until the next admission. Incomplete accounting or a ceiling
+that cannot be restored in one batch fails closed and rolls back both insertion
+and attempted compaction.
+Isolated regressions reopen a compacted file-backed store, append through the
+persistent event-ID sequence, page across removed IDs, and force the retained
+history through the existing Resource-offer path. The reopened store preserves
+only the surviving ordered IDs and Resource payloads serialize only those
+events. The existing v0.6.0-1 byte fixtures remain exact; live mixed-version
+retention behavior is still a separate release qualification rather than an
+inference from these deterministic tests.
+An operator can stop omenchatd and run
+`database advance-history-usage --room-id <id> --confirm --home <path>` to
+advance one 256-event accounting batch for one room. The command requires the
+existing current schema, reports its durable cursor and target, and never
+deletes history. Repeating it until `complete=true` closes the fail-closed
+legacy-ledger admission condition without adding a startup sweep or worker.
+The desktop has a matching rebuildable revision projection outside
+immutable room history. It is bounded per room, server, and identity-scoped
+cache by rows and stable retained bytes; strict deltas and authoritative
+explicit-target snapshots are persisted transactionally and reconciled after
+restart. Invalid snapshots retain prior rows while clearing authoritative
+evidence. The reserved durable-intent operation has a bounded live sender and
+exact typed acknowledgement correlation. The desktop has a bounded correction
+draft separate from the ordinary composer, explicit deletion confirmation,
+durable prepare-before-send actions, and author/moderator/mute/depth checks.
+Those controls require authoritative target evidence plus explicitly
+negotiated `durable-mutations-v1` and `message-revisions-v1`. The client
+requests the revision capability only with its persistent client instance
+identifier; unsolicited acceptance and capability loss remain fail closed.
+The shared Iced timeline renders the negotiated projection. It borrows only
+authoritative rows for retained targets:
+corrections show effective text with an edited marker, while tombstones hide
+the original body plus reply, mention, media, reaction, resend, and mutation
+actions. Stale restored rows remain hidden until an explicit-target snapshot
+or a validated negotiated live delta re-establishes authority for that target.
+An exact live replay restores stale target evidence once without changing the
+retained row; stale or conflicting deltas restore nothing, and other targets
+remain stale. This adds no worker, timer, automatic retry,
+or per-redraw revision-body clone. The dormant sender never applies revision
+state optimistically and uses the existing item-bounded per-session pending
+mutation queue.
+
+The desktop client's independent `chat.sqlite` adds a default-off
+`rooms.mute_except_mentions` preference. It is shown only when a negotiated
+nonzero local OMENchat user ID is known. When enabled, exact numeric rich
+message metadata for that ID is required to increment the local room unread
+counter; ordinary events remain stored and reconciled normally. This preference
+does not itself request or enable the negotiated reply/mention wire capability.
+The same identity-scoped database now has an additive constrained
+`room_reactions` cache. Reaction rows stay outside message history and are
+bounded per actor/target, target, room, server, and database by both items and
+retained bytes. The shared client state applies only strictly decoded,
+negotiated deltas and authoritative explicit-target snapshots, including the
+existing bounded inline/Resource history paths, and restores only reactions
+whose eligible target events remain in the bounded resident history. The Iced
+timeline contains fixed-token controls which additionally require both
+negotiated capabilities, a bound local user, a retained target, and current
+authoritative snapshot evidence. They persist through the bounded durable
+mutation owner before sending and never update counts optimistically.
+Production session-open frames request `reactions-v1` only when the persistent
+durable-mutation owner is ready. Older or capability-absent servers leave the
+controls hidden and ordinary room behavior unchanged.
+The desktop exposes the fixed reaction vocabulary as a compact emoji strip
+with semantic hover labels instead of a wrapping block of textual buttons.
+Reply uses the compact Nerd Font comments glyph with a `Reply` tooltip. Reaction
+summaries use the same emoji vocabulary while retaining actor counts and the
+explicit `you` marker.
+Negotiated Links now receive an explicit reaction snapshot after join and
+recent-history synchronization. The snapshot covers only the bounded history
+range represented to that client. Inline and Resource forms use the same strict
+decoder; base or legacy Links receive neither. The release smoke's one-byte
+batch threshold is an isolated way to select Resource transport earlier and
+does not change message, Resource, allocation, or retention limits.
+The shared presentation reducer can summarize retained rows by fixed token and
+distinct actor count. When retained reaction state is available, the
+Iced timeline displays those summaries as chips and marks `you` only
+when the negotiated numeric local-user ID is among the actors. The summary
+chips remain read-only; a separate bounded token-control row appears only when
+every dormant action gate above is satisfied. Counts are visible only after a
+validated live snapshot marks that explicit target complete. Cache restore and
+reconnect clear this non-persistent evidence without deleting bounded rows, so
+stale counts are not presented as current while reconciliation is pending. The
+legacy Ratatui Messages
+workspace currently represents LXMF conversations, not OMENchat sessions, so
+it does not display OMENchat reaction state.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
-`omenchat.sqlite.pre-v3-from-v<old>.bak`. It never overwrites an existing backup;
+`omenchat.sqlite.pre-v10-from-v<old>.bak`. It never overwrites an existing backup;
 backup failure aborts migration, and a successful backup is retained for
 operator recovery.
 Schema statements and the version update share one immediate transaction, so a
@@ -67,6 +206,56 @@ copy must migrate and pass SQLite integrity/foreign-key checks before atomic
 publication. The selected source remains unchanged and the prior active
 database is retained as an owner-only `pre-restore` backup. Operators must run
 `doctor` before restarting.
+
+An offline non-destructive schema-9 downgrade artifact can be created with
+`omenchatd database export-schema9-copy --to <new-path> --confirm --home
+<path>`. It removes only schema-10 moderation-audit storage and preserves
+schema-9 pins and every earlier layer. The audit capability remains dormant;
+only durable in-room moderation paths whose user change and replay result
+share one immediate transaction populate this bounded storage.
+
+An offline non-destructive schema-8 downgrade artifact can be created with
+`omenchatd database export-schema8-copy --to <new-path> --confirm --home
+<path>`. It removes schema-10 moderation history and schema-9 pin state/audit
+objects and preserves history usage, event sequences, history, reactions, and
+dormant revisions.
+
+The desktop maintains a separate bounded pin projection in its
+identity-scoped `chat.sqlite`. It may retain pin rows across restart, but those
+rows are explicitly stale until a negotiated exact-target snapshot or delta
+restores authority. The timeline labels this distinction as `📌 pinned` versus
+`📌 pinned · cached`. The production client requests `room-pins-v1` only with
+its persistent durable identity, and controls remain hidden unless the current
+Link accepts it and current role/target authority permits the action.
+
+Pin/unpin controls require current moderator/administrator role, joined-room
+membership, retained target eligibility, exact-target authority, durable
+identity, and both negotiated capabilities. Intent is persisted before send;
+an ACK is presented only as accepted pending an authoritative room update.
+Older, base-only, downgraded, or unsolicited peers cannot activate them.
+
+An offline non-destructive schema-7 downgrade artifact can be created with
+`omenchatd database export-schema7-copy --to <new-path> --confirm --home
+<path>`. It removes only schema-8 usage metadata and preserves event sequences,
+history, reactions, and dormant revisions.
+
+A schema-6 downgrade artifact can be created with
+`omenchatd database export-schema6-copy --to <new-path> --confirm --home
+<path>`. It removes schema-8 usage and schema-7 event sequence metadata from a
+private staged copy; history, reactions, and dormant revisions remain. An
+older schema-6 binary can then allocate from the retained maximum because no
+compaction is active.
+
+A schema-5 downgrade artifact can be created with
+`omenchatd database export-schema5-copy --to <new-path> --confirm --home
+<path>`. A private staged copy drops only schema-6 revision objects, moves to
+`user_version = 5`, and preserves reaction state. For a deeper schema-4
+artifact, use
+`omenchatd database export-schema4-copy --to <new-path> --confirm --home
+<path>`. That copy drops both schema-6 revisions and schema-5 reactions before
+moving to `user_version = 4`. Both commands require a new destination, pass
+integrity/foreign-key checks, atomically publish, and leave the active schema-10
+database unchanged.
 
 ## Server Commands
 
@@ -83,6 +272,20 @@ Add a TCP gateway:
 ```bash
 omenchatd interfaces tcp-client <gateway-host:port> --home /tmp/omenchatd-test
 ```
+
+That command adds a client without replacing other configured TCP clients or
+listeners. Multiple enabled TCP clients are started independently. Inspect the
+redacted list or delete one exact endpoint with:
+
+```bash
+omenchatd interfaces list --home /tmp/omenchatd-test
+omenchatd interfaces delete tcp-client <gateway-host:port> \
+  --home /tmp/omenchatd-test
+```
+
+The generated configuration is bounded to 64 interface sections and 2 MiB.
+Add/delete writes retain an owner-only `config.before-interface-edit.bak`
+recovery copy, and take effect after the live server restarts.
 
 For IFAC-protected gateways:
 
@@ -120,6 +323,17 @@ rate-controlled discovery refresh without periodic UI polling.
 In `omenchatd tui`, use **Announce Now** after the live server is running to
 send the OMENchat and NomadNet portal announces immediately. This is useful for
 testing discovery without waiting for the configured announce interval.
+
+Canonical desktop and server products negotiate `room-slow-mode-v1` only
+alongside durable mutations. A negotiated desktop session shows a static
+`Slow mode · Ns` indicator; it does not run a countdown or treat elapsed
+client time as permission to send. omenchatd atomically admits a new room
+message/action with its durable event and replay result, while moderators
+bypass the interval. Legacy and non-negotiating peers retain byte-exact
+four-/five-field room values and prior behavior. The omenchatd CLI and TUI
+report `enforcement active` in canonical server builds. The legacy root
+Ratatui frontend does not host OMENchat sessions, so it has no duplicate
+OMENchat policy state machine.
 
 ## Interface Recovery
 
@@ -347,6 +561,16 @@ trusted.
   message bodies, composer drafts, user lists, room names, filenames, local
   paths, credentials, private identity material, and all free-form status/error
   text. Disconnect detail is reduced to a fixed non-secret category.
+- Show recovered durable mutations as a compact, non-error notice by default,
+  explicitly separate current connection health from an earlier uncertain send,
+  and reveal the bounded four-row-per-server review panel only on request. The
+  review panel contains no
+  mutation IDs, request hashes, message bodies, or command targets. Each row
+  identifies the operation kind, public server, room scope, state, and relative
+  expiry. Send/Retry appears only when the production identity, client-instance,
+  original-room, live-transport, capability, expiry, and pending-result guard
+  passes. Otherwise the panel explains why retry is unavailable and offers only
+  explicit local stop-tracking. Nothing is resent automatically.
 - Show byte progress for the newest active inbound OMENchat Resource in the
   matching session pane. Attribution requires the typed runtime source,
   inbound direction, and exact active link identity to agree; another session's

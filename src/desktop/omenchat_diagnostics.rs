@@ -35,20 +35,19 @@ impl DesktopApp {
             .omenchat_recovered_mutation_intents
             .iter()
             .filter(|intent| intent.server_destination == session.server.destination)
-            .fold((0usize, 0usize, 0usize), |counts, intent| {
-                (
-                    counts.0
-                        + usize::from(
-                            intent.state
-                                == crate::chat::mutation_intents::OutboundMutationState::Prepared,
-                        ),
-                    counts.1
-                        + usize::from(
-                            intent.state
-                                == crate::chat::mutation_intents::OutboundMutationState::SentUncertain,
-                        ),
-                    counts.2 + usize::from(intent.expires_at <= now_unix),
-                )
+            .fold((0usize, 0usize, 0usize), |mut counts, intent| {
+                if intent.expires_at <= now_unix {
+                    counts.2 = counts.2.saturating_add(1);
+                } else if intent.state
+                    == crate::chat::mutation_intents::OutboundMutationState::Prepared
+                {
+                    counts.0 = counts.0.saturating_add(1);
+                } else if intent.state
+                    == crate::chat::mutation_intents::OutboundMutationState::SentUncertain
+                {
+                    counts.1 = counts.1.saturating_add(1);
+                }
+                counts
             });
         let intent_worker = self
             .omenchat
@@ -236,8 +235,50 @@ mod tests {
 
     #[test]
     fn omenchat_session_diagnostics_are_bounded_structured_and_redacted() {
-        let (desktop, session_id) =
+        let (mut desktop, session_id) =
             desktop_with_session("omenbrowser-rs-omenchat-copy-diagnostics");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .unwrap_or_default();
+        for (marker, state, expires_at, body) in [
+            (
+                1,
+                crate::chat::mutation_intents::OutboundMutationState::Prepared,
+                now.saturating_add(60),
+                "private prepared mutation body",
+            ),
+            (
+                2,
+                crate::chat::mutation_intents::OutboundMutationState::SentUncertain,
+                now.saturating_add(60),
+                "private uncertain mutation body",
+            ),
+            (
+                3,
+                crate::chat::mutation_intents::OutboundMutationState::Prepared,
+                now.saturating_sub(60),
+                "private expired mutation body",
+            ),
+        ] {
+            desktop.omenchat.omenchat_recovered_mutation_intents.push(
+                crate::chat::mutation_intents::OutboundMutationIntent {
+                    server_destination: "00112233445566778899aabbccddeeff".into(),
+                    authenticated_identity_hash: vec![marker; 16],
+                    client_instance_id: crate::chat::protocol::ClientInstanceId::new([marker; 16]),
+                    mutation_id: crate::chat::protocol::MutationId::new([marker; 16]),
+                    request_hash: crate::chat::protocol::RequestHash::new([marker; 32]),
+                    op: crate::chat::protocol::ChatOp::RoomMessage,
+                    room_id: Some(1),
+                    body: crate::chat::protocol::FrameBody::Text(body.into()),
+                    state,
+                    created_at: now.saturating_sub(60),
+                    expires_at,
+                    correlation_id: None,
+                },
+            );
+        }
         let text = desktop
             .omenchat_session_diagnostics_text(session_id)
             .expect("diagnostics");
@@ -251,6 +292,18 @@ mod tests {
             "other-redacted"
         );
         assert_eq!(report["transport"]["connected"], false);
+        assert_eq!(
+            report["durable_mutations"]["recovered_prepared_for_server"],
+            1
+        );
+        assert_eq!(
+            report["durable_mutations"]["recovered_uncertain_for_server"],
+            1
+        );
+        assert_eq!(
+            report["durable_mutations"]["recovered_past_expiry_for_server"],
+            1
+        );
         assert!(text.contains("00112233445566778899aabbccddeeff"));
         for secret in [
             "/private/path",
@@ -258,6 +311,9 @@ mod tests {
             "message body",
             "private composer draft",
             "private-room-name",
+            "private prepared mutation body",
+            "private uncertain mutation body",
+            "private expired mutation body",
         ] {
             assert!(!text.contains(secret), "diagnostics leaked {secret}");
         }

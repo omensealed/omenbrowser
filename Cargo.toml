@@ -1,6 +1,6 @@
 [package]
 name = "omenbrowser_rs"
-version = "0.9.6-3"
+version = "0.9.6-4"
 edition = "2021"
 rust-version = "1.85"
 description = "OMENbrowser Rust Desktop/TUI"
@@ -45,12 +45,31 @@ chat-client-rns = ["chat-client-reticulum"]
 chat-client-rns-legacy = ["chat-client", "experimental-rns-net-stack"]
 chat-client-lxmf = ["chat-client", "native-lxmf-sdk"]
 chat-client-popout = ["chat-client"]
+# Capability-negotiated room policy projection. Server authorization remains
+# unconditional, while legacy peers retain byte-exact four-field room values.
+omenchat-announcement-rooms = []
+# Capability-negotiated durable room slow-mode enforcement. Legacy peers retain
+# byte-exact four-field room values and never receive implicit enforcement.
+omenchat-slow-mode = []
+# Non-product interoperability hooks for deterministic live qualification.
+omenchat-slow-mode-qualification = ["omenchat-slow-mode"]
+# Capability-negotiated per-room upload admission. Legacy peers retain their
+# prior admission behavior and byte-exact room values.
+omenchat-room-media-policy = ["omenchat-announcement-rooms", "omenchat-slow-mode"]
+# Non-product deterministic GUI/process hooks for the production capability.
+omenchat-room-media-policy-qualification = ["omenchat-room-media-policy"]
+# Capability-negotiated, bounded, read-only moderation audit.
+omenchat-moderation-audit = []
+# Non-product process qualification for the real capability boundary.
+omenchat-moderation-audit-qualification = ["omenchat-moderation-audit"]
+# Non-product hook that forces only moderation-audit pages through Resource.
+omenchat-moderation-audit-resource-qualification = ["omenchat-moderation-audit-qualification"]
 
 # Canonical build identities. Release and packaging commands must use
 # `--no-default-features --features desktop-product`; development profiles keep
 # mock support explicit so it cannot leak into distributed binaries.
-desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite"]
-desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite"]
+desktop-product = ["chat-client-reticulum", "chat-client-gif", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-room-media-policy", "omenchat-moderation-audit"]
+desktop-product-static-media = ["chat-client-reticulum", "portable-sqlite", "desktop-qr", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-room-media-policy", "omenchat-moderation-audit"]
 desktop-dev = ["desktop-product", "mock-runtime"]
 desktop-test = ["desktop-dev", "desktop-ui-test"]
 

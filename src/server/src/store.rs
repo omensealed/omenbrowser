@@ -3,9 +3,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::OptionalExtension;
 
 use crate::error::ServerResult;
-use crate::protocol::{EventId, RoomId, UserId};
+use crate::protocol::{
+    EventId, RichMessageEventMetadata, RoomId, UserId, ROOM_POLICY_ANNOUNCEMENT,
+    ROOM_SLOW_MODE_MAX_SECONDS, ROOM_UPLOAD_MAX_FILE_BYTES,
+};
 
 pub mod durable_replay;
+pub mod history_retention;
+pub mod message_revisions;
+pub mod moderation_audit;
+pub mod pins;
+pub mod reactions;
+pub mod slow_mode;
+
+pub use history_retention::RoomHistoryRetentionPolicy;
+pub use history_retention::{RoomHistoryCompaction, RoomHistoryMaintenanceStatus};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerRoom {
@@ -13,6 +25,68 @@ pub struct ServerRoom {
     pub name: String,
     pub topic: Option<String>,
     pub room_revision: u64,
+    pub policy_bits: u64,
+    pub slow_mode_seconds: u32,
+    pub upload_max_file_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EffectiveRoomUploadPolicy {
+    Disabled,
+    MaximumFileBytes(u64),
+}
+
+impl EffectiveRoomUploadPolicy {
+    pub(crate) fn resolve(
+        configured_max_file_bytes: Option<u64>,
+        global_max_file_bytes: u64,
+    ) -> ServerResult<Self> {
+        if global_max_file_bytes > ROOM_UPLOAD_MAX_FILE_BYTES {
+            return Err(crate::error::ServerError::Message(format!(
+                "global upload file ceiling exceeds protocol maximum of {ROOM_UPLOAD_MAX_FILE_BYTES} bytes"
+            )));
+        }
+        Ok(match configured_max_file_bytes {
+            Some(0) => Self::Disabled,
+            Some(room_max) => Self::MaximumFileBytes(room_max.min(global_max_file_bytes)),
+            None if global_max_file_bytes == 0 => Self::Disabled,
+            None => Self::MaximumFileBytes(global_max_file_bytes),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomSlowModeUpdate {
+    pub previous_seconds: u32,
+    pub room: ServerRoom,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomUploadPolicyUpdate {
+    pub previous_max_file_bytes: Option<u64>,
+    pub room: ServerRoom,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RoomContentMutationAdmission {
+    Allowed,
+    RoomNotFound,
+    AnnouncementRestricted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoomPolicyUpdateBoundary {
+    BeforeCommit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoomSlowModeUpdateBoundary {
+    BeforeCommit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoomUploadPolicyUpdateBoundary {
+    BeforeCommit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +114,7 @@ pub struct ServerRoomEvent {
     pub actor_user_id: Option<UserId>,
     pub actor_display_name: Option<String>,
     pub at_unix: i64,
+    pub metadata: Option<RichMessageEventMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +154,15 @@ pub struct UploadLedgerQuotaPlan {
     pub evict_paths: Vec<std::path::PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomHistoryUsage {
+    pub event_count: u64,
+    pub retained_bytes: u64,
+    pub backfill_through_event_id: EventId,
+    pub backfill_target_event_id: EventId,
+    pub backfill_complete: bool,
+}
+
 pub struct RecordUploadFile<'a> {
     pub resource_id: &'a str,
     pub room_id: RoomId,
@@ -113,10 +197,15 @@ pub enum ServerRoomEventKind {
 pub struct OmenchatStore {
     connection: rusqlite::Connection,
     verified_upload_ledgers: std::sync::Mutex<std::collections::BTreeSet<UserId>>,
+    history_retention: RoomHistoryRetentionPolicy,
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 13;
+const ROOM_PUBLISHER_ROLE_MASK: u64 = (1 << 1) | (1 << 2);
+const HISTORY_USAGE_BACKFILL_BATCH: usize = 256;
+const HISTORY_EVENT_FIXED_RETAINED_BYTES: u64 = 64;
+const HISTORY_REPLY_RETAINED_BYTES: u64 = 8;
 
 impl OmenchatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
@@ -142,13 +231,22 @@ impl OmenchatStore {
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
-        connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+        connection.busy_timeout(Duration::ZERO)?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version != SCHEMA_VERSION {
             return Err(crate::error::ServerError::Message(format!(
                 "maintenance requires database schema version {SCHEMA_VERSION}, found {version}; start the matching omenchatd version normally to perform any supported migration first"
             )));
         }
+        connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        connection
+            .execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
+            .map_err(|error| {
+                crate::error::ServerError::Message(format!(
+                    "database maintenance could not obtain exclusive access; ensure omenchatd is stopped: {error}"
+                ))
+            })?;
+        connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         Ok(Self::from_connection(connection))
     }
 
@@ -196,7 +294,17 @@ impl OmenchatStore {
         Self {
             connection,
             verified_upload_ledgers: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            history_retention: RoomHistoryRetentionPolicy::default(),
         }
+    }
+
+    pub fn with_room_history_retention(mut self, policy: RoomHistoryRetentionPolicy) -> Self {
+        self.history_retention = policy;
+        self
+    }
+
+    pub(crate) fn room_history_retention(&self) -> RoomHistoryRetentionPolicy {
+        self.history_retention
     }
 
     fn migrate_with_sql(
@@ -204,6 +312,117 @@ impl OmenchatStore {
         backup_source: Option<&std::path::Path>,
         migration_sql: &str,
     ) -> ServerResult<()> {
+        self.migrate_with_sql_and_step(backup_source, migration_sql, ensure_event_metadata_schema)
+    }
+
+    fn migrate_with_sql_and_step<F>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_reaction_hook(
+            backup_source,
+            migration_sql,
+            schema_step,
+            |_| Ok(()),
+        )
+    }
+
+    fn migrate_with_sql_step_and_reaction_hook<F, H>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        reaction_hook: H,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            reaction_hook,
+            |_| Ok(()),
+        )
+    }
+
+    fn migrate_with_sql_step_and_hooks<F, H, R>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        reaction_hook: H,
+        revision_hook: R,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+        R: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_all_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            reaction_hook,
+            revision_hook,
+            |_| Ok(()),
+        )
+    }
+
+    fn migrate_with_sql_step_and_all_hooks<F, H, R, S>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        reaction_hook: H,
+        revision_hook: R,
+        sequence_hook: S,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+        R: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
+        S: FnMut(EventSequenceMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_history_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            MigrationHooks {
+                reaction: reaction_hook,
+                revision: revision_hook,
+                sequence: sequence_hook,
+                usage: |_| Ok(()),
+                pin: |_| Ok(()),
+                moderation_audit: |_| Ok(()),
+                room_policy: |_| Ok(()),
+            },
+        )
+    }
+
+    fn migrate_with_sql_step_and_history_hooks<F, H, R, S, U, P, A, Q>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        mut hooks: MigrationHooks<H, R, S, U, P, A, Q>,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+        R: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
+        S: FnMut(EventSequenceMigrationBoundary) -> ServerResult<()>,
+        U: FnMut(HistoryUsageMigrationBoundary) -> ServerResult<()>,
+        P: FnMut(PinMigrationBoundary) -> ServerResult<()>,
+        A: FnMut(ModerationAuditMigrationBoundary) -> ServerResult<()>,
+        Q: FnMut(RoomPolicyMigrationBoundary) -> ServerResult<()>,
+    {
         let current_version: i64 =
             self.connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -225,9 +444,115 @@ impl OmenchatStore {
             rusqlite::TransactionBehavior::Immediate,
         )?;
         transaction.execute_batch(migration_sql)?;
+        schema_step(&transaction)?;
+        ensure_reaction_schema_with_hook(&transaction, &mut hooks.reaction)?;
+        ensure_message_revision_schema_with_hook(&transaction, &mut hooks.revision)?;
+        ensure_event_sequence_schema_with_hook(&transaction, &mut hooks.sequence)?;
+        ensure_history_usage_schema_with_hook(&transaction, &mut hooks.usage)?;
+        ensure_pin_schema_with_hook(&transaction, &mut hooks.pin)?;
+        ensure_moderation_audit_schema_with_hook(&transaction, &mut hooks.moderation_audit)?;
+        ensure_room_policy_schema_with_hook(&transaction, &mut hooks.room_policy)?;
+        (hooks.reaction)(ReactionMigrationBoundary::BeforeVersionUpdate)?;
+        (hooks.revision)(MessageRevisionMigrationBoundary::BeforeVersionUpdate)?;
+        (hooks.sequence)(EventSequenceMigrationBoundary::VersionUpdate)?;
+        (hooks.usage)(HistoryUsageMigrationBoundary::VersionUpdate)?;
+        (hooks.pin)(PinMigrationBoundary::BeforeVersionUpdate)?;
+        (hooks.moderation_audit)(ModerationAuditMigrationBoundary::VersionUpdate)?;
+        (hooks.room_policy)(RoomPolicyMigrationBoundary::VersionUpdate)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        (hooks.reaction)(ReactionMigrationBoundary::BeforeCommit)?;
+        (hooks.revision)(MessageRevisionMigrationBoundary::BeforeCommit)?;
+        (hooks.sequence)(EventSequenceMigrationBoundary::Commit)?;
+        (hooks.usage)(HistoryUsageMigrationBoundary::Commit)?;
+        (hooks.pin)(PinMigrationBoundary::BeforeCommit)?;
+        (hooks.moderation_audit)(ModerationAuditMigrationBoundary::Commit)?;
+        (hooks.room_policy)(RoomPolicyMigrationBoundary::Commit)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn migrate_with_sql_step_and_pin_hook<F, P>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        pin_hook: P,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        P: FnMut(PinMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_history_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            MigrationHooks {
+                reaction: |_| Ok(()),
+                revision: |_| Ok(()),
+                sequence: |_| Ok(()),
+                usage: |_| Ok(()),
+                pin: pin_hook,
+                moderation_audit: |_| Ok(()),
+                room_policy: |_| Ok(()),
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn migrate_with_sql_step_and_moderation_audit_hook<F, A>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        moderation_audit_hook: A,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        A: FnMut(ModerationAuditMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_history_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            MigrationHooks {
+                reaction: |_| Ok(()),
+                revision: |_| Ok(()),
+                sequence: |_| Ok(()),
+                usage: |_| Ok(()),
+                pin: |_| Ok(()),
+                moderation_audit: moderation_audit_hook,
+                room_policy: |_| Ok(()),
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn migrate_with_sql_step_and_room_policy_hook<F, Q>(
+        &self,
+        backup_source: Option<&std::path::Path>,
+        migration_sql: &str,
+        schema_step: F,
+        room_policy_hook: Q,
+    ) -> ServerResult<()>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> ServerResult<()>,
+        Q: FnMut(RoomPolicyMigrationBoundary) -> ServerResult<()>,
+    {
+        self.migrate_with_sql_step_and_history_hooks(
+            backup_source,
+            migration_sql,
+            schema_step,
+            MigrationHooks {
+                reaction: |_| Ok(()),
+                revision: |_| Ok(()),
+                sequence: |_| Ok(()),
+                usage: |_| Ok(()),
+                pin: |_| Ok(()),
+                moderation_audit: |_| Ok(()),
+                room_policy: room_policy_hook,
+            },
+        )
     }
 
     pub fn ensure_room(&self, name: &str, topic: Option<&str>) -> ServerResult<ServerRoom> {
@@ -262,7 +587,8 @@ impl OmenchatStore {
 
     pub fn room_by_name(&self, name: &str) -> ServerResult<Option<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision
+            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                    upload_max_file_bytes
              FROM rooms
              WHERE name = ?1 AND archived = 0",
         )?;
@@ -272,7 +598,8 @@ impl OmenchatStore {
 
     pub fn room_by_id(&self, room_id: RoomId) -> ServerResult<Option<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision
+            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                    upload_max_file_bytes
              FROM rooms
              WHERE room_id = ?1 AND archived = 0",
         )?;
@@ -282,13 +609,93 @@ impl OmenchatStore {
 
     pub fn list_rooms(&self) -> ServerResult<Vec<ServerRoom>> {
         let mut statement = self.connection.prepare(
-            "SELECT room_id, name, topic, room_revision
+            "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                    upload_max_file_bytes
              FROM rooms
              WHERE archived = 0
              ORDER BY name",
         )?;
         let rows = statement.query_map([], room_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn effective_room_upload_policy(
+        &self,
+        room_id: RoomId,
+        global_max_file_bytes: u64,
+    ) -> ServerResult<Option<EffectiveRoomUploadPolicy>> {
+        let Some(room) = self.room_by_id(room_id)? else {
+            return Ok(None);
+        };
+        EffectiveRoomUploadPolicy::resolve(room.upload_max_file_bytes, global_max_file_bytes)
+            .map(Some)
+    }
+
+    pub fn update_room_upload_max_file_bytes(
+        &self,
+        room_id: RoomId,
+        upload_max_file_bytes: Option<u64>,
+    ) -> ServerResult<RoomUploadPolicyUpdate> {
+        self.update_room_upload_max_file_bytes_with_hook(room_id, upload_max_file_bytes, |_| Ok(()))
+    }
+
+    fn update_room_upload_max_file_bytes_with_hook<H>(
+        &self,
+        room_id: RoomId,
+        upload_max_file_bytes: Option<u64>,
+        mut hook: H,
+    ) -> ServerResult<RoomUploadPolicyUpdate>
+    where
+        H: FnMut(RoomUploadPolicyUpdateBoundary) -> ServerResult<()>,
+    {
+        if upload_max_file_bytes.is_some_and(|bytes| bytes > ROOM_UPLOAD_MAX_FILE_BYTES) {
+            return Err(crate::error::ServerError::Message(format!(
+                "room upload file ceiling exceeds protocol maximum of {ROOM_UPLOAD_MAX_FILE_BYTES} bytes"
+            )));
+        }
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let previous_max_file_bytes = transaction
+            .query_row(
+                "SELECT upload_max_file_bytes
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                |row| row.get::<_, Option<u64>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| crate::error::ServerError::Message("room not found".into()))?;
+        let changed = transaction.execute(
+            "UPDATE rooms
+             SET upload_max_file_bytes = ?2,
+                 room_revision = room_revision + CASE
+                   WHEN upload_max_file_bytes IS ?2 THEN 0 ELSE 1
+                 END
+             WHERE room_id = ?1 AND archived = 0",
+            rusqlite::params![room_id, upload_max_file_bytes],
+        )?;
+        let room = transaction
+            .query_row(
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                        upload_max_file_bytes
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                room_from_row,
+            )
+            .optional()?;
+        if changed > 1 {
+            return Err(crate::error::ServerError::Message(
+                "room upload-policy update changed more than one room".into(),
+            ));
+        }
+        hook(RoomUploadPolicyUpdateBoundary::BeforeCommit)?;
+        transaction.commit()?;
+        Ok(RoomUploadPolicyUpdate {
+            previous_max_file_bytes,
+            room: room
+                .ok_or_else(|| crate::error::ServerError::Message("room not found".into()))?,
+        })
     }
 
     pub fn update_room_topic(
@@ -305,6 +712,150 @@ impl OmenchatStore {
         self.room_by_id(room_id)?.ok_or_else(|| {
             crate::error::ServerError::Message("room was not found after topic update".into())
         })
+    }
+
+    pub fn set_room_announcement_policy(
+        &self,
+        room_id: RoomId,
+        announcement_only: bool,
+    ) -> ServerResult<ServerRoom> {
+        self.set_room_announcement_policy_with_hook(room_id, announcement_only, |_| Ok(()))
+    }
+
+    fn set_room_announcement_policy_with_hook<H>(
+        &self,
+        room_id: RoomId,
+        announcement_only: bool,
+        mut hook: H,
+    ) -> ServerResult<ServerRoom>
+    where
+        H: FnMut(RoomPolicyUpdateBoundary) -> ServerResult<()>,
+    {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let policy_bits = if announcement_only {
+            ROOM_POLICY_ANNOUNCEMENT
+        } else {
+            0
+        };
+        let changed = transaction.execute(
+            "UPDATE rooms
+             SET policy_bits = ?1, room_revision = room_revision + 1
+             WHERE room_id = ?2 AND archived = 0 AND policy_bits != ?1",
+            (policy_bits as i64, room_id as i64),
+        )?;
+        let room = transaction
+            .query_row(
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                        upload_max_file_bytes
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                room_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| crate::error::ServerError::Message("room not found".into()))?;
+        if changed > 1 {
+            return Err(crate::error::ServerError::Message(
+                "room policy update changed more than one room".into(),
+            ));
+        }
+        hook(RoomPolicyUpdateBoundary::BeforeCommit)?;
+        transaction.commit()?;
+        Ok(room)
+    }
+
+    pub fn set_room_slow_mode_seconds(
+        &self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<ServerRoom> {
+        self.update_room_slow_mode_seconds(room_id, slow_mode_seconds)
+            .map(|update| update.room)
+    }
+
+    pub fn update_room_slow_mode_seconds(
+        &self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<RoomSlowModeUpdate> {
+        self.set_room_slow_mode_seconds_with_hook(room_id, slow_mode_seconds, |_| Ok(()))
+    }
+
+    fn set_room_slow_mode_seconds_with_hook<H>(
+        &self,
+        room_id: RoomId,
+        slow_mode_seconds: u32,
+        mut hook: H,
+    ) -> ServerResult<RoomSlowModeUpdate>
+    where
+        H: FnMut(RoomSlowModeUpdateBoundary) -> ServerResult<()>,
+    {
+        if slow_mode_seconds > ROOM_SLOW_MODE_MAX_SECONDS {
+            return Err(crate::error::ServerError::Message(format!(
+                "room slow mode cannot exceed {ROOM_SLOW_MODE_MAX_SECONDS} seconds"
+            )));
+        }
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let previous_seconds = transaction
+            .query_row(
+                "SELECT slow_mode_seconds
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .ok_or_else(|| crate::error::ServerError::Message("room not found".into()))?;
+        let previous_seconds = u32::try_from(previous_seconds).map_err(|_| {
+            crate::error::ServerError::Message("stored room slow-mode interval is invalid".into())
+        })?;
+        let changed = transaction.execute(
+            "UPDATE rooms
+             SET slow_mode_seconds = ?1, room_revision = room_revision + 1
+             WHERE room_id = ?2 AND archived = 0 AND slow_mode_seconds != ?1",
+            (i64::from(slow_mode_seconds), room_id as i64),
+        )?;
+        let room = transaction
+            .query_row(
+                "SELECT room_id, name, topic, room_revision, policy_bits, slow_mode_seconds,
+                        upload_max_file_bytes
+                 FROM rooms WHERE room_id = ?1 AND archived = 0",
+                [room_id],
+                room_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| crate::error::ServerError::Message("room not found".into()))?;
+        if changed > 1 {
+            return Err(crate::error::ServerError::Message(
+                "room slow-mode update changed more than one room".into(),
+            ));
+        }
+        hook(RoomSlowModeUpdateBoundary::BeforeCommit)?;
+        transaction.commit()?;
+        Ok(RoomSlowModeUpdate {
+            previous_seconds,
+            room,
+        })
+    }
+
+    pub(crate) fn room_content_mutation_admission(
+        &self,
+        room_id: RoomId,
+        actor_role_bits: u64,
+    ) -> ServerResult<RoomContentMutationAdmission> {
+        room_content_mutation_admission_on(&self.connection, room_id, actor_role_bits)
+    }
+
+    pub(crate) fn durable_room_content_mutation_admission(
+        transaction: &rusqlite::Transaction<'_>,
+        room_id: RoomId,
+        actor_role_bits: u64,
+    ) -> ServerResult<RoomContentMutationAdmission> {
+        room_content_mutation_admission_on(transaction, room_id, actor_role_bits)
     }
 
     pub fn archive_room(&self, room_id: RoomId) -> ServerResult<()> {
@@ -485,9 +1036,56 @@ impl OmenchatStore {
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let event = append_event_in_transaction(&transaction, room_id, actor_user_id, kind)?;
+        let event = append_event_in_transaction(
+            &transaction,
+            room_id,
+            actor_user_id,
+            kind,
+            self.history_retention,
+        )?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    pub fn advance_room_history_usage(&self, room_id: RoomId) -> ServerResult<RoomHistoryUsage> {
+        let room_exists = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM rooms WHERE room_id = ?1)",
+            [room_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !room_exists {
+            return Err(crate::error::ServerError::Message(format!(
+                "room {room_id} was not found"
+            )));
+        }
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let high_water = ensure_room_event_sequence(&transaction, room_id)?;
+        ensure_room_history_usage(&transaction, room_id, high_water)?;
+        advance_room_history_usage_backfill(&transaction, room_id, HISTORY_USAGE_BACKFILL_BATCH)?;
+        let usage = room_history_usage_on(&transaction, room_id)?;
+        transaction.commit()?;
+        Ok(usage)
+    }
+
+    pub fn room_history_usage(&self, room_id: RoomId) -> ServerResult<Option<RoomHistoryUsage>> {
+        room_history_usage_optional_on(&self.connection, room_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_event_deleted_for_test(
+        &self,
+        room_id: RoomId,
+        event_id: EventId,
+    ) -> ServerResult<()> {
+        self.connection.execute(
+            "UPDATE room_events SET deleted = 1
+             WHERE room_id = ?1 AND event_id = ?2",
+            (room_id, event_id),
+        )?;
+        Ok(())
     }
 
     pub fn record_upload_file(&self, upload: RecordUploadFile<'_>) -> ServerResult<()> {
@@ -731,7 +1329,8 @@ impl OmenchatStore {
         limit: usize,
     ) -> ServerResult<Vec<ServerRoomEvent>> {
         let mut events = self.query_events(
-            "SELECT e.room_id, e.event_id, e.event_kind, e.actor_user_id, e.at, e.payload, u.display_name
+            "SELECT e.room_id, e.event_id, e.event_kind, e.actor_user_id, e.at, e.payload, u.display_name,
+                    e.reply_to_event_id, e.mention_user_ids
              FROM room_events e
              LEFT JOIN users u ON u.user_id = e.actor_user_id
              WHERE e.room_id = ?1 AND e.deleted = 0
@@ -750,7 +1349,8 @@ impl OmenchatStore {
         limit: usize,
     ) -> ServerResult<Vec<ServerRoomEvent>> {
         let mut events = self.query_events(
-            "SELECT e.room_id, e.event_id, e.event_kind, e.actor_user_id, e.at, e.payload, u.display_name
+            "SELECT e.room_id, e.event_id, e.event_kind, e.actor_user_id, e.at, e.payload, u.display_name,
+                    e.reply_to_event_id, e.mention_user_ids
              FROM room_events e
              LEFT JOIN users u ON u.user_id = e.actor_user_id
              WHERE e.room_id = ?1 AND e.event_id < ?2 AND e.deleted = 0
@@ -767,20 +1367,439 @@ impl OmenchatStore {
         P: rusqlite::Params,
     {
         let mut statement = self.connection.prepare(sql)?;
-        let rows = statement.query_map(params, |row| {
+        let mut rows = statement.query(params)?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
             let kind: i64 = row.get(2)?;
             let payload: Option<Vec<u8>> = row.get(5)?;
-            Ok(ServerRoomEvent {
+            let metadata = decode_stored_event_metadata(row.get(7)?, row.get(8)?)?;
+            events.push(ServerRoomEvent {
                 room_id: row.get::<_, i64>(0)? as RoomId,
                 event_id: row.get::<_, i64>(1)? as EventId,
                 kind: decode_event_kind(kind, payload.unwrap_or_default()),
                 actor_user_id: row.get::<_, Option<i64>>(3)?.map(|value| value as UserId),
                 actor_display_name: row.get(6)?,
                 at_unix: row.get(4)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+                metadata,
+            });
+        }
+        Ok(events)
     }
+}
+
+fn ensure_event_metadata_schema(transaction: &rusqlite::Transaction<'_>) -> ServerResult<()> {
+    let mut statement = transaction.prepare("PRAGMA table_info(room_events)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    drop(statement);
+
+    if !columns.contains("reply_to_event_id") {
+        transaction.execute_batch(
+            "ALTER TABLE room_events
+             ADD COLUMN reply_to_event_id INTEGER
+             CHECK(reply_to_event_id IS NULL OR reply_to_event_id > 0);",
+        )?;
+    }
+    if !columns.contains("mention_user_ids") {
+        transaction.execute_batch(
+            "ALTER TABLE room_events
+             ADD COLUMN mention_user_ids BLOB
+             CHECK(
+               mention_user_ids IS NULL OR (
+                 length(mention_user_ids) BETWEEN 4 AND 64
+                 AND length(mention_user_ids) % 4 = 0
+               )
+             );",
+        )?;
+    }
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_events_reply
+         ON room_events(room_id, reply_to_event_id)
+         WHERE reply_to_event_id IS NOT NULL;",
+    )?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReactionMigrationBoundary {
+    BeforeTables,
+    BetweenTables,
+    BeforeIndexes,
+    BeforeVersionUpdate,
+    BeforeCommit,
+}
+
+fn ensure_reaction_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(ReactionMigrationBoundary) -> ServerResult<()>,
+{
+    hook(ReactionMigrationBoundary::BeforeTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_reactions(
+           room_id INTEGER NOT NULL,
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           reaction_token TEXT NOT NULL CHECK(length(reaction_token) BETWEEN 1 AND 16),
+           created_at INTEGER NOT NULL,
+           PRIMARY KEY(room_id, target_event_id, actor_user_id, reaction_token)
+         );",
+    )?;
+
+    hook(ReactionMigrationBoundary::BetweenTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_reaction_events(
+           room_id INTEGER NOT NULL,
+           reaction_event_id INTEGER NOT NULL CHECK(reaction_event_id > 0),
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           reaction_token TEXT NOT NULL CHECK(length(reaction_token) BETWEEN 1 AND 16),
+           reaction_action INTEGER NOT NULL CHECK(reaction_action IN (1, 2)),
+           at INTEGER NOT NULL,
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           PRIMARY KEY(room_id, reaction_event_id)
+         );",
+    )?;
+
+    hook(ReactionMigrationBoundary::BeforeIndexes)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_reactions_target
+         ON room_reactions(room_id, target_event_id, reaction_token, actor_user_id);
+
+         CREATE INDEX IF NOT EXISTS idx_room_reaction_events_retention
+         ON room_reaction_events(at, room_id, reaction_event_id);",
+    )?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MessageRevisionMigrationBoundary {
+    BeforeTables,
+    BetweenTables,
+    BeforeIndexes,
+    BeforeVersionUpdate,
+    BeforeCommit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventSequenceMigrationBoundary {
+    Table,
+    VersionUpdate,
+    Commit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryUsageMigrationBoundary {
+    Table,
+    VersionUpdate,
+    Commit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PinMigrationBoundary {
+    BeforeTables,
+    BetweenTables,
+    BeforeIndexes,
+    BeforeVersionUpdate,
+    BeforeCommit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModerationAuditMigrationBoundary {
+    Table,
+    Indexes,
+    VersionUpdate,
+    Commit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoomPolicyMigrationBoundary {
+    PolicyColumn,
+    SlowModeColumn,
+    SlowModeTable,
+    SlowModeIndex,
+    MediaPolicyColumn,
+    VersionUpdate,
+    Commit,
+}
+
+struct MigrationHooks<H, R, S, U, P, A, Q> {
+    reaction: H,
+    revision: R,
+    sequence: S,
+    usage: U,
+    pin: P,
+    moderation_audit: A,
+    room_policy: Q,
+}
+
+fn ensure_room_policy_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(RoomPolicyMigrationBoundary) -> ServerResult<()>,
+{
+    hook(RoomPolicyMigrationBoundary::PolicyColumn)?;
+    let mut statement = transaction.prepare("PRAGMA table_info(rooms)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    drop(statement);
+    if !columns.contains("policy_bits") {
+        transaction.execute_batch(
+            "ALTER TABLE rooms
+             ADD COLUMN policy_bits INTEGER NOT NULL DEFAULT 0
+             CHECK(policy_bits >= 0 AND policy_bits <= 1);",
+        )?;
+    }
+    hook(RoomPolicyMigrationBoundary::SlowModeColumn)?;
+    if !columns.contains("slow_mode_seconds") {
+        transaction.execute_batch(
+            "ALTER TABLE rooms
+             ADD COLUMN slow_mode_seconds INTEGER NOT NULL DEFAULT 0
+             CHECK(slow_mode_seconds BETWEEN 0 AND 86400);",
+        )?;
+    }
+    hook(RoomPolicyMigrationBoundary::SlowModeTable)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_slow_mode_admissions(
+           room_id INTEGER NOT NULL,
+           user_id INTEGER NOT NULL,
+           not_before_unix INTEGER NOT NULL CHECK(not_before_unix >= 0),
+           updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+           PRIMARY KEY(room_id, user_id)
+         );",
+    )?;
+    hook(RoomPolicyMigrationBoundary::SlowModeIndex)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_slow_mode_admissions_expiry
+         ON room_slow_mode_admissions(not_before_unix, room_id, user_id);",
+    )?;
+    hook(RoomPolicyMigrationBoundary::MediaPolicyColumn)?;
+    if !columns.contains("upload_max_file_bytes") {
+        transaction.execute_batch(
+            "ALTER TABLE rooms
+             ADD COLUMN upload_max_file_bytes INTEGER DEFAULT NULL
+             CHECK(
+               upload_max_file_bytes IS NULL OR
+               upload_max_file_bytes BETWEEN 0 AND 10485760
+             );",
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_pin_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(PinMigrationBoundary) -> ServerResult<()>,
+{
+    hook(PinMigrationBoundary::BeforeTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_pins(
+           room_id INTEGER NOT NULL,
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           pin_event_id INTEGER NOT NULL CHECK(pin_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           pinned_at INTEGER NOT NULL CHECK(pinned_at >= 0),
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           PRIMARY KEY(room_id, target_event_id),
+           UNIQUE(pin_event_id)
+         );",
+    )?;
+
+    hook(PinMigrationBoundary::BetweenTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_pin_events(
+           pin_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+           room_id INTEGER NOT NULL,
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           pin_action INTEGER NOT NULL CHECK(pin_action IN (1, 2)),
+           at INTEGER NOT NULL CHECK(at >= 0),
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0)
+         );",
+    )?;
+
+    hook(PinMigrationBoundary::BeforeIndexes)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_pin_events_target
+         ON room_pin_events(room_id, target_event_id, pin_event_id);
+
+         CREATE INDEX IF NOT EXISTS idx_room_pin_events_retention
+         ON room_pin_events(at, room_id, pin_event_id);",
+    )?;
+    Ok(())
+}
+
+fn ensure_moderation_audit_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(ModerationAuditMigrationBoundary) -> ServerResult<()>,
+{
+    hook(ModerationAuditMigrationBoundary::Table)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS moderation_audit_events(
+           audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+           room_id INTEGER NOT NULL CHECK(room_id BETWEEN 1 AND 4294967295),
+           actor_user_id INTEGER NOT NULL
+             CHECK(actor_user_id BETWEEN 1 AND 4294967295),
+           actor_display_name TEXT NOT NULL
+             CHECK(length(CAST(actor_display_name AS BLOB)) BETWEEN 1 AND 256),
+           target_user_id INTEGER NOT NULL
+             CHECK(target_user_id BETWEEN 1 AND 4294967295),
+           target_display_name TEXT NOT NULL
+             CHECK(length(CAST(target_display_name AS BLOB)) BETWEEN 1 AND 256),
+           action_kind INTEGER NOT NULL CHECK(action_kind BETWEEN 1 AND 6),
+           result_role_bits INTEGER,
+           result_status_bits INTEGER,
+           committed_at INTEGER NOT NULL CHECK(committed_at >= 0),
+           retained_bytes INTEGER NOT NULL
+             CHECK(
+               retained_bytes =
+                 64
+                 + length(CAST(actor_display_name AS BLOB))
+                 + length(CAST(target_display_name AS BLOB))
+             ),
+           CHECK(
+             (action_kind = 1 AND result_role_bits IS NULL AND result_status_bits IS NULL)
+             OR
+             (action_kind IN (2, 3, 4, 5)
+               AND result_role_bits IS NULL
+               AND result_status_bits BETWEEN 0 AND 3)
+             OR
+             (action_kind = 6
+               AND result_role_bits IN (0, 1, 3, 7)
+               AND result_status_bits IS NULL)
+           ),
+           CHECK(action_kind != 2 OR (result_status_bits & 1) = 1),
+           CHECK(action_kind != 3 OR (result_status_bits & 1) = 0),
+           CHECK(action_kind != 4 OR (result_status_bits & 2) = 2),
+           CHECK(action_kind != 5 OR (result_status_bits & 2) = 0)
+         );",
+    )?;
+
+    hook(ModerationAuditMigrationBoundary::Indexes)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_moderation_audit_room_page
+         ON moderation_audit_events(room_id, audit_id DESC);
+
+         CREATE INDEX IF NOT EXISTS idx_moderation_audit_retention
+         ON moderation_audit_events(committed_at, room_id, audit_id);",
+    )?;
+    Ok(())
+}
+
+fn ensure_history_usage_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(HistoryUsageMigrationBoundary) -> ServerResult<()>,
+{
+    hook(HistoryUsageMigrationBoundary::Table)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_history_usage(
+           room_id INTEGER PRIMARY KEY,
+           event_count INTEGER NOT NULL CHECK(event_count >= 0),
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           backfill_through_event_id INTEGER NOT NULL
+             CHECK(backfill_through_event_id >= 0),
+           backfill_target_event_id INTEGER NOT NULL
+             CHECK(backfill_target_event_id >= 0),
+           backfill_complete INTEGER NOT NULL CHECK(backfill_complete IN (0, 1)),
+           last_compacted_at INTEGER,
+           CHECK(backfill_through_event_id <= backfill_target_event_id)
+         );",
+    )?;
+    Ok(())
+}
+
+fn ensure_event_sequence_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(EventSequenceMigrationBoundary) -> ServerResult<()>,
+{
+    hook(EventSequenceMigrationBoundary::Table)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_event_sequences(
+           room_id INTEGER PRIMARY KEY,
+           last_event_id INTEGER NOT NULL CHECK(last_event_id >= 0)
+         );",
+    )?;
+    Ok(())
+}
+
+fn ensure_message_revision_schema_with_hook<H>(
+    transaction: &rusqlite::Transaction<'_>,
+    hook: &mut H,
+) -> ServerResult<()>
+where
+    H: FnMut(MessageRevisionMigrationBoundary) -> ServerResult<()>,
+{
+    hook(MessageRevisionMigrationBoundary::BeforeTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_message_revision_state(
+           room_id INTEGER NOT NULL,
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           latest_revision_event_id INTEGER NOT NULL CHECK(latest_revision_event_id > 0),
+           revision_action INTEGER NOT NULL CHECK(revision_action IN (1, 2)),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           replacement_body BLOB,
+           revision_number INTEGER NOT NULL CHECK(revision_number BETWEEN 1 AND 9),
+           at INTEGER NOT NULL,
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           PRIMARY KEY(room_id, target_event_id),
+           UNIQUE(room_id, latest_revision_event_id),
+           CHECK(
+             (revision_action = 1 AND replacement_body IS NOT NULL) OR
+             (revision_action = 2 AND replacement_body IS NULL)
+           )
+         );",
+    )?;
+
+    hook(MessageRevisionMigrationBoundary::BetweenTables)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS room_message_revision_events(
+           room_id INTEGER NOT NULL,
+           revision_event_id INTEGER NOT NULL CHECK(revision_event_id > 0),
+           target_event_id INTEGER NOT NULL CHECK(target_event_id > 0),
+           actor_user_id INTEGER NOT NULL CHECK(actor_user_id > 0),
+           revision_action INTEGER NOT NULL CHECK(revision_action IN (1, 2)),
+           replacement_body BLOB,
+           revision_number INTEGER NOT NULL CHECK(revision_number BETWEEN 1 AND 9),
+           at INTEGER NOT NULL,
+           retained_bytes INTEGER NOT NULL CHECK(retained_bytes >= 0),
+           PRIMARY KEY(room_id, revision_event_id),
+           CHECK(
+             (revision_action = 1 AND replacement_body IS NOT NULL) OR
+             (revision_action = 2 AND replacement_body IS NULL)
+           )
+         );",
+    )?;
+
+    hook(MessageRevisionMigrationBoundary::BeforeIndexes)?;
+    transaction.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_room_message_revision_state_event
+         ON room_message_revision_state(room_id, latest_revision_event_id);
+
+         CREATE INDEX IF NOT EXISTS idx_room_message_revision_events_target
+         ON room_message_revision_events(room_id, target_event_id, revision_event_id);
+
+         CREATE INDEX IF NOT EXISTS idx_room_message_revision_events_retention
+         ON room_message_revision_events(at, room_id, revision_event_id);",
+    )?;
+    Ok(())
 }
 
 pub(crate) fn migration_backup_path(
@@ -853,12 +1872,48 @@ fn next_event_id(
     transaction: &rusqlite::Transaction<'_>,
     room_id: RoomId,
 ) -> ServerResult<EventId> {
-    let event_id = transaction.query_row(
-        "SELECT COALESCE(MAX(event_id), 0) + 1 FROM room_events WHERE room_id = ?1",
+    ensure_room_event_sequence(transaction, room_id)?;
+    let event_id = transaction
+        .query_row(
+            "UPDATE room_event_sequences
+             SET last_event_id = last_event_id + 1
+             WHERE room_id = ?1 AND last_event_id < 9223372036854775807
+             RETURNING last_event_id",
+            [room_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            crate::error::ServerError::Message(format!(
+                "room {room_id} event identifier space is exhausted"
+            ))
+        })?;
+    EventId::try_from(event_id).map_err(|_| {
+        crate::error::ServerError::Message(format!("room {room_id} event identifier is invalid"))
+    })
+}
+
+fn ensure_room_event_sequence(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+) -> ServerResult<EventId> {
+    transaction.execute(
+        "INSERT INTO room_event_sequences(room_id, last_event_id)
+         SELECT ?1, COALESCE(MAX(event_id), 0)
+         FROM room_events WHERE room_id = ?1
+         ON CONFLICT(room_id) DO NOTHING",
+        [room_id],
+    )?;
+    let high_water = transaction.query_row(
+        "SELECT last_event_id FROM room_event_sequences WHERE room_id = ?1",
         [room_id],
         |row| row.get::<_, i64>(0),
     )?;
-    Ok(event_id as EventId)
+    EventId::try_from(high_water).map_err(|_| {
+        crate::error::ServerError::Message(format!(
+            "room {room_id} event sequence high-water mark is invalid"
+        ))
+    })
 }
 
 fn ensure_user_on(
@@ -909,13 +1964,45 @@ fn append_event_in_transaction(
     room_id: RoomId,
     actor_user_id: Option<UserId>,
     kind: ServerRoomEventKind,
+    retention: RoomHistoryRetentionPolicy,
 ) -> ServerResult<ServerRoomEvent> {
+    append_event_with_metadata_in_transaction(
+        transaction,
+        room_id,
+        actor_user_id,
+        kind,
+        None,
+        retention,
+    )
+}
+
+pub(super) fn append_event_with_metadata_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    actor_user_id: Option<UserId>,
+    kind: ServerRoomEventKind,
+    metadata: Option<RichMessageEventMetadata>,
+    retention: RoomHistoryRetentionPolicy,
+) -> ServerResult<ServerRoomEvent> {
+    if metadata.is_some() && !matches!(kind, ServerRoomEventKind::Message { .. }) {
+        return Err(crate::error::ServerError::Message(
+            "reply and mention metadata is valid only for room messages".into(),
+        ));
+    }
+    let (reply_to_event_id, mention_user_ids) = encode_stored_event_metadata(metadata.as_ref())?;
     let event_id = next_event_id(transaction, room_id)?;
     let at_unix = current_unix_seconds();
     let (kind_code, payload) = encode_event_kind(&kind);
+    let retained_bytes = room_event_retained_bytes(
+        payload.len(),
+        reply_to_event_id.is_some(),
+        mention_user_ids.as_ref().map_or(0, Vec::len),
+    )?;
     transaction.execute(
-        "INSERT INTO room_events(room_id, event_id, event_kind, actor_user_id, at, payload)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO room_events(
+           room_id, event_id, event_kind, actor_user_id, at, payload,
+           reply_to_event_id, mention_user_ids
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         (
             room_id,
             event_id,
@@ -923,7 +2010,18 @@ fn append_event_in_transaction(
             actor_user_id,
             at_unix,
             payload,
+            reply_to_event_id,
+            mention_user_ids,
         ),
+    )?;
+    ensure_room_history_usage(transaction, room_id, event_id.saturating_sub(1))?;
+    record_new_room_history_event(transaction, room_id, retained_bytes)?;
+    advance_room_history_usage_backfill(transaction, room_id, HISTORY_USAGE_BACKFILL_BATCH)?;
+    history_retention::enforce_room_history_policy_in_transaction(
+        transaction,
+        room_id,
+        event_id,
+        retention,
     )?;
     let actor_display_name = actor_user_id
         .map(|user_id| {
@@ -944,7 +2042,305 @@ fn append_event_in_transaction(
         actor_user_id,
         actor_display_name,
         at_unix,
+        metadata,
     })
+}
+
+fn room_event_retained_bytes(
+    payload_bytes: usize,
+    has_reply: bool,
+    mention_bytes: usize,
+) -> ServerResult<u64> {
+    let payload_bytes = u64::try_from(payload_bytes).map_err(|_| {
+        crate::error::ServerError::Message("room event payload size does not fit storage".into())
+    })?;
+    let mention_bytes = u64::try_from(mention_bytes).map_err(|_| {
+        crate::error::ServerError::Message("room event mention size does not fit storage".into())
+    })?;
+    HISTORY_EVENT_FIXED_RETAINED_BYTES
+        .checked_add(payload_bytes)
+        .and_then(|bytes| bytes.checked_add(mention_bytes))
+        .and_then(|bytes| {
+            bytes.checked_add(if has_reply {
+                HISTORY_REPLY_RETAINED_BYTES
+            } else {
+                0
+            })
+        })
+        .ok_or_else(|| {
+            crate::error::ServerError::Message(
+                "room event retained-byte accounting overflowed".into(),
+            )
+        })
+}
+
+fn ensure_room_history_usage(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    backfill_target_event_id: EventId,
+) -> ServerResult<()> {
+    let target = i64::try_from(backfill_target_event_id).map_err(|_| {
+        crate::error::ServerError::Message(
+            "room history backfill target does not fit SQLite".into(),
+        )
+    })?;
+    transaction.execute(
+        "INSERT INTO room_history_usage(
+           room_id, event_count, retained_bytes,
+           backfill_through_event_id, backfill_target_event_id, backfill_complete
+         ) VALUES (?1, 0, 0, 0, ?2, CASE WHEN ?2 = 0 THEN 1 ELSE 0 END)
+         ON CONFLICT(room_id) DO NOTHING",
+        (room_id, target),
+    )?;
+    Ok(())
+}
+
+fn record_new_room_history_event(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    retained_bytes: u64,
+) -> ServerResult<()> {
+    let retained_bytes = i64::try_from(retained_bytes).map_err(|_| {
+        crate::error::ServerError::Message("room event retained bytes do not fit SQLite".into())
+    })?;
+    let changed = transaction.execute(
+        "UPDATE room_history_usage
+         SET event_count = event_count + 1,
+             retained_bytes = retained_bytes + ?2
+         WHERE room_id = ?1
+           AND event_count < 9223372036854775807
+           AND retained_bytes <= 9223372036854775807 - ?2",
+        (room_id, retained_bytes),
+    )?;
+    if changed != 1 {
+        return Err(crate::error::ServerError::Message(format!(
+            "room {room_id} history usage accounting is unavailable or exhausted"
+        )));
+    }
+    Ok(())
+}
+
+fn advance_room_history_usage_backfill(
+    transaction: &rusqlite::Transaction<'_>,
+    room_id: RoomId,
+    limit: usize,
+) -> ServerResult<usize> {
+    let (through, target, complete) = transaction.query_row(
+        "SELECT backfill_through_event_id, backfill_target_event_id, backfill_complete
+         FROM room_history_usage WHERE room_id = ?1",
+        [room_id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        },
+    )?;
+    if complete || limit == 0 {
+        return Ok(0);
+    }
+    let bounded_limit = limit.min(HISTORY_USAGE_BACKFILL_BATCH);
+    let mut statement = transaction.prepare(
+        "SELECT event_id, COALESCE(length(payload), 0),
+                reply_to_event_id IS NOT NULL,
+                COALESCE(length(mention_user_ids), 0)
+         FROM room_events
+         WHERE room_id = ?1 AND event_id > ?2 AND event_id <= ?3
+         ORDER BY event_id
+         LIMIT ?4",
+    )?;
+    let rows = statement
+        .query_map((room_id, through, target, bounded_limit as i64), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let mut added_bytes = 0u64;
+    for (_, payload_bytes, has_reply, mention_bytes) in &rows {
+        let payload_bytes = usize::try_from(*payload_bytes).map_err(|_| {
+            crate::error::ServerError::Message("stored room event payload length is invalid".into())
+        })?;
+        let mention_bytes = usize::try_from(*mention_bytes).map_err(|_| {
+            crate::error::ServerError::Message("stored room event mention length is invalid".into())
+        })?;
+        added_bytes = added_bytes
+            .checked_add(room_event_retained_bytes(
+                payload_bytes,
+                *has_reply,
+                mention_bytes,
+            )?)
+            .ok_or_else(|| {
+                crate::error::ServerError::Message(
+                    "room history backfill byte accounting overflowed".into(),
+                )
+            })?;
+    }
+    let added_items = i64::try_from(rows.len()).map_err(|_| {
+        crate::error::ServerError::Message("room history backfill count does not fit SQLite".into())
+    })?;
+    let added_bytes = i64::try_from(added_bytes).map_err(|_| {
+        crate::error::ServerError::Message("room history backfill bytes do not fit SQLite".into())
+    })?;
+    let last_seen = rows.last().map(|row| row.0).unwrap_or(target);
+    let finished = rows.len() < bounded_limit || last_seen >= target;
+    let next_through = if finished { target } else { last_seen };
+    let changed = transaction.execute(
+        "UPDATE room_history_usage
+         SET event_count = event_count + ?2,
+             retained_bytes = retained_bytes + ?3,
+             backfill_through_event_id = ?4,
+             backfill_complete = ?5
+         WHERE room_id = ?1
+           AND backfill_through_event_id = ?6
+           AND backfill_target_event_id = ?7
+           AND backfill_complete = 0
+           AND event_count <= 9223372036854775807 - ?2
+           AND retained_bytes <= 9223372036854775807 - ?3",
+        (
+            room_id,
+            added_items,
+            added_bytes,
+            next_through,
+            finished,
+            through,
+            target,
+        ),
+    )?;
+    if changed != 1 {
+        return Err(crate::error::ServerError::Message(format!(
+            "room {room_id} history backfill state changed or accounting is exhausted"
+        )));
+    }
+    Ok(rows.len())
+}
+
+fn room_history_usage_optional_on(
+    connection: &rusqlite::Connection,
+    room_id: RoomId,
+) -> ServerResult<Option<RoomHistoryUsage>> {
+    connection
+        .query_row(
+            "SELECT event_count, retained_bytes,
+                    backfill_through_event_id, backfill_target_event_id,
+                    backfill_complete
+             FROM room_history_usage WHERE room_id = ?1",
+            [room_id],
+            room_history_usage_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn room_history_usage_on(
+    connection: &rusqlite::Connection,
+    room_id: RoomId,
+) -> ServerResult<RoomHistoryUsage> {
+    room_history_usage_optional_on(connection, room_id)?.ok_or_else(|| {
+        crate::error::ServerError::Message(format!(
+            "room {room_id} history usage ledger is unavailable"
+        ))
+    })
+}
+
+fn room_history_usage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoomHistoryUsage> {
+    let event_count = row.get::<_, i64>(0)?;
+    let retained_bytes = row.get::<_, i64>(1)?;
+    let through = row.get::<_, i64>(2)?;
+    let target = row.get::<_, i64>(3)?;
+    if event_count < 0 || retained_bytes < 0 || through < 0 || target < 0 {
+        return Err(rusqlite::Error::IntegralValueOutOfRange(0, event_count));
+    }
+    Ok(RoomHistoryUsage {
+        event_count: event_count as u64,
+        retained_bytes: retained_bytes as u64,
+        backfill_through_event_id: through as EventId,
+        backfill_target_event_id: target as EventId,
+        backfill_complete: row.get(4)?,
+    })
+}
+
+fn encode_stored_event_metadata(
+    metadata: Option<&RichMessageEventMetadata>,
+) -> ServerResult<(Option<i64>, Option<Vec<u8>>)> {
+    let Some(metadata) = metadata else {
+        return Ok((None, None));
+    };
+    metadata.validate().map_err(|error| {
+        crate::error::ServerError::Message(format!(
+            "room event reply/mention metadata is invalid: {error}"
+        ))
+    })?;
+    let reply_to_event_id = metadata
+        .reply_to_event_id
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| {
+            crate::error::ServerError::Message(
+                "room event reply identifier exceeds SQLite integer range".into(),
+            )
+        })?;
+    let mention_user_ids = (!metadata.mentioned_user_ids.is_empty()).then(|| {
+        let mut encoded =
+            Vec::with_capacity(metadata.mentioned_user_ids.len() * std::mem::size_of::<UserId>());
+        for user_id in &metadata.mentioned_user_ids {
+            encoded.extend_from_slice(&user_id.to_be_bytes());
+        }
+        encoded
+    });
+    Ok((reply_to_event_id, mention_user_ids))
+}
+
+fn decode_stored_event_metadata(
+    reply_to_event_id: Option<i64>,
+    mention_user_ids: Option<Vec<u8>>,
+) -> ServerResult<Option<RichMessageEventMetadata>> {
+    if reply_to_event_id.is_none() && mention_user_ids.is_none() {
+        return Ok(None);
+    }
+    let reply_to_event_id = reply_to_event_id
+        .map(|event_id| {
+            EventId::try_from(event_id).map_err(|_| {
+                crate::error::ServerError::Message(
+                    "stored room event reply identifier is invalid".into(),
+                )
+            })
+        })
+        .transpose()?;
+    let mentioned_user_ids = match mention_user_ids {
+        None => Vec::new(),
+        Some(bytes)
+            if !bytes.is_empty()
+                && bytes.len() <= crate::protocol::RICH_MESSAGE_MAX_MENTIONS * 4
+                && bytes.len() % 4 == 0 =>
+        {
+            bytes
+                .chunks_exact(4)
+                .map(|chunk| UserId::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect()
+        }
+        Some(_) => {
+            return Err(crate::error::ServerError::Message(
+                "stored room event mention identifiers have an invalid bounded encoding".into(),
+            ))
+        }
+    };
+    let metadata = RichMessageEventMetadata {
+        reply_to_event_id,
+        mentioned_user_ids,
+    };
+    metadata.validate().map_err(|error| {
+        crate::error::ServerError::Message(format!(
+            "stored room event reply/mention metadata is invalid: {error}"
+        ))
+    })?;
+    Ok(Some(metadata))
 }
 
 fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRoom> {
@@ -953,7 +2349,33 @@ fn room_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRoom> {
         name: row.get(1)?,
         topic: row.get(2)?,
         room_revision: row.get::<_, i64>(3)? as u64,
+        policy_bits: row.get::<_, i64>(4)? as u64,
+        slow_mode_seconds: row.get::<_, i64>(5)? as u32,
+        upload_max_file_bytes: row.get(6)?,
     })
+}
+
+fn room_content_mutation_admission_on(
+    connection: &rusqlite::Connection,
+    room_id: RoomId,
+    actor_role_bits: u64,
+) -> ServerResult<RoomContentMutationAdmission> {
+    let policy_bits = connection
+        .query_row(
+            "SELECT policy_bits FROM rooms WHERE room_id = ?1 AND archived = 0",
+            [room_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(policy_bits) = policy_bits else {
+        return Ok(RoomContentMutationAdmission::RoomNotFound);
+    };
+    if policy_bits as u64 & ROOM_POLICY_ANNOUNCEMENT != 0
+        && actor_role_bits & ROOM_PUBLISHER_ROLE_MASK == 0
+    {
+        return Ok(RoomContentMutationAdmission::AnnouncementRestricted);
+    }
+    Ok(RoomContentMutationAdmission::Allowed)
 }
 
 fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerUser> {
@@ -1081,6 +2503,281 @@ mod tests {
                 Err(error) => panic!("remove isolated database: {error}"),
             }
         }
+    }
+
+    fn create_version_three_fixture(path: &std::path::Path) {
+        let connection = rusqlite::Connection::open(path).expect("version three database");
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .expect("base schema");
+        connection
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_room_events_reply;
+                 DROP TABLE IF EXISTS room_event_sequences;
+                 DROP TABLE IF EXISTS room_history_usage;
+                 DROP TABLE room_events;
+                 CREATE TABLE room_events (
+                   room_id INTEGER NOT NULL,
+                   event_id INTEGER NOT NULL,
+                   event_kind INTEGER NOT NULL,
+                   actor_user_id INTEGER,
+                   target_user_id INTEGER,
+                   at INTEGER NOT NULL,
+                   payload BLOB,
+                   deleted INTEGER NOT NULL DEFAULT 0,
+                   PRIMARY KEY(room_id, event_id)
+                 );
+                 INSERT INTO rooms(room_id, name, topic, created_at)
+                 VALUES (1, 'preserved-v3-room', 'must survive migration', 1);
+                 INSERT INTO room_events(
+                   room_id, event_id, event_kind, at, payload
+                 ) VALUES (1, 1, 1, 1, X'7072657365727665642D7633');
+                 PRAGMA user_version = 3;",
+            )
+            .expect("version three fixture");
+    }
+
+    fn create_version_four_fixture(path: &std::path::Path) {
+        let connection = rusqlite::Connection::open(path).expect("version four database");
+        connection
+            .execute_batch(include_str!("../migrations/001_init.sql"))
+            .expect("version four schema");
+        connection
+            .execute_batch(
+                "DROP TABLE IF EXISTS room_event_sequences;
+                 DROP TABLE IF EXISTS room_history_usage;
+                 INSERT INTO rooms(room_id, name, topic, created_at)
+                 VALUES (1, 'preserved-v4-room', 'must survive migration', 1);
+                 INSERT INTO room_events(
+                   room_id, event_id, event_kind, at, payload
+                 ) VALUES (1, 1, 1, 1, X'7072657365727665642D7634');
+                 INSERT INTO durable_mutation_results(
+                   identity_hash, client_instance_id, mutation_id, request_hash,
+                   result_frame, retained_bytes, created_at, last_seen_at
+                 ) VALUES (
+                   X'01', zeroblob(16), zeroblob(16), zeroblob(32),
+                   X'02', 1, 1, 1
+                 );
+                 PRAGMA user_version = 4;",
+            )
+            .expect("version four fixture");
+    }
+
+    fn create_version_five_fixture(path: &std::path::Path) {
+        create_version_four_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version five database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version five transaction");
+        ensure_reaction_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version five reaction schema");
+        transaction
+            .execute(
+                "INSERT INTO room_reactions(
+                   room_id, target_event_id, actor_user_id, reaction_token, created_at
+                 ) VALUES (1, 1, 7, 'heart', 1)",
+                [],
+            )
+            .expect("version five reaction state");
+        transaction
+            .execute(
+                "INSERT INTO room_reaction_events(
+                   room_id, reaction_event_id, target_event_id, actor_user_id,
+                   reaction_token, reaction_action, at, retained_bytes
+                 ) VALUES (1, 1, 1, 7, 'heart', 1, 1, 32)",
+                [],
+            )
+            .expect("version five reaction audit");
+        transaction
+            .pragma_update(None, "user_version", 5)
+            .expect("version five marker");
+        transaction.commit().expect("version five commit");
+    }
+
+    fn create_version_six_fixture(path: &std::path::Path) {
+        create_version_five_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version six database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version six transaction");
+        ensure_message_revision_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version six message revision schema");
+        transaction
+            .pragma_update(None, "user_version", 6)
+            .expect("version six marker");
+        transaction.commit().expect("version six commit");
+    }
+
+    fn create_version_seven_fixture(path: &std::path::Path) {
+        create_version_six_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version seven database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version seven transaction");
+        ensure_event_sequence_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version seven event sequence schema");
+        transaction
+            .pragma_update(None, "user_version", 7)
+            .expect("version seven marker");
+        transaction.commit().expect("version seven commit");
+    }
+
+    fn create_version_eight_fixture(path: &std::path::Path) {
+        create_version_seven_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version eight database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version eight transaction");
+        ensure_history_usage_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version eight history usage schema");
+        transaction
+            .pragma_update(None, "user_version", 8)
+            .expect("version eight marker");
+        transaction.commit().expect("version eight commit");
+    }
+
+    fn create_version_nine_fixture(path: &std::path::Path) {
+        create_version_eight_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version nine database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version nine transaction");
+        ensure_pin_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version nine pin schema");
+        transaction
+            .pragma_update(None, "user_version", 9)
+            .expect("version nine marker");
+        transaction.commit().expect("version nine commit");
+    }
+
+    fn create_version_ten_fixture(path: &std::path::Path) {
+        create_version_nine_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version ten database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version ten transaction");
+        ensure_moderation_audit_schema_with_hook(&transaction, &mut |_| Ok(()))
+            .expect("version ten moderation-audit schema");
+        transaction
+            .pragma_update(None, "user_version", 10)
+            .expect("version ten marker");
+        transaction.commit().expect("version ten commit");
+    }
+
+    fn create_version_eleven_fixture(path: &std::path::Path) {
+        create_version_ten_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version eleven database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version eleven transaction");
+        transaction
+            .execute_batch(
+                "ALTER TABLE rooms
+                 ADD COLUMN policy_bits INTEGER NOT NULL DEFAULT 0
+                 CHECK(policy_bits >= 0 AND policy_bits <= 1);",
+            )
+            .expect("version eleven room policy schema");
+        transaction
+            .pragma_update(None, "user_version", 11)
+            .expect("version eleven marker");
+        transaction.commit().expect("version eleven commit");
+    }
+
+    fn create_version_twelve_fixture(path: &std::path::Path) {
+        create_version_eleven_fixture(path);
+        let connection = rusqlite::Connection::open(path).expect("version twelve database");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("version twelve transaction");
+        transaction
+            .execute_batch(
+                "ALTER TABLE rooms
+                 ADD COLUMN slow_mode_seconds INTEGER NOT NULL DEFAULT 0
+                 CHECK(slow_mode_seconds BETWEEN 0 AND 86400);
+                 CREATE TABLE room_slow_mode_admissions(
+                   room_id INTEGER NOT NULL,
+                   user_id INTEGER NOT NULL,
+                   not_before_unix INTEGER NOT NULL CHECK(not_before_unix >= 0),
+                   updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+                   PRIMARY KEY(room_id, user_id)
+                 );
+                 CREATE INDEX idx_room_slow_mode_admissions_expiry
+                 ON room_slow_mode_admissions(not_before_unix, room_id, user_id);",
+            )
+            .expect("version twelve slow-mode schema");
+        transaction
+            .pragma_update(None, "user_version", 12)
+            .expect("version twelve marker");
+        transaction.commit().expect("version twelve commit");
+    }
+
+    fn schema_object_exists(connection: &rusqlite::Connection, kind: &str, name: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2
+                 )",
+                (kind, name),
+                |row| row.get(0),
+            )
+            .expect("schema object lookup")
+    }
+
+    fn room_event_columns(connection: &rusqlite::Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(room_events)")
+            .expect("room event columns");
+        statement
+            .query_map([], |row| row.get(1))
+            .expect("query room event columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect room event columns")
+    }
+
+    fn room_columns(connection: &rusqlite::Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(rooms)")
+            .expect("room columns");
+        statement
+            .query_map([], |row| row.get(1))
+            .expect("query room columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect room columns")
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct LegacyRoomEventRow {
+        room_id: i64,
+        event_id: i64,
+        event_kind: i64,
+        actor_user_id: Option<i64>,
+        target_user_id: Option<i64>,
+        at: i64,
+        payload: Option<Vec<u8>>,
+        deleted: i64,
+    }
+
+    fn legacy_room_event_row(connection: &rusqlite::Connection) -> LegacyRoomEventRow {
+        connection
+            .query_row(
+                "SELECT room_id, event_id, event_kind, actor_user_id,
+                        target_user_id, at, payload, deleted
+                 FROM room_events WHERE room_id = 1 AND event_id = 1",
+                [],
+                |row| {
+                    Ok(LegacyRoomEventRow {
+                        room_id: row.get(0)?,
+                        event_id: row.get(1)?,
+                        event_kind: row.get(2)?,
+                        actor_user_id: row.get(3)?,
+                        target_user_id: row.get(4)?,
+                        at: row.get(5)?,
+                        payload: row.get(6)?,
+                        deleted: row.get(7)?,
+                    })
+                },
+            )
+            .expect("legacy room event row")
     }
 
     fn wait_for_crash_boundary_and_kill(
@@ -1424,7 +3121,7 @@ mod tests {
             .expect("version two fixture");
         drop(connection);
 
-        let store = OmenchatStore::open(&path).expect("version three migration");
+        let store = OmenchatStore::open(&path).expect("current schema migration");
         let room_count: i64 = store
             .connection
             .query_row(
@@ -1518,6 +3215,1967 @@ mod tests {
         assert_eq!(backup_version, 2);
         assert_eq!(backup_replay_table_count, 0);
         assert_eq!(backup_client_table_count, 0);
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn version_three_database_adds_reply_metadata_without_rewriting_events() {
+        let path = isolated_database_path("v3-reply-metadata");
+        create_version_three_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version four migration");
+        let columns = room_event_columns(&store.connection);
+        assert!(columns.iter().any(|column| column == "reply_to_event_id"));
+        assert!(columns.iter().any(|column| column == "mention_user_ids"));
+        let index_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_room_events_reply'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("reply index");
+        let events = store.latest_events(1, 10).expect("preserved events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind,
+            ServerRoomEventKind::Message {
+                body: "preserved-v3".into()
+            }
+        );
+        assert_eq!(events[0].metadata, None);
+        assert_eq!(index_count, 1);
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        let backup_path = migration_backup_path(&path, 3);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version three migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            3
+        );
+        let backup_columns = room_event_columns(&backup);
+        assert!(!backup_columns
+            .iter()
+            .any(|column| column == "reply_to_event_id"));
+        assert!(!backup_columns
+            .iter()
+            .any(|column| column == "mention_user_ids"));
+        assert_eq!(
+            legacy_room_event_row(&store.connection),
+            legacy_room_event_row(&backup),
+            "every pre-v4 event column must retain its logical value"
+        );
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn version_four_database_adds_dormant_reaction_schema_without_losing_rows() {
+        let path = isolated_database_path("v4-reaction-schema");
+        create_version_four_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version five migration");
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_reactions"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_reaction_events"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "index",
+            "idx_room_reactions_target"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "index",
+            "idx_room_reaction_events_retention"
+        ));
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM rooms WHERE name = 'preserved-v4-room'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("preserved room"),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM durable_mutation_results", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved durable result"),
+            1
+        );
+
+        for statement in [
+            "INSERT INTO room_reactions(
+               room_id, target_event_id, actor_user_id, reaction_token, created_at
+             ) VALUES (1, 0, 1, 'heart', 1)",
+            "INSERT INTO room_reactions(
+               room_id, target_event_id, actor_user_id, reaction_token, created_at
+             ) VALUES (1, 1, 1, '', 1)",
+            "INSERT INTO room_reaction_events(
+               room_id, reaction_event_id, target_event_id, actor_user_id,
+               reaction_token, reaction_action, at, retained_bytes
+             ) VALUES (1, 1, 1, 1, 'heart', 3, 1, 1)",
+        ] {
+            assert!(
+                store.connection.execute(statement, []).is_err(),
+                "schema constraint must reject {statement}"
+            );
+        }
+
+        let backup_path = migration_backup_path(&path, 4);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version four migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            4
+        );
+        assert!(!schema_object_exists(&backup, "table", "room_reactions"));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_reaction_events"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_reaction_schema_fault_boundary_rolls_back_to_version_four() {
+        for boundary in [
+            ReactionMigrationBoundary::BeforeTables,
+            ReactionMigrationBoundary::BetweenTables,
+            ReactionMigrationBoundary::BeforeIndexes,
+            ReactionMigrationBoundary::BeforeVersionUpdate,
+            ReactionMigrationBoundary::BeforeCommit,
+        ] {
+            let path = isolated_database_path(&format!("v5-fault-{boundary:?}"));
+            create_version_four_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_reaction_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected reaction migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected reaction migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                4
+            );
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_reactions"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_reaction_events"
+            ));
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM rooms WHERE name = 'preserved-v4-room'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .expect("preserved room"),
+                1
+            );
+
+            let backup_path = migration_backup_path(&path, 4);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("retained version four backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                4
+            );
+            assert!(!schema_object_exists(&backup, "table", "room_reactions"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_five_database_adds_dormant_message_revision_schema_without_losing_rows() {
+        let path = isolated_database_path("v5-message-revision-schema");
+        create_version_five_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version six migration");
+        for (kind, name) in [
+            ("table", "room_message_revision_state"),
+            ("table", "room_message_revision_events"),
+            ("index", "idx_room_message_revision_state_event"),
+            ("index", "idx_room_message_revision_events_target"),
+            ("index", "idx_room_message_revision_events_retention"),
+        ] {
+            assert!(
+                schema_object_exists(&store.connection, kind, name),
+                "missing schema-6 object {name}"
+            );
+        }
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM room_reactions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved reaction state"),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM room_reaction_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved reaction audit"),
+            1
+        );
+
+        for statement in [
+            "INSERT INTO room_message_revision_state(
+               room_id, target_event_id, latest_revision_event_id, revision_action,
+               actor_user_id, replacement_body, revision_number, at, retained_bytes
+             ) VALUES (1, 0, 1, 1, 7, X'61', 1, 1, 1)",
+            "INSERT INTO room_message_revision_state(
+               room_id, target_event_id, latest_revision_event_id, revision_action,
+               actor_user_id, replacement_body, revision_number, at, retained_bytes
+             ) VALUES (1, 1, 1, 2, 7, X'61', 1, 1, 1)",
+            "INSERT INTO room_message_revision_events(
+               room_id, revision_event_id, target_event_id, actor_user_id,
+               revision_action, replacement_body, revision_number, at, retained_bytes
+             ) VALUES (1, 1, 1, 7, 1, X'61', 10, 1, 1)",
+        ] {
+            assert!(
+                store.connection.execute(statement, []).is_err(),
+                "schema constraint must reject {statement}"
+            );
+        }
+
+        let backup_path = migration_backup_path(&path, 5);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version five migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            5
+        );
+        assert!(schema_object_exists(&backup, "table", "room_reactions"));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_message_revision_state"
+        ));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_message_revision_events"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_message_revision_schema_fault_boundary_rolls_back_to_version_five() {
+        for boundary in [
+            MessageRevisionMigrationBoundary::BeforeTables,
+            MessageRevisionMigrationBoundary::BetweenTables,
+            MessageRevisionMigrationBoundary::BeforeIndexes,
+            MessageRevisionMigrationBoundary::BeforeVersionUpdate,
+            MessageRevisionMigrationBoundary::BeforeCommit,
+        ] {
+            let path = isolated_database_path(&format!("v6-fault-{boundary:?}"));
+            create_version_five_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_hooks(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |_| Ok(()),
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected message revision migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected message revision migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                5
+            );
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_reactions"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_message_revision_state"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_message_revision_events"
+            ));
+
+            let backup_path = migration_backup_path(&path, 5);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version five rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                5
+            );
+            assert!(schema_object_exists(&backup, "table", "room_reactions"));
+            assert!(!schema_object_exists(
+                &backup,
+                "table",
+                "room_message_revision_state"
+            ));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_six_database_adds_empty_room_event_sequence_schema_without_scanning_history() {
+        let path = isolated_database_path("v6-event-sequence-schema");
+        create_version_six_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version seven migration");
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_event_sequences"
+        ));
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM room_event_sequences", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("sequence row count"),
+            0,
+            "migration must not scan or eagerly seed legacy room history"
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        let room = store
+            .room_by_name("preserved-v4-room")
+            .expect("room lookup")
+            .expect("legacy room");
+        let event = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "after migration".into(),
+                },
+            )
+            .expect("append after lazy seed");
+        assert_eq!(event.event_id, 2);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT last_event_id FROM room_event_sequences WHERE room_id = ?1",
+                    [room.room_id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("sequence high-water mark"),
+            2
+        );
+
+        let backup_path = migration_backup_path(&path, 6);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version six migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            6
+        );
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_event_sequences"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_event_sequence_schema_fault_boundary_rolls_back_to_version_six() {
+        for boundary in [
+            EventSequenceMigrationBoundary::Table,
+            EventSequenceMigrationBoundary::VersionUpdate,
+            EventSequenceMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v7-fault-{boundary:?}"));
+            create_version_six_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_all_hooks(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |_| Ok(()),
+                    |_| Ok(()),
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected event sequence migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected event sequence migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                6
+            );
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_event_sequences"
+            ));
+
+            let backup_path = migration_backup_path(&path, 6);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version six rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                6
+            );
+            assert!(!schema_object_exists(
+                &backup,
+                "table",
+                "room_event_sequences"
+            ));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_seven_database_adds_empty_history_usage_without_scanning_history() {
+        let path = isolated_database_path("v7-history-usage-schema");
+        create_version_seven_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version eight migration");
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_event_sequences"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_history_usage"
+        ));
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM room_history_usage", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("usage row count"),
+            0,
+            "migration must not scan or eagerly account legacy room history"
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        let backup_path = migration_backup_path(&path, 7);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version seven migration backup");
+        assert!(schema_object_exists(
+            &backup,
+            "table",
+            "room_event_sequences"
+        ));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "room_history_usage"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_history_usage_schema_fault_boundary_rolls_back_to_version_seven() {
+        for boundary in [
+            HistoryUsageMigrationBoundary::Table,
+            HistoryUsageMigrationBoundary::VersionUpdate,
+            HistoryUsageMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v8-fault-{boundary:?}"));
+            create_version_seven_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_history_hooks(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    MigrationHooks {
+                        reaction: |_| Ok(()),
+                        revision: |_| Ok(()),
+                        sequence: |_| Ok(()),
+                        usage: |observed| {
+                            if observed == boundary {
+                                Err(crate::error::ServerError::Message(format!(
+                                    "injected history usage migration fault at {observed:?}"
+                                )))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                        pin: |_| Ok(()),
+                        moderation_audit: |_| Ok(()),
+                        room_policy: |_| Ok(()),
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected history usage migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                7
+            );
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_event_sequences"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_history_usage"
+            ));
+
+            let backup_path = migration_backup_path(&path, 7);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version seven rollback backup");
+            assert!(schema_object_exists(
+                &backup,
+                "table",
+                "room_event_sequences"
+            ));
+            assert!(!schema_object_exists(
+                &backup,
+                "table",
+                "room_history_usage"
+            ));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_eight_database_adds_empty_constrained_pin_schema_without_scanning_history() {
+        let path = isolated_database_path("v8-pin-schema");
+        create_version_eight_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version nine migration");
+        for (kind, name) in [
+            ("table", "room_pins"),
+            ("table", "room_pin_events"),
+            ("index", "idx_room_pin_events_target"),
+            ("index", "idx_room_pin_events_retention"),
+        ] {
+            assert!(
+                schema_object_exists(&store.connection, kind, name),
+                "missing schema-9 object {name}"
+            );
+        }
+        assert_eq!(
+            store.pin_row_counts().expect("pin row counts"),
+            (0, 0),
+            "migration must not scan or synthesize pin state"
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        for statement in [
+            "INSERT INTO room_pins(
+               room_id, target_event_id, pin_event_id, actor_user_id,
+               pinned_at, retained_bytes
+             ) VALUES (1, 0, 1, 7, 1, 32)",
+            "INSERT INTO room_pin_events(
+               room_id, target_event_id, actor_user_id, pin_action, at, retained_bytes
+             ) VALUES (1, 1, 7, 3, 1, 41)",
+            "INSERT INTO room_pin_events(
+               room_id, target_event_id, actor_user_id, pin_action, at, retained_bytes
+             ) VALUES (1, 1, 7, 1, -1, 41)",
+        ] {
+            assert!(
+                store.connection.execute(statement, []).is_err(),
+                "schema constraint must reject {statement}"
+            );
+        }
+
+        let backup_path = migration_backup_path(&path, 8);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version eight migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            8
+        );
+        assert!(!schema_object_exists(&backup, "table", "room_pins"));
+        assert!(!schema_object_exists(&backup, "table", "room_pin_events"));
+        assert!(schema_object_exists(&backup, "table", "room_history_usage"));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_pin_schema_fault_boundary_rolls_back_to_version_eight() {
+        for boundary in [
+            PinMigrationBoundary::BeforeTables,
+            PinMigrationBoundary::BetweenTables,
+            PinMigrationBoundary::BeforeIndexes,
+            PinMigrationBoundary::BeforeVersionUpdate,
+            PinMigrationBoundary::BeforeCommit,
+        ] {
+            let path = isolated_database_path(&format!("v9-fault-{boundary:?}"));
+            create_version_eight_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_pin_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected pin migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected pin migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                8
+            );
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_pins"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_pin_events"
+            ));
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_history_usage"
+            ));
+
+            let backup_path = migration_backup_path(&path, 8);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version eight rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                8
+            );
+            assert!(!schema_object_exists(&backup, "table", "room_pins"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_nine_database_adds_empty_constrained_moderation_audit_schema() {
+        let path = isolated_database_path("v9-moderation-audit-schema");
+        create_version_nine_fixture(&path);
+
+        let store = OmenchatStore::open(&path).expect("version ten migration");
+        for (kind, name) in [
+            ("table", "moderation_audit_events"),
+            ("index", "idx_moderation_audit_room_page"),
+            ("index", "idx_moderation_audit_retention"),
+        ] {
+            assert!(
+                schema_object_exists(&store.connection, kind, name),
+                "missing schema-10 object {name}"
+            );
+        }
+        assert_eq!(
+            store
+                .moderation_audit_row_count()
+                .expect("moderation audit row count"),
+            0,
+            "migration must not synthesize moderation history"
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+
+        for statement in [
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (1, 2, 'Actor', 3, 'Target', 2, NULL, 0, 1, 75)",
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (1, 2, '', 3, 'Target', 1, NULL, NULL, 1, 70)",
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (1, 2, 'Actor', 3, 'Target', 6, 2, NULL, 1, 75)",
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (1, 2, 'Actor', 3, 'Target', 1, NULL, NULL, 1, 76)",
+            "INSERT INTO moderation_audit_events(
+               room_id, actor_user_id, actor_display_name,
+               target_user_id, target_display_name, action_kind,
+               result_role_bits, result_status_bits, committed_at, retained_bytes
+             ) VALUES (4294967296, 2, 'Actor', 3, 'Target', 1, NULL, NULL, 1, 75)",
+        ] {
+            assert!(
+                store.connection.execute(statement, []).is_err(),
+                "schema constraint must reject {statement}"
+            );
+        }
+
+        let backup_path = migration_backup_path(&path, 9);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version nine migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            9
+        );
+        assert!(schema_object_exists(&backup, "table", "room_pins"));
+        assert!(!schema_object_exists(
+            &backup,
+            "table",
+            "moderation_audit_events"
+        ));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_moderation_audit_schema_fault_boundary_rolls_back_to_version_nine() {
+        for boundary in [
+            ModerationAuditMigrationBoundary::Table,
+            ModerationAuditMigrationBoundary::Indexes,
+            ModerationAuditMigrationBoundary::VersionUpdate,
+            ModerationAuditMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v10-fault-{boundary:?}"));
+            create_version_nine_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_moderation_audit_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected moderation audit migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected schema migration failure")
+                .to_string();
+            assert!(error.contains("injected moderation audit migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                9
+            );
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_pins"
+            ));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "moderation_audit_events"
+            ));
+
+            let backup_path = migration_backup_path(&path, 9);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version nine rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                9
+            );
+            assert!(schema_object_exists(&backup, "table", "room_pins"));
+            assert!(!schema_object_exists(
+                &backup,
+                "table",
+                "moderation_audit_events"
+            ));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_ten_database_adds_constrained_room_policy_and_slow_mode_storage() {
+        let path = isolated_database_path("v10-room-policy-schema");
+        create_version_ten_fixture(&path);
+        {
+            let connection = rusqlite::Connection::open(&path).expect("version ten fixture");
+            connection
+                .execute(
+                    "INSERT INTO rooms(name, topic, created_at)
+                     VALUES ('preserved-v10-room', 'ordinary after migration', 1)",
+                    [],
+                )
+                .expect("version ten room");
+        }
+
+        let store = OmenchatStore::open(&path).expect("version eleven migration");
+        assert!(room_columns(&store.connection)
+            .iter()
+            .any(|column| column == "policy_bits"));
+        assert!(room_columns(&store.connection)
+            .iter()
+            .any(|column| column == "slow_mode_seconds"));
+        assert!(schema_object_exists(
+            &store.connection,
+            "table",
+            "room_slow_mode_admissions"
+        ));
+        assert!(schema_object_exists(
+            &store.connection,
+            "index",
+            "idx_room_slow_mode_admissions_expiry"
+        ));
+        let room = store
+            .room_by_name("preserved-v10-room")
+            .expect("room lookup")
+            .expect("preserved room");
+        assert_eq!(room.policy_bits, 0);
+        assert_eq!(room.slow_mode_seconds, 0);
+        assert_eq!(room.upload_max_file_bytes, None);
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE rooms SET policy_bits = 2 WHERE room_id = ?1",
+                [room.room_id],
+            )
+            .is_err());
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE rooms SET slow_mode_seconds = 86401 WHERE room_id = ?1",
+                [room.room_id],
+            )
+            .is_err());
+
+        let backup_path = migration_backup_path(&path, 10);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version ten migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            10
+        );
+        assert!(!room_columns(&backup)
+            .iter()
+            .any(|column| column == "policy_bits"));
+        assert!(!room_columns(&backup)
+            .iter()
+            .any(|column| column == "slow_mode_seconds"));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_room_policy_schema_fault_boundary_rolls_back_to_version_ten() {
+        for boundary in [
+            RoomPolicyMigrationBoundary::PolicyColumn,
+            RoomPolicyMigrationBoundary::SlowModeColumn,
+            RoomPolicyMigrationBoundary::SlowModeTable,
+            RoomPolicyMigrationBoundary::SlowModeIndex,
+            RoomPolicyMigrationBoundary::MediaPolicyColumn,
+            RoomPolicyMigrationBoundary::VersionUpdate,
+            RoomPolicyMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v11-fault-{boundary:?}"));
+            create_version_ten_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_room_policy_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected room policy migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected room policy migration failure")
+                .to_string();
+            assert!(error.contains("injected room policy migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                10
+            );
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "policy_bits"));
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_slow_mode_admissions"
+            ));
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "moderation_audit_events"
+            ));
+
+            let backup_path = migration_backup_path(&path, 10);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version ten rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                10
+            );
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "policy_bits"));
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn every_slow_mode_schema_fault_boundary_rolls_back_to_version_eleven() {
+        for boundary in [
+            RoomPolicyMigrationBoundary::SlowModeColumn,
+            RoomPolicyMigrationBoundary::SlowModeTable,
+            RoomPolicyMigrationBoundary::SlowModeIndex,
+            RoomPolicyMigrationBoundary::VersionUpdate,
+            RoomPolicyMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v12-fault-{boundary:?}"));
+            create_version_eleven_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_room_policy_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected slow-mode migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected slow-mode migration failure")
+                .to_string();
+            assert!(error.contains("injected slow-mode migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                11
+            );
+            assert!(room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "policy_bits"));
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+            assert!(!schema_object_exists(
+                &store.connection,
+                "table",
+                "room_slow_mode_admissions"
+            ));
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
+
+            let backup_path = migration_backup_path(&path, 11);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version eleven rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                11
+            );
+            assert!(room_columns(&backup)
+                .iter()
+                .any(|column| column == "policy_bits"));
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn version_twelve_database_adds_nullable_constrained_room_upload_policy() {
+        let path = isolated_database_path("v12-room-media-policy-schema");
+        create_version_twelve_fixture(&path);
+        {
+            let connection = rusqlite::Connection::open(&path).expect("version twelve fixture");
+            connection
+                .execute(
+                    "UPDATE rooms
+                     SET policy_bits = 1, slow_mode_seconds = 30
+                     WHERE room_id = 1",
+                    [],
+                )
+                .expect("preserved room policy");
+            connection
+                .execute(
+                    "INSERT INTO room_slow_mode_admissions(
+                       room_id, user_id, not_before_unix, updated_at
+                     ) VALUES (1, 7, 130, 100)",
+                    [],
+                )
+                .expect("preserved slow-mode admission");
+            connection
+                .execute(
+                    "INSERT INTO upload_files(
+                       resource_id, room_id, actor_user_id, filename,
+                       content_type, byte_len, path, created_at
+                     ) VALUES (
+                       'preserved-v12-upload', 1, 7, 'fixture.bin',
+                       'application/octet-stream', 3, '/isolated/fixture.bin', 1
+                     )",
+                    [],
+                )
+                .expect("preserved upload ledger");
+        }
+
+        let store = OmenchatStore::open(&path).expect("version thirteen migration");
+        let room = store.room_by_id(1).expect("room lookup").expect("room");
+        assert_eq!(room.policy_bits, ROOM_POLICY_ANNOUNCEMENT);
+        assert_eq!(room.slow_mode_seconds, 30);
+        assert_eq!(room.upload_max_file_bytes, None);
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            SCHEMA_VERSION
+        );
+        for invalid in [-1_i64, 10 * 1024 * 1024 + 1] {
+            assert!(store
+                .connection
+                .execute(
+                    "UPDATE rooms SET upload_max_file_bytes = ?1 WHERE room_id = 1",
+                    [invalid],
+                )
+                .is_err());
+        }
+        for valid in [0_i64, 1, 10 * 1024 * 1024] {
+            store
+                .connection
+                .execute(
+                    "UPDATE rooms SET upload_max_file_bytes = ?1 WHERE room_id = 1",
+                    [valid],
+                )
+                .expect("valid room upload ceiling");
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE rooms SET upload_max_file_bytes = NULL WHERE room_id = 1",
+                [],
+            )
+            .expect("inherited room upload ceiling");
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM room_slow_mode_admissions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("slow-mode row count"),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM upload_files", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("upload row count"),
+            1
+        );
+
+        let backup_path = migration_backup_path(&path, 12);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("version twelve migration backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            12
+        );
+        assert!(!room_columns(&backup)
+            .iter()
+            .any(|column| column == "upload_max_file_bytes"));
+        assert!(room_columns(&backup)
+            .iter()
+            .any(|column| column == "slow_mode_seconds"));
+        assert_eq!(
+            backup
+                .query_row(
+                    "SELECT policy_bits, slow_mode_seconds FROM rooms WHERE room_id = 1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("preserved room policy"),
+            (1, 30)
+        );
+        assert_eq!(
+            backup
+                .query_row("SELECT COUNT(*) FROM upload_files", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("preserved upload count"),
+            1
+        );
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn effective_room_upload_policy_is_store_owned_bounded_and_persistent() {
+        let path = isolated_database_path("effective-room-upload-policy");
+        let store = OmenchatStore::open(&path).expect("store");
+        let room = store.ensure_room("policy-room", None).expect("policy room");
+
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 512 * 1024)
+                .expect("inherited policy"),
+            Some(EffectiveRoomUploadPolicy::MaximumFileBytes(512 * 1024))
+        );
+        let limited = store
+            .update_room_upload_max_file_bytes(room.room_id, Some(256 * 1024))
+            .expect("limited policy")
+            .room;
+        assert_eq!(limited.room_revision, room.room_revision + 1);
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 512 * 1024)
+                .expect("room-limited policy"),
+            Some(EffectiveRoomUploadPolicy::MaximumFileBytes(256 * 1024))
+        );
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 128 * 1024)
+                .expect("global-limited policy"),
+            Some(EffectiveRoomUploadPolicy::MaximumFileBytes(128 * 1024))
+        );
+        let unchanged = store
+            .update_room_upload_max_file_bytes(room.room_id, Some(256 * 1024))
+            .expect("idempotent policy")
+            .room;
+        assert_eq!(unchanged.room_revision, limited.room_revision);
+        store
+            .update_room_upload_max_file_bytes(room.room_id, Some(0))
+            .expect("disabled policy");
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 512 * 1024)
+                .expect("disabled policy"),
+            Some(EffectiveRoomUploadPolicy::Disabled)
+        );
+        store
+            .update_room_upload_max_file_bytes(room.room_id, None)
+            .expect("inherit policy");
+        assert_eq!(
+            store
+                .effective_room_upload_policy(room.room_id, 0)
+                .expect("globally disabled policy"),
+            Some(EffectiveRoomUploadPolicy::Disabled)
+        );
+        assert!(store
+            .effective_room_upload_policy(room.room_id, ROOM_UPLOAD_MAX_FILE_BYTES + 1)
+            .is_err());
+        assert!(store
+            .update_room_upload_max_file_bytes(room.room_id, Some(ROOM_UPLOAD_MAX_FILE_BYTES + 1))
+            .is_err());
+        assert_eq!(
+            store
+                .effective_room_upload_policy(u32::MAX, 512 * 1024)
+                .expect("missing room"),
+            None
+        );
+        drop(store);
+
+        let reopened = OmenchatStore::open(&path).expect("reopened store");
+        assert_eq!(
+            reopened
+                .effective_room_upload_policy(room.room_id, 512 * 1024)
+                .expect("restarted inherited policy"),
+            Some(EffectiveRoomUploadPolicy::MaximumFileBytes(512 * 1024))
+        );
+        drop(reopened);
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn every_media_policy_schema_fault_boundary_rolls_back_to_version_twelve() {
+        for boundary in [
+            RoomPolicyMigrationBoundary::MediaPolicyColumn,
+            RoomPolicyMigrationBoundary::VersionUpdate,
+            RoomPolicyMigrationBoundary::Commit,
+        ] {
+            let path = isolated_database_path(&format!("v13-fault-{boundary:?}"));
+            create_version_twelve_fixture(&path);
+            let connection = rusqlite::Connection::open(&path).expect("migration connection");
+            configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT)
+                .expect("connection policy");
+            let store = OmenchatStore::from_connection(connection);
+            let error = store
+                .migrate_with_sql_step_and_room_policy_hook(
+                    Some(&path),
+                    include_str!("../migrations/001_init.sql"),
+                    ensure_event_metadata_schema,
+                    |observed| {
+                        if observed == boundary {
+                            Err(crate::error::ServerError::Message(format!(
+                                "injected media-policy migration fault at {observed:?}"
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .expect_err("injected media-policy migration failure")
+                .to_string();
+            assert!(error.contains("injected media-policy migration fault"));
+            assert_eq!(
+                store
+                    .connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("rolled-back version"),
+                12
+            );
+            assert!(!room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
+            assert!(room_columns(&store.connection)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+            assert!(schema_object_exists(
+                &store.connection,
+                "table",
+                "room_slow_mode_admissions"
+            ));
+
+            let backup_path = migration_backup_path(&path, 12);
+            let backup = rusqlite::Connection::open_with_flags(
+                &backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("version twelve rollback backup");
+            assert_eq!(
+                backup
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .expect("backup version"),
+                12
+            );
+            assert!(!room_columns(&backup)
+                .iter()
+                .any(|column| column == "upload_max_file_bytes"));
+            assert!(room_columns(&backup)
+                .iter()
+                .any(|column| column == "slow_mode_seconds"));
+
+            drop(backup);
+            drop(store);
+            std::fs::remove_file(backup_path).expect("remove migration backup");
+            remove_database_files(&path);
+        }
+    }
+
+    #[test]
+    fn room_policy_update_is_atomic_idempotent_and_persists_across_restart() {
+        let path = isolated_database_path("room-policy-update");
+        let store = OmenchatStore::open(&path).expect("store");
+        let room = store
+            .ensure_room("policy-room", Some("policy"))
+            .expect("room");
+        assert_eq!(room.policy_bits, 0);
+
+        let announcement = store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+        assert_eq!(announcement.policy_bits, ROOM_POLICY_ANNOUNCEMENT);
+        assert_eq!(announcement.room_revision, room.room_revision + 1);
+        let unchanged = store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("idempotent policy");
+        assert_eq!(unchanged.room_revision, announcement.room_revision);
+        drop(store);
+
+        let reopened = OmenchatStore::open(&path).expect("reopened store");
+        let persisted = reopened
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("persisted room");
+        assert_eq!(persisted.policy_bits, ROOM_POLICY_ANNOUNCEMENT);
+        assert_eq!(persisted.room_revision, announcement.room_revision);
+        drop(reopened);
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn room_policy_update_failure_rolls_back_policy_and_revision_together() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("policy-rollback", None).expect("room");
+        let error = store
+            .set_room_announcement_policy_with_hook(room.room_id, true, |boundary| {
+                assert_eq!(boundary, RoomPolicyUpdateBoundary::BeforeCommit);
+                Err(crate::error::ServerError::Message(
+                    "injected policy update failure".into(),
+                ))
+            })
+            .expect_err("injected update failure")
+            .to_string();
+        assert!(error.contains("injected policy update failure"));
+        let unchanged = store
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("room");
+        assert_eq!(unchanged.policy_bits, 0);
+        assert_eq!(unchanged.room_revision, room.room_revision);
+    }
+
+    #[test]
+    fn slow_mode_update_is_bounded_atomic_idempotent_and_persistent() {
+        let path = isolated_database_path("slow-mode-update");
+        let store = OmenchatStore::open(&path).expect("store");
+        let room = store.ensure_room("slow-update", None).expect("room");
+        assert_eq!(room.slow_mode_seconds, 0);
+
+        let enabled = store
+            .update_room_slow_mode_seconds(room.room_id, 30)
+            .expect("enable slow mode");
+        assert_eq!(enabled.previous_seconds, 0);
+        assert_eq!(enabled.room.slow_mode_seconds, 30);
+        assert_eq!(enabled.room.room_revision, room.room_revision + 1);
+        let unchanged = store
+            .update_room_slow_mode_seconds(room.room_id, 30)
+            .expect("idempotent update");
+        assert_eq!(unchanged.previous_seconds, 30);
+        assert_eq!(unchanged.room.room_revision, enabled.room.room_revision);
+        assert!(store
+            .set_room_slow_mode_seconds(room.room_id, ROOM_SLOW_MODE_MAX_SECONDS + 1)
+            .is_err());
+        drop(store);
+
+        let reopened = OmenchatStore::open(&path).expect("reopened store");
+        let persisted = reopened
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("persisted room");
+        assert_eq!(persisted.slow_mode_seconds, 30);
+        assert_eq!(persisted.room_revision, enabled.room.room_revision);
+        drop(reopened);
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn slow_mode_update_failure_rolls_back_interval_and_revision_together() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("slow-rollback", None).expect("room");
+        let error = store
+            .set_room_slow_mode_seconds_with_hook(room.room_id, 30, |boundary| {
+                assert_eq!(boundary, RoomSlowModeUpdateBoundary::BeforeCommit);
+                Err(crate::error::ServerError::Message(
+                    "injected slow-mode update failure".into(),
+                ))
+            })
+            .expect_err("injected update failure")
+            .to_string();
+        assert!(error.contains("injected slow-mode update failure"));
+        let unchanged = store
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("room");
+        assert_eq!(unchanged.slow_mode_seconds, 0);
+        assert_eq!(unchanged.room_revision, room.room_revision);
+    }
+
+    #[test]
+    fn room_upload_policy_update_is_atomic_idempotent_and_rolls_back_on_fault() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store
+            .ensure_room("upload-policy-update", None)
+            .expect("room");
+        let limited = store
+            .update_room_upload_max_file_bytes(room.room_id, Some(256 * 1024))
+            .expect("limited policy");
+        assert_eq!(limited.previous_max_file_bytes, None);
+        assert_eq!(limited.room.upload_max_file_bytes, Some(256 * 1024));
+        assert_eq!(limited.room.room_revision, room.room_revision + 1);
+        let unchanged = store
+            .update_room_upload_max_file_bytes(room.room_id, Some(256 * 1024))
+            .expect("idempotent policy");
+        assert_eq!(unchanged.previous_max_file_bytes, Some(256 * 1024));
+        assert_eq!(unchanged.room.room_revision, limited.room.room_revision);
+
+        let error = store
+            .update_room_upload_max_file_bytes_with_hook(
+                room.room_id,
+                Some(128 * 1024),
+                |boundary| {
+                    assert_eq!(boundary, RoomUploadPolicyUpdateBoundary::BeforeCommit);
+                    Err(crate::error::ServerError::Message(
+                        "injected room upload-policy update failure".into(),
+                    ))
+                },
+            )
+            .expect_err("injected update failure")
+            .to_string();
+        assert!(error.contains("injected room upload-policy update failure"));
+        let rolled_back = store
+            .room_by_id(room.room_id)
+            .expect("room lookup")
+            .expect("room");
+        assert_eq!(rolled_back.upload_max_file_bytes, Some(256 * 1024));
+        assert_eq!(rolled_back.room_revision, limited.room.room_revision);
+        assert!(store
+            .update_room_upload_max_file_bytes(u32::MAX, None)
+            .is_err());
+    }
+
+    #[test]
+    fn room_content_policy_uses_current_role_and_transaction_state() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("policy-admission", None).expect("room");
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 0)
+                .expect("ordinary admission"),
+            RoomContentMutationAdmission::Allowed
+        );
+        store
+            .set_room_announcement_policy(room.room_id, true)
+            .expect("announcement policy");
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 0)
+                .expect("member admission"),
+            RoomContentMutationAdmission::AnnouncementRestricted
+        );
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 1)
+                .expect("trusted admission"),
+            RoomContentMutationAdmission::AnnouncementRestricted
+        );
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 1 << 1)
+                .expect("moderator admission"),
+            RoomContentMutationAdmission::Allowed
+        );
+        assert_eq!(
+            store
+                .room_content_mutation_admission(room.room_id, 1 << 2)
+                .expect("administrator admission"),
+            RoomContentMutationAdmission::Allowed
+        );
+        assert_eq!(
+            store
+                .room_content_mutation_admission(u32::MAX, 1 << 2)
+                .expect("missing admission"),
+            RoomContentMutationAdmission::RoomNotFound
+        );
+    }
+
+    #[test]
+    fn room_policy_maintenance_refuses_an_active_writer_and_succeeds_after_release() {
+        let path = isolated_database_path("room-policy-exclusive-maintenance");
+        let store = OmenchatStore::open(&path).expect("active store");
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .expect("active writer");
+        let error = match OmenchatStore::open_existing_for_maintenance(&path) {
+            Ok(_) => panic!("maintenance must not overlap an active writer"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("exclusive access"));
+        transaction.rollback().expect("release writer");
+        drop(store);
+
+        let maintenance =
+            OmenchatStore::open_existing_for_maintenance(&path).expect("exclusive maintenance");
+        drop(maintenance);
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn version_four_metadata_round_trips_and_rejects_invalid_storage_shapes() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let metadata = RichMessageEventMetadata {
+            reply_to_event_id: Some(41),
+            mentioned_user_ids: vec![2, 9],
+        };
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .expect("metadata transaction");
+        let event = append_event_with_metadata_in_transaction(
+            &transaction,
+            1,
+            None,
+            ServerRoomEventKind::Message {
+                body: "rich body".into(),
+            },
+            Some(metadata.clone()),
+            RoomHistoryRetentionPolicy::default(),
+        )
+        .expect("append rich event");
+        transaction.commit().expect("commit rich event");
+        assert_eq!(event.metadata, Some(metadata.clone()));
+        assert_eq!(
+            store.latest_events(1, 10).expect("stored rich event")[0].metadata,
+            Some(metadata)
+        );
+        let stored: (i64, Vec<u8>) = store
+            .connection
+            .query_row(
+                "SELECT reply_to_event_id, mention_user_ids
+                 FROM room_events WHERE room_id = 1 AND event_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("stored metadata");
+        assert_eq!(stored.0, 41);
+        assert_eq!(
+            stored.1,
+            [2_u32.to_be_bytes(), 9_u32.to_be_bytes()].concat()
+        );
+
+        let legacy = store
+            .append_event(
+                1,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "legacy body".into(),
+                },
+            )
+            .expect("ordinary event");
+        assert_eq!(legacy.metadata, None);
+        let legacy_metadata: (Option<i64>, Option<Vec<u8>>) = store
+            .connection
+            .query_row(
+                "SELECT reply_to_event_id, mention_user_ids
+                 FROM room_events WHERE room_id = 1 AND event_id = 2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("ordinary stored metadata");
+        assert_eq!(legacy_metadata, (None, None));
+
+        for malformed in [
+            Vec::new(),
+            vec![0; 3],
+            vec![0; 68],
+            [1_u32.to_be_bytes(), 1_u32.to_be_bytes()].concat(),
+            0_u32.to_be_bytes().to_vec(),
+        ] {
+            assert!(decode_stored_event_metadata(None, Some(malformed)).is_err());
+        }
+        assert!(decode_stored_event_metadata(Some(0), None).is_err());
+    }
+
+    #[test]
+    fn metadata_is_rejected_for_non_message_events_before_insert() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .expect("metadata transaction");
+        let error = append_event_with_metadata_in_transaction(
+            &transaction,
+            1,
+            None,
+            ServerRoomEventKind::Notice {
+                body: "notice".into(),
+            },
+            Some(RichMessageEventMetadata {
+                reply_to_event_id: Some(1),
+                mentioned_user_ids: Vec::new(),
+            }),
+            RoomHistoryRetentionPolicy::default(),
+        )
+        .expect_err("notice metadata must fail")
+        .to_string();
+        assert!(error.contains("only for room messages"));
+        drop(transaction);
+        assert!(store.latest_events(1, 10).expect("events").is_empty());
+    }
+
+    #[test]
+    fn failed_version_four_schema_step_rolls_back_and_retains_v3_backup() {
+        let path = isolated_database_path("v4-migration-rollback");
+        create_version_three_fixture(&path);
+        let connection = rusqlite::Connection::open(&path).expect("migration connection");
+        configure_connection(&connection, true, SQLITE_BUSY_TIMEOUT).expect("connection policy");
+        let store = OmenchatStore::from_connection(connection);
+        let error = store
+            .migrate_with_sql_and_step(
+                Some(&path),
+                include_str!("../migrations/001_init.sql"),
+                |transaction| {
+                    transaction.execute_batch(
+                        "ALTER TABLE room_events
+                         ADD COLUMN reply_to_event_id INTEGER;
+                         INSERT INTO missing_v4_table(value) VALUES ('fail');",
+                    )?;
+                    Ok(())
+                },
+            )
+            .expect_err("injected version four migration failure");
+        assert!(matches!(error, crate::error::ServerError::Sqlite(_)));
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("source version"),
+            3
+        );
+        assert!(!room_event_columns(&store.connection)
+            .iter()
+            .any(|column| column == "reply_to_event_id"));
+        let payload: Vec<u8> = store
+            .connection
+            .query_row(
+                "SELECT payload FROM room_events WHERE room_id = 1 AND event_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved source payload");
+        assert_eq!(payload, b"preserved-v3");
+
+        let backup_path = migration_backup_path(&path, 3);
+        let backup = rusqlite::Connection::open_with_flags(
+            &backup_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("retained version three backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup version"),
+            3
+        );
 
         drop(backup);
         drop(store);
@@ -1697,6 +5355,389 @@ mod tests {
         assert_eq!(event_ids, (1..=WRITERS as EventId).collect::<Vec<_>>());
 
         remove_database_files(&path);
+    }
+
+    #[test]
+    fn room_event_sequence_never_reuses_deleted_newest_or_all_event_ids() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("sequence", None).expect("room");
+        for body in ["one", "two", "three"] {
+            store
+                .append_event(
+                    room.room_id,
+                    None,
+                    ServerRoomEventKind::Message { body: body.into() },
+                )
+                .expect("append");
+        }
+        store
+            .connection
+            .execute(
+                "DELETE FROM room_events WHERE room_id = ?1 AND event_id = 3",
+                [room.room_id],
+            )
+            .expect("delete newest");
+        let fourth = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "four".into(),
+                },
+            )
+            .expect("append after newest deletion");
+        assert_eq!(fourth.event_id, 4);
+
+        store
+            .connection
+            .execute("DELETE FROM room_events WHERE room_id = ?1", [room.room_id])
+            .expect("delete all retained history");
+        let fifth = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "five".into(),
+                },
+            )
+            .expect("append after all history deletion");
+        assert_eq!(fifth.event_id, 5);
+    }
+
+    #[test]
+    fn room_event_sequence_exhaustion_fails_without_wrapping_or_inserting() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("exhausted", None).expect("room");
+        store
+            .connection
+            .execute(
+                "INSERT INTO room_event_sequences(room_id, last_event_id)
+                 VALUES (?1, 9223372036854775807)",
+                [room.room_id],
+            )
+            .expect("seed exhausted sequence");
+        let error = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "must fail".into(),
+                },
+            )
+            .expect_err("exhausted sequence must fail")
+            .to_string();
+        assert!(error.contains("event identifier space is exhausted"));
+        assert!(store
+            .latest_events(room.room_id, 10)
+            .expect("history")
+            .is_empty());
+    }
+
+    #[test]
+    fn retained_history_reopens_with_monotonic_ids_and_pages_across_gaps() {
+        let path = isolated_database_path("history-retention-reopen");
+        let policy = RoomHistoryRetentionPolicy {
+            enabled: true,
+            max_age_days: 3_650,
+            max_events_per_room: 3,
+            max_bytes_per_room: u64::MAX,
+        };
+        let room_id = {
+            let store = OmenchatStore::open(&path)
+                .expect("store")
+                .with_room_history_retention(policy);
+            let room = store.ensure_room("retained", None).expect("room");
+            for body in ["one", "two", "three", "four"] {
+                store
+                    .append_event(
+                        room.room_id,
+                        None,
+                        ServerRoomEventKind::Message { body: body.into() },
+                    )
+                    .expect("retained append");
+            }
+            assert_eq!(
+                store
+                    .latest_events(room.room_id, 10)
+                    .expect("retained history")
+                    .iter()
+                    .map(|event| event.event_id)
+                    .collect::<Vec<_>>(),
+                vec![2, 3, 4]
+            );
+            room.room_id
+        };
+
+        {
+            let store = OmenchatStore::open(&path)
+                .expect("reopened store")
+                .with_room_history_retention(policy);
+            assert_eq!(
+                store
+                    .events_before(room_id, 4, 10)
+                    .expect("page before retained event")
+                    .iter()
+                    .map(|event| event.event_id)
+                    .collect::<Vec<_>>(),
+                vec![2, 3]
+            );
+            assert!(store
+                .events_before(room_id, 2, 10)
+                .expect("page before oldest retained event")
+                .is_empty());
+
+            let fifth = store
+                .append_event(
+                    room_id,
+                    None,
+                    ServerRoomEventKind::Message {
+                        body: "five".into(),
+                    },
+                )
+                .expect("append after reopen");
+            assert_eq!(fifth.event_id, 5);
+            assert_eq!(
+                store
+                    .latest_events(room_id, 10)
+                    .expect("history after reopen append")
+                    .iter()
+                    .map(|event| event.event_id)
+                    .collect::<Vec<_>>(),
+                vec![3, 4, 5]
+            );
+            let usage = store
+                .room_history_usage(room_id)
+                .expect("usage")
+                .expect("usage row");
+            assert_eq!(usage.event_count, 3);
+            assert!(usage.backfill_complete);
+        }
+
+        let store = OmenchatStore::open(&path).expect("final reopen");
+        assert_eq!(
+            store
+                .latest_events(room_id, 10)
+                .expect("final retained history")
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5]
+        );
+        drop(store);
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn room_history_usage_backfill_is_bounded_resumable_and_byte_exact() {
+        let path = isolated_database_path("history-usage-backfill");
+        create_version_seven_fixture(&path);
+        let fixture = rusqlite::Connection::open(&path).expect("fixture connection");
+        for event_id in 2..=600i64 {
+            fixture
+                .execute(
+                    "INSERT INTO room_events(
+                       room_id, event_id, event_kind, at, payload
+                     ) VALUES (1, ?1, 1, ?1, ?2)",
+                    (event_id, format!("legacy-{event_id}").into_bytes()),
+                )
+                .expect("legacy history");
+        }
+        drop(fixture);
+
+        let store = OmenchatStore::open(&path).expect("migrated store");
+        let first = store.advance_room_history_usage(1).expect("first batch");
+        assert_eq!(first.event_count, HISTORY_USAGE_BACKFILL_BATCH as u64);
+        assert_eq!(
+            first.backfill_through_event_id,
+            HISTORY_USAGE_BACKFILL_BATCH as EventId
+        );
+        assert_eq!(first.backfill_target_event_id, 600);
+        assert!(!first.backfill_complete);
+
+        drop(store);
+        let store = OmenchatStore::open(&path).expect("restart during backfill");
+        let second = store.advance_room_history_usage(1).expect("second batch");
+        assert_eq!(second.event_count, 512);
+        assert_eq!(second.backfill_through_event_id, 512);
+        assert!(!second.backfill_complete);
+
+        let third = store.advance_room_history_usage(1).expect("final batch");
+        assert_eq!(third.event_count, 600);
+        assert_eq!(third.backfill_through_event_id, 600);
+        assert!(third.backfill_complete);
+        let expected_bytes: i64 = store
+            .connection
+            .query_row(
+                "SELECT SUM(
+                   64 + COALESCE(length(payload), 0)
+                   + CASE WHEN reply_to_event_id IS NULL THEN 0 ELSE 8 END
+                   + COALESCE(length(mention_user_ids), 0)
+                 ) FROM room_events WHERE room_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expected retained bytes");
+        assert_eq!(third.retained_bytes, expected_bytes as u64);
+
+        drop(store);
+        std::fs::remove_file(migration_backup_path(&path, 7)).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn append_during_incomplete_history_backfill_is_counted_exactly_once() {
+        let path = isolated_database_path("history-usage-concurrent-append");
+        create_version_seven_fixture(&path);
+        let fixture = rusqlite::Connection::open(&path).expect("fixture connection");
+        for event_id in 2..=600i64 {
+            fixture
+                .execute(
+                    "INSERT INTO room_events(
+                       room_id, event_id, event_kind, at, payload
+                     ) VALUES (1, ?1, 1, ?1, X'78')",
+                    [event_id],
+                )
+                .expect("legacy history");
+        }
+        drop(fixture);
+
+        let store = OmenchatStore::open(&path).expect("migrated store");
+        let first = store.advance_room_history_usage(1).expect("first batch");
+        assert_eq!(first.event_count, 256);
+        let appended = store
+            .append_event(1, None, ServerRoomEventKind::Message { body: "new".into() })
+            .expect("append while backfill incomplete");
+        assert_eq!(appended.event_id, 601);
+        let after_append = store
+            .room_history_usage(1)
+            .expect("usage query")
+            .expect("usage row");
+        assert_eq!(after_append.event_count, 513);
+        assert_eq!(after_append.backfill_through_event_id, 512);
+        assert_eq!(after_append.backfill_target_event_id, 600);
+        assert!(!after_append.backfill_complete);
+
+        let complete = store.advance_room_history_usage(1).expect("complete");
+        assert_eq!(complete.event_count, 601);
+        assert!(complete.backfill_complete);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM room_events WHERE room_id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("actual history count"),
+            complete.event_count as i64
+        );
+
+        drop(store);
+        std::fs::remove_file(migration_backup_path(&path, 7)).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn history_usage_accounting_failure_rolls_back_event_and_sequence() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("usage-overflow", None).expect("room");
+        let first = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "first".into(),
+                },
+            )
+            .expect("first event");
+        assert_eq!(first.event_id, 1);
+        store
+            .connection
+            .execute(
+                "UPDATE room_history_usage
+                 SET retained_bytes = 9223372036854775807
+                 WHERE room_id = ?1",
+                [room.room_id],
+            )
+            .expect("saturate usage");
+        let error = store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "must roll back".into(),
+                },
+            )
+            .expect_err("accounting overflow must fail")
+            .to_string();
+        assert!(error.contains("history usage accounting is unavailable or exhausted"));
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT last_event_id FROM room_event_sequences WHERE room_id = ?1",
+                    [room.room_id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .expect("rolled-back sequence"),
+            1
+        );
+        assert_eq!(
+            store
+                .latest_events(room.room_id, 10)
+                .expect("history")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn history_usage_counts_reply_and_mention_metadata_with_stable_bytes() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let room = store.ensure_room("usage-metadata", None).expect("room");
+        store
+            .append_event(
+                room.room_id,
+                None,
+                ServerRoomEventKind::Message {
+                    body: "original".into(),
+                },
+            )
+            .expect("original");
+        let transaction = store
+            .connection
+            .unchecked_transaction()
+            .expect("transaction");
+        append_event_with_metadata_in_transaction(
+            &transaction,
+            room.room_id,
+            None,
+            ServerRoomEventKind::Message {
+                body: "reply".into(),
+            },
+            Some(RichMessageEventMetadata {
+                reply_to_event_id: Some(1),
+                mentioned_user_ids: vec![7, 9],
+            }),
+            RoomHistoryRetentionPolicy::default(),
+        )
+        .expect("rich reply");
+        transaction.commit().expect("commit");
+
+        let usage = store
+            .room_history_usage(room.room_id)
+            .expect("usage")
+            .expect("usage row");
+        assert!(usage.backfill_complete);
+        assert_eq!(usage.event_count, 2);
+        assert_eq!(
+            usage.retained_bytes,
+            (HISTORY_EVENT_FIXED_RETAINED_BYTES + "original".len() as u64)
+                + (HISTORY_EVENT_FIXED_RETAINED_BYTES
+                    + "reply".len() as u64
+                    + HISTORY_REPLY_RETAINED_BYTES
+                    + 2 * std::mem::size_of::<UserId>() as u64)
+        );
     }
 
     #[test]

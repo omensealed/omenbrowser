@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use crate::{ChatOp, FrameBody, FrameValue, RoomId, PROTOCOL_VERSION};
 
 pub const DURABLE_MUTATION_CAPABILITY: &str = "durable-mutations-v1";
+pub const DURABLE_NOTICE_ACK_CAPABILITY: &str = "durable-room-notice-ack-v1";
 pub const DURABLE_MUTATION_ENVELOPE_TAG: &str = "durable-mutation-v1";
 pub const CLIENT_INSTANCE_ID_BYTES: usize = 16;
 pub const MUTATION_ID_BYTES: usize = 16;

@@ -207,6 +207,29 @@ impl MessageStore {
         Ok(threads)
     }
 
+    pub(crate) fn list_threads_read_only(&self) -> AppResult<Vec<ConversationThread>> {
+        let mut threads = Vec::new();
+        for (path, _) in inventory_thread_files(&self.root)? {
+            let raw = read_thread_file(&path)?;
+            let thread = serde_json::from_slice::<ConversationThread>(&raw).map_err(|error| {
+                AppError::Runtime(format!(
+                    "read-only message thread parse failed for {}: {error}",
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("<non-UTF-8 filename>")
+                ))
+            })?;
+            validate_thread(&thread)?;
+            threads.push(thread);
+        }
+        threads.sort_by(|left, right| {
+            recent_timestamp(right)
+                .total_cmp(&recent_timestamp(left))
+                .then_with(|| left.peer_hash.cmp(&right.peer_hash))
+        });
+        Ok(threads)
+    }
+
     pub fn get_thread(&self, peer_hash: &str) -> AppResult<ConversationThread> {
         self.load_thread(peer_hash, None)
     }
@@ -1872,6 +1895,33 @@ mod publication_tests {
             "unread_count": 0
         }))
         .expect("thread fixture bytes")
+    }
+
+    #[test]
+    fn read_only_thread_listing_preserves_order_without_corruption_side_effects() {
+        let root = fixture("read-only-list");
+        let store = MessageStore::new(root.clone()).expect("message store");
+        std::fs::write(root.join("peer.json"), thread_bytes(true)).expect("valid thread");
+        let threads = store.list_threads_read_only().expect("read-only threads");
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].messages.len(), 2);
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .expect("thread entries")
+                .filter_map(Result::ok)
+                .count(),
+            1
+        );
+
+        std::fs::write(root.join("peer.json"), b"{malformed").expect("corrupt thread");
+        assert!(store.list_threads_read_only().is_err());
+        let names = std::fs::read_dir(&root)
+            .expect("thread entries")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["peer.json"]);
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     fn staged_files(root: &std::path::Path) -> usize {

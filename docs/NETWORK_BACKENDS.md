@@ -6,7 +6,7 @@ crate version or a saved mode name.
 
 ## Managed integrated mode
 
-`reticulum_instance_mode = "managed"` is the supported v0.9.6-3 product mode.
+`reticulum_instance_mode = "managed"` is the supported v0.9.6-4 product mode.
 OMENbrowser owns the runtime lifecycle, identity attachment, configured
 interfaces, bounded event workers, and orderly shutdown. The diagnostics
 lifecycle and capability snapshots report what that active adapter actually
@@ -44,6 +44,53 @@ The optional local LXMF SDK/RPC endpoint provides only the explicitly
 negotiated SDK functions and bounded event stream. It is not treated as a full
 Reticulum transport, interface, NomadNet, OMENchat, or shared-instance backend.
 
+## OMENchat announcement-room feature identity
+
+`omenchat-announcement-rooms` exists independently in the root OMENbrowser and
+standalone `src/server` manifests. It is dependency-free and is included by
+the canonical `desktop-product`, `desktop-product-static-media`,
+`server-headless`, and `server-full` aliases. A capable client requests
+`announcement-rooms-v1`; a capable server accepts it and shapes room values
+per authenticated Link.
+
+Legacy or non-negotiating peers continue receiving byte-exact four-field room
+values. Server authorization is unconditional and does not depend on this
+feature or negotiation. `scripts/verify-product-features.sh` fails if any
+canonical client/server graph omits the production feature.
+
+## OMENchat slow-mode feature identity
+
+`omenchat-slow-mode` is dependency-free and included by the canonical
+`desktop-product`, `desktop-product-static-media`, `server-headless`, and
+`server-full` aliases. Client and server negotiate `room-slow-mode-v1` only
+with `durable-mutations-v1`; exact legacy four-field and announcement-only
+five-field room values remain unchanged for peers that do not negotiate it.
+
+`omenchat-slow-mode-qualification` depends on the product feature but remains
+excluded from every product alias. It owns only deterministic process-test
+hooks such as the isolated room-policy transition and GUI auto-open behavior.
+The product verifier requires the production feature and rejects the
+qualification feature in release graphs.
+
+## OMENchat room media-policy feature identity
+
+`omenchat-room-media-policy` is dependency-free and included by canonical
+`desktop-product`, `desktop-product-static-media`, `server-headless`, and
+`server-full`. It depends on the already active announcement-room and slow-mode
+features. Current peers select the cumulative seven-field room shape only
+after explicit request/accept; non-negotiating peers retain their exact
+four-, five-, or six-field shape and global upload admission.
+
+`omenchat-room-media-policy-qualification` depends on the production feature
+but remains excluded from every product alias. It owns only deterministic
+process/GUI hooks. The product verifier requires the production feature and
+rejects the qualification hook from release graphs.
+
+Neither feature adds a runtime, interface, worker, timer, queue, cache,
+subscription, or dependency. The production activation and rollback decision
+is recorded in
+`audits/omenchat-room-media-policy-activation-review.md`.
+
 ## Security and ownership requirements
 
 A future external backend must be explicit opt-in, prefer a restrictive local
@@ -55,7 +102,7 @@ owns interfaces and identities before external mode can start network work.
 ## Migration and rollback
 
 Existing external-mode configuration is preserved without conversion. To use
-the integrated v0.9.6-3 runtime, select Managed and restart. Do not delete
+the integrated v0.9.6-4 runtime, select Managed and restart. Do not delete
 identity, configuration, history, or cache data. Rolling back this safety gate
 is source-only, but should not be done without a tested shared backend because
 the former behavior launched an integrated runtime while labeling it External.

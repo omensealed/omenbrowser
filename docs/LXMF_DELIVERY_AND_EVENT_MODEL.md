@@ -220,6 +220,105 @@ this set and the acknowledgement inventory.
 
 ## Event and delivery follow-up
 
+### Per-peer delivery default
+
+The existing Directory `Direct` or `Propagated` preference initializes the
+delivery mode of a newly opened conversation for that peer. Reopening an
+existing conversation, restoring a saved conversation, and manually changing a
+conversation's delivery mode preserve that explicit per-tab choice. An unset
+or legacy preference remains Direct. This is a local composer default, not
+automatic fallback policy, delivery evidence, or permission to retry an
+uncertain send.
+
+The additive `Direct only` and `Propagated only` policies reuse the existing
+bounded Directory entry and JSON field. They initialize new conversations to
+the permitted transport, prevent the composer from switching to the forbidden
+transport, and are checked again immediately before a native send. Legacy
+`direct` and `propagated` JSON values retain preferred—not exclusive—semantics.
+The outbound operation snapshot records whether propagation fallback is
+permitted so an explicit retry cannot silently weaken `Direct only`; older
+operation records default to the prior fallback-permitted behavior. Malformed
+policy metadata is not reused. Strict policy does not trigger a fallback,
+retry, path request, propagation sync, or stamp expenditure.
+
+Each peer also has a fallback policy. `Ask before fallback` is the migration
+default and retains the explicit `Retry via propagation` action after a direct
+failure. `Automatic safe fallback` is opt-in and is copied into the durable
+operation metadata before dispatch. It enables the upstream 0.9.6 typed
+`try_propagation_on_fail` option for direct delivery only. In the integrated
+clean runtime, automatic fallback is restricted to failures before the
+transport observes packet or Resource submission. The same signed LXMF message
+and logical operation identity are then submitted to the selected propagation
+node. A failure after submission begins remains uncertain and is never
+automatically retried. This boundary prevents a local timeout or lost
+acknowledgement from fabricating a second logical message.
+
+Peers may also set a maximum automatic direct-stamp cost. The migration default
+is 8, matching the existing compiled clean-runtime safety ceiling. An explicit
+zero disables automatic direct-stamp work for that peer; the bounded presets
+then increase through 1, 2, 4, and 8. The effective value is copied into the
+durable operation metadata before dispatch, and the clean integrated runtime
+compares it with authenticated delivery-announce policy before acquiring the
+bounded blocking stamp permit. A required cost above the effective limit is an
+actionable pre-dispatch failure, not an uncertain send. A valid reply ticket
+still takes precedence and requires no stamp. The hard compiled ceiling and
+attempt bound cannot be raised through Directory data. Reusing a prepared
+logical operation may lower its snapshotted ceiling to a newer peer policy but
+never raises it.
+
+This policy currently governs locally generated direct stamps. It does not
+claim control over a separately managed RPC daemon, and it does not change the
+different propagation-node stamp defaults. Propagation cost policy remains
+separate work so existing propagated delivery behavior is not silently
+changed.
+
+An optional per-peer threshold can require confirmation above a direct-stamp
+cost. It is disabled by default; bounded presets ask above 0, 1, 2, 4, or 8.
+Only identity-bound authenticated delivery-announce evidence can trigger the
+prompt. Desktop presents explicit Confirm/Cancel controls. The TUI presents
+the same evidence and uses Ctrl-A to confirm or Ctrl-X to cancel, with mouse
+actions over the confirmation row. In either frontend, the original draft
+remains intact and the prompt states that no message has been sent.
+
+Confirmation authorizes only the exact advertised cost for that dispatch. The
+threshold and approved cost are included in the durable outbound operation,
+and the clean runtime checks them again before acquiring the blocking stamp
+permit. A different cost, an edited draft, changed peer policy, cancellation,
+or a prepared retry requires a new decision. Confirmation never overrides the
+maximum automatic cost. A valid reply ticket bypasses confirmation because it
+avoids direct-stamp generation. External RPC mode is not presented as locally
+enforced cost confirmation.
+
+Peers may also persist a reply-ticket default for newly opened conversations:
+use the existing application default (off), offer a ticket, or explicitly do
+not offer one. Desktop exposes the setting in Directory, while the TUI shows
+the same vocabulary and cycles it with `k` on a selected peer. Existing and
+restored conversation tabs keep their current composer ticket choice, and the
+normal composer control remains available after a tab opens. This preference
+only initializes the already-supported signed LXMF reply-ticket field; it does
+not invent a ticket, bypass peer policy, retry a message, or change inbound
+remembered-ticket validation.
+
+The planned per-peer attachment auto-download threshold does not map to the
+current LXMF wire model. File attachments are bounded inline fields inside the
+signed message, so their bytes have already arrived before the application can
+offer a separate download decision. The decoder enforces per-file, aggregate,
+item, name, and wire-size limits and atomically stores accepted files under the
+isolated attachment root. OMENbrowser therefore does not expose a misleading
+“automatic download” policy. A future resource-reference attachment protocol
+would need capability negotiation, mixed-version behavior, and an explicit
+pre-transfer admission boundary before such a threshold becomes meaningful.
+
+Propagation-node diagnostics also project operational evidence already owned
+elsewhere in the application. The current single-flight refresh contributes
+its outcome, observation time, and cooldown remaining at snapshot time. The
+bounded shared Operations history contributes node-correlated sync state, the
+latest sync update, the most recent successful completion, and its bounded
+last error. A later failed sync does not erase the prior successful timestamp.
+Unknown or non-node-correlated operations remain unknown. The projection is
+updated on existing start, typed progress, and completion events and creates no
+polling timer or duplicate operational history.
+
 The integrated runtime broadcast is consumed by one owned worker and forwarded
 through the existing 256-item application channel. Payload-bearing OMENchat
 events and SDK history pages additionally retain the shared 32 MiB queued-byte

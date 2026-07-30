@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::chat::commands::{parse_client_command, ClientCommand};
-use crate::chat::protocol::RoomId;
+use crate::chat::protocol::{RoomId, RoomUploadPolicyProjection};
 use crate::chat::{ChatClientEvent, ChatClientRequest, ChatSessionId};
 use crate::workspace::WorkspaceSection;
 
@@ -123,6 +123,19 @@ impl DesktopApp {
         session_id: ChatSessionId,
         path: &Path,
     ) -> OmenChatDraftCommandResult {
+        let room_id = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.active_room.room_id);
+        if room_id.is_some_and(|room_id| !self.omenchat_room_publish_available(session_id, room_id))
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "room is read-only for members; upload was not opened".into(),
+            );
+            return OmenChatDraftCommandResult::HandledKeep;
+        }
         if path.as_os_str().is_empty() {
             self.set_omenchat_session_status(session_id, "usage: /upload <path>".into());
             return OmenChatDraftCommandResult::HandledKeep;
@@ -152,10 +165,27 @@ impl DesktopApp {
             self.set_omenchat_session_status(session_id, "upload file is empty".into());
             return OmenChatDraftCommandResult::HandledKeep;
         }
+        let server_max_file_bytes = self.omenchat_session_upload_max_file_bytes(session_id);
+        let room_upload_policy = room_id.and_then(|room_id| {
+            self.omenchat
+                .chat_client
+                .room_upload_policy(session_id, room_id)
+        });
+        let room_policy_limit = matches!(
+            room_upload_policy,
+            Some(RoomUploadPolicyProjection::MaximumFileBytes(room_max))
+                if server_max_file_bytes.is_none_or(|server_max| room_max <= server_max)
+        );
+        let upload_max_file_bytes = room_id
+            .and_then(|room_id| {
+                self.omenchat_room_effective_upload_max_file_bytes(session_id, room_id)
+            })
+            .or(server_max_file_bytes);
         if let Some(reason) = omenchat_upload_policy_rejection(
             upload_byte_len,
             self.omenchat_session_upload_quota(session_id),
-            self.omenchat_session_upload_max_file_bytes(session_id),
+            upload_max_file_bytes,
+            room_policy_limit,
         ) {
             self.set_omenchat_session_status(session_id, reason);
             return OmenChatDraftCommandResult::HandledKeep;
@@ -178,7 +208,8 @@ impl DesktopApp {
         if let Some(reason) = omenchat_upload_policy_rejection(
             upload_byte_len,
             self.omenchat_session_upload_quota(session_id),
-            self.omenchat_session_upload_max_file_bytes(session_id),
+            upload_max_file_bytes,
+            room_policy_limit,
         ) {
             self.set_omenchat_session_status(session_id, reason);
             return OmenChatDraftCommandResult::HandledKeep;

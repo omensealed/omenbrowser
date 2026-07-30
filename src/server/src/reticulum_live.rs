@@ -401,6 +401,43 @@ where
         result
     }
 
+    #[cfg(feature = "omenchat-slow-mode-qualification")]
+    pub async fn transition_slow_mode_for_qualification(
+        &self,
+        room_id: u32,
+        slow_mode_seconds: u32,
+    ) -> ServerResult<bool> {
+        let permit = self.permit.clone().try_acquire_owned().map_err(|_| {
+            self.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+            ServerError::Message("live-server worker is busy".into())
+        })?;
+        let server = self.server.clone();
+        let metrics = self.metrics.clone();
+        metrics.in_flight.store(1, Ordering::Release);
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let started = Instant::now();
+            let result = match server.lock() {
+                Ok(mut server) => {
+                    server.transition_slow_mode_for_qualification(room_id, slow_mode_seconds)
+                }
+                Err(_) => Err(ServerError::Message(
+                    "live-server worker lock poisoned".into(),
+                )),
+            };
+            let elapsed = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
+            (result, elapsed)
+        })
+        .await;
+        metrics.in_flight.store(0, Ordering::Release);
+        let (result, elapsed) = task
+            .map_err(|error| ServerError::Message(format!("live-server worker failed: {error}")))?;
+        metrics.total_micros.fetch_add(elapsed, Ordering::Relaxed);
+        metrics.max_micros.fetch_max(elapsed, Ordering::Relaxed);
+        metrics.completed.fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
     pub fn worker_metrics(&self) -> LiveServerWorkerMetricsSnapshot {
         let completed = self.metrics.completed.load(Ordering::Relaxed);
         let total_micros = self.metrics.total_micros.load(Ordering::Relaxed);
@@ -908,15 +945,24 @@ pub fn configured_destination_status(config: &ServerConfig) -> ServerResult<Stri
     ))
 }
 
-pub fn run_live_server(config: ServerConfig) -> ServerResult<()> {
+pub fn run_live_server(
+    config: ServerConfig,
+    qualification_slow_mode_transition_seconds: Option<u32>,
+) -> ServerResult<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| ServerError::Message(format!("tokio runtime failed: {error}")))?;
-    runtime.block_on(run_live_server_async(config))
+    runtime.block_on(run_live_server_async(
+        config,
+        qualification_slow_mode_transition_seconds,
+    ))
 }
 
-async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
+async fn run_live_server_async(
+    config: ServerConfig,
+    qualification_slow_mode_transition_seconds: Option<u32>,
+) -> ServerResult<()> {
     append_server_log(
         &config,
         format!(
@@ -933,6 +979,10 @@ async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
     let mut next_announce = Instant::now() + announce_interval;
     let mut next_stats = Instant::now() + stats_interval;
     let mut next_handshake_sweep = Instant::now() + handshake_sweep_interval;
+    #[cfg(feature = "omenchat-slow-mode-qualification")]
+    let mut qualification_slow_mode_transition_seconds = qualification_slow_mode_transition_seconds;
+    #[cfg(not(feature = "omenchat-slow-mode-qualification"))]
+    let _ = qualification_slow_mode_transition_seconds;
     let shutdown_signal = wait_for_shutdown_signal();
     tokio::pin!(shutdown_signal);
 
@@ -980,6 +1030,35 @@ async fn run_live_server_async(config: ServerConfig) -> ServerResult<()> {
                     &config,
                     format!("reticulum-rs live event failed: {error}"),
                 );
+            }
+        }
+
+        #[cfg(feature = "omenchat-slow-mode-qualification")]
+        if let Some(seconds) = qualification_slow_mode_transition_seconds {
+            if !(1..=crate::protocol::ROOM_SLOW_MODE_MAX_SECONDS).contains(&seconds) {
+                break Err(ServerError::Message(
+                    "qualification slow-mode transition is outside protocol bounds".into(),
+                ));
+            }
+            match runtime
+                .live_server
+                .transition_slow_mode_for_qualification(1, seconds)
+                .await
+            {
+                Ok(true) => {
+                    println!(
+                        "omenchatd qualification slow-mode transition committed: room=1 seconds={seconds}"
+                    );
+                    qualification_slow_mode_transition_seconds = None;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    append_server_log_error(
+                        &config,
+                        format!("slow-mode transition qualification failed: {error}"),
+                    );
+                    break Err(error);
+                }
             }
         }
 
@@ -1124,7 +1203,8 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
     crate::config::ensure_nomadnet_portal(config, &destination_hash.to_hex_string())?;
     announce_destinations(&transport, &destination, &nomadnet_destination, config).await?;
 
-    let store = OmenchatStore::open(&config.database_path)?;
+    let store = OmenchatStore::open(&config.database_path)?
+        .with_room_history_retention((&config.history_retention).into());
     let engine =
         SessionEngine::with_limits_and_motd(store, config.into(), Some(config.motd.clone()));
 
@@ -2068,7 +2148,7 @@ fn validate_reticulum_interfaces(interfaces: &[ReticulumInterface]) -> ServerRes
             Some("TCPServerInterface") | Some("tcp_server") => {
                 if interface.network_name.is_some() || interface.passphrase.is_some() {
                     return Err(ServerError::Message(format!(
-                        "enabled TCP server interface {} configures IFAC, but the published reticulum-rs 0.9.5 TCP server does not enforce the Python IFAC wire transform; use an IFAC TCP client or disable this interface",
+                        "enabled TCP server interface {} configures IFAC, but the published reticulum-rs 0.9.6 TCP server does not enforce the Python IFAC wire transform; use an IFAC TCP client or disable this interface",
                         interface.name
                     )));
                 }
@@ -2570,6 +2650,77 @@ mod tests {
             .expect_err("stock TCP server must not claim IFAC enforcement");
         assert!(error.to_string().contains("does not enforce"));
         assert!(!error.to_string().contains("public-test-fixture"));
+    }
+
+    #[test]
+    fn generated_multi_client_config_is_accepted_by_live_runtime_parser() {
+        let config = test_config("multiple-tcp-clients");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("init isolated config");
+        for (host, port) in [("private.example", 42420), ("wns.example", 42421)] {
+            crate::config::add_reticulum_tcp_client_config(
+                &config,
+                &crate::TcpClientOverride {
+                    target_host: host.into(),
+                    target_port: port,
+                    network_name: None,
+                    passphrase: None,
+                },
+            )
+            .expect("add TCP client");
+        }
+
+        let interfaces =
+            parse_reticulum_interfaces(&config.reticulum_config_file()).expect("parse interfaces");
+        validate_reticulum_interfaces(&interfaces).expect("validate interfaces");
+        let clients = interfaces
+            .iter()
+            .filter(|interface| interface.kind.as_deref() == Some("TCPClientInterface"))
+            .collect::<Vec<_>>();
+        assert_eq!(clients.len(), 2);
+        assert_eq!(clients[0].target_host.as_deref(), Some("private.example"));
+        assert_eq!(clients[1].target_host.as_deref(), Some("wns.example"));
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
+    #[tokio::test]
+    async fn live_runtime_owns_two_configured_tcp_client_workers() {
+        let config = test_config("multiple-live-tcp-clients");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("init isolated config");
+        for port in [42431, 42432] {
+            crate::config::add_reticulum_tcp_client_config(
+                &config,
+                &crate::TcpClientOverride {
+                    target_host: "127.0.0.1".into(),
+                    target_port: port,
+                    network_name: None,
+                    passphrase: None,
+                },
+            )
+            .expect("add TCP client");
+        }
+
+        let mut runtime = start_live_server(&config)
+            .await
+            .expect("start live runtime");
+        let interfaces = runtime.interface_stats_lines();
+        assert_eq!(interfaces.len(), 2);
+        assert!(interfaces
+            .iter()
+            .any(|line| line.contains("127.0.0.1:42431")));
+        assert!(interfaces
+            .iter()
+            .any(|line| line.contains("127.0.0.1:42432")));
+        assert_eq!(runtime.owned_tasks.len(), 6);
+
+        tokio::time::timeout(Duration::from_secs(5), runtime.shutdown(&config))
+            .await
+            .expect("shutdown must be bounded")
+            .expect("shutdown");
+        assert!(runtime.owned_tasks.is_empty());
+        assert!(crate::server_log::flush(Duration::from_secs(1)));
+        let _ = std::fs::remove_dir_all(config.root_dir());
     }
 
     #[test]

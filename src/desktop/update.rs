@@ -13,6 +13,7 @@ enum MessageRoute {
     Clearweb,
     ExternalBrowser,
     Runtime,
+    HistorySearch,
     Shell,
     Interface,
     Plugin,
@@ -49,6 +50,8 @@ impl Message {
             Message::ExternalBrowser(_) => MessageRoute::ExternalBrowser,
 
             Message::Runtime(_) => MessageRoute::Runtime,
+
+            Message::HistorySearch(_) => MessageRoute::HistorySearch,
 
             Message::Shell(_) => MessageRoute::Shell,
 
@@ -98,6 +101,7 @@ impl DesktopApp {
             MessageRoute::Clearweb => self.dispatch_clearweb_message(message),
             MessageRoute::ExternalBrowser => self.dispatch_external_browser_message(message),
             MessageRoute::Runtime => self.dispatch_runtime_message(message),
+            MessageRoute::HistorySearch => self.dispatch_history_search_message(message),
             MessageRoute::Shell => self.dispatch_shell_message(message),
             MessageRoute::Interface => self.dispatch_interface_message(message),
             MessageRoute::Plugin => self.dispatch_plugin_message(message),
@@ -133,8 +137,9 @@ mod tests {
     use crate::app::{App, LogSeverity, LogSource};
     use crate::desktop::{
         BrowserMessage, ClearwebMessage, ConversationCompletionMessage, ConversationMessage,
-        DiagnosticsMessage, DirectoryMessage, ExternalBrowserMessage, IdentityMessage,
-        InterfaceMessage, PluginMessage, RuntimeMessage, ThemeMessage, WorkspacePaneMessage,
+        DiagnosticsMessage, DirectoryMessage, ExternalBrowserMessage, HistorySearchMessage,
+        IdentityMessage, InterfaceMessage, PluginMessage, RuntimeMessage, ThemeMessage,
+        WorkspacePaneMessage,
     };
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     use crate::desktop::{
@@ -223,10 +228,16 @@ mod tests {
             OmenChatMessage::NewPane,
             OmenChatMessage::ServerEntryChanged("omenchat://server".into()),
             OmenChatMessage::OpenServerEntry,
+            OmenChatMessage::ConfirmInvitation,
+            OmenChatMessage::CancelInvitation,
             OmenChatMessage::ToggleRooms,
             OmenChatMessage::JoinRoom {
                 session_id,
                 room: "lobby".into(),
+            },
+            OmenChatMessage::ToggleMuteExceptMentions {
+                session_id,
+                room_id,
             },
             OmenChatMessage::DraftChanged {
                 session_id,
@@ -241,6 +252,22 @@ mod tests {
                 session_id,
                 room_id,
             },
+            OmenChatMessage::JumpToEvent {
+                session_id,
+                room_id,
+                event_id: 3,
+            },
+            OmenChatMessage::BeginReply {
+                session_id,
+                room_id,
+                event_id: 3,
+            },
+            OmenChatMessage::CancelReply(session_id),
+            OmenChatMessage::ToggleMention {
+                session_id,
+                user_id: 4,
+            },
+            OmenChatMessage::ClearMentions(session_id),
             OmenChatMessage::SendDraft(session_id),
             OmenChatMessage::ResendLocalEcho {
                 session_id,
@@ -250,6 +277,11 @@ mod tests {
                 action: false,
             },
             OmenChatMessage::LoadOlderHistory(session_id),
+            OmenChatMessage::CopyInvitation(session_id),
+            #[cfg(feature = "desktop-qr")]
+            OmenChatMessage::ToggleInvitationQr(session_id),
+            #[cfg(feature = "desktop-qr")]
+            OmenChatMessage::CloseInvitationQr,
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             OmenChatMessage::CopySessionDiagnostics(session_id),
             OmenChatMessage::CloseSession(session_id),
@@ -501,6 +533,9 @@ mod tests {
         for message in [
             WorkspacePaneMessage::NewConversation,
             WorkspacePaneMessage::CloseConversationTab(1),
+            WorkspacePaneMessage::ApplyPreset(
+                crate::desktop::DesktopWorkspacePreset::BrowserAndMessages,
+            ),
             WorkspacePaneMessage::Clicked(pane),
             WorkspacePaneMessage::Dragged(iced::widget::pane_grid::DragEvent::Picked { pane }),
             WorkspacePaneMessage::Resized(iced::widget::pane_grid::ResizeEvent {
@@ -523,6 +558,10 @@ mod tests {
     fn diagnostics_domain_messages_have_one_compile_time_route() {
         for message in [
             DiagnosticsMessage::Show,
+            DiagnosticsMessage::CopyOperationDiagnostics(crate::operations::OperationId::numeric(
+                crate::operations::OperationDomain::PathDiscovery,
+                1,
+            )),
             DiagnosticsMessage::PreviewManagedConfig,
             DiagnosticsMessage::ExportManagedConfig,
             DiagnosticsMessage::PreviewBundle,
@@ -660,6 +699,10 @@ mod tests {
             DirectoryMessage::ToggleTrust(0),
             DirectoryMessage::ToggleIdentify(0),
             DirectoryMessage::CycleDelivery(0),
+            DirectoryMessage::CycleFallback(0),
+            DirectoryMessage::CycleDirectStampLimit(0),
+            DirectoryMessage::CycleDirectStampConfirmation(0),
+            DirectoryMessage::CycleReplyTicketPreference(0),
             DirectoryMessage::RequestPath(0),
             DirectoryMessage::RefreshPropagation(0),
             DirectoryMessage::CancelPropagationRefresh,
@@ -719,6 +762,30 @@ mod tests {
             RuntimeMessage::InterfaceStatsSampled(Err("unavailable".into())),
         ] {
             assert_eq!(Message::Runtime(message).route(), MessageRoute::Runtime);
+        }
+    }
+
+    #[test]
+    fn history_search_messages_have_one_compile_time_route() {
+        for message in [
+            HistorySearchMessage::QueryChanged("query".into()),
+            HistorySearchMessage::CycleSource,
+            HistorySearchMessage::SubmitCurrent,
+            HistorySearchMessage::Submit(crate::history_search::LocalHistorySearchQuery::default()),
+            HistorySearchMessage::Jump(crate::history_search::LocalHistoryResultKey::LxmfStored {
+                peer_key: "peer".into(),
+                message_index: 0,
+                message_key: "message".into(),
+            }),
+            HistorySearchMessage::Completed {
+                generation: 1,
+                result: Ok(crate::history_search::LocalHistorySearchPage::default()),
+            },
+        ] {
+            assert_eq!(
+                Message::HistorySearch(Box::new(message)).route(),
+                MessageRoute::HistorySearch
+            );
         }
     }
 

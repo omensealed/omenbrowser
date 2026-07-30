@@ -14,8 +14,15 @@ use super::super::*;
 impl DesktopApp {
     pub(in crate::desktop) fn browser_messages_workspace_view(&self) -> Element<'_, Message> {
         let controls = action_grid(self.workspace_primary_buttons(), 5);
+        let presets = action_grid(self.workspace_preset_buttons(), 3);
         let hidden_workspace_panes = self.hidden_workspace_pane_buttons();
         let hidden_conversation_panes = self.hidden_conversation_pane_buttons();
+        let history_search: Element<'_, Message> =
+            if self.app.workspace.active_section == WorkspaceSection::Messages {
+                views::history_search::local_history_search_view(self)
+            } else {
+                column![].into()
+            };
         #[cfg(feature = "chat-client")]
         let omenchat_opener = row![
             text_input(
@@ -30,6 +37,56 @@ impl DesktopApp {
             omen_button("Open", Message::OmenChat(OmenChatMessage::OpenServerEntry),),
         ]
         .spacing(8);
+        #[cfg(feature = "chat-client")]
+        let omenchat_invitation = if let Some(preview) =
+            self.omenchat.omenchat_invitation_preview.pending()
+        {
+            let invitation = &preview.invitation;
+            let mut details = column![
+                text("Review OMENchat invitation").size(ui_size(14)),
+                text(format!("Server: {}", invitation.server_destination)).size(ui_size(12)),
+                text(preview.identity_evidence.label()).size(ui_size(12)),
+            ]
+            .spacing(4);
+            if let Some(label) = &invitation.display_label {
+                details = details.push(text(format!("Claimed label: {label}")).size(ui_size(12)));
+            }
+            if let Some(room_id) = invitation.room_id {
+                details = details.push(
+                    text(format!(
+                        "Suggested room ID: {room_id} (select only after the server catalog loads)"
+                    ))
+                    .size(ui_size(12)),
+                );
+            }
+            let actions = if preview.allows_confirmation() {
+                row![
+                    omen_button(
+                        "Open Server",
+                        Message::OmenChat(OmenChatMessage::ConfirmInvitation)
+                    ),
+                    subtle_button(
+                        "Cancel",
+                        Message::OmenChat(OmenChatMessage::CancelInvitation)
+                    ),
+                ]
+            } else {
+                row![subtle_button(
+                    "Cancel Conflicting Invitation",
+                    Message::OmenChat(OmenChatMessage::CancelInvitation)
+                )]
+            }
+            .spacing(8);
+            section_card(
+                "Invitation Confirmation",
+                details.push(actions).push(
+                    text("Importing this invitation does not save or trust the server.")
+                        .size(ui_size(12)),
+                ),
+            )
+        } else {
+            column![].into()
+        };
 
         let grid = pane_grid(
             &self.workspace.workspace_panes,
@@ -281,9 +338,12 @@ impl DesktopApp {
         #[cfg(feature = "chat-client")]
         let content = column![
             controls,
+            presets,
             hidden_workspace_panes,
             hidden_conversation_panes,
             omenchat_opener,
+            omenchat_invitation,
+            history_search,
             grid
         ]
         .spacing(8)
@@ -293,8 +353,10 @@ impl DesktopApp {
         #[cfg(not(feature = "chat-client"))]
         let content = column![
             controls,
+            presets,
             hidden_workspace_panes,
             hidden_conversation_panes,
+            history_search,
             grid
         ]
         .spacing(8)
@@ -302,6 +364,25 @@ impl DesktopApp {
         .width(Length::Fill)
         .into();
         content
+    }
+
+    pub(in crate::desktop) fn workspace_preset_buttons(&self) -> Vec<Button<'_, Message>> {
+        [
+            ("Preset: Browser", DesktopWorkspacePreset::BrowserFocus),
+            ("Preset: Messages", DesktopWorkspacePreset::MessagesFocus),
+            (
+                "Preset: Browser + Messages",
+                DesktopWorkspacePreset::BrowserAndMessages,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, preset)| {
+            subtle_button(
+                label,
+                Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(preset)),
+            )
+        })
+        .collect()
     }
 
     pub(in crate::desktop) fn workspace_primary_buttons(&self) -> Vec<Button<'_, Message>> {

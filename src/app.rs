@@ -1,4 +1,22 @@
 mod diagnostics_results;
+mod log_state;
+mod network_doctor;
+mod network_smoke;
+
+use log_state::STRUCTURED_LOG_STARTUP_ENTRY_LIMIT;
+pub use log_state::{LogBuffer, LogEntry, LogSeverity, LogSource};
+#[cfg(test)]
+use log_state::{
+    STRUCTURED_LOG_DEFAULT_MAX_BYTES, STRUCTURED_LOG_MEMORY_BYTES,
+    STRUCTURED_LOG_MEMORY_ENTRY_LIMIT, STRUCTURED_LOG_STARTUP_FILE_BYTES,
+    STRUCTURED_LOG_STARTUP_FILE_LIMIT, STRUCTURED_LOG_STARTUP_TOTAL_BYTES,
+};
+pub use network_doctor::{
+    NetworkDoctorActiveResourceRow, NetworkDoctorLinkRecentRow, NetworkDoctorLxmfRecentRow,
+    NetworkDoctorPanelState, NetworkDoctorPathRecentRow, NetworkDoctorResourceRecentRow,
+    NETWORK_DOCTOR_OPERATION_ROWS,
+};
+use network_smoke::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -16,8 +34,8 @@ use crate::browser::{BrowserAddress, BrowserPage, BrowserSession, DownloadedFile
 use crate::config::{AppConfig, AppPaths};
 use crate::diagnostics::{DiagnosticsService, DiagnosticsSnapshot};
 use crate::directory::{
-    DirectoryEntry, DirectoryKind, DirectoryService, PreferredDelivery, PropagationNodeInventory,
-    TrustLevel,
+    DeliveryFallbackPolicy, DirectoryEntry, DirectoryKind, DirectoryService, PreferredDelivery,
+    PropagationNodeInventory, TrustLevel, DEFAULT_AUTOMATIC_DIRECT_STAMP_COST,
 };
 use crate::error::AppResult;
 use crate::identity::IdentityManager;
@@ -26,9 +44,9 @@ use crate::interfaces::{
     GatewayProfileCreateOutcome, InterfaceConfigService, InterfaceKind, ReticulumInterfaceProfile,
 };
 use crate::messaging::{
-    Conversation, ConversationThread, DeliveryMode, LxmfCancellationUpdate, MessageSendState,
-    MessageStore, MessageSummary, MessagingService, OutboundComposeRequest,
-    OutboundOperationIdentity, PreparedRetryOperation, TransportMethod,
+    Conversation, ConversationThread, DeliveryMode, DirectStampConfirmation,
+    LxmfCancellationUpdate, MessageSendState, MessageStore, MessageSummary, MessagingService,
+    OutboundComposeRequest, OutboundOperationIdentity, PreparedRetryOperation, TransportMethod,
 };
 use crate::micron::parser::DEFAULT_FG_DARK;
 use crate::micron::render::{
@@ -65,12 +83,8 @@ use crate::storage::settings::{
     DeletedConversationSettings, ReticulumInstanceMode, RuntimeBackendSetting,
     SensitiveFormPersistence, WorkspaceSectionPreference,
 };
-use crate::structured_log_reader::{
-    load_recent_log_entries, PersistedLogLimits, PersistedLogStats,
-};
 use crate::structured_log_writer::{
-    enforce_structured_log_retention, StructuredLogDiskPolicy, StructuredLogDiskStats,
-    StructuredLogFlushHandle, StructuredLogWorker, StructuredLogWorkerMetrics,
+    StructuredLogDiskPolicy, StructuredLogFlushHandle, StructuredLogWorkerMetrics,
     STRUCTURED_LOG_MAX_FILE_BYTES, STRUCTURED_LOG_MAX_RETAIN_FILES, STRUCTURED_LOG_MIN_FILE_BYTES,
 };
 
@@ -81,13 +95,7 @@ const LOCAL_LXMF_ANNOUNCE_COOLDOWN: Duration = Duration::from_secs(30);
 const PROPAGATION_NODE_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const PROPAGATION_NODE_REFRESH_TIMEOUT: Duration = Duration::from_secs(6);
 const UI_PREFERENCE_AUTOSAVE_DELAY_MS: u64 = 500;
-const STRUCTURED_LOG_DEFAULT_MAX_BYTES: u64 = 256 * 1024;
-const STRUCTURED_LOG_MESSAGE_BYTES: usize = 16 * 1024;
-const STRUCTURED_LOG_MEMORY_ENTRY_LIMIT: usize = 4096;
-const STRUCTURED_LOG_MEMORY_BYTES: usize = 4 * 1024 * 1024;
-const STRUCTURED_LOG_STARTUP_ENTRY_LIMIT: usize = 4096;
-const STRUCTURED_LOG_STARTUP_DIRECTORY_ENTRY_LIMIT: usize = 4096;
-const STRUCTURED_LOG_STARTUP_FILE_LIMIT: usize = 16;
+const INTERNAL_EVENT_QUEUE_MAX_ITEMS: usize = 256;
 const INTERNAL_EVENT_QUEUE_MAX_BYTES: usize = 32 * 1024 * 1024;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 const OMENCHAT_STAGED_FRAME_MAX_ITEMS: usize = 256;
@@ -105,8 +113,6 @@ const OMENCHAT_STAGED_CLOSE_MAX_BYTES: usize = 256 * 1024;
 const OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_ITEMS: usize = 64;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 const OMENCHAT_STAGED_RESOURCE_TERMINAL_MAX_BYTES: usize = 256 * 1024;
-const STRUCTURED_LOG_STARTUP_FILE_BYTES: usize = 512 * 1024;
-const STRUCTURED_LOG_STARTUP_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const LXMF_DIRECT_PROOF_TIMEOUT_SECONDS: f64 = 45.0;
 const LXMF_DIRECT_PROOF_RECONCILE_INTERVAL_MS: u64 = 5_000;
 const LXMF_EXPIRY_RECONCILE_INTERVAL_MS: u64 = 60_000;
@@ -211,370 +217,6 @@ pub struct BrowserLiveWarning {
     pub visible_page: Option<String>,
     pub message: String,
     pub next_action: String,
-}
-
-impl BrowserProbeSummary {
-    fn from_report(report: &PageFetchProbeReport, mode: &str) -> Self {
-        let failed = report.steps.iter().find(|step| !step.ok);
-        let status = if report.ready_to_request {
-            "ready"
-        } else if failed.is_some() {
-            "blocked"
-        } else {
-            "checked"
-        };
-        let mut detail = failed
-            .map(|step| {
-                format!(
-                    "{}: {}",
-                    page_fetch_probe_stage_label(&step.stage),
-                    step.detail
-                )
-            })
-            .or_else(|| report.steps.last().map(|step| step.detail.clone()))
-            .unwrap_or_else(|| "no probe steps reported".into());
-        if let Some(guidance) = page_fetch_probe_retry_guidance(report) {
-            detail = format!("{detail}; {guidance}");
-        }
-
-        Self {
-            url: report.url.clone(),
-            mode: mode.into(),
-            ready_to_request: report.ready_to_request,
-            status: status.into(),
-            detail,
-        }
-    }
-
-    fn from_path_discovery_report(report: &serde_json::Value) -> Self {
-        let url = report
-            .get("active_browser_url")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let wait = report
-            .get("path_warmup")
-            .and_then(|value| value.get("wait"));
-        let last_attempt = wait
-            .and_then(|value| value.get("attempts"))
-            .and_then(serde_json::Value::as_array)
-            .and_then(|attempts| attempts.last());
-        let has_path = last_attempt
-            .and_then(|attempt| attempt.get("has_path"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let known_identity = last_attempt
-            .and_then(|attempt| attempt.get("inspection"))
-            .and_then(|inspection| inspection.get("known_identity"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let first_failed_stage = last_attempt
-            .and_then(|attempt| attempt.get("dry_run_page_probe"))
-            .and_then(|probe| probe.get("first_failed_stage"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown");
-        let warmup_status = report
-            .get("path_warmup")
-            .and_then(|value| value.get("status"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown");
-        let status = if has_path {
-            "path known"
-        } else if known_identity {
-            "path unknown"
-        } else {
-            "identity unknown"
-        };
-        let detail = if has_path {
-            "path discovery reports a known route; press Retry/Open or run N to re-check request readiness".into()
-        } else if known_identity {
-            format!(
-                "destination identity known, path not known; warmup={warmup_status}, first failed stage={first_failed_stage}; retry guidance: wait 5-10s for a PathUpdated event after request_path, then press Retry or run Request Path again"
-            )
-        } else {
-            format!(
-                "destination identity not known; warmup={warmup_status}, first failed stage={first_failed_stage}"
-            )
-        };
-
-        Self {
-            url,
-            mode: "path-discovery".into(),
-            ready_to_request: has_path,
-            status: status.into(),
-            detail,
-        }
-    }
-
-    fn from_native_browser_load_failure(target: &str, step: &PageFetchProbeStep) -> Self {
-        let status = match step.stage {
-            PageFetchProbeStage::DestinationIdentity => "identity unknown",
-            PageFetchProbeStage::PathDiscovery => "path unknown",
-            PageFetchProbeStage::LinkSetup => "link setup failed",
-            PageFetchProbeStage::RequestSend => "request send failed",
-            PageFetchProbeStage::ResponseWait => "response wait failed",
-            PageFetchProbeStage::ResponseDecode => "response decode failed",
-            _ => "blocked",
-        };
-        let next_action = match step.stage {
-            PageFetchProbeStage::DestinationIdentity => {
-                "wait for announce, preload known_destinations, or run Diagnostics D"
-            }
-            PageFetchProbeStage::PathDiscovery => {
-                "run Diagnostics D to request path and inspect dry-run state"
-            }
-            PageFetchProbeStage::LinkSetup => {
-                "run Diagnostics X or L for a live probe and inspect Reticulum 0.9 link setup"
-            }
-            PageFetchProbeStage::RequestSend => {
-                "run Diagnostics X or L and inspect request payload/path send traces"
-            }
-            PageFetchProbeStage::ResponseWait => {
-                "run Diagnostics X or L; verify node availability and response timeout"
-            }
-            PageFetchProbeStage::ResponseDecode => {
-                "run Diagnostics X or L; inspect returned payload bytes/content type"
-            }
-            _ => "run N for dry-run readiness or Diagnostics D for path state",
-        };
-        let mode = match step.stage {
-            PageFetchProbeStage::DestinationIdentity | PageFetchProbeStage::PathDiscovery => {
-                "path-discovery"
-            }
-            _ => "native-load",
-        };
-        let mut detail = format!(
-            "{}: {}; next: {next_action}",
-            page_fetch_probe_stage_label(&step.stage),
-            step.detail
-        );
-        if page_fetch_probe_step_queued_path_request(step) {
-            detail.push_str("; retry guidance: request_path was queued; wait 5-10s for path discovery, then press Retry/Open. If no PathUpdated event appears, run Request Path or Live Probe again.");
-        }
-
-        Self {
-            url: target.into(),
-            mode: mode.into(),
-            ready_to_request: false,
-            status: status.into(),
-            detail,
-        }
-    }
-}
-
-fn page_fetch_probe_step_queued_path_request(step: &PageFetchProbeStep) -> bool {
-    if step.stage != PageFetchProbeStage::PathDiscovery || step.ok {
-        return false;
-    }
-    let detail = step.detail.to_ascii_lowercase();
-    detail.contains("queued")
-        || detail.contains("request_path")
-        || step.trace.iter().any(|(key, value)| {
-            let key = key.to_ascii_lowercase();
-            let value = value.to_ascii_lowercase();
-            (key.contains("request_path") || key.contains("path_request"))
-                && (value.contains("queued") || value == "true")
-        })
-}
-
-fn page_fetch_probe_retry_guidance(report: &PageFetchProbeReport) -> Option<&'static str> {
-    report
-        .steps
-        .iter()
-        .any(page_fetch_probe_step_queued_path_request)
-        .then_some(
-            "retry guidance: request_path was queued; wait 5-10s for PathUpdated/announce evidence, then press Retry/Open. If no update appears, run Request Path or Live Probe again",
-        )
-}
-
-fn page_fetch_probe_stage_label(stage: &PageFetchProbeStage) -> &'static str {
-    match stage {
-        PageFetchProbeStage::AddressParse => "address",
-        PageFetchProbeStage::RuntimeSetup => "runtime",
-        PageFetchProbeStage::DestinationIdentity => "identity",
-        PageFetchProbeStage::PathDiscovery => "path",
-        PageFetchProbeStage::LinkSetup => "link",
-        PageFetchProbeStage::RequestSend => "request",
-        PageFetchProbeStage::ResponseWait => "response",
-        PageFetchProbeStage::ResponseDecode => "decode",
-    }
-}
-
-fn format_page_probe_trace_log_line(
-    mode: &str,
-    index: usize,
-    step: &crate::runtime::PageFetchProbeStep,
-) -> String {
-    let mut line = format!(
-        "{mode} page probe step {} {} {}: {}",
-        index + 1,
-        page_fetch_probe_stage_label(&step.stage),
-        if step.ok { "ok" } else { "failed" },
-        step.detail
-    );
-    if !step.trace.is_empty() {
-        let trace = step
-            .trace
-            .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        line.push_str(" | ");
-        line.push_str(&trace);
-    }
-    line
-}
-
-fn native_page_load_failure_needs_probe_hint(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    message.contains("native Reticulum")
-        || message.contains("Reticulum path")
-        || message.contains("rns-net")
-        || message.contains("destination identity")
-        || browser_load_failure_is_app_timeout(&lower)
-}
-
-fn browser_load_failure_is_app_timeout(lower_message: &str) -> bool {
-    lower_message.contains("timed out after") && lower_message.contains("request cancelled")
-}
-
-fn compact_app_timeout_status(message: &str) -> String {
-    let timeout = message
-        .split(';')
-        .next()
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .unwrap_or("browser request timed out");
-    format!("{timeout}; press Retry when path/link is ready")
-}
-
-fn native_browser_load_failure_step(target: &str, message: &str) -> Option<PageFetchProbeStep> {
-    if !native_page_load_failure_needs_probe_hint(message) {
-        return None;
-    }
-
-    let stage = native_page_load_failure_stage(message);
-    let suggested_action = native_browser_load_failure_status_action(&stage);
-    let mut step = PageFetchProbeStep::failed(stage, message)
-        .with_trace("origin", "browser_load")
-        .with_trace("target", target)
-        .with_trace("suggested_action", suggested_action);
-    if let Some(address) = BrowserAddress::parse(target) {
-        step = step
-            .with_trace("destination", address.destination)
-            .with_trace("path", address.path);
-    }
-    Some(step)
-}
-
-fn native_page_load_failure_stage(message: &str) -> PageFetchProbeStage {
-    let lower = message.to_lowercase();
-    if lower.contains("identity") || lower.contains("signing public key") {
-        PageFetchProbeStage::DestinationIdentity
-    } else if browser_load_failure_is_app_timeout(&lower) {
-        PageFetchProbeStage::ResponseWait
-    } else if lower.contains("path") {
-        PageFetchProbeStage::PathDiscovery
-    } else if lower.contains("link") {
-        PageFetchProbeStage::LinkSetup
-    } else if lower.contains("decode") {
-        PageFetchProbeStage::ResponseDecode
-    } else if lower.contains("response") {
-        PageFetchProbeStage::ResponseWait
-    } else if lower.contains("send") || lower.contains("request") {
-        PageFetchProbeStage::RequestSend
-    } else if lower.contains("timed out") {
-        PageFetchProbeStage::ResponseWait
-    } else {
-        PageFetchProbeStage::RuntimeSetup
-    }
-}
-
-fn native_browser_load_failure_status_action(stage: &PageFetchProbeStage) -> &'static str {
-    match stage {
-        PageFetchProbeStage::DestinationIdentity | PageFetchProbeStage::PathDiscovery => {
-            "run Diagnostics D for path state"
-        }
-        PageFetchProbeStage::LinkSetup
-        | PageFetchProbeStage::RequestSend
-        | PageFetchProbeStage::ResponseWait
-        | PageFetchProbeStage::ResponseDecode => {
-            "run Diagnostics X or L for link/request/response report"
-        }
-        _ => "run N for dry-run readiness",
-    }
-}
-
-fn native_browser_load_failure_allows_one_auto_retry(stage: &PageFetchProbeStage) -> bool {
-    matches!(
-        stage,
-        PageFetchProbeStage::LinkSetup
-            | PageFetchProbeStage::RequestSend
-            | PageFetchProbeStage::ResponseWait
-    )
-}
-
-fn browser_probe_summary_waits_for_network_evidence(summary: &BrowserProbeSummary) -> bool {
-    if summary.ready_to_request || summary.status == "running" {
-        return false;
-    }
-
-    matches!(
-        summary.status.as_str(),
-        "blocked" | "suggested" | "path known" | "path unknown"
-    ) || summary.detail.contains("identity")
-        || summary.detail.contains("signing key")
-        || summary.detail.contains("path")
-}
-
-fn announce_matches_browser_probe(
-    announce: &crate::runtime::AnnouncePayload,
-    summary_url: &str,
-    tab_address_input: &str,
-) -> bool {
-    let mut candidate_hashes = vec![announce.destination_hash.as_str()];
-    if let Some(hash) = announce.associated_hash.as_deref() {
-        candidate_hashes.push(hash);
-    }
-    if let Some(hash) = announce.node_associated_hash.as_deref() {
-        candidate_hashes.push(hash);
-    }
-
-    browser_address_matches_any_hash(summary_url, &candidate_hashes)
-        || browser_address_matches_any_hash(tab_address_input, &candidate_hashes)
-        || candidate_hashes
-            .iter()
-            .any(|hash| summary_url.contains(hash))
-}
-
-fn browser_address_matches_any_hash(input: &str, hashes: &[&str]) -> bool {
-    BrowserAddress::parse(input)
-        .map(|address| {
-            hashes
-                .iter()
-                .any(|hash| address.destination.eq_ignore_ascii_case(hash))
-        })
-        .unwrap_or(false)
-}
-
-fn announce_browser_probe_status(kind: &DirectoryKind) -> &'static str {
-    match kind {
-        DirectoryKind::Node => "identity known",
-        DirectoryKind::Peer => "peer known",
-        DirectoryKind::Propagation => "propagation known",
-        DirectoryKind::OmenChat => "OMENchat known",
-        DirectoryKind::Unknown => "announce seen",
-    }
-}
-
-fn announce_kind_label(kind: &DirectoryKind) -> &'static str {
-    match kind {
-        DirectoryKind::Node => "node",
-        DirectoryKind::Peer => "peer",
-        DirectoryKind::Propagation => "propagation",
-        DirectoryKind::OmenChat => "omenchat",
-        DirectoryKind::Unknown => "unknown",
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -965,8 +607,11 @@ struct InternalEventPayloadPermit {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InternalEventPayloadMetrics {
+    pub channel_queued_items: usize,
+    pub channel_max_items: usize,
     pub queued_items: usize,
     pub queued_bytes: usize,
+    pub max_bytes: usize,
     pub rejected_events: u64,
 }
 
@@ -1001,8 +646,11 @@ impl InternalEventPayloadBudget {
 
     fn metrics(&self) -> InternalEventPayloadMetrics {
         InternalEventPayloadMetrics {
+            channel_queued_items: 0,
+            channel_max_items: INTERNAL_EVENT_QUEUE_MAX_ITEMS,
             queued_items: self.queued_items.load(Ordering::Acquire),
             queued_bytes: self.queued_bytes.load(Ordering::Acquire),
+            max_bytes: INTERNAL_EVENT_QUEUE_MAX_BYTES,
             rejected_events: self.rejected_events.load(Ordering::Relaxed),
         }
     }
@@ -5449,571 +5097,6 @@ pub struct OmenChatEventStagingMetrics {
     pub rejected_terminals: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NetworkDoctorPanelState {
-    pub recent_paths: Vec<NetworkDoctorPathRecentRow>,
-    pub recent_links: Vec<NetworkDoctorLinkRecentRow>,
-    pub recent_resources: Vec<NetworkDoctorResourceRecentRow>,
-    pub recent_lxmf: Vec<NetworkDoctorLxmfRecentRow>,
-    pub active_resources: BTreeMap<String, NetworkDoctorActiveResourceRow>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetworkDoctorPathRecentRow {
-    pub epoch_ms: u64,
-    pub target: String,
-    pub state: String,
-    pub detail: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetworkDoctorLinkRecentRow {
-    pub epoch_ms: u64,
-    pub link_id: String,
-    pub state: String,
-    pub detail: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetworkDoctorResourceRecentRow {
-    pub epoch_ms: u64,
-    pub transfer: String,
-    pub state: String,
-    pub detail: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetworkDoctorActiveResourceRow {
-    pub epoch_ms: u64,
-    pub transfer: String,
-    pub state: String,
-    pub source: String,
-    pub purpose: Option<String>,
-    pub direction: Option<String>,
-    pub peer: Option<String>,
-    pub detail: String,
-    pub received: Option<u64>,
-    pub total: Option<u64>,
-}
-
-struct NetworkDoctorResourceUpdate {
-    transfer: String,
-    state: String,
-    source: String,
-    purpose: Option<String>,
-    direction: Option<String>,
-    peer: Option<String>,
-    detail: String,
-    received: Option<u64>,
-    total: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetworkDoctorLxmfRecentRow {
-    pub epoch_ms: u64,
-    pub peer: String,
-    pub state: String,
-    pub detail: String,
-}
-
-impl NetworkDoctorPanelState {
-    const MAX_RECENT_ROWS: usize = 12;
-
-    fn push_path(
-        rows: &mut Vec<NetworkDoctorPathRecentRow>,
-        target: impl Into<String>,
-        state: impl Into<String>,
-        detail: impl Into<String>,
-    ) {
-        let target = target.into();
-        let state = state.into();
-        let detail = detail.into();
-        if rows
-            .iter()
-            .any(|row| row.target == target && row.state == state && row.detail == detail)
-        {
-            return;
-        }
-        rows.insert(
-            0,
-            NetworkDoctorPathRecentRow {
-                epoch_ms: current_epoch_ms(),
-                target,
-                state,
-                detail,
-            },
-        );
-        rows.truncate(Self::MAX_RECENT_ROWS);
-    }
-
-    fn push_link(
-        rows: &mut Vec<NetworkDoctorLinkRecentRow>,
-        link_id: impl Into<String>,
-        state: impl Into<String>,
-        detail: impl Into<String>,
-    ) {
-        let link_id = link_id.into();
-        let state = state.into();
-        let detail = detail.into();
-        if rows
-            .iter()
-            .any(|row| row.link_id == link_id && row.state == state && row.detail == detail)
-        {
-            return;
-        }
-        rows.insert(
-            0,
-            NetworkDoctorLinkRecentRow {
-                epoch_ms: current_epoch_ms(),
-                link_id,
-                state,
-                detail,
-            },
-        );
-        rows.truncate(Self::MAX_RECENT_ROWS);
-    }
-
-    fn push_resource(
-        rows: &mut Vec<NetworkDoctorResourceRecentRow>,
-        transfer: impl Into<String>,
-        state: impl Into<String>,
-        detail: impl Into<String>,
-    ) {
-        let transfer = transfer.into();
-        let state = state.into();
-        let detail = detail.into();
-        if rows
-            .iter()
-            .any(|row| row.transfer == transfer && row.state == state && row.detail == detail)
-        {
-            return;
-        }
-        rows.insert(
-            0,
-            NetworkDoctorResourceRecentRow {
-                epoch_ms: current_epoch_ms(),
-                transfer,
-                state,
-                detail,
-            },
-        );
-        rows.truncate(Self::MAX_RECENT_ROWS);
-    }
-
-    fn upsert_resource(&mut self, update: NetworkDoctorResourceUpdate) {
-        let NetworkDoctorResourceUpdate {
-            transfer,
-            state,
-            source,
-            purpose,
-            direction,
-            peer,
-            detail,
-            received,
-            total,
-        } = update;
-        let previous = self.active_resources.get(&transfer);
-        let source = if source == "unknown" {
-            previous
-                .map(|row| row.source.clone())
-                .unwrap_or_else(|| "unknown".into())
-        } else {
-            source
-        };
-        let purpose = purpose.or_else(|| previous.and_then(|row| row.purpose.clone()));
-        let direction = direction.or_else(|| previous.and_then(|row| row.direction.clone()));
-        let peer = peer.or_else(|| previous.and_then(|row| row.peer.clone()));
-        let detail = Self::resource_detail_with_context(
-            detail,
-            &source,
-            purpose.as_deref(),
-            direction.as_deref(),
-            peer.as_deref(),
-        );
-        self.active_resources.insert(
-            transfer.clone(),
-            NetworkDoctorActiveResourceRow {
-                epoch_ms: current_epoch_ms(),
-                transfer,
-                state,
-                source,
-                purpose,
-                direction,
-                peer,
-                detail,
-                received,
-                total,
-            },
-        );
-    }
-
-    fn resource_detail_with_context(
-        detail: String,
-        source: &str,
-        purpose: Option<&str>,
-        direction: Option<&str>,
-        peer: Option<&str>,
-    ) -> String {
-        let mut context = Vec::new();
-        if source != "unknown" {
-            context.push(format!("source={source}"));
-        }
-        if let Some(purpose) = purpose.filter(|value| !value.is_empty()) {
-            context.push(format!("purpose={purpose}"));
-        }
-        if let Some(direction) = direction.filter(|value| !value.is_empty()) {
-            context.push(format!("direction={direction}"));
-        }
-        if let Some(peer) = peer.filter(|value| !value.is_empty()) {
-            context.push(format!("peer={peer}"));
-        }
-        if context.is_empty() {
-            detail
-        } else {
-            format!("{} | {}", context.join(" "), detail)
-        }
-    }
-
-    fn push_lxmf(
-        rows: &mut Vec<NetworkDoctorLxmfRecentRow>,
-        peer: impl Into<String>,
-        state: impl Into<String>,
-        detail: impl Into<String>,
-    ) {
-        let peer = peer.into();
-        let state = state.into();
-        let detail = detail.into();
-        if rows
-            .iter()
-            .any(|row| row.peer == peer && row.state == state && row.detail == detail)
-        {
-            return;
-        }
-        rows.insert(
-            0,
-            NetworkDoctorLxmfRecentRow {
-                epoch_ms: current_epoch_ms(),
-                peer,
-                state,
-                detail,
-            },
-        );
-        rows.truncate(Self::MAX_RECENT_ROWS);
-    }
-
-    fn record_announce(&mut self, announce: &crate::runtime::AnnouncePayload) {
-        self.record_facade_event(&RuntimeFacadeEvent::AnnounceObserved {
-            destination_hash: announce.destination_hash.clone(),
-            kind: format!("{:?}", announce.kind),
-            display_name: announce.display_name.clone(),
-            has_ratchet: announce.has_ratchet,
-        });
-    }
-
-    fn record_path_update(&mut self, path: &crate::runtime::PathEvent) {
-        self.record_facade_event(&RuntimeFacadeEvent::PathUpdated {
-            destination_hash: path.destination_hash.clone(),
-            known: path.known,
-            hops: path.hops,
-        });
-    }
-
-    fn record_delivery_status(&mut self, status: &OutboundStatus) {
-        let state = if status.failed {
-            "failed"
-        } else if status.delivered {
-            "delivered"
-        } else {
-            "updated"
-        };
-        Self::push_lxmf(
-            &mut self.recent_lxmf,
-            compact_hash(&status.peer_hash),
-            state,
-            format!(
-                "message={} state={:?} evidence={}",
-                status.message_id.as_deref().unwrap_or("none"),
-                status.state,
-                status.evidence.as_deref().unwrap_or("none")
-            ),
-        );
-    }
-
-    fn record_lxmf_evidence(&mut self, evidence: &LxmfDeliveryEvidence) {
-        Self::push_lxmf(
-            &mut self.recent_lxmf,
-            compact_hash(&evidence.peer_hash),
-            format!("{:?}", evidence.kind).to_ascii_lowercase(),
-            format!(
-                "message={} detail={}",
-                evidence.message_id.as_deref().unwrap_or("none"),
-                evidence.detail.as_deref().unwrap_or("none")
-            ),
-        );
-    }
-
-    fn record_omenchat_link_closed(&mut self, data: &crate::runtime::OmenChatLinkClosed) {
-        Self::push_link(
-            &mut self.recent_links,
-            hex_lower(&data.link_id),
-            "closed",
-            data.reason.as_deref().unwrap_or("unknown").to_string(),
-        );
-    }
-
-    fn record_omenchat_link_data(&mut self, data: &crate::runtime::OmenChatLinkData) {
-        Self::push_link(
-            &mut self.recent_links,
-            hex_lower(&data.link_id),
-            "frame",
-            format!("{} byte(s)", data.frame_bytes.len()),
-        );
-    }
-
-    fn record_omenchat_resource_data(&mut self, data: &crate::runtime::OmenChatResourceData) {
-        let transfer_id = hex_lower(&data.link_id);
-        let detail = format!(
-            "{} byte(s), metadata {} byte(s)",
-            data.data.len(),
-            data.metadata.as_ref().map_or(0, Vec::len)
-        );
-        self.upsert_resource(NetworkDoctorResourceUpdate {
-            transfer: transfer_id.clone(),
-            state: "complete".into(),
-            source: "omenchat".into(),
-            purpose: Some("omenchat-resource".into()),
-            direction: Some("inbound".into()),
-            peer: None,
-            detail: detail.clone(),
-            received: Some(data.data.len() as u64),
-            total: Some(data.data.len() as u64),
-        });
-        Self::push_resource(&mut self.recent_resources, transfer_id, "complete", detail);
-    }
-
-    fn record_facade_event(&mut self, event: &crate::runtime::RuntimeFacadeEvent) {
-        match event {
-            crate::runtime::RuntimeFacadeEvent::InterfaceUp {
-                interface_id,
-                detail,
-            } => Self::push_path(
-                &mut self.recent_paths,
-                interface_id,
-                "interface up",
-                detail.as_deref().unwrap_or("no detail"),
-            ),
-            crate::runtime::RuntimeFacadeEvent::InterfaceDown {
-                interface_id,
-                reason,
-            } => Self::push_path(
-                &mut self.recent_paths,
-                interface_id,
-                "interface down",
-                reason.as_deref().unwrap_or("unknown"),
-            ),
-            crate::runtime::RuntimeFacadeEvent::AnnounceHeard {
-                destination_hash,
-                app,
-                aspect,
-            } => Self::push_path(
-                &mut self.recent_paths,
-                compact_hash(destination_hash),
-                "announce",
-                format!("{app}.{aspect}"),
-            ),
-            crate::runtime::RuntimeFacadeEvent::AnnounceObserved {
-                destination_hash,
-                kind,
-                display_name,
-                has_ratchet,
-            } => Self::push_path(
-                &mut self.recent_paths,
-                format!("announce {kind}"),
-                if *has_ratchet { "ratchet" } else { "heard" },
-                format!("{} {}", compact_hash(destination_hash), display_name),
-            ),
-            crate::runtime::RuntimeFacadeEvent::PathRequested { destination_hash } => {
-                Self::push_path(
-                    &mut self.recent_paths,
-                    compact_hash(destination_hash),
-                    "requested",
-                    "path request queued",
-                )
-            }
-            crate::runtime::RuntimeFacadeEvent::PathUpdated {
-                destination_hash,
-                known,
-                hops,
-            } => Self::push_path(
-                &mut self.recent_paths,
-                compact_hash(destination_hash),
-                if *known { "known" } else { "unknown" },
-                hops.map(|hops| format!("{hops} hop(s)"))
-                    .unwrap_or_else(|| "hop count unavailable".into()),
-            ),
-            crate::runtime::RuntimeFacadeEvent::PathFound {
-                destination_hash,
-                hops,
-            } => Self::push_path(
-                &mut self.recent_paths,
-                compact_hash(destination_hash),
-                "found",
-                hops.map(|hops| format!("{hops} hop(s)"))
-                    .unwrap_or_else(|| "hop count unavailable".into()),
-            ),
-            crate::runtime::RuntimeFacadeEvent::LinkOpening { destination_hash } => {
-                Self::push_link(
-                    &mut self.recent_links,
-                    compact_hash(destination_hash),
-                    "opening",
-                    "link open requested",
-                )
-            }
-            crate::runtime::RuntimeFacadeEvent::LinkOpened {
-                destination_hash,
-                link_id,
-            } => Self::push_link(
-                &mut self.recent_links,
-                link_id,
-                "opened",
-                format!("destination={}", compact_hash(destination_hash)),
-            ),
-            crate::runtime::RuntimeFacadeEvent::LinkClosed { link_id, reason } => Self::push_link(
-                &mut self.recent_links,
-                link_id,
-                "closed",
-                reason.as_deref().unwrap_or("unknown"),
-            ),
-            crate::runtime::RuntimeFacadeEvent::LinkFrameReceived { link_id, bytes } => {
-                Self::push_link(
-                    &mut self.recent_links,
-                    link_id,
-                    "frame",
-                    format!("{bytes} byte(s)"),
-                );
-            }
-            crate::runtime::RuntimeFacadeEvent::ResourceOffered {
-                link_id,
-                transfer_id,
-                purpose,
-                bytes,
-                source,
-                direction,
-                peer,
-            } => {
-                let detail = format!(
-                    "link={} purpose={} size={}",
-                    link_id,
-                    purpose,
-                    bytes
-                        .map(|bytes| format!("{bytes} byte(s)"))
-                        .unwrap_or_else(|| "unknown".into())
-                );
-                self.upsert_resource(NetworkDoctorResourceUpdate {
-                    transfer: transfer_id.clone(),
-                    state: "offered".into(),
-                    source: source.clone().unwrap_or_else(|| "unknown".into()),
-                    purpose: Some(purpose.clone()),
-                    direction: direction.clone().or_else(|| Some("inbound".into())),
-                    peer: peer.clone().or_else(|| Some(link_id.clone())),
-                    detail: detail.clone(),
-                    received: None,
-                    total: *bytes,
-                });
-                Self::push_resource(&mut self.recent_resources, transfer_id, "offered", detail);
-            }
-            crate::runtime::RuntimeFacadeEvent::ResourceProgress {
-                transfer_id,
-                received,
-                total,
-                source,
-                purpose,
-                direction,
-                peer,
-            } => {
-                let detail = match (source.as_deref(), total) {
-                    (Some(source), Some(total)) => {
-                        format!("{source} | {received}/{total} byte(s)")
-                    }
-                    (Some(source), None) => {
-                        format!("{source} | {received} byte(s) received")
-                    }
-                    (None, Some(total)) => format!("{received}/{total} byte(s)"),
-                    (None, None) => format!("{received} byte(s) received"),
-                };
-                self.upsert_resource(NetworkDoctorResourceUpdate {
-                    transfer: transfer_id.clone(),
-                    state: "progress".into(),
-                    source: source.clone().unwrap_or_else(|| "unknown".into()),
-                    purpose: purpose.clone(),
-                    direction: direction.clone(),
-                    peer: peer.clone(),
-                    detail: detail.clone(),
-                    received: Some(*received),
-                    total: *total,
-                });
-                Self::push_resource(&mut self.recent_resources, transfer_id, "progress", detail);
-            }
-            crate::runtime::RuntimeFacadeEvent::ResourceComplete {
-                transfer_id,
-                bytes,
-                source,
-                purpose,
-                direction,
-                peer,
-            } => {
-                self.upsert_resource(NetworkDoctorResourceUpdate {
-                    transfer: transfer_id.clone(),
-                    state: "complete".into(),
-                    source: source.clone().unwrap_or_else(|| "unknown".into()),
-                    purpose: purpose.clone(),
-                    direction: direction.clone(),
-                    peer: peer.clone(),
-                    detail: format!("{bytes} byte(s)"),
-                    received: Some(*bytes),
-                    total: Some(*bytes),
-                });
-                Self::push_resource(
-                    &mut self.recent_resources,
-                    transfer_id,
-                    "complete",
-                    format!("{bytes} byte(s)"),
-                );
-            }
-            crate::runtime::RuntimeFacadeEvent::ResourceFailed {
-                transfer_id,
-                reason,
-                source,
-                purpose,
-                direction,
-                peer,
-            } => {
-                self.upsert_resource(NetworkDoctorResourceUpdate {
-                    transfer: transfer_id.clone(),
-                    state: "failed".into(),
-                    source: source.clone().unwrap_or_else(|| "unknown".into()),
-                    purpose: purpose.clone(),
-                    direction: direction.clone(),
-                    peer: peer.clone(),
-                    detail: reason.clone(),
-                    received: None,
-                    total: None,
-                });
-                Self::push_resource(&mut self.recent_resources, transfer_id, "failed", reason);
-            }
-            crate::runtime::RuntimeFacadeEvent::LxmfEvent { event, detail } => Self::push_lxmf(
-                &mut self.recent_lxmf,
-                event,
-                "event",
-                detail.as_deref().unwrap_or("no detail"),
-            ),
-            crate::runtime::RuntimeFacadeEvent::Diagnostic { section, message } => {
-                Self::push_path(&mut self.recent_paths, section, "diagnostic", message)
-            }
-        }
-    }
-}
-
 impl MonitoringPanelState {
     fn note_runtime_event(&mut self) {
         self.runtime_events_total = self.runtime_events_total.saturating_add(1);
@@ -6053,355 +5136,6 @@ pub struct SmokeKnownDestinationsPreload {
     pub loaded: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub enum LogSeverity {
-    Debug,
-    #[default]
-    Info,
-    Warn,
-    Error,
-}
-
-impl LogSeverity {
-    const ALL: [Self; 4] = [Self::Debug, Self::Info, Self::Warn, Self::Error];
-}
-
-#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub enum LogSource {
-    #[default]
-    App,
-    Runtime,
-    Directory,
-    Messaging,
-    Diagnostics,
-    Interface,
-    Plugin,
-}
-
-impl LogSource {
-    const ALL: [Self; 7] = [
-        Self::App,
-        Self::Runtime,
-        Self::Directory,
-        Self::Messaging,
-        Self::Diagnostics,
-        Self::Interface,
-        Self::Plugin,
-    ];
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct LogEntry {
-    pub epoch_ms: u64,
-    pub severity: LogSeverity,
-    pub source: LogSource,
-    pub message: String,
-}
-
-#[derive(Debug)]
-pub struct LogBuffer {
-    pub lines: Vec<String>,
-    pub entries: Vec<LogEntry>,
-    pub severity_filter: Option<LogSeverity>,
-    pub source_filter: Option<LogSource>,
-    log_file: Option<PathBuf>,
-    max_file_bytes: u64,
-    retain_files: usize,
-    memory_bytes: usize,
-    startup_load_stats: PersistedLogStats,
-    disk_stats: StructuredLogDiskStats,
-    worker: Option<StructuredLogWorker>,
-}
-
-impl LogBuffer {
-    fn with_persistence(
-        logs_dir: PathBuf,
-        max_file_bytes: u64,
-        retain_files: usize,
-        load_recent_entries: usize,
-    ) -> Self {
-        let _ = std::fs::create_dir_all(&logs_dir);
-        let policy = StructuredLogDiskPolicy::normalized(max_file_bytes, retain_files);
-        let log_file = logs_dir.join("omenbrowser_rs.jsonl");
-        let worker = StructuredLogWorker::start();
-        let worker_start_warning = worker.as_ref().err().map(|error| {
-            format!("structured log persistence disabled: writer start failed: {error}")
-        });
-        let mut buffer = Self {
-            log_file: Some(log_file.clone()),
-            max_file_bytes: policy.max_file_bytes,
-            retain_files: policy.retain_files,
-            disk_stats: enforce_structured_log_retention(&log_file, policy),
-            worker: worker.ok(),
-            ..Self::default()
-        };
-        buffer.load_recent_entries(load_recent_entries);
-        if let Some(warning) = worker_start_warning {
-            buffer.push_with_source(LogSeverity::Warn, LogSource::App, warning);
-        }
-        buffer
-    }
-
-    fn push(&mut self, severity: LogSeverity, message: impl Into<String>) {
-        self.push_with_source(severity, LogSource::App, message);
-    }
-
-    fn push_with_source(
-        &mut self,
-        severity: LogSeverity,
-        source: LogSource,
-        message: impl Into<String>,
-    ) {
-        let message = bounded_log_message(message.into());
-        self.lines.push(message.clone());
-        let entry = LogEntry {
-            epoch_ms: current_epoch_ms(),
-            severity,
-            source,
-            message,
-        };
-        self.persist_entry(&entry);
-        self.memory_bytes = self
-            .memory_bytes
-            .saturating_add(log_entry_memory_bytes(&entry));
-        self.entries.push(entry);
-        self.enforce_memory_budget();
-    }
-
-    fn clear_display(&mut self) {
-        self.lines.clear();
-        self.entries.clear();
-        self.memory_bytes = 0;
-        self.severity_filter = None;
-        self.source_filter = None;
-    }
-
-    pub(crate) fn filtered_entries(&self) -> Vec<&LogEntry> {
-        self.entries
-            .iter()
-            .filter(|entry| {
-                self.severity_filter
-                    .is_none_or(|severity| entry.severity == severity)
-                    && self
-                        .source_filter
-                        .is_none_or(|source| entry.source == source)
-            })
-            .collect()
-    }
-
-    fn cycle_severity_filter(&mut self) -> Option<LogSeverity> {
-        self.severity_filter = match self.severity_filter {
-            None => Some(LogSeverity::Debug),
-            Some(current) => LogSeverity::ALL
-                .iter()
-                .position(|candidate| *candidate == current)
-                .and_then(|index| LogSeverity::ALL.get(index + 1).copied()),
-        };
-        self.severity_filter
-    }
-
-    fn cycle_source_filter(&mut self) -> Option<LogSource> {
-        self.source_filter = match self.source_filter {
-            None => Some(LogSource::App),
-            Some(current) => LogSource::ALL
-                .iter()
-                .position(|candidate| *candidate == current)
-                .and_then(|index| LogSource::ALL.get(index + 1).copied()),
-        };
-        self.source_filter
-    }
-
-    fn persist_entry(&mut self, entry: &LogEntry) {
-        let Some(path) = &self.log_file else {
-            return;
-        };
-        let policy = StructuredLogDiskPolicy::normalized(self.max_file_bytes, self.retain_files);
-        if let Some(worker) = &self.worker {
-            let _ = worker.enqueue(path, entry.clone(), policy);
-        } else {
-            let stats = StructuredLogDiskStats {
-                write_failures: 1,
-                ..StructuredLogDiskStats::default()
-            };
-            self.record_disk_stats(stats);
-        }
-    }
-
-    fn flush(&self, timeout: Duration) -> bool {
-        self.worker
-            .as_ref()
-            .is_none_or(|worker| worker.flush_handle().flush(timeout))
-    }
-
-    fn flush_handle(&self) -> Option<StructuredLogFlushHandle> {
-        self.worker.as_ref().map(StructuredLogWorker::flush_handle)
-    }
-
-    fn worker_metrics(&self) -> StructuredLogWorkerMetrics {
-        let mut metrics = self.worker.as_ref().map_or_else(
-            StructuredLogWorkerMetrics::default,
-            StructuredLogWorker::metrics,
-        );
-        metrics.write_failures = metrics
-            .write_failures
-            .saturating_add(self.disk_stats.write_failures as u64);
-        metrics.rotations = metrics
-            .rotations
-            .saturating_add(self.disk_stats.rotations as u64);
-        metrics.removed_files = metrics
-            .removed_files
-            .saturating_add(self.disk_stats.removed_files as u64);
-        metrics.removal_failures = metrics
-            .removal_failures
-            .saturating_add(self.disk_stats.removal_failures as u64);
-        metrics.unsafe_paths_refused = metrics
-            .unsafe_paths_refused
-            .saturating_add(self.disk_stats.unsafe_paths_refused as u64);
-        metrics.truncated_directory_scans = metrics
-            .truncated_directory_scans
-            .saturating_add(u64::from(self.disk_stats.directory_scan_truncated));
-        metrics
-    }
-
-    fn record_disk_stats(&mut self, stats: StructuredLogDiskStats) {
-        // Persistence failures remain non-fatal and must not recursively log themselves.
-        self.disk_stats.directory_entries_scanned = self
-            .disk_stats
-            .directory_entries_scanned
-            .saturating_add(stats.directory_entries_scanned);
-        self.disk_stats.directory_scan_truncated |= stats.directory_scan_truncated;
-        self.disk_stats.matching_rotated_files = stats.matching_rotated_files;
-        self.disk_stats.removed_files = self
-            .disk_stats
-            .removed_files
-            .saturating_add(stats.removed_files);
-        self.disk_stats.removal_failures = self
-            .disk_stats
-            .removal_failures
-            .saturating_add(stats.removal_failures);
-        self.disk_stats.rotations = self.disk_stats.rotations.saturating_add(stats.rotations);
-        self.disk_stats.write_failures = self
-            .disk_stats
-            .write_failures
-            .saturating_add(stats.write_failures);
-        self.disk_stats.unsafe_paths_refused = self
-            .disk_stats
-            .unsafe_paths_refused
-            .saturating_add(stats.unsafe_paths_refused);
-    }
-
-    fn load_recent_entries(&mut self, limit: usize) {
-        if limit == 0 {
-            self.lines.clear();
-            self.entries.clear();
-            self.memory_bytes = 0;
-            self.startup_load_stats = PersistedLogStats::default();
-            return;
-        }
-        let Some(path) = &self.log_file else {
-            return;
-        };
-        let Some(logs_dir) = path.parent() else {
-            return;
-        };
-        let effective_limit = limit.min(STRUCTURED_LOG_STARTUP_ENTRY_LIMIT);
-        let loaded = load_recent_log_entries(
-            logs_dir,
-            PersistedLogLimits {
-                entry_limit: effective_limit,
-                directory_entry_limit: STRUCTURED_LOG_STARTUP_DIRECTORY_ENTRY_LIMIT,
-                file_limit: self
-                    .retain_files
-                    .saturating_add(1)
-                    .clamp(1, STRUCTURED_LOG_STARTUP_FILE_LIMIT),
-                file_bytes: STRUCTURED_LOG_STARTUP_FILE_BYTES,
-                total_bytes: STRUCTURED_LOG_STARTUP_TOTAL_BYTES,
-            },
-        );
-        self.startup_load_stats = loaded.stats;
-        self.entries = loaded
-            .entries
-            .into_iter()
-            .map(|mut entry| {
-                entry.message = bounded_log_message(entry.message);
-                entry
-            })
-            .collect();
-        self.lines = self
-            .entries
-            .iter()
-            .map(|entry| entry.message.clone())
-            .collect();
-        self.memory_bytes = self.entries.iter().map(log_entry_memory_bytes).sum();
-        self.enforce_memory_budget();
-        if limit > effective_limit {
-            self.push_with_source(
-                LogSeverity::Warn,
-                LogSource::App,
-                format!(
-                    "structured log startup entries capped at {effective_limit} (requested {limit})"
-                ),
-            );
-        }
-    }
-
-    fn enforce_memory_budget(&mut self) {
-        let mut remove_count = 0;
-        let mut retained_bytes = self.memory_bytes;
-        while self.entries.len().saturating_sub(remove_count) > STRUCTURED_LOG_MEMORY_ENTRY_LIMIT
-            || retained_bytes > STRUCTURED_LOG_MEMORY_BYTES
-        {
-            let Some(entry) = self.entries.get(remove_count) else {
-                break;
-            };
-            retained_bytes = retained_bytes.saturating_sub(log_entry_memory_bytes(entry));
-            remove_count += 1;
-        }
-        if remove_count > 0 {
-            self.entries.drain(..remove_count);
-            self.lines.drain(..remove_count.min(self.lines.len()));
-        }
-        self.memory_bytes = retained_bytes;
-    }
-}
-
-impl Default for LogBuffer {
-    fn default() -> Self {
-        Self {
-            lines: Vec::new(),
-            entries: Vec::new(),
-            severity_filter: None,
-            source_filter: None,
-            log_file: None,
-            max_file_bytes: STRUCTURED_LOG_DEFAULT_MAX_BYTES,
-            retain_files: 4,
-            memory_bytes: 0,
-            startup_load_stats: PersistedLogStats::default(),
-            disk_stats: StructuredLogDiskStats::default(),
-            worker: None,
-        }
-    }
-}
-
-fn bounded_log_message(message: String) -> String {
-    const MARKER: &str = "...<truncated>";
-    if message.len() <= STRUCTURED_LOG_MESSAGE_BYTES {
-        return message.as_str().to_owned();
-    }
-    let mut end = STRUCTURED_LOG_MESSAGE_BYTES.saturating_sub(MARKER.len());
-    while !message.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    let mut bounded = String::with_capacity(end.saturating_add(MARKER.len()));
-    bounded.push_str(&message[..end]);
-    bounded.push_str(MARKER);
-    bounded
-}
-
-fn log_entry_memory_bytes(entry: &LogEntry) -> usize {
-    entry.message.len().saturating_mul(2).saturating_add(128)
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct PluginsPanelState {
     pub manifests: Vec<PluginManifest>,
@@ -6414,6 +5148,7 @@ pub struct PluginsPanelState {
 pub enum SettingsAction {
     EditTheme,
     EditHome,
+    ToggleReducedMotion,
     SelectRuntimeAuto,
     SelectRuntimeMock,
     SelectRuntimeReticulum,
@@ -6442,9 +5177,10 @@ pub enum SettingsAction {
 }
 
 impl SettingsAction {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::EditTheme,
         Self::EditHome,
+        Self::ToggleReducedMotion,
         Self::SelectRuntimeAuto,
         Self::SelectRuntimeMock,
         Self::SelectRuntimeReticulum,
@@ -6517,6 +5253,7 @@ pub struct App {
     pub diagnostics_state: DiagnosticsPanelState,
     pub monitoring_state: MonitoringPanelState,
     pub network_doctor_state: NetworkDoctorPanelState,
+    pub operation_history: crate::operations::OperationHistory,
     pub logs: LogBuffer,
     pub plugins_state: PluginsPanelState,
     pub settings_state: SettingsPanelState,
@@ -6590,6 +5327,14 @@ struct BrowserTabRestoreContext<'a> {
     downloads_dir: PathBuf,
     settings: &'a AppSettings,
     directory_service: &'a DirectoryService,
+}
+
+fn propagation_sync_record_matches_node(
+    record: &crate::operations::OperationRecord,
+    destination_hash: &str,
+) -> bool {
+    record.id.domain == crate::operations::OperationDomain::PropagationSync
+        && record.target.label.eq_ignore_ascii_case(destination_hash)
 }
 
 impl App {
@@ -6711,7 +5456,7 @@ impl App {
                 warnings: vec![format!("plugin discovery failed: {error}")],
             });
         static NEXT_EVENT_WAKE_ID: AtomicU64 = AtomicU64::new(1);
-        let (raw_event_tx, event_rx) = channel(256);
+        let (raw_event_tx, event_rx) = channel(INTERNAL_EVENT_QUEUE_MAX_ITEMS);
         let (wake_tx, wake_rx) = watch::channel(0);
         let payload_budget = Arc::new(InternalEventPayloadBudget::default());
         let event_tx = InternalEventSender {
@@ -6809,6 +5554,7 @@ impl App {
                 ..MonitoringPanelState::default()
             },
             network_doctor_state: NetworkDoctorPanelState::default(),
+            operation_history: crate::operations::OperationHistory::default(),
             logs,
             plugins_state: PluginsPanelState {
                 manifests: plugin_report
@@ -12159,6 +10905,183 @@ impl App {
         self.status.task = "editing structured log startup entries".into();
     }
 
+    pub fn focus_operations_search(&mut self) {
+        self.workspace.active_section = WorkspaceSection::NetworkDoctor;
+        self.workspace.focus = FocusArea::Command;
+        self.input.begin(
+            InputTarget::OperationsSearch,
+            self.network_doctor_state.operations_search.clone(),
+        );
+        self.status.task = "editing Operations search".into();
+    }
+
+    pub fn edit_operations_search_char(&mut self, character: char) -> bool {
+        let Some(active) = self.input.active.as_ref() else {
+            return false;
+        };
+        if active.target != InputTarget::OperationsSearch {
+            return false;
+        }
+        if character.is_control()
+            || active
+                .buffer
+                .as_str()
+                .len()
+                .saturating_add(character.len_utf8())
+                > crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES
+        {
+            self.status.task = format!(
+                "Operations search is limited to {} bytes",
+                crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES
+            );
+            return false;
+        }
+        self.input.insert_char(character)
+    }
+
+    pub fn cycle_operations_filter(&mut self) {
+        use crate::operations::presentation::OperationPresentationFilter;
+
+        self.network_doctor_state.operations_filter = match self
+            .network_doctor_state
+            .operations_filter
+        {
+            OperationPresentationFilter::All => OperationPresentationFilter::Active,
+            OperationPresentationFilter::Active => OperationPresentationFilter::NeedsAttention,
+            OperationPresentationFilter::NeedsAttention => OperationPresentationFilter::Completed,
+            OperationPresentationFilter::Completed | OperationPresentationFilter::Domain(_) => {
+                OperationPresentationFilter::All
+            }
+        };
+        self.reconcile_operation_selection();
+        self.status.task = format!(
+            "Operations filter: {}",
+            crate::operations::presentation::filter_label(
+                self.network_doctor_state.operations_filter
+            )
+        );
+    }
+
+    pub fn clear_operations_search(&mut self) {
+        self.network_doctor_state.operations_search.clear();
+        if matches!(
+            self.input.active.as_ref().map(|active| &active.target),
+            Some(InputTarget::OperationsSearch)
+        ) {
+            self.input.cancel();
+            self.workspace.focus = FocusArea::Workspace;
+        }
+        self.reconcile_operation_selection();
+        self.status.task = "Operations search cleared".into();
+    }
+
+    pub fn move_operation_selection(&mut self, direction: isize) -> bool {
+        let visible = self.visible_operation_ids();
+        if visible.is_empty() {
+            self.network_doctor_state.selected_operation = None;
+            self.status.task = "no Operations row matches the current filter".into();
+            return false;
+        }
+        let current = self
+            .network_doctor_state
+            .selected_operation
+            .and_then(|selected| visible.iter().position(|id| *id == selected));
+        let next = match (current, direction.is_negative()) {
+            (Some(index), true) => index.saturating_sub(1),
+            (Some(index), false) => index.saturating_add(1).min(visible.len() - 1),
+            (None, true) => visible.len() - 1,
+            (None, false) => 0,
+        };
+        self.network_doctor_state.selected_operation = Some(visible[next]);
+        self.status.task = format!(
+            "selected {} operation",
+            crate::operations::presentation::domain_label(visible[next].domain)
+        );
+        true
+    }
+
+    pub fn open_operation_select_mode(&mut self) -> bool {
+        self.reconcile_operation_selection();
+        if self.network_doctor_state.selected_operation.is_none() {
+            self.status.task = "no retained operation is available to inspect".into();
+            return false;
+        }
+        self.network_doctor_state.operation_select_mode = true;
+        self.network_doctor_state.operation_diagnostic_scroll = 0;
+        self.status.task =
+            "operation copy/select mode open; select terminal text, Esc returns".into();
+        true
+    }
+
+    pub fn close_operation_select_mode(&mut self) -> bool {
+        if !self.network_doctor_state.operation_select_mode {
+            return false;
+        }
+        self.network_doctor_state.operation_select_mode = false;
+        self.network_doctor_state.operation_diagnostic_scroll = 0;
+        self.status.task = "operation copy/select mode closed".into();
+        true
+    }
+
+    pub fn scroll_operation_diagnostic(&mut self, direction: isize) -> bool {
+        if !self.network_doctor_state.operation_select_mode {
+            return false;
+        }
+        self.network_doctor_state.operation_diagnostic_scroll = if direction.is_negative() {
+            self.network_doctor_state
+                .operation_diagnostic_scroll
+                .saturating_sub(1)
+        } else {
+            self.network_doctor_state
+                .operation_diagnostic_scroll
+                .saturating_add(1)
+        };
+        true
+    }
+
+    pub fn selected_operation_diagnostic(&self) -> Option<String> {
+        let selected = self.network_doctor_state.selected_operation?;
+        self.operation_history
+            .records()
+            .find(|record| record.id == selected)
+            .map(crate::operations::presentation::operation_diagnostics_text)
+    }
+
+    fn visible_operation_ids(&self) -> Vec<crate::operations::OperationId> {
+        use crate::operations::presentation::{present_operations, OperationPresentationQuery};
+
+        let query = OperationPresentationQuery::new(
+            self.network_doctor_state.operations_filter,
+            Some(&self.network_doctor_state.operations_search),
+            NETWORK_DOCTOR_OPERATION_ROWS,
+        )
+        .unwrap_or_else(|_| {
+            OperationPresentationQuery::new(
+                self.network_doctor_state.operations_filter,
+                None,
+                NETWORK_DOCTOR_OPERATION_ROWS,
+            )
+            .expect("the fixed Network Doctor row limit must remain valid")
+        });
+        present_operations(&self.operation_history, &query)
+            .rows
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    fn reconcile_operation_selection(&mut self) {
+        let visible = self.visible_operation_ids();
+        if self
+            .network_doctor_state
+            .selected_operation
+            .is_some_and(|selected| visible.contains(&selected))
+        {
+            return;
+        }
+        self.network_doctor_state.selected_operation = visible.first().copied();
+    }
+
     pub fn cancel_active_input(&mut self) -> bool {
         let Some((target, original)) = self.input.cancel() else {
             return false;
@@ -12264,6 +11187,10 @@ impl App {
             InputTarget::DiagnosticsKnownDestinationsPath => {
                 self.workspace.focus = FocusArea::Workspace;
                 self.submit_known_destinations_preload_path(text);
+            }
+            InputTarget::OperationsSearch => {
+                self.workspace.focus = FocusArea::Workspace;
+                self.submit_operations_search(text);
             }
             InputTarget::SettingsBrowserFormMaxAgeSecs => {
                 self.workspace.focus = FocusArea::Workspace;
@@ -12863,11 +11790,30 @@ impl App {
     }
 
     pub fn toggle_active_conversation_delivery_mode(&mut self) {
-        let conversation = &mut self.workspace.conversations[self.workspace.active_conversation];
-        conversation.delivery_mode = match conversation.delivery_mode {
+        let active = self.workspace.active_conversation;
+        let peer_hash = self.workspace.conversations[active].peer_hash.trim();
+        let policy = self
+            .directory_service
+            .find(peer_hash)
+            .and_then(|entry| entry.preferred_delivery);
+        let next = match self.workspace.conversations[active].delivery_mode {
             DeliveryMode::Direct => DeliveryMode::Propagated,
             DeliveryMode::Propagated => DeliveryMode::Direct,
         };
+        if let Some(policy) = policy {
+            let allowed = match next {
+                DeliveryMode::Direct => policy.allows_direct(),
+                DeliveryMode::Propagated => policy.allows_propagated(),
+            };
+            if !allowed {
+                self.workspace.active_section = WorkspaceSection::Messages;
+                self.status.task =
+                    format!("delivery mode blocked by peer policy: {}", policy.label());
+                return;
+            }
+        }
+        let conversation = &mut self.workspace.conversations[active];
+        conversation.delivery_mode = next;
         self.workspace.active_section = WorkspaceSection::Messages;
         self.status.task = format!("delivery mode: {:?}", conversation.delivery_mode);
         self.persist_ui_preferences("workspace section");
@@ -12904,6 +11850,7 @@ impl App {
                 self.edit_settings_default_start_page();
                 true
             }
+            SettingsAction::ToggleReducedMotion => self.toggle_settings_reduced_motion(),
             SettingsAction::SelectRuntimeAuto => {
                 self.set_runtime_backend_setting(RuntimeBackendSetting::Auto)
             }
@@ -13202,20 +12149,185 @@ impl App {
         let next = match entry.preferred_delivery {
             None => Some(PreferredDelivery::Direct),
             Some(PreferredDelivery::Direct) => Some(PreferredDelivery::Propagated),
-            Some(PreferredDelivery::Propagated) => None,
+            Some(PreferredDelivery::Propagated) => Some(PreferredDelivery::DirectOnly),
+            Some(PreferredDelivery::DirectOnly) => Some(PreferredDelivery::PropagatedOnly),
+            Some(PreferredDelivery::PropagatedOnly) => None,
         };
         match self
             .directory_service
-            .set_preferred_delivery(&entry.destination_hash, next.clone())
+            .set_preferred_delivery(&entry.destination_hash, next)
         {
             Ok(Some(updated)) => {
                 self.refresh_panels_from_services();
                 self.status.task = format!(
                     "directory delivery: {} {}",
                     updated.display_name,
-                    next.map(|delivery| format!("{delivery:?}"))
+                    next.map(|delivery| delivery.label().to_string())
                         .unwrap_or_else(|| "default".into())
                 );
+                true
+            }
+            Ok(None) => {
+                self.status.task = "directory entry no longer exists".into();
+                false
+            }
+            Err(error) => {
+                self.status.task = error.to_string();
+                false
+            }
+        }
+    }
+
+    pub fn cycle_selected_directory_delivery_fallback(&mut self) -> bool {
+        let Some(entry) = self.selected_directory_entry() else {
+            self.status.task = "no directory entry selected".into();
+            return false;
+        };
+        if entry.kind != DirectoryKind::Peer {
+            self.status.task = "fallback policy only applies to LXMF peers".into();
+            return false;
+        }
+        let next = match entry.delivery_fallback {
+            DeliveryFallbackPolicy::Ask => DeliveryFallbackPolicy::Automatic,
+            DeliveryFallbackPolicy::Automatic => DeliveryFallbackPolicy::Ask,
+        };
+        match self
+            .directory_service
+            .set_delivery_fallback(&entry.destination_hash, next)
+        {
+            Ok(Some(updated)) => {
+                self.refresh_panels_from_services();
+                self.status.task = format!(
+                    "directory fallback: {} {}",
+                    updated.display_name,
+                    next.label()
+                );
+                true
+            }
+            Ok(None) => {
+                self.status.task = "directory entry no longer exists".into();
+                false
+            }
+            Err(error) => {
+                self.status.task = error.to_string();
+                false
+            }
+        }
+    }
+
+    pub fn cycle_selected_directory_direct_stamp_limit(&mut self) -> bool {
+        let Some(entry) = self.selected_directory_entry() else {
+            self.status.task = "no directory entry selected".into();
+            return false;
+        };
+        if entry.kind != DirectoryKind::Peer {
+            self.status.task = "direct stamp limit only applies to LXMF peers".into();
+            return false;
+        }
+        let next = match entry.max_automatic_direct_stamp_cost {
+            None => Some(0),
+            Some(0) => Some(1),
+            Some(1) => Some(2),
+            Some(2) => Some(4),
+            Some(4) => Some(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST),
+            Some(_) => None,
+        };
+        match self
+            .directory_service
+            .set_max_automatic_direct_stamp_cost(&entry.destination_hash, next)
+        {
+            Ok(Some(updated)) => {
+                self.refresh_panels_from_services();
+                let label = next
+                    .map(|cost| cost.to_string())
+                    .unwrap_or_else(|| format!("default ({DEFAULT_AUTOMATIC_DIRECT_STAMP_COST})"));
+                self.status.task = format!(
+                    "directory direct stamp limit: {} {label}",
+                    updated.display_name
+                );
+                true
+            }
+            Ok(None) => {
+                self.status.task = "directory entry no longer exists".into();
+                false
+            }
+            Err(error) => {
+                self.status.task = error.to_string();
+                false
+            }
+        }
+    }
+
+    pub fn cycle_selected_directory_direct_stamp_confirmation(&mut self) -> bool {
+        let Some(entry) = self.selected_directory_entry() else {
+            self.status.task = "no directory entry selected".into();
+            return false;
+        };
+        if entry.kind != DirectoryKind::Peer {
+            self.status.task = "direct stamp confirmation only applies to LXMF peers".into();
+            return false;
+        }
+        let next = match entry.ask_above_direct_stamp_cost {
+            None => Some(0),
+            Some(0) => Some(1),
+            Some(1) => Some(2),
+            Some(2) => Some(4),
+            Some(4) => Some(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST),
+            Some(_) => None,
+        };
+        match self
+            .directory_service
+            .set_ask_above_direct_stamp_cost(&entry.destination_hash, next)
+        {
+            Ok(Some(updated)) => {
+                self.refresh_panels_from_services();
+                let label = next
+                    .map(|cost| format!("ask above {cost}"))
+                    .unwrap_or_else(|| "disabled".into());
+                self.status.task = format!(
+                    "directory direct stamp confirmation: {} {label}",
+                    updated.display_name
+                );
+                true
+            }
+            Ok(None) => {
+                self.status.task = "directory entry no longer exists".into();
+                false
+            }
+            Err(error) => {
+                self.status.task = error.to_string();
+                false
+            }
+        }
+    }
+
+    pub fn cycle_selected_directory_reply_ticket_preference(&mut self) -> bool {
+        let Some(entry) = self.selected_directory_entry() else {
+            self.status.task = "no directory entry selected".into();
+            return false;
+        };
+        if entry.kind != DirectoryKind::Peer {
+            self.status.task = "reply ticket preference only applies to LXMF peers".into();
+            return false;
+        }
+        let next = match entry.offer_reply_ticket {
+            None => Some(true),
+            Some(true) => Some(false),
+            Some(false) => None,
+        };
+        match self
+            .directory_service
+            .set_offer_reply_ticket(&entry.destination_hash, next)
+        {
+            Ok(Some(updated)) => {
+                self.refresh_panels_from_services();
+                let label = match next {
+                    Some(true) => "offer by default",
+                    Some(false) => "do not offer",
+                    None => "default (off)",
+                };
+                self.status.task =
+                    format!("directory reply ticket: {} {label}", updated.display_name);
                 true
             }
             Ok(None) => {
@@ -13865,6 +12977,55 @@ impl App {
     }
 
     pub fn send_active_conversation_draft(&mut self) {
+        self.send_active_conversation_draft_with_stamp_approval(None);
+    }
+
+    pub fn confirm_active_conversation_direct_stamp(&mut self) -> bool {
+        let active = self.workspace.active_conversation;
+        let Some(confirmation) = self.workspace.conversations[active]
+            .direct_stamp_confirmation
+            .clone()
+        else {
+            self.status.task = "no direct stamp cost is awaiting confirmation".into();
+            return false;
+        };
+        if !confirmation.matches_draft(&self.workspace.conversations[active]) {
+            self.workspace.conversations[active].direct_stamp_confirmation = None;
+            self.status.task = "direct stamp confirmation expired because the draft changed".into();
+            return false;
+        }
+        if self.active_direct_stamp_confirmation_requirement()
+            != Some((confirmation.advertised_cost, confirmation.ask_above))
+        {
+            self.workspace.conversations[active].direct_stamp_confirmation = None;
+            self.status.task =
+                "direct stamp confirmation expired because peer policy changed".into();
+            return false;
+        }
+        self.workspace.conversations[active].direct_stamp_confirmation = None;
+        self.send_active_conversation_draft_with_stamp_approval(Some(confirmation.advertised_cost));
+        true
+    }
+
+    pub fn cancel_active_conversation_direct_stamp(&mut self) -> bool {
+        let active = self.workspace.active_conversation;
+        if self.workspace.conversations[active]
+            .direct_stamp_confirmation
+            .take()
+            .is_some()
+        {
+            self.status.task = "direct stamp send cancelled; draft preserved".into();
+            true
+        } else {
+            self.status.task = "no direct stamp cost is awaiting confirmation".into();
+            false
+        }
+    }
+
+    fn send_active_conversation_draft_with_stamp_approval(
+        &mut self,
+        approved_direct_stamp_cost: Option<u8>,
+    ) {
         if self.input.active.is_some() {
             self.submit_active_input();
         }
@@ -13908,9 +13069,57 @@ impl App {
             }
             return;
         }
+        if let Some((advertised_cost, ask_above)) =
+            self.active_direct_stamp_confirmation_requirement()
+        {
+            if approved_direct_stamp_cost != Some(advertised_cost) {
+                let conversation = &mut self.workspace.conversations[active];
+                conversation.direct_stamp_confirmation = Some(DirectStampConfirmation {
+                    peer_hash: conversation.peer_hash.clone(),
+                    title: conversation.draft_title.clone(),
+                    body: conversation.draft_body.clone(),
+                    attachments: conversation.attachments.clone(),
+                    delivery_mode: conversation.delivery_mode.clone(),
+                    include_ticket: conversation.include_ticket,
+                    advertised_cost,
+                    ask_above,
+                });
+                self.workspace.active_section = WorkspaceSection::Messages;
+                self.status.task = format!(
+                    "direct stamp cost {advertised_cost} requires confirmation (ask above {ask_above})"
+                );
+                return;
+            }
+        } else if approved_direct_stamp_cost.is_some() {
+            self.status.task =
+                "direct stamp confirmation expired because peer policy changed".into();
+            return;
+        }
 
         let generation = self.next_message_generation;
         self.next_message_generation += 1;
+        let allow_propagation_fallback = self
+            .directory_service
+            .find(self.workspace.conversations[active].peer_hash.trim())
+            .and_then(|entry| entry.preferred_delivery)
+            != Some(PreferredDelivery::DirectOnly);
+        let automatic_propagation_fallback = self
+            .directory_service
+            .find(self.workspace.conversations[active].peer_hash.trim())
+            .is_some_and(|entry| {
+                entry.delivery_fallback == DeliveryFallbackPolicy::Automatic
+                    && entry.preferred_delivery != Some(PreferredDelivery::DirectOnly)
+            });
+        let max_automatic_direct_stamp_cost = self
+            .directory_service
+            .find(self.workspace.conversations[active].peer_hash.trim())
+            .and_then(|entry| entry.max_automatic_direct_stamp_cost)
+            .unwrap_or(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST)
+            .min(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST);
+        let ask_above_direct_stamp_cost = self
+            .directory_service
+            .find(self.workspace.conversations[active].peer_hash.trim())
+            .and_then(|entry| entry.ask_above_direct_stamp_cost);
         let (
             conversation_id,
             peer_hash,
@@ -13923,12 +13132,20 @@ impl App {
             operation,
         ) = {
             let conversation = &mut self.workspace.conversations[active];
-            let operation = conversation
+            let mut operation = conversation
                 .prepared_retry_operation
                 .take()
                 .filter(|prepared| prepared.matches_draft(conversation))
                 .map(|prepared| prepared.identity)
                 .unwrap_or_else(OutboundOperationIdentity::generate);
+            operation.allow_propagation_fallback = allow_propagation_fallback;
+            operation.automatic_propagation_fallback = automatic_propagation_fallback;
+            operation.max_automatic_direct_stamp_cost = operation
+                .max_automatic_direct_stamp_cost
+                .min(max_automatic_direct_stamp_cost);
+            operation.ask_above_direct_stamp_cost = ask_above_direct_stamp_cost;
+            operation.approved_direct_stamp_cost = approved_direct_stamp_cost;
+            conversation.direct_stamp_confirmation = None;
             conversation.pending_send = Some(MessageSendState { generation });
             if !message_pending_placeholder_present(conversation, generation) {
                 conversation.push_message(pending_outbound_message_from_conversation(
@@ -14323,6 +13540,21 @@ impl App {
             .outbound_propagation_syncs
             .saturating_add(1);
         self.monitoring_state.note_outbound(128);
+        let selected_from_settings = self.settings.preferred_propagation_node_hash.clone();
+        let observed_at_unix_ms = i64::try_from(current_epoch_ms()).unwrap_or(i64::MAX);
+        if let Err(error) = crate::operations::propagation::begin_propagation_sync(
+            &mut self.operation_history,
+            generation,
+            selected_from_settings.as_deref(),
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Messaging,
+                format!("propagation Operations projection rejected sync start: {error}"),
+            );
+        }
+        self.refresh_propagation_node_inventory();
         self.logs.push_with_source(
             LogSeverity::Info,
             LogSource::Messaging,
@@ -14332,7 +13564,6 @@ impl App {
         let runtime = self.runtime.clone();
         let service = self.messaging_service.clone();
         let tx = self.event_tx.clone();
-        let selected_from_settings = self.settings.preferred_propagation_node_hash.clone();
         let sync_limit = Some(self.settings.lxmf_sync_limit);
         tokio::spawn(async move {
             let report = collect_native_lxmf_propagation_diagnostics_report(
@@ -14595,6 +13826,22 @@ impl App {
         if self.runtime_status.active_identity.is_none() {
             return Some("LXMF send blocked: no active identity is attached".into());
         }
+        if let Some(policy) = self
+            .directory_service
+            .find(peer_hash)
+            .and_then(|entry| entry.preferred_delivery)
+        {
+            let allowed = match conversation.delivery_mode {
+                DeliveryMode::Direct => policy.allows_direct(),
+                DeliveryMode::Propagated => policy.allows_propagated(),
+            };
+            if !allowed {
+                return Some(format!(
+                    "LXMF send blocked by peer delivery policy: {}",
+                    policy.label()
+                ));
+            }
+        }
 
         if matches!(conversation.delivery_mode, DeliveryMode::Propagated) {
             if self.settings.preferred_propagation_node_hash.is_none() {
@@ -14660,6 +13907,38 @@ impl App {
             );
         }
         None
+    }
+
+    fn active_direct_stamp_confirmation_requirement(&self) -> Option<(u8, u8)> {
+        let conversation = self.active_conversation();
+        if !self.active_conversation_uses_native_lxmf()
+            || !matches!(conversation.delivery_mode, DeliveryMode::Direct)
+            || self.settings.native_lxmf_sdk_rpc_endpoint.is_some()
+        {
+            return None;
+        }
+        if self
+            .message_store
+            .latest_valid_lxmf_reply_ticket(
+                conversation.peer_hash.trim(),
+                current_epoch_ms() as f64 / 1_000.0,
+            )
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return None;
+        }
+        let entry = self.directory_service.find(conversation.peer_hash.trim())?;
+        entry.identity_hash.as_ref()?;
+        let advertised_cost = entry.lxmf_stamp_cost?;
+        let ask_above = entry.ask_above_direct_stamp_cost?;
+        let max_cost = entry
+            .max_automatic_direct_stamp_cost
+            .unwrap_or(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST)
+            .min(DEFAULT_AUTOMATIC_DIRECT_STAMP_COST);
+        (advertised_cost > ask_above && advertised_cost <= max_cost)
+            .then_some((advertised_cost, ask_above))
     }
 
     fn active_conversation_needs_peer_inspection(&self) -> bool {
@@ -16763,7 +16042,12 @@ impl App {
     }
 
     pub fn internal_event_payload_metrics(&self) -> InternalEventPayloadMetrics {
-        self.event_tx.payload_budget.metrics()
+        let mut metrics = self.event_tx.payload_budget.metrics();
+        metrics.channel_max_items = self.event_tx.sender.max_capacity();
+        metrics.channel_queued_items = metrics
+            .channel_max_items
+            .saturating_sub(self.event_tx.sender.capacity());
+        metrics
     }
 
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -17224,6 +16508,63 @@ impl App {
         for facade_event in network_doctor_facade_events_from_runtime_bus_event(&event) {
             self.network_doctor_state.record_facade_event(&facade_event);
         }
+        let observed_at_unix_ms = i64::try_from(current_epoch_ms()).unwrap_or(i64::MAX);
+        if let Err(error) = crate::operations::resource::record_resource_runtime_event(
+            &mut self.operation_history,
+            &event,
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("resource Operations projection rejected an update: {error}"),
+            );
+        }
+        if let Err(error) = crate::operations::path::record_path_runtime_event(
+            &mut self.operation_history,
+            &event,
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("path Operations projection rejected an update: {error}"),
+            );
+        }
+        if let Err(error) = crate::operations::lxmf::record_lxmf_runtime_event_at(
+            &mut self.operation_history,
+            &event,
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("LXMF Operations projection rejected an update: {error}"),
+            );
+        }
+        if let Err(error) = crate::operations::event_stream::record_event_stream_runtime_event(
+            &mut self.operation_history,
+            &event,
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("event-stream Operations projection rejected an update: {error}"),
+            );
+        }
+        if let Err(error) = crate::operations::propagation::record_propagation_sync_runtime_event(
+            &mut self.operation_history,
+            self.propagation_sync_pending,
+            &event,
+            observed_at_unix_ms,
+        ) {
+            self.logs.push_with_source(
+                LogSeverity::Warn,
+                LogSource::Runtime,
+                format!("propagation Operations projection rejected an update: {error}"),
+            );
+        }
         match event {
             crate::runtime::RuntimeBusEvent::StatusChanged(status) => {
                 self.runtime_status = status.clone();
@@ -17516,6 +16857,7 @@ impl App {
                         event.stage, event.status, event.detail, event.counts
                     ),
                 );
+                self.refresh_propagation_node_inventory();
                 true
             }
             crate::runtime::RuntimeBusEvent::InterfaceStats(stats) => {
@@ -18254,6 +17596,28 @@ impl App {
                 let stage_hint = propagation_sync_stage_hint(&report);
                 let _ = self.set_diagnostics_preview_value(&report);
                 let blocked = blocker != "no propagation blocker reported";
+                let selected_node = report
+                    .get("selected_node")
+                    .and_then(serde_json::Value::as_str);
+                let observed_at_unix_ms = i64::try_from(current_epoch_ms()).unwrap_or(i64::MAX);
+                if let Err(error) = crate::operations::propagation::finish_propagation_sync(
+                    &mut self.operation_history,
+                    generation,
+                    crate::operations::propagation::PropagationSyncOutcome {
+                        succeeded: sync_ok && !blocked,
+                        selected_node,
+                        messages_received: message_count,
+                        delivery_updates: sync_evidence_count,
+                    },
+                    observed_at_unix_ms,
+                ) {
+                    self.logs.push_with_source(
+                        LogSeverity::Warn,
+                        LogSource::Messaging,
+                        format!("propagation Operations projection rejected sync result: {error}"),
+                    );
+                }
+                self.refresh_propagation_node_inventory();
                 self.status.task = if sync_ok && !blocked {
                     format!(
                         "propagation sync complete: state={after_state} messages={message_count} delivery_updates={sync_evidence_count} events={event_count}"
@@ -19577,16 +18941,30 @@ impl App {
             self.switch_section(WorkspaceSection::Messages);
             return;
         }
-        let label = self
-            .directory_service
-            .find(peer_hash)
-            .map(|entry| entry.display_name)
+        let directory_entry = self.directory_service.find(peer_hash);
+        let label = directory_entry
+            .as_ref()
+            .map(|entry| entry.display_name.clone())
             .unwrap_or_else(|| peer_hash.chars().take(8).collect());
         let id = self.next_conversation_id;
         self.next_conversation_id += 1;
-        self.workspace
-            .conversations
-            .push(Conversation::new(id, peer_hash, label));
+        let mut conversation = Conversation::new(id, peer_hash, label);
+        conversation.delivery_mode = match directory_entry
+            .as_ref()
+            .and_then(|entry| entry.preferred_delivery.as_ref())
+        {
+            Some(PreferredDelivery::Propagated | PreferredDelivery::PropagatedOnly) => {
+                DeliveryMode::Propagated
+            }
+            Some(PreferredDelivery::Direct | PreferredDelivery::DirectOnly) | None => {
+                DeliveryMode::Direct
+            }
+        };
+        conversation.include_ticket = directory_entry
+            .as_ref()
+            .and_then(|entry| entry.offer_reply_ticket)
+            .unwrap_or(false);
+        self.workspace.conversations.push(conversation);
         self.workspace.active_conversation = self.workspace.conversations.len() - 1;
         self.switch_section(WorkspaceSection::Messages);
     }
@@ -19633,6 +19011,7 @@ impl App {
             let elapsed = started.elapsed();
             if elapsed < PROPAGATION_NODE_REFRESH_COOLDOWN {
                 let remaining = PROPAGATION_NODE_REFRESH_COOLDOWN.saturating_sub(elapsed);
+                self.refresh_propagation_node_inventory();
                 self.status.task = format!(
                     "propagation refresh cooldown: retry in {}s",
                     remaining.as_secs().saturating_add(1)
@@ -19668,6 +19047,7 @@ impl App {
             started_epoch_ms: Some(started_epoch_ms),
             completed_epoch_ms: None,
         };
+        self.refresh_propagation_node_inventory();
         self.status.task = format!(
             "refreshing propagation node {}",
             compact_hash(&destination_hash)
@@ -20146,11 +19526,81 @@ impl App {
     }
 
     fn refresh_propagation_node_inventory(&mut self) {
-        self.directory_state.propagation_nodes = self.directory_service.propagation_node_inventory(
+        let now_epoch_ms = current_epoch_ms();
+        let mut inventory = self.directory_service.propagation_node_inventory(
             self.settings.preferred_propagation_node_hash.as_deref(),
             &self.propagation_path_evidence,
-            current_epoch_ms() as f64 / 1_000.0,
+            now_epoch_ms as f64 / 1_000.0,
         );
+        let refresh = &self.directory_state.propagation_refresh;
+        let refresh_cooldown_remaining_seconds = self
+            .last_propagation_refresh_started
+            .map(|started| PROPAGATION_NODE_REFRESH_COOLDOWN.saturating_sub(started.elapsed()))
+            .filter(|remaining| !remaining.is_zero())
+            .map(|remaining| remaining.as_secs().saturating_add(1));
+        for node in &mut inventory.nodes {
+            if refresh
+                .destination_hash
+                .as_deref()
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(&node.destination_hash))
+            {
+                node.refresh = match refresh.outcome {
+                    PropagationNodeRefreshOutcome::Idle => None,
+                    PropagationNodeRefreshOutcome::Running => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::Running)
+                    }
+                    PropagationNodeRefreshOutcome::Refreshed => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::Refreshed)
+                    }
+                    PropagationNodeRefreshOutcome::NoPath => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::NoPath)
+                    }
+                    PropagationNodeRefreshOutcome::Cancelled => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::Cancelled)
+                    }
+                    PropagationNodeRefreshOutcome::TimedOut => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::TimedOut)
+                    }
+                    PropagationNodeRefreshOutcome::Failed => {
+                        Some(crate::directory::PropagationNodeRefreshEvidence::Failed)
+                    }
+                };
+                node.refresh_observed_epoch_ms =
+                    refresh.completed_epoch_ms.or(refresh.started_epoch_ms);
+                node.refresh_cooldown_remaining_seconds = refresh_cooldown_remaining_seconds;
+            }
+
+            let latest_sync = self.operation_history.records().rev().find(|record| {
+                propagation_sync_record_matches_node(record, &node.destination_hash)
+            });
+            if let Some(latest) = latest_sync {
+                node.sync = Some(match latest.state {
+                    crate::operations::OperationState::Queued => {
+                        crate::directory::PropagationNodeSyncEvidence::Queued
+                    }
+                    crate::operations::OperationState::Completed => {
+                        crate::directory::PropagationNodeSyncEvidence::Succeeded
+                    }
+                    state if state.is_terminal() => {
+                        crate::directory::PropagationNodeSyncEvidence::Failed
+                    }
+                    _ => crate::directory::PropagationNodeSyncEvidence::Running,
+                });
+                node.last_sync_epoch_ms = u64::try_from(latest.updated_at_unix_ms).ok();
+                node.last_sync_error = latest.last_error.clone();
+            }
+            node.last_successful_sync_epoch_ms = self
+                .operation_history
+                .records()
+                .filter(|record| {
+                    propagation_sync_record_matches_node(record, &node.destination_hash)
+                        && record.state == crate::operations::OperationState::Completed
+                })
+                .filter_map(|record| u64::try_from(record.updated_at_unix_ms).ok())
+                .max();
+        }
+        inventory.enforce_bounds();
+        self.directory_state.propagation_nodes = inventory;
     }
 
     pub fn selected_plugin_manifest(&self) -> Option<&PluginManifest> {
@@ -20577,11 +20027,40 @@ impl App {
             | InputTarget::SettingsIdentityPath
             | InputTarget::SettingsReticulumConfigPath
             | InputTarget::DiagnosticsKnownDestinationsPath
+            | InputTarget::OperationsSearch
             | InputTarget::SettingsBrowserFormMaxAgeSecs
             | InputTarget::SettingsLogMaxBytes
             | InputTarget::SettingsLogRetainFiles
             | InputTarget::SettingsLogLoadRecentEntries => {}
         }
+    }
+
+    fn submit_operations_search(&mut self, text: String) -> bool {
+        use crate::operations::presentation::{
+            OperationPresentationQuery, OPERATION_PRESENTATION_DEFAULT_ROWS,
+        };
+
+        if OperationPresentationQuery::new(
+            self.network_doctor_state.operations_filter,
+            Some(&text),
+            OPERATION_PRESENTATION_DEFAULT_ROWS,
+        )
+        .is_err()
+        {
+            self.status.task = "Operations search rejected: maximum 128 bytes, no controls".into();
+            return false;
+        }
+        self.network_doctor_state.operations_search = text.trim().to_string();
+        self.reconcile_operation_selection();
+        self.status.task = if self.network_doctor_state.operations_search.is_empty() {
+            "Operations search cleared".into()
+        } else {
+            format!(
+                "Operations search: {}",
+                self.network_doctor_state.operations_search
+            )
+        };
+        true
     }
 
     fn merge_message_into_conversation(&mut self, message: MessageSummary) {
@@ -23519,6 +22998,23 @@ mod tests {
         assert!(app.network_doctor_state.recent_resources[0]
             .detail
             .contains("omenchat | 64/128"));
+        let resource_operation = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::ResourceTransfer)
+            .expect("resource progress operation");
+        assert_eq!(
+            resource_operation.state,
+            crate::operations::OperationState::Transferring
+        );
+        assert_eq!(
+            resource_operation.progress,
+            Some(crate::operations::AuthoritativeProgress {
+                completed_bytes: 64,
+                total_bytes: 128,
+            })
+        );
+        assert!(resource_operation.target.label.contains("peer=link-1"));
 
         assert!(
             app.handle_runtime_bus_event(RuntimeBusEvent::InterfaceStats(InterfaceStats {
@@ -23580,6 +23076,11 @@ mod tests {
         assert_eq!(offered.purpose.as_deref(), Some("history-batch"));
         assert_eq!(offered.peer.as_deref(), Some("link-0"));
         assert!(app.status.task.contains("offered"));
+        assert!(app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::ResourceTransfer
+                && record.state == crate::operations::OperationState::Waiting
+                && record.target.label.contains("purpose=history-batch")
+        }));
 
         assert!(
             app.handle_runtime_bus_event(RuntimeBusEvent::ResourceLifecycle(
@@ -23608,6 +23109,12 @@ mod tests {
         assert_eq!(complete.purpose.as_deref(), Some("omenchat-resource"));
         assert!(complete.detail.contains("peer=link-1"));
         assert!(app.status.task.contains("complete"));
+        assert!(app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::ResourceTransfer
+                && record.state == crate::operations::OperationState::Completed
+                && !record.state.claims_peer_delivery()
+                && record.target.label.contains("purpose=omenchat-resource")
+        }));
 
         let errors_before = app.monitoring_state.runtime_errors;
         assert!(
@@ -23636,6 +23143,11 @@ mod tests {
         assert_eq!(failed.peer.as_deref(), Some("prop-node"));
         assert!(failed.detail.contains("timeout"));
         assert!(app.status.task.contains("failed"));
+        assert!(app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::ResourceTransfer
+                && record.state == crate::operations::OperationState::Failed
+                && record.last_error.as_deref() == Some("timeout")
+        }));
 
         let errors_after_failure = app.monitoring_state.runtime_errors;
         assert!(
@@ -23664,6 +23176,289 @@ mod tests {
         assert!(cancelled.detail.contains("cancelled"));
         assert!(cancelled.detail.contains("user cancelled"));
         assert!(app.status.task.contains("cancelled"));
+        assert!(app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::ResourceTransfer
+                && record.state == crate::operations::OperationState::Cancelled
+                && record.last_error.as_deref() == Some("user cancelled")
+        }));
+    }
+
+    #[test]
+    fn runtime_handler_projects_path_observations_without_delivery_claims() {
+        let mut app = App::new(test_config("operations-runtime-handler-path"));
+        let destination = "AABBCCDDEEFF00112233445566778899";
+        assert!(app.handle_runtime_bus_event(RuntimeBusEvent::PathUpdated(
+            crate::runtime::PathEvent {
+                destination_hash: destination.into(),
+                known: false,
+                hops: None,
+            },
+        )));
+        let waiting = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::PathDiscovery)
+            .expect("waiting path operation");
+        assert_eq!(waiting.state, crate::operations::OperationState::Waiting);
+        assert_eq!(waiting.target.label, "aabbccddeeff00112233445566778899");
+        assert!(waiting.last_error.is_none());
+        assert_eq!(app.network_doctor_state.recent_paths[0].state, "unknown");
+
+        assert!(app.handle_runtime_bus_event(RuntimeBusEvent::PathUpdated(
+            crate::runtime::PathEvent {
+                destination_hash: destination.into(),
+                known: true,
+                hops: Some(2),
+            },
+        )));
+        assert_eq!(
+            app.operation_history
+                .records()
+                .filter(|record| {
+                    record.id.domain == crate::operations::OperationDomain::PathDiscovery
+                })
+                .count(),
+            1
+        );
+        let completed = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::PathDiscovery)
+            .expect("completed path operation");
+        assert_eq!(
+            completed.state,
+            crate::operations::OperationState::Completed
+        );
+        assert!(!completed.state.claims_peer_delivery());
+        assert_eq!(
+            completed.evidence[0].detail.as_deref(),
+            Some("path known; 2 hop(s)")
+        );
+        assert_eq!(app.network_doctor_state.recent_paths[0].state, "known");
+    }
+
+    #[test]
+    fn runtime_handler_projects_typed_sdk_delivery_without_conflating_sent_and_delivered() {
+        let mut app = App::new(test_config("operations-runtime-handler-lxmf"));
+        let update = |state, terminal, last_updated_ms, seq_no| {
+            RuntimeBusEvent::SdkDeliveryUpdated(crate::runtime::RuntimeLxmfDeliveryUpdate {
+                message_id: "sdk-message-id".into(),
+                peer_hash: Some("AABBCCDDEEFF00112233445566778899".into()),
+                previous_state: None,
+                state,
+                terminal,
+                attempts: 1,
+                reason_code: None,
+                last_updated_ms,
+                event_id: format!("event-{seq_no}"),
+                seq_no,
+                cursor: format!("cursor-{seq_no}"),
+            })
+        };
+        let _ = app.handle_runtime_bus_event(update(
+            crate::runtime::RuntimeLxmfDeliveryState::Sent,
+            false,
+            10,
+            1,
+        ));
+        let sent = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("sent operation");
+        assert_eq!(
+            sent.state,
+            crate::operations::OperationState::TransportAccepted
+        );
+        assert!(!sent.state.claims_peer_delivery());
+
+        let _ = app.handle_runtime_bus_event(update(
+            crate::runtime::RuntimeLxmfDeliveryState::Delivered,
+            true,
+            20,
+            2,
+        ));
+        let delivered = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("delivered operation");
+        assert_eq!(
+            delivered.state,
+            crate::operations::OperationState::Delivered
+        );
+        assert!(delivered.state.claims_peer_delivery());
+        assert_eq!(delivered.event_cursor, Some(2));
+        assert_eq!(
+            delivered.evidence.last().map(|evidence| evidence.kind),
+            Some(crate::operations::OperationEvidenceKind::PeerDelivery)
+        );
+    }
+
+    #[test]
+    fn runtime_handler_correlates_native_lxmf_evidence_without_retaining_raw_detail() {
+        let mut app = App::new(test_config("operations-runtime-handler-native-lxmf"));
+        let evidence = |kind, observed_at| {
+            RuntimeBusEvent::LxmfDeliveryEvidence(crate::runtime::LxmfDeliveryEvidence {
+                peer_hash: "AABBCCDDEEFF00112233445566778899".into(),
+                message_id: Some("native-message-id".into()),
+                kind,
+                detail: Some("packet_hash:private;link_id:private".into()),
+                rtt: Some(0.25),
+                observed_at: Some(observed_at),
+            })
+        };
+        let _ = app.handle_runtime_bus_event(evidence(
+            crate::runtime::LxmfDeliveryEvidenceKind::PropagationNodeAccepted,
+            0.010,
+        ));
+        let accepted = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("propagation acceptance operation");
+        assert_eq!(
+            accepted.state,
+            crate::operations::OperationState::TransportAccepted
+        );
+        assert!(!accepted.state.claims_peer_delivery());
+        assert!(!accepted.evidence.iter().any(|item| item
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private"))));
+
+        let _ = app.handle_runtime_bus_event(evidence(
+            crate::runtime::LxmfDeliveryEvidenceKind::LxmfRouterDelivered,
+            0.020,
+        ));
+        let delivered = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("router-delivered operation");
+        assert_eq!(
+            delivered.state,
+            crate::operations::OperationState::Delivered
+        );
+        assert!(delivered.state.claims_peer_delivery());
+        assert_eq!(
+            delivered.evidence.last().map(|item| item.kind),
+            Some(crate::operations::OperationEvidenceKind::PeerDelivery)
+        );
+    }
+
+    #[test]
+    fn runtime_handler_projects_legacy_lxmf_status_without_parsing_raw_evidence() {
+        let mut app = App::new(test_config("operations-runtime-handler-legacy-lxmf"));
+        let status = |state, delivered, failed| {
+            RuntimeBusEvent::MessageDeliveryUpdated(crate::runtime::OutboundStatus {
+                peer_hash: "AABBCCDDEEFF00112233445566778899".into(),
+                message_id: Some("legacy-message-id".into()),
+                delivered,
+                failed,
+                state,
+                evidence: Some("packet_hash:private;failure_reason:private".into()),
+                rtt: Some(0.25),
+            })
+        };
+        let _ = app.handle_runtime_bus_event(status(
+            crate::runtime::OutboundDeliveryState::SubmittedToRnsNet,
+            false,
+            false,
+        ));
+        let submitted = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("submitted operation");
+        assert_eq!(
+            submitted.state,
+            crate::operations::OperationState::TransportAccepted
+        );
+        assert!(!submitted.state.claims_peer_delivery());
+        assert!(!submitted.evidence.iter().any(|item| item
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private"))));
+
+        let _ = app.handle_runtime_bus_event(status(
+            crate::runtime::OutboundDeliveryState::Delivered,
+            true,
+            false,
+        ));
+        let delivered = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::LxmfMessage)
+            .expect("delivered operation");
+        assert_eq!(
+            delivered.state,
+            crate::operations::OperationState::Delivered
+        );
+        assert!(delivered.state.claims_peer_delivery());
+    }
+
+    #[test]
+    fn runtime_handler_projects_event_gap_and_redacted_recovery_state() {
+        let mut app = App::new(test_config("operations-runtime-handler-event-gap"));
+        assert!(app.handle_runtime_bus_event(RuntimeBusEvent::StreamGap(
+            crate::runtime::RuntimeEventGap {
+                source: crate::runtime::RuntimeEventSource::SdkRpc,
+                reason: crate::runtime::RuntimeEventGapReason::UpstreamStreamGap,
+                dropped_count: 2,
+                last_cursor: 8,
+                next_cursor: 11,
+                upstream_cursor: Some("private-upstream-cursor".into()),
+            },
+        )));
+        let gap = app
+            .operation_history
+            .records()
+            .find(|record| {
+                record.id.domain == crate::operations::OperationDomain::RuntimeEventStream
+            })
+            .expect("event gap operation");
+        assert_eq!(gap.state, crate::operations::OperationState::EventGap);
+        assert!(!gap.state.claims_peer_delivery());
+        assert!(!gap.evidence.iter().any(|evidence| evidence
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private"))));
+
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::StreamRecovered(
+                crate::runtime::RuntimeEventRecovery {
+                    source: crate::runtime::RuntimeEventSource::SdkRpc,
+                    cursor: 10,
+                    status_recovered: true,
+                    interfaces_recovered: true,
+                    network_snapshot_recovered: false,
+                    propagation_recovered: true,
+                    directory_entries_recovered: 3,
+                    messages_recovered: 2,
+                    errors: vec!["private identity and endpoint detail".into()],
+                },
+            ))
+        );
+        let recovery = app
+            .operation_history
+            .records()
+            .find(|record| {
+                record.id.domain == crate::operations::OperationDomain::RuntimeEventStream
+            })
+            .expect("event recovery operation");
+        assert_eq!(
+            recovery.state,
+            crate::operations::OperationState::Reconciling
+        );
+        assert_eq!(
+            recovery.authority,
+            crate::operations::EvidenceAuthority::Uncertain
+        );
+        assert!(!recovery.evidence.iter().any(|evidence| evidence
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private"))));
     }
 
     #[test]
@@ -25443,6 +25238,15 @@ side
             app.propagation_node_inventory().nodes[0].path_state,
             crate::directory::PropagationNodePathState::Known
         );
+        let refreshed = &app.propagation_node_inventory().nodes[0];
+        assert_eq!(
+            refreshed.refresh,
+            Some(crate::directory::PropagationNodeRefreshEvidence::Refreshed)
+        );
+        assert!(refreshed.refresh_observed_epoch_ms.is_some());
+        assert!(refreshed
+            .refresh_cooldown_remaining_seconds
+            .is_some_and(|remaining| remaining > 0));
         assert!(!app.refresh_selected_propagation_node());
         assert!(app.status.task.contains("cooldown"));
     }
@@ -26681,7 +26485,212 @@ side
             app.directory_service
                 .find("peer.hash")
                 .and_then(|entry| entry.preferred_delivery),
+            Some(PreferredDelivery::DirectOnly)
+        );
+        assert!(app.cycle_selected_directory_preferred_delivery());
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .and_then(|entry| entry.preferred_delivery),
+            Some(PreferredDelivery::PropagatedOnly)
+        );
+        assert!(app.cycle_selected_directory_preferred_delivery());
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .and_then(|entry| entry.preferred_delivery),
             None
+        );
+    }
+
+    #[test]
+    fn directory_fallback_policy_cycles_from_safe_default() {
+        let mut app = App::new(test_config("directory-fallback-policy"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.refresh_panels_from_services();
+        app.switch_section(WorkspaceSection::Directory);
+
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .map(|entry| entry.delivery_fallback),
+            Some(DeliveryFallbackPolicy::Ask)
+        );
+        assert!(app.cycle_selected_directory_delivery_fallback());
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .map(|entry| entry.delivery_fallback),
+            Some(DeliveryFallbackPolicy::Automatic)
+        );
+        assert!(app.cycle_selected_directory_delivery_fallback());
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .map(|entry| entry.delivery_fallback),
+            Some(DeliveryFallbackPolicy::Ask)
+        );
+    }
+
+    #[test]
+    fn directory_direct_stamp_limit_cycles_from_existing_default() {
+        let mut app = App::new(test_config("directory-direct-stamp-limit"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.refresh_panels_from_services();
+        app.switch_section(WorkspaceSection::Directory);
+
+        for expected in [Some(0), Some(1), Some(2), Some(4), Some(8), None] {
+            assert!(app.cycle_selected_directory_direct_stamp_limit());
+            assert_eq!(
+                app.directory_service
+                    .find("peer.hash")
+                    .and_then(|entry| entry.max_automatic_direct_stamp_cost),
+                expected
+            );
+        }
+        app.directory_service
+            .set_max_automatic_direct_stamp_cost("peer.hash", Some(2))
+            .expect("persist limit");
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer renamed", DirectoryKind::Peer, None, None)
+            .expect("refresh announce");
+        assert_eq!(
+            app.directory_service
+                .find("peer.hash")
+                .and_then(|entry| entry.max_automatic_direct_stamp_cost),
+            Some(2),
+            "a fresh announce must not overwrite saved stamp policy"
+        );
+    }
+
+    #[test]
+    fn directory_direct_stamp_confirmation_cycles_from_disabled() {
+        let mut app = App::new(test_config("directory-direct-stamp-confirmation"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.refresh_panels_from_services();
+        app.switch_section(WorkspaceSection::Directory);
+
+        for expected in [Some(0), Some(1), Some(2), Some(4), Some(8), None] {
+            assert!(app.cycle_selected_directory_direct_stamp_confirmation());
+            assert_eq!(
+                app.directory_service
+                    .find("peer.hash")
+                    .and_then(|entry| entry.ask_above_direct_stamp_cost),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn directory_reply_ticket_preference_cycles_from_safe_default() {
+        let mut app = App::new(test_config("directory-reply-ticket-preference"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.refresh_panels_from_services();
+        app.switch_section(WorkspaceSection::Directory);
+
+        for expected in [Some(true), Some(false), None] {
+            assert!(app.cycle_selected_directory_reply_ticket_preference());
+            assert_eq!(
+                app.directory_service
+                    .find("peer.hash")
+                    .and_then(|entry| entry.offer_reply_ticket),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn directory_preferred_delivery_initializes_only_new_conversations() {
+        let mut app = App::new(test_config("directory-delivery-conversation-default"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_preferred_delivery("peer.hash", Some(PreferredDelivery::Propagated))
+            .expect("persist preference");
+
+        app.open_directory_peer_conversation("peer.hash");
+        assert_eq!(
+            app.active_conversation().delivery_mode,
+            DeliveryMode::Propagated
+        );
+
+        app.active_conversation_mut_for_test().delivery_mode = DeliveryMode::Direct;
+        app.open_directory_peer_conversation("peer.hash");
+        assert_eq!(
+            app.active_conversation().delivery_mode,
+            DeliveryMode::Direct,
+            "reopening an existing tab must preserve its explicit mode"
+        );
+    }
+
+    #[test]
+    fn directory_reply_ticket_preference_initializes_only_new_conversations() {
+        let mut app = App::new(test_config("directory-reply-ticket-conversation-default"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_offer_reply_ticket("peer.hash", Some(true))
+            .expect("persist preference");
+
+        app.open_directory_peer_conversation("peer.hash");
+        assert!(app.active_conversation().include_ticket);
+
+        app.active_conversation_mut_for_test().include_ticket = false;
+        app.open_directory_peer_conversation("peer.hash");
+        assert!(
+            !app.active_conversation().include_ticket,
+            "reopening an existing tab must preserve its explicit ticket choice"
+        );
+    }
+
+    #[test]
+    fn strict_directory_delivery_policy_blocks_manual_mode_switch() {
+        let mut app = App::new(test_config("directory-delivery-strict-toggle"));
+        app.directory_service
+            .ingest_announce("peer.hash", "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_preferred_delivery("peer.hash", Some(PreferredDelivery::DirectOnly))
+            .expect("persist strict policy");
+        app.open_directory_peer_conversation("peer.hash");
+
+        assert_eq!(
+            app.active_conversation().delivery_mode,
+            DeliveryMode::Direct
+        );
+        app.toggle_active_conversation_delivery_mode();
+        assert_eq!(
+            app.active_conversation().delivery_mode,
+            DeliveryMode::Direct
+        );
+        assert!(app.status.task.contains("direct only"));
+    }
+
+    #[cfg(feature = "native-reticulum")]
+    #[test]
+    fn strict_directory_delivery_policy_is_rechecked_at_send_boundary() {
+        let mut app = make_native_send_ready_app("directory-delivery-strict-send");
+        app.directory_service
+            .ingest_announce(FIXTURE_NODE_HASH, "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_preferred_delivery(FIXTURE_NODE_HASH, Some(PreferredDelivery::PropagatedOnly))
+            .expect("persist strict policy");
+        app.active_conversation_mut_for_test().delivery_mode = DeliveryMode::Direct;
+
+        assert_eq!(
+            app.active_conversation_send_blocker().as_deref(),
+            Some("LXMF send blocked by peer delivery policy: propagated only")
         );
     }
 
@@ -31834,63 +31843,6 @@ side
     }
 
     #[test]
-    fn structured_log_memory_is_item_byte_and_message_bounded() {
-        let mut logs = LogBuffer::default();
-        for index in 0..500 {
-            logs.push_with_source(
-                LogSeverity::Info,
-                LogSource::Runtime,
-                format!("{index}:{}", "é".repeat(STRUCTURED_LOG_MESSAGE_BYTES)),
-            );
-        }
-
-        assert!(logs.entries.len() <= STRUCTURED_LOG_MEMORY_ENTRY_LIMIT);
-        assert_eq!(logs.lines.len(), logs.entries.len());
-        assert!(logs.memory_bytes <= STRUCTURED_LOG_MEMORY_BYTES);
-        assert!(logs
-            .entries
-            .iter()
-            .all(|entry| entry.message.len() <= STRUCTURED_LOG_MESSAGE_BYTES));
-        assert!(logs
-            .entries
-            .iter()
-            .all(|entry| entry.message.capacity() <= STRUCTURED_LOG_MESSAGE_BYTES));
-        assert!(logs
-            .lines
-            .iter()
-            .all(|line| line.capacity() <= STRUCTURED_LOG_MESSAGE_BYTES));
-        assert!(logs
-            .entries
-            .last()
-            .is_some_and(|entry| entry.message.starts_with("499:")));
-        assert!(logs
-            .entries
-            .last()
-            .is_some_and(|entry| entry.message.ends_with("...<truncated>")));
-
-        let mut short_with_excess_capacity = String::with_capacity(1024 * 1024);
-        short_with_excess_capacity.push_str("short");
-        logs.push(LogSeverity::Info, short_with_excess_capacity);
-        assert_eq!(logs.entries.last().expect("short entry").message, "short");
-        assert!(
-            logs.entries.last().expect("short entry").message.capacity()
-                <= STRUCTURED_LOG_MESSAGE_BYTES
-        );
-
-        let mut item_limited = LogBuffer::default();
-        for index in 0..STRUCTURED_LOG_MEMORY_ENTRY_LIMIT + 7 {
-            item_limited.push(LogSeverity::Info, format!("item-{index}"));
-        }
-        assert_eq!(
-            item_limited.entries.len(),
-            STRUCTURED_LOG_MEMORY_ENTRY_LIMIT
-        );
-        assert_eq!(item_limited.lines.len(), item_limited.entries.len());
-        assert!(item_limited.memory_bytes <= STRUCTURED_LOG_MEMORY_BYTES);
-        assert_eq!(item_limited.entries[0].message, "item-7");
-    }
-
-    #[test]
     fn structured_log_startup_loader_enforces_production_scan_and_byte_budgets() {
         let config = test_config("structured-log-production-bounds");
         config.paths.ensure().expect("paths");
@@ -33342,6 +33294,138 @@ side
     }
 
     #[test]
+    fn propagation_sync_operations_require_app_correlation_and_finalize_from_task_result() {
+        let mut app = App::new(test_config("propagation-sync-operations"));
+        app.directory_service
+            .ingest_announce(
+                FIXTURE_NODE_HASH,
+                "Propagation Node",
+                DirectoryKind::Propagation,
+                None,
+                None,
+            )
+            .expect("propagation announce");
+        app.refresh_panels_from_services();
+        let progress_event = || {
+            RuntimeBusEvent::PropagationSync(crate::runtime::PropagationSyncEvent {
+                stage: crate::runtime::PropagationSyncStage::LinkEstablish,
+                status: crate::runtime::PropagationSyncEventStatus::Started,
+                destination_hash: Some(FIXTURE_NODE_HASH.into()),
+                detail: "private link and identity detail".into(),
+                counts: BTreeMap::from([("private_message_id".into(), 99)]),
+            })
+        };
+
+        assert!(app.handle_runtime_bus_event(progress_event()));
+        assert!(!app.operation_history.records().any(|record| {
+            record.id.domain == crate::operations::OperationDomain::PropagationSync
+        }));
+
+        app.propagation_sync_pending = Some(77);
+        crate::operations::propagation::begin_propagation_sync(
+            &mut app.operation_history,
+            77,
+            Some(FIXTURE_NODE_HASH),
+            1,
+        )
+        .expect("begin correlated sync");
+        assert!(app.handle_runtime_bus_event(progress_event()));
+        let active = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::PropagationSync)
+            .expect("active sync operation");
+        assert_eq!(active.state, crate::operations::OperationState::Dispatching);
+        assert!(!active.state.claims_peer_delivery());
+        assert!(!active.evidence.iter().any(|evidence| evidence
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("private") || detail.contains("99"))));
+        assert_eq!(
+            app.propagation_node_inventory().nodes[0].sync,
+            Some(crate::directory::PropagationNodeSyncEvidence::Running)
+        );
+
+        assert!(
+            app.apply_message_task_result(MessageTaskResult::PropagationSynced {
+                generation: 77,
+                report: serde_json::json!({
+                    "report": "native_lxmf_propagation_diagnostics",
+                    "selected_node": FIXTURE_NODE_HASH,
+                    "sync": {"ok": true, "error": null},
+                    "after": {
+                        "has_path": true,
+                        "known_app_data": true,
+                        "transfer_state": "complete"
+                    },
+                    "sync_events": [],
+                    "blocker": "no propagation blocker reported"
+                }),
+                messages: Vec::new(),
+            })
+        );
+        let completed = app
+            .operation_history
+            .records()
+            .find(|record| record.id.domain == crate::operations::OperationDomain::PropagationSync)
+            .expect("completed sync operation");
+        assert_eq!(
+            completed.state,
+            crate::operations::OperationState::Completed
+        );
+        assert!(!completed.state.claims_peer_delivery());
+        assert!(completed.last_error.is_none());
+        let succeeded = &app.propagation_node_inventory().nodes[0];
+        assert_eq!(
+            succeeded.sync,
+            Some(crate::directory::PropagationNodeSyncEvidence::Succeeded)
+        );
+        let successful_epoch = succeeded
+            .last_successful_sync_epoch_ms
+            .expect("successful sync epoch");
+        assert_eq!(succeeded.last_sync_epoch_ms, Some(successful_epoch));
+        assert!(succeeded.last_sync_error.is_none());
+
+        app.propagation_sync_pending = Some(78);
+        crate::operations::propagation::begin_propagation_sync(
+            &mut app.operation_history,
+            78,
+            Some(FIXTURE_NODE_HASH),
+            i64::try_from(current_epoch_ms()).unwrap_or(i64::MAX),
+        )
+        .expect("begin failed sync");
+        assert!(
+            app.apply_message_task_result(MessageTaskResult::PropagationSynced {
+                generation: 78,
+                report: serde_json::json!({
+                    "report": "native_lxmf_propagation_diagnostics",
+                    "selected_node": FIXTURE_NODE_HASH,
+                    "sync": {"ok": false, "error": "path unavailable"},
+                    "after": {
+                        "has_path": false,
+                        "known_app_data": true,
+                        "transfer_state": "failed"
+                    },
+                    "sync_events": [],
+                    "blocker": "path unavailable"
+                }),
+                messages: Vec::new(),
+            })
+        );
+        let failed = &app.propagation_node_inventory().nodes[0];
+        assert_eq!(
+            failed.sync,
+            Some(crate::directory::PropagationNodeSyncEvidence::Failed)
+        );
+        assert_eq!(
+            failed.last_successful_sync_epoch_ms,
+            Some(successful_epoch),
+            "a later failure must not erase the last successful sync"
+        );
+        assert!(failed.last_sync_error.is_some());
+    }
+
+    #[test]
     fn propagation_sync_result_merges_inbound_messages_into_threads() {
         let mut app = App::new(test_config("propagation-sync-merge"));
         app.propagation_sync_pending = Some(7);
@@ -33824,8 +33908,11 @@ side
         assert_eq!(
             app.internal_event_payload_metrics(),
             InternalEventPayloadMetrics {
+                channel_queued_items: 4,
+                channel_max_items: INTERNAL_EVENT_QUEUE_MAX_ITEMS,
                 queued_items: 4,
                 queued_bytes: INTERNAL_EVENT_QUEUE_MAX_BYTES,
+                max_bytes: INTERNAL_EVENT_QUEUE_MAX_BYTES,
                 rejected_events: 1,
             }
         );
@@ -33861,8 +33948,11 @@ side
         assert_eq!(
             app.internal_event_payload_metrics(),
             InternalEventPayloadMetrics {
+                channel_queued_items: INTERNAL_EVENT_QUEUE_MAX_ITEMS,
+                channel_max_items: INTERNAL_EVENT_QUEUE_MAX_ITEMS,
                 queued_items: 0,
                 queued_bytes: 0,
+                max_bytes: INTERNAL_EVENT_QUEUE_MAX_BYTES,
                 rejected_events: 1,
             }
         );
@@ -34553,6 +34643,187 @@ side
             TransportMethod::Propagated
         );
         assert_eq!(app.status.task, "message delivered");
+    }
+
+    #[tokio::test]
+    async fn send_snapshots_automatic_fallback_without_weakening_direct_only() {
+        let mut app = App::new(test_config("send-fallback-snapshot"));
+        app.directory_service
+            .ingest_announce(FIXTURE_NODE_HASH, "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_delivery_fallback(FIXTURE_NODE_HASH, DeliveryFallbackPolicy::Automatic)
+            .expect("persist fallback policy");
+        app.directory_service
+            .set_max_automatic_direct_stamp_cost(FIXTURE_NODE_HASH, Some(2))
+            .expect("persist direct stamp limit");
+        {
+            let conversation = app.active_conversation_mut_for_test();
+            conversation.peer_hash = FIXTURE_NODE_HASH.into();
+            conversation.peer_label = "Peer".into();
+            conversation.draft_body = "automatic".into();
+            conversation.delivery_mode = DeliveryMode::Direct;
+        }
+
+        app.send_active_conversation_draft();
+        let automatic =
+            OutboundOperationIdentity::from_message(&app.active_conversation().thread.messages[0])
+                .expect("pending operation");
+        assert!(automatic.allow_propagation_fallback);
+        assert!(automatic.automatic_propagation_fallback);
+        assert_eq!(automatic.max_automatic_direct_stamp_cost, 2);
+        assert!(app.wait_for_message_task_result().await);
+
+        app.directory_service
+            .set_preferred_delivery(FIXTURE_NODE_HASH, Some(PreferredDelivery::DirectOnly))
+            .expect("persist strict policy");
+        app.active_conversation_mut_for_test().draft_body = "strict".into();
+        app.send_active_conversation_draft();
+        let strict =
+            OutboundOperationIdentity::from_message(&app.active_conversation().thread.messages[1])
+                .expect("pending strict operation");
+        assert!(!strict.allow_propagation_fallback);
+        assert!(!strict.automatic_propagation_fallback);
+        assert!(app.wait_for_message_task_result().await);
+    }
+
+    #[cfg(feature = "native-reticulum")]
+    #[tokio::test]
+    async fn authenticated_direct_stamp_cost_requires_exact_one_send_confirmation() {
+        let mut app = make_native_send_ready_app("direct-stamp-confirmation");
+        app.directory_service
+            .ingest_announce_with_identity_metadata(
+                FIXTURE_NODE_HASH,
+                "Peer",
+                DirectoryKind::Peer,
+                crate::directory::DirectoryAnnounceMetadata {
+                    identity_hash: Some("11".repeat(16)),
+                    associated_hash: None,
+                    node_associated_hash: None,
+                    lxmf_stamp_cost: Some(8),
+                },
+            )
+            .expect("authenticated announce");
+        app.directory_service
+            .set_max_automatic_direct_stamp_cost(FIXTURE_NODE_HASH, Some(8))
+            .expect("persist ceiling");
+        app.directory_service
+            .set_ask_above_direct_stamp_cost(FIXTURE_NODE_HASH, Some(4))
+            .expect("persist confirmation threshold");
+        app.lxmf_peer_inspection = Some(LxmfPeerInspectionState {
+            conversation_id: app.active_conversation().id,
+            generation: 1,
+            peer_hash: FIXTURE_NODE_HASH.into(),
+            pending: false,
+            inspection: Some(DestinationInspection {
+                destination_hash: FIXTURE_NODE_HASH.into(),
+                valid_length: true,
+                has_path: true,
+                hops: Some(1),
+                first_hop_timeout: None,
+                known_identity: true,
+                known_app_data: true,
+                propagation_usable: Some(true),
+            }),
+            error: None,
+        });
+
+        app.send_active_conversation_draft();
+        let confirmation = app
+            .active_conversation()
+            .direct_stamp_confirmation
+            .as_ref()
+            .expect("confirmation");
+        assert_eq!(confirmation.advertised_cost, 8);
+        assert!(app.active_conversation().pending_send.is_none());
+        assert_eq!(app.active_conversation().draft_body, "Body");
+
+        assert!(app.confirm_active_conversation_direct_stamp());
+        assert!(app
+            .active_conversation()
+            .direct_stamp_confirmation
+            .is_none());
+        assert!(app.active_conversation().pending_send.is_some());
+        let operation =
+            OutboundOperationIdentity::from_message(&app.active_conversation().thread.messages[0])
+                .expect("approved pending operation");
+        assert_eq!(operation.ask_above_direct_stamp_cost, Some(4));
+        assert_eq!(operation.approved_direct_stamp_cost, Some(8));
+        let _ = app.wait_for_message_task_result().await;
+    }
+
+    #[cfg(feature = "native-reticulum")]
+    #[test]
+    fn direct_stamp_confirmation_cancels_or_expires_without_losing_draft() {
+        let mut app = make_native_send_ready_app("direct-stamp-confirmation-cancel");
+        let conversation = app.active_conversation_mut_for_test();
+        conversation.direct_stamp_confirmation = Some(DirectStampConfirmation {
+            peer_hash: conversation.peer_hash.clone(),
+            title: conversation.draft_title.clone(),
+            body: conversation.draft_body.clone(),
+            attachments: Vec::new(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            advertised_cost: 4,
+            ask_above: 2,
+        });
+
+        assert!(app.cancel_active_conversation_direct_stamp());
+        assert_eq!(app.active_conversation().draft_body, "Body");
+        let conversation = app.active_conversation_mut_for_test();
+        conversation.direct_stamp_confirmation = Some(DirectStampConfirmation {
+            peer_hash: conversation.peer_hash.clone(),
+            title: conversation.draft_title.clone(),
+            body: conversation.draft_body.clone(),
+            attachments: Vec::new(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            advertised_cost: 4,
+            ask_above: 2,
+        });
+        conversation.draft_body.push_str(" edited");
+        assert!(!app.confirm_active_conversation_direct_stamp());
+        assert!(app
+            .active_conversation()
+            .direct_stamp_confirmation
+            .is_none());
+        assert_eq!(app.active_conversation().draft_body, "Body edited");
+    }
+
+    #[tokio::test]
+    async fn prepared_retry_never_raises_its_snapshotted_stamp_ceiling() {
+        let mut app = App::new(test_config("retry-stamp-ceiling"));
+        app.directory_service
+            .ingest_announce(FIXTURE_NODE_HASH, "Peer", DirectoryKind::Peer, None, None)
+            .expect("announce");
+        app.directory_service
+            .set_max_automatic_direct_stamp_cost(FIXTURE_NODE_HASH, Some(8))
+            .expect("persist current limit");
+        let mut identity = OutboundOperationIdentity::generate();
+        identity.max_automatic_direct_stamp_cost = 2;
+        {
+            let conversation = app.active_conversation_mut_for_test();
+            conversation.peer_hash = FIXTURE_NODE_HASH.into();
+            conversation.peer_label = "Peer".into();
+            conversation.draft_body = "retry".into();
+            conversation.delivery_mode = DeliveryMode::Direct;
+            conversation.prepared_retry_operation = Some(PreparedRetryOperation {
+                identity,
+                title: String::new(),
+                body: "retry".into(),
+                attachments: Vec::new(),
+                delivery_mode: DeliveryMode::Direct,
+                include_ticket: false,
+            });
+        }
+
+        app.send_active_conversation_draft();
+        let operation =
+            OutboundOperationIdentity::from_message(&app.active_conversation().thread.messages[0])
+                .expect("pending retry operation");
+        assert_eq!(operation.max_automatic_direct_stamp_cost, 2);
+        assert_eq!(operation.approved_direct_stamp_cost, None);
+        assert!(app.wait_for_message_task_result().await);
     }
 
     #[tokio::test]

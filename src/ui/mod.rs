@@ -1,4 +1,5 @@
 pub mod mouse;
+mod operations;
 pub mod status;
 pub mod tabs;
 pub mod workspace;
@@ -164,6 +165,20 @@ impl<L: TerminalLifecycle> TerminalGuard<L> {
             self.alternate_screen_entered = false;
         }
     }
+
+    fn set_mouse_capture(&mut self, enabled: bool) -> io::Result<()> {
+        if enabled == self.mouse_capture_enabled {
+            return Ok(());
+        }
+        if enabled {
+            self.lifecycle.enable_mouse_capture()?;
+            self.mouse_capture_enabled = true;
+        } else {
+            self.lifecycle.disable_mouse_capture()?;
+            self.mouse_capture_enabled = false;
+        }
+        Ok(())
+    }
 }
 
 impl<L: TerminalLifecycle> Drop for TerminalGuard<L> {
@@ -173,7 +188,7 @@ impl<L: TerminalLifecycle> Drop for TerminalGuard<L> {
 }
 
 pub async fn run(mut app: App) -> AppResult<()> {
-    let _guard = TerminalGuard::enter()?;
+    let mut guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let external_shutdown = Arc::new(AtomicBool::new(false));
@@ -212,6 +227,7 @@ pub async fn run(mut app: App) -> AppResult<()> {
                 _ => {}
             }
         }
+        guard.set_mouse_capture(!app.network_doctor_state.operation_select_mode)?;
     }
     app.flush_pending_ui_preferences();
     let _ = app.flush_structured_logs(Duration::from_secs(3));
@@ -463,6 +479,12 @@ async fn apply_mouse_action(app: &mut App, action: MouseAction) {
         MouseAction::ToggleMessageDeliveryMode => app.toggle_active_conversation_delivery_mode(),
         MouseAction::ToggleMessageTicket => app.toggle_active_conversation_ticket(),
         MouseAction::SendMessageDraft => app.send_active_conversation_draft(),
+        MouseAction::ConfirmDirectStamp => {
+            app.confirm_active_conversation_direct_stamp();
+        }
+        MouseAction::CancelDirectStamp => {
+            app.cancel_active_conversation_direct_stamp();
+        }
     }
 }
 
@@ -472,6 +494,21 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
             if modifiers.contains(KeyModifiers::CONTROL) && matches!(character, 'c' | 'C') =>
         {
             app.quit();
+        }
+        (_, KeyCode::Esc | KeyCode::Char('q'))
+            if app.network_doctor_state.operation_select_mode =>
+        {
+            app.close_operation_select_mode();
+        }
+        (_, KeyCode::PageDown | KeyCode::Char('j'))
+            if app.network_doctor_state.operation_select_mode =>
+        {
+            app.scroll_operation_diagnostic(1);
+        }
+        (_, KeyCode::PageUp | KeyCode::Char('k'))
+            if app.network_doctor_state.operation_select_mode =>
+        {
+            app.scroll_operation_diagnostic(-1);
         }
         (_, KeyCode::Enter)
             if matches!(
@@ -489,6 +526,15 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 ) =>
         {
             app.edit_address_char(ch);
+        }
+        (_, KeyCode::Char(ch))
+            if key.modifiers.is_empty()
+                && matches!(
+                    app.input.active.as_ref().map(|active| &active.target),
+                    Some(crate::input::InputTarget::OperationsSearch)
+                ) =>
+        {
+            app.edit_operations_search_char(ch);
         }
         (_, KeyCode::Char(ch)) if key.modifiers.is_empty() && app.input.active.is_some() => {
             app.edit_address_char(ch);
@@ -541,6 +587,16 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         (KeyModifiers::CONTROL, KeyCode::Char('y')) => app.focus_message_title(),
         (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.focus_message_body(),
         (KeyModifiers::CONTROL, KeyCode::Char('s')) => app.send_active_conversation_draft(),
+        (KeyModifiers::CONTROL, KeyCode::Char('a'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Messages =>
+        {
+            app.confirm_active_conversation_direct_stamp();
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('x'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Messages =>
+        {
+            app.cancel_active_conversation_direct_stamp();
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('g')) => app.sync_runtime_messages(),
         (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
             app.toggle_active_conversation_delivery_mode()
@@ -563,6 +619,11 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
                 && app.active_browser_tab().focused_control.is_some() =>
         {
             app.activate_focused_browser_control();
+        }
+        (_, KeyCode::Enter)
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.open_operation_select_mode();
         }
         (_, KeyCode::Enter) => app.activate_workspace_selection(),
         (_, KeyCode::Char(' '))
@@ -597,6 +658,36 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
             if app.workspace.active_section == workspace::WorkspaceSection::Logs =>
         {
             app.cycle_log_source_filter();
+        }
+        (_, KeyCode::Char('/'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.focus_operations_search();
+        }
+        (_, KeyCode::Char('f'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.cycle_operations_filter();
+        }
+        (_, KeyCode::Char('c'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.clear_operations_search();
+        }
+        (_, KeyCode::Down | KeyCode::Char('j'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.move_operation_selection(1);
+        }
+        (_, KeyCode::Up | KeyCode::Char('k'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.move_operation_selection(-1);
+        }
+        (_, KeyCode::Char('v'))
+            if app.workspace.active_section == workspace::WorkspaceSection::NetworkDoctor =>
+        {
+            app.open_operation_select_mode();
         }
         (_, KeyCode::Char('P'))
             if app.workspace.active_section == workspace::WorkspaceSection::Diagnostics =>
@@ -727,6 +818,11 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
         {
             app.save_selected_directory_entry();
         }
+        (_, KeyCode::Char('d'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
+        {
+            app.request_selected_directory_path();
+        }
         (_, KeyCode::Char('r'))
             if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
         {
@@ -746,6 +842,11 @@ async fn handle_key(app: &mut App, key: KeyEvent) {
             if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
         {
             app.sync_propagation_messages_now();
+        }
+        (_, KeyCode::Char('k'))
+            if app.workspace.active_section == workspace::WorkspaceSection::Directory =>
+        {
+            app.cycle_selected_directory_reply_ticket_preference();
         }
         (_, KeyCode::Char('e'))
             if app.workspace.active_section == workspace::WorkspaceSection::Interfaces =>
@@ -1120,6 +1221,36 @@ mod tests {
     }
 
     #[test]
+    fn terminal_guard_releases_and_restores_mouse_capture_for_copy_select_mode() {
+        let (lifecycle, calls) = lifecycle(EnterFailure::None);
+        let mut guard = TerminalGuard::enter_with(lifecycle).expect("enter terminal lifecycle");
+        guard
+            .set_mouse_capture(false)
+            .expect("release mouse capture");
+        guard
+            .set_mouse_capture(false)
+            .expect("duplicate release is idempotent");
+        guard
+            .set_mouse_capture(true)
+            .expect("restore mouse capture");
+        drop(guard);
+
+        assert_eq!(
+            *calls.lock().expect("read lifecycle calls"),
+            [
+                "enable_raw",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "disable_mouse_capture",
+                "enable_mouse_capture",
+                "disable_raw",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+            ]
+        );
+    }
+
+    #[test]
     fn terminal_guard_rolls_back_every_partial_enter_failure() {
         let cases = [
             (EnterFailure::Raw, vec!["enable_raw", "disable_raw"]),
@@ -1217,6 +1348,228 @@ mod tests {
 
         assert!(app.should_quit());
         assert_eq!(app.paths.root, root);
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[tokio::test]
+    async fn network_doctor_search_and_filter_keys_are_bounded_and_ephemeral() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-operation-search-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        app.switch_section(workspace::WorkspaceSection::NetworkDoctor);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(matches!(
+            app.input.active.as_ref().map(|active| &active.target),
+            Some(crate::input::InputTarget::OperationsSearch)
+        ));
+        for character in "attention room".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            )
+            .await;
+        }
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert_eq!(app.network_doctor_state.operations_search, "attention room");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+        )
+        .await;
+        assert_eq!(
+            app.network_doctor_state.operations_filter,
+            crate::operations::presentation::OperationPresentationFilter::Active
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(app.network_doctor_state.operations_search.is_empty());
+
+        app.focus_operations_search();
+        for _ in 0..crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES {
+            assert!(app.edit_operations_search_char('x'));
+        }
+        assert!(!app.edit_operations_search_char('y'));
+        assert_eq!(
+            app.input
+                .active
+                .as_ref()
+                .expect("search input")
+                .buffer
+                .as_str()
+                .len(),
+            crate::operations::presentation::OPERATION_PRESENTATION_SEARCH_MAX_BYTES
+        );
+
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[tokio::test]
+    async fn network_doctor_operation_selection_opens_bounded_copy_select_mode() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-operation-selection-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        let id = crate::operations::OperationId::numeric(
+            crate::operations::OperationDomain::PathDiscovery,
+            9,
+        );
+        app.operation_history
+            .upsert(crate::operations::OperationRecord {
+                id,
+                target: crate::operations::OperationTarget {
+                    kind: crate::operations::OperationTargetKind::Destination,
+                    label: "selected-path".into(),
+                },
+                state: crate::operations::OperationState::Failed,
+                authority: crate::operations::EvidenceAuthority::Authoritative,
+                evidence: vec![crate::operations::OperationEvidence {
+                    kind: crate::operations::OperationEvidenceKind::Failure,
+                    authority: crate::operations::EvidenceAuthority::Authoritative,
+                    at_unix_ms: 10,
+                    detail: Some("path unavailable".into()),
+                }],
+                progress: None,
+                attempt_count: 1,
+                stamp_cost: None,
+                propagation_node: None,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 10,
+                last_error: Some("path unavailable".into()),
+                event_cursor: None,
+                valid_actions: vec![crate::operations::OperationAction::CopyDiagnostics],
+            })
+            .expect("operation");
+        app.switch_section(workspace::WorkspaceSection::NetworkDoctor);
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        assert_eq!(app.network_doctor_state.selected_operation, Some(id));
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.network_doctor_state.operation_select_mode);
+        let diagnostic = app.selected_operation_diagnostic().expect("diagnostic");
+        assert!(diagnostic.contains("selected-path"));
+        assert!(
+            diagnostic.len() <= crate::operations::presentation::OPERATION_DIAGNOSTICS_MAX_BYTES
+        );
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        )
+        .await;
+        assert_eq!(app.network_doctor_state.operation_diagnostic_scroll, 1);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(!app.network_doctor_state.operation_select_mode);
+        assert_eq!(app.network_doctor_state.operation_diagnostic_scroll, 0);
+
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[tokio::test]
+    async fn directory_shortcuts_route_existing_path_and_propagation_refresh_actions() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-directory-network-actions-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        app.directory_service
+            .ingest_announce(
+                "00112233445566778899aabbccddeeff",
+                "Propagation fixture",
+                crate::directory::DirectoryKind::Propagation,
+                None,
+                None,
+            )
+            .expect("propagation directory fixture");
+        app.refresh_panels_from_services();
+        assert!(app.select_directory_entry(0));
+        app.switch_section(workspace::WorkspaceSection::Directory);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(app.status.task.contains("requesting path for"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        )
+        .await;
+        assert_eq!(
+            app.directory_state.propagation_refresh.outcome,
+            crate::app::PropagationNodeRefreshOutcome::Running
+        );
+        assert!(app.status.task.contains("refreshing propagation node"));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(app.status.task.contains("cancelling propagation refresh"));
+
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove isolated TUI root");
+    }
+
+    #[tokio::test]
+    async fn settings_reduced_motion_action_routes_existing_persisted_preference() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-rs-tui-reduced-motion-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = App::new(AppConfig {
+            paths: AppPaths::from_root(root.clone()),
+            settings: AppSettings::default(),
+        });
+        let action_index = crate::app::SettingsAction::ALL
+            .iter()
+            .position(|action| *action == crate::app::SettingsAction::ToggleReducedMotion)
+            .expect("reduced-motion Settings action");
+        app.switch_section(workspace::WorkspaceSection::Settings);
+        assert!(app.select_settings_action(action_index));
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.settings.ui.reduce_motion);
+        assert!(app.status.task.contains("animated previews are paused"));
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(!app.settings.ui.reduce_motion);
+        assert!(app.status.task.contains("animated previews may play"));
+
         drop(app);
         std::fs::remove_dir_all(root).expect("remove isolated TUI root");
     }

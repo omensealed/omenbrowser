@@ -6,7 +6,9 @@ readonly repo_root
 readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a4c203}
 readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
 readonly old_server_stop_mode=${OMEN_MIXED_OLD_SERVER_STOP_MODE:-sigterm}
-readonly current_expected_version=0.9.6-3
+readonly current_expected_version=0.9.6-4
+readonly current_client_features=${OMEN_MIXED_CURRENT_CLIENT_FEATURES:-desktop-product}
+readonly current_server_features=${OMEN_MIXED_CURRENT_SERVER_FEATURES:-server-headless}
 
 case "$old_server_stop_mode" in
   orderly|sigterm) ;;
@@ -58,8 +60,13 @@ temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/omen-mixed-omenchat.XXXXXX")
 cleanup() {
   rm -rf -- "$temporary_root"
 }
+report_error() {
+  local status=$1
+  local line=$2
+  echo "mixed OMENchat live harness failed at line $line (status $status)" >&2
+}
 trap cleanup EXIT INT TERM
-trap 'status=$?; echo "mixed OMENchat live harness failed at line $LINENO (status $status)" >&2' ERR
+trap 'report_error "$?" "$LINENO"' ERR
 
 old_source="$temporary_root/old-source"
 old_target=${OMEN_MIXED_OLD_TARGET_DIR:-$temporary_root/old-target}
@@ -72,7 +79,7 @@ if ((reverse)); then
     --manifest-path "$old_source/Cargo.toml" \
     --no-default-features --features desktop-product --bin omenbrowser_rs
   cargo build --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
-    --no-default-features --features server-headless --bin omenchatd
+    --no-default-features --features "$current_server_features" --bin omenchatd
   browser_bin="$old_target/debug/omenbrowser_rs"
   server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
   expected_client_version="$old_expected_version"
@@ -84,7 +91,7 @@ else
     --manifest-path "$old_source/src/server/Cargo.toml" \
     --no-default-features --features server-headless --bin omenchatd
   cargo build --locked --manifest-path "$repo_root/Cargo.toml" \
-    --no-default-features --features desktop-product --bin omenbrowser_rs
+    --no-default-features --features "$current_client_features" --bin omenbrowser_rs
   browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
   server_bin="$old_target/debug/omenchatd"
   expected_client_version="$current_expected_version"
@@ -142,7 +149,7 @@ fi
 summary="$temporary_root/summary.json"
 python3 - "$smoke_report" "$summary" "$old_commit" "$client_version" \
   "$server_version" "$direction" "$restart" "$restart_report" \
-  "$restart_stop" "$history_resource" "$history_report" <<'PY'
+  "$restart_stop" "$history_resource" "$history_report" "$((1 - reverse))" <<'PY'
 import json
 import pathlib
 import sys
@@ -170,6 +177,20 @@ session = report.get("session", {})
 room = session.get("room", {})
 if room.get("joined") is not True or session.get("event_count", 0) < 1:
     raise RuntimeError("mixed OMENchat live session state was incomplete")
+
+current_client = sys.argv[12] == "1"
+if current_client:
+    capabilities = stages.get("capability_observation", {})
+    if capabilities.get("announcement_rooms_negotiated") is not False:
+        raise RuntimeError("adjacent server unexpectedly negotiated announcement rooms")
+    if capabilities.get("announcement_policy_bits") is not None:
+        raise RuntimeError("adjacent server projected policy without capability negotiation")
+    if capabilities.get("moderation_audit_negotiated") is not False:
+        raise RuntimeError("adjacent server unexpectedly negotiated moderation audit")
+    if capabilities.get("room_media_policy_negotiated") is not False:
+        raise RuntimeError("adjacent server unexpectedly negotiated room media policy")
+    if capabilities.get("room_upload_max_file_bytes") is not None:
+        raise RuntimeError("adjacent server projected a room upload policy")
 
 restart = sys.argv[7] == "1"
 if restart:
@@ -247,6 +268,19 @@ summary = {
     "session_event_count_positive": True,
     "isolated_loopback": True,
 }
+if current_client:
+    summary.update(
+        {
+            "current_client_legacy_room_projection": True,
+            "announcement_rooms_negotiated": False,
+            "announcement_policy_bits": None,
+            "moderation_audit_negotiated": False,
+            "room_media_policy_negotiated": False,
+            "room_upload_max_file_bytes": None,
+        }
+    )
+else:
+    summary["adjacent_client_completed_against_current_server"] = True
 if restart:
     summary.update(
         {

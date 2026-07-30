@@ -38,6 +38,34 @@ impl DesktopApp {
                 self.update_toggle_navigation();
                 Ok(Task::none())
             }
+            Message::Shell(ShellMessage::OpenCommandPalette) => {
+                self.ui.command_palette_open = true;
+                Ok(iced::widget::operation::focus(
+                    super::command_palette_input_id(),
+                ))
+            }
+            Message::Shell(ShellMessage::CloseCommandPalette) => {
+                self.close_command_palette();
+                Ok(Task::none())
+            }
+            Message::Shell(ShellMessage::CommandPaletteQueryChanged(query)) => {
+                self.ui.command_palette_query = super::bounded_command_palette_query(&query);
+                Ok(Task::none())
+            }
+            Message::Shell(ShellMessage::ExecuteFirstCommandPaletteResult) => {
+                let command = super::command_palette_results(&self.ui.command_palette_query)
+                    .first()
+                    .copied();
+                self.close_command_palette();
+                Ok(command
+                    .map(super::command_palette_message)
+                    .map(Task::done)
+                    .unwrap_or_else(Task::none))
+            }
+            Message::Shell(ShellMessage::ExecuteCommandPalette(command)) => {
+                self.close_command_palette();
+                Ok(Task::done(super::command_palette_message(command)))
+            }
             Message::Shell(ShellMessage::WorkspaceScrollTick) => {
                 Ok(self.update_workspace_scroll_tick())
             }
@@ -82,6 +110,7 @@ impl DesktopApp {
             return Task::none();
         }
         self.app.cancel_propagation_node_refresh_for_shutdown();
+        self.history_search.cancel_for_shutdown();
         self.app.flush_pending_ui_preferences();
         self.app.flush_pending_directory_persistence();
         let runtime = self.app.runtime.clone();
@@ -165,9 +194,19 @@ impl DesktopApp {
         tracing::debug!(applied, "desktop internal event wake drained");
         #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
         let omenchat_runtime_events = self.drain_omenchat_runtime_events();
+        #[cfg(any(
+            feature = "omenchat-slow-mode-qualification",
+            feature = "omenchat-room-media-policy-qualification"
+        ))]
+        let qualification_omenchat_open = self.open_qualification_omenchat_if_runtime_ready();
         Task::batch([
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_runtime_events,
+            #[cfg(any(
+                feature = "omenchat-slow-mode-qualification",
+                feature = "omenchat-room-media-policy-qualification"
+            ))]
+            qualification_omenchat_open,
             self.snap_conversations_with_new_messages_to_bottom(),
             #[cfg(feature = "chat-client")]
             self.snap_omenchat_with_new_events_to_bottom(),
@@ -176,6 +215,11 @@ impl DesktopApp {
 
     pub(super) fn update_toggle_navigation(&mut self) {
         self.ui.navigation_open = !self.ui.navigation_open;
+    }
+
+    fn close_command_palette(&mut self) {
+        self.ui.command_palette_open = false;
+        self.ui.command_palette_query.clear();
     }
 
     pub(super) fn update_workspace_scroll_tick(&mut self) -> Task<Message> {
@@ -265,8 +309,37 @@ impl DesktopApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_shutdown, ShutdownOutcome};
+    use super::{bounded_shutdown, DesktopApp, Message, ShellMessage, ShutdownOutcome};
+    use crate::app::App;
     use std::time::Duration;
+
+    fn desktop_with_temp_root(name: &str) -> DesktopApp {
+        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::config::AppPaths::from_root(root);
+        paths.ensure().expect("paths");
+        DesktopApp::new(App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        }))
+    }
+
+    #[test]
+    fn command_palette_open_query_and_close_have_bounded_ephemeral_state() {
+        let mut desktop = desktop_with_temp_root("omenbrowser-rs-command-palette-state");
+        let _ = desktop.update(Message::Shell(ShellMessage::OpenCommandPalette));
+        assert!(desktop.ui.command_palette_open);
+
+        let _ = desktop.update(Message::Shell(ShellMessage::CommandPaletteQueryChanged(
+            "é".repeat(300),
+        )));
+        assert!(desktop.ui.command_palette_query.chars().count() <= 128);
+        assert!(desktop.ui.command_palette_query.len() <= 256);
+
+        let _ = desktop.update(Message::Shell(ShellMessage::CloseCommandPalette));
+        assert!(!desktop.ui.command_palette_open);
+        assert!(desktop.ui.command_palette_query.is_empty());
+    }
 
     #[tokio::test]
     async fn bounded_shutdown_reports_success_failure_and_timeout() {

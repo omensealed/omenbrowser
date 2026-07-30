@@ -2,6 +2,7 @@ mod app;
 mod browser;
 mod clearweb;
 mod clearweb_state;
+mod command_palette;
 mod constants;
 mod conversation;
 mod conversation_active;
@@ -12,6 +13,8 @@ mod diagnostics;
 mod directory;
 mod external_browser;
 mod fonts;
+mod history_search;
+mod history_search_state;
 mod icons;
 mod identity;
 mod input;
@@ -33,6 +36,8 @@ mod omenchat_commands;
 mod omenchat_desktop_state;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 mod omenchat_diagnostics;
+#[cfg(feature = "chat-client")]
+mod omenchat_invitations;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 mod omenchat_live_drain;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -97,6 +102,10 @@ use crate::workspace::WorkspaceSection;
 pub use app::run;
 #[cfg(feature = "chat-client")]
 pub(in crate::desktop) use clearweb::fetch_clearweb_media_over_socks;
+pub(in crate::desktop) use command_palette::{
+    bounded_command_palette_query, command_palette_input_id, command_palette_message,
+    command_palette_overlay, command_palette_results,
+};
 pub(in crate::desktop) use constants::*;
 pub(in crate::desktop) use conversation_editor::conversation_editor_text;
 use external_browser::*;
@@ -106,8 +115,7 @@ use layout::*;
 use message::*;
 use message_compact::lxmf_message_compact_status;
 pub(in crate::desktop) use message_retry::{
-    desktop_message_is_cancel_candidate, desktop_message_is_retry_candidate,
-    desktop_message_propagation_sync_label, desktop_message_retry_labels,
+    desktop_message_valid_actions, DesktopMessageRetryLabels,
 };
 use message_stamp::lxmf_message_compact_stamp_status;
 use message_status::lxmf_message_status_lines;

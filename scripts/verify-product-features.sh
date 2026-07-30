@@ -7,7 +7,7 @@ cd "$repo_root"
 features="${OMENBROWSER_BROWSER_FEATURES:-desktop-product}"
 tree="$(cargo tree --locked -e features --no-default-features --features "$features" -i omenbrowser_rs)"
 
-required=(desktop-product portable-sqlite chat-client-gif chat-client-reticulum native-network)
+required=(desktop-product desktop-qr portable-sqlite chat-client-gif chat-client-reticulum native-network omenchat-announcement-rooms omenchat-slow-mode omenchat-room-media-policy omenchat-moderation-audit)
 for feature in "${required[@]}"; do
   if ! grep -q "omenbrowser_rs feature \"$feature\"" <<<"$tree"; then
     echo "product feature verification failed: required feature '$feature' is absent" >&2
@@ -15,7 +15,7 @@ for feature in "${required[@]}"; do
   fi
 done
 
-forbidden=(mock-runtime desktop-dev desktop-test desktop-ui-test native-rns-net experimental-rns-net-stack legacy-live-rns-net chat-client-rns-legacy)
+forbidden=(mock-runtime desktop-dev desktop-test desktop-ui-test native-rns-net experimental-rns-net-stack legacy-live-rns-net chat-client-rns-legacy omenchat-slow-mode-qualification omenchat-room-media-policy-qualification omenchat-moderation-audit-qualification omenchat-moderation-audit-resource-qualification)
 for feature in "${forbidden[@]}"; do
   if grep -q "omenbrowser_rs feature \"$feature\"" <<<"$tree"; then
     echo "product feature verification failed: forbidden feature '$feature' is active" >&2
@@ -57,9 +57,31 @@ if grep -Eq '(^|[[:space:]])iced_gif v' <<<"$static_media_dependencies"; then
   echo "product feature verification failed: static-media product includes iced_gif" >&2
   exit 1
 fi
-for feature in desktop-product-static-media chat-client-reticulum native-network; do
+for feature in desktop-product-static-media desktop-qr chat-client-reticulum native-network omenchat-announcement-rooms omenchat-slow-mode omenchat-room-media-policy omenchat-moderation-audit; do
   if ! grep -q "omenbrowser_rs feature \"$feature\"" <<<"$static_media_features"; then
     echo "product feature verification failed: static-media product lacks '$feature'" >&2
+    exit 1
+  fi
+done
+
+for profile_spec in \
+  "animated product|$features" \
+  "static-media product|desktop-product-static-media"; do
+  profile="${profile_spec%%|*}"
+  profile_features="${profile_spec#*|}"
+  qr_tree="$(
+    cargo tree --locked -e features --no-default-features \
+      --features "$profile_features" -i qrcode
+  )"
+  qr_dependencies="$(
+    cargo tree --locked --no-default-features --features "$profile_features" --prefix none
+  )"
+  if ! grep -qF 'iced_widget feature "qr_code"' <<<"$qr_tree"; then
+    echo "product feature verification failed: $profile lacks reviewed Iced QR support" >&2
+    exit 1
+  fi
+  if ! grep -q '^qrcode v0\.13\.0$' <<<"$qr_dependencies"; then
+    echo "product feature verification failed: $profile lacks locked qrcode 0.13.0" >&2
     exit 1
   fi
 done
@@ -186,6 +208,52 @@ widget_tree="$(cargo tree --locked -e features --no-default-features --features 
 for font_feature in lucide nerd codicon; do
   if grep -qF "iced_fonts feature \"$font_feature\"" <<<"$widget_tree"; then
     echo "product feature verification failed: desktop-widgets includes unused iced_fonts/$font_feature" >&2
+    exit 1
+  fi
+done
+
+for server_profile in server-headless server-full; do
+  server_features="$(
+    cargo tree --locked --manifest-path src/server/Cargo.toml -e features \
+      --no-default-features --features "$server_profile" -i omenchatd
+  )"
+  if ! grep -q 'omenchatd feature "omenchat-announcement-rooms"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile lacks announcement-room support" >&2
+    exit 1
+  fi
+  if ! grep -q 'omenchatd feature "omenchat-slow-mode"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile lacks slow-mode support" >&2
+    exit 1
+  fi
+  if grep -q 'omenchatd feature "omenchat-slow-mode-qualification"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile activates dormant slow-mode qualification" >&2
+    exit 1
+  fi
+  if grep -q 'omenchatd feature "omenchat-room-media-policy-qualification"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile activates dormant room media-policy qualification" >&2
+    exit 1
+  fi
+  if ! grep -q 'omenchatd feature "omenchat-room-media-policy"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile lacks room media-policy support" >&2
+    exit 1
+  fi
+  if ! grep -q 'omenchatd feature "omenchat-moderation-audit"' <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile lacks moderation-audit support" >&2
+    exit 1
+  fi
+  if grep -q 'omenchatd feature "omenchat-moderation-audit-qualification"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile activates moderation-audit qualification" >&2
+    exit 1
+  fi
+  if grep -q 'omenchatd feature "omenchat-moderation-audit-resource-qualification"' \
+    <<<"$server_features"; then
+    echo "product feature verification failed: $server_profile activates moderation-audit Resource qualification" >&2
     exit 1
   fi
 done

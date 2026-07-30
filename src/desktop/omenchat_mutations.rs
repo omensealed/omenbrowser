@@ -2,12 +2,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use iced::Task;
 
+use crate::chat::commands::{parse_client_command, ClientCommand};
+use crate::chat::model::{chat_text_fits, CHAT_ROOM_NAME_MAX_BYTES, CHAT_ROOM_TOPIC_MAX_BYTES};
 use crate::chat::mutation_intent_worker::await_intent_worker_reply;
 use crate::chat::mutation_intents::{
-    IntentTransition, OutboundMutationIntent, OutboundMutationState, OwnedPrepareOutboundMutation,
+    IntentRemoval, IntentTransition, OutboundMutationIntent, OutboundMutationState,
+    OwnedPrepareOutboundMutation,
 };
-use crate::chat::protocol::{ChatOp, FrameBody, MutationId};
-use crate::chat::{ChatClientEvent, ChatSessionId};
+use crate::chat::protocol::{
+    ChatOp, FrameBody, MessageRevisionRequest, MutationId, PinAction, PinRequest, ReactionAction,
+    ReactionRequest, ReactionToken, ReplyReference, RichMessageBody,
+};
+use crate::chat::{ChatClientEvent, ChatEventKind, ChatSessionId};
 
 use super::omenchat_desktop_state::{
     OmenChatMutationRecoveryState, OmenChatMutationResolutionConfirmation,
@@ -20,6 +26,338 @@ use super::{
 const DURABLE_MUTATION_INTENT_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 impl DesktopApp {
+    pub(in crate::desktop) fn prepare_omenchat_reaction_mutation(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: u32,
+        event_id: u64,
+        token: ReactionToken,
+    ) -> Task<Message> {
+        if !self.omenchat_room_publish_available(session_id, room_id) {
+            self.set_omenchat_session_status(
+                session_id,
+                "room is read-only for members; reaction was not sent".into(),
+            );
+            return Task::none();
+        }
+        if !self.omenchat_reactions_available(session_id) {
+            self.set_omenchat_session_status(
+                session_id,
+                "reactions are unavailable because reactions-v1 and durable-mutations-v1 were not negotiated"
+                    .into(),
+            );
+            return Task::none();
+        }
+        if !self
+            .omenchat
+            .chat_client
+            .reaction_snapshot_complete(session_id, room_id, event_id)
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "reaction controls are waiting for an authoritative server snapshot".into(),
+            );
+            return Task::none();
+        }
+        let Some(local_user_id) = self.omenchat.chat_client.local_user_id(session_id) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "reaction controls require the authenticated room user identity".into(),
+            );
+            return Task::none();
+        };
+        let Some((server_destination, target_retained)) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| {
+                (
+                    session.server.destination.clone(),
+                    session.events.iter().any(|event| {
+                        event.room_id == room_id
+                            && event.event_id == event_id
+                            && crate::chat::model::chat_event_supports_reactions(event)
+                    }),
+                )
+            })
+        else {
+            self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
+            return Task::none();
+        };
+        if !target_retained {
+            self.set_omenchat_session_status(
+                session_id,
+                "the reaction target is no longer retained".into(),
+            );
+            return Task::none();
+        }
+        let already_reacted = self
+            .omenchat
+            .chat_client
+            .reactions_for_targets(session_id, room_id, &[event_id])
+            .iter()
+            .any(|reaction| {
+                reaction.target_event_id == event_id
+                    && reaction.actor_user_id == local_user_id
+                    && reaction.token == token
+            });
+        let request = ReactionRequest {
+            target_event_id: event_id,
+            token,
+            action: if already_reacted {
+                ReactionAction::Remove
+            } else {
+                ReactionAction::Add
+            },
+        };
+        let body = match request.into_frame_body() {
+            Ok(body) => body,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("reaction request is invalid: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.set_omenchat_session_status(
+                session_id,
+                "reaction was not sent because durable mutation persistence is unavailable".into(),
+            );
+            return Task::none();
+        };
+        let (Some(client_instance_id), Some(authenticated_identity_hash)) = (
+            self.omenchat.omenchat_live_state.client_instance_id(),
+            self.omenchat.omenchat_authenticated_identity_hash.clone(),
+        ) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "reaction was not sent because durable mutation identity is unavailable".into(),
+            );
+            return Task::none();
+        };
+        let created_at = current_unix_seconds();
+        let reply = match worker.try_prepare(OwnedPrepareOutboundMutation {
+            server_destination,
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::RoomReaction,
+            room_id: Some(room_id),
+            body,
+            created_at,
+            expires_at: created_at.saturating_add(DURABLE_MUTATION_INTENT_LIFETIME_SECONDS),
+            correlation_id: None,
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("reaction was not admitted for durable persistence: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        self.set_omenchat_session_status(
+            session_id,
+            "persisting reaction intent before transmission".into(),
+        );
+        Task::perform(await_intent_worker_reply(reply), move |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::Prepared {
+                    session_id,
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
+    pub(in crate::desktop) fn prepare_omenchat_message_revision_mutation(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: u32,
+        event_id: u64,
+        action: crate::chat::protocol::MessageRevisionAction,
+        replacement: Option<String>,
+    ) -> Task<Message> {
+        if !self.omenchat_message_revision_action_available(session_id, room_id, event_id, action) {
+            self.set_omenchat_session_status(
+                session_id,
+                "message revision is unavailable because capability, authority, or permission evidence is missing"
+                    .into(),
+            );
+            return Task::none();
+        }
+        let request = MessageRevisionRequest {
+            target_event_id: event_id,
+            action,
+            replacement,
+        };
+        let body = match request.into_frame_body() {
+            Ok(body) => body,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("message revision request is invalid: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        let Some(server_destination) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.server.destination.clone())
+        else {
+            self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
+            return Task::none();
+        };
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.set_omenchat_session_status(
+                session_id,
+                "message revision was not sent because durable mutation persistence is unavailable"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let (Some(client_instance_id), Some(authenticated_identity_hash)) = (
+            self.omenchat.omenchat_live_state.client_instance_id(),
+            self.omenchat.omenchat_authenticated_identity_hash.clone(),
+        ) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "message revision was not sent because durable mutation identity is unavailable"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let created_at = current_unix_seconds();
+        let reply = match worker.try_prepare(OwnedPrepareOutboundMutation {
+            server_destination,
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::RoomMessageRevision,
+            room_id: Some(room_id),
+            body,
+            created_at,
+            expires_at: created_at.saturating_add(DURABLE_MUTATION_INTENT_LIFETIME_SECONDS),
+            correlation_id: None,
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("message revision was not admitted for durable persistence: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        self.set_omenchat_session_status(
+            session_id,
+            "persisting message revision intent before transmission".into(),
+        );
+        Task::perform(await_intent_worker_reply(reply), move |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::Prepared {
+                    session_id,
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
+    pub(in crate::desktop) fn prepare_omenchat_pin_mutation(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: u32,
+        event_id: u64,
+        action: PinAction,
+    ) -> Task<Message> {
+        if self.omenchat_pin_action_for_target(session_id, room_id, event_id) != Some(action) {
+            self.set_omenchat_session_status(
+                session_id,
+                "pin mutation is unavailable because capability, authority, role, or target evidence is missing"
+                    .into(),
+            );
+            return Task::none();
+        }
+        let body = match (PinRequest {
+            target_event_id: event_id,
+            action,
+        })
+        .into_frame_body()
+        {
+            Ok(body) => body,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("pin request is invalid: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        let Some(server_destination) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.server.destination.clone())
+        else {
+            self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
+            return Task::none();
+        };
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.set_omenchat_session_status(
+                session_id,
+                "pin mutation was not sent because durable mutation persistence is unavailable"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let (Some(client_instance_id), Some(authenticated_identity_hash)) = (
+            self.omenchat.omenchat_live_state.client_instance_id(),
+            self.omenchat.omenchat_authenticated_identity_hash.clone(),
+        ) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "pin mutation was not sent because durable mutation identity is unavailable".into(),
+            );
+            return Task::none();
+        };
+        let created_at = current_unix_seconds();
+        let reply = match worker.try_prepare(OwnedPrepareOutboundMutation {
+            server_destination,
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::RoomPin,
+            room_id: Some(room_id),
+            body,
+            created_at,
+            expires_at: created_at.saturating_add(DURABLE_MUTATION_INTENT_LIFETIME_SECONDS),
+            correlation_id: None,
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("pin mutation was not admitted for durable persistence: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        self.set_omenchat_session_status(
+            session_id,
+            "persisting pin mutation intent before transmission".into(),
+        );
+        Task::perform(await_intent_worker_reply(reply), move |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::Prepared {
+                    session_id,
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
     pub(in crate::desktop) fn recover_omenchat_mutation_intents_if_pending(
         &mut self,
     ) -> Task<Message> {
@@ -84,14 +422,205 @@ impl DesktopApp {
         if draft.is_empty() {
             return Task::none();
         }
-        match self.handle_omenchat_draft_command(session_id, &draft) {
-            OmenChatDraftCommandResult::NotCommand => {}
-            OmenChatDraftCommandResult::HandledClear => {
-                self.omenchat.chat_drafts.insert(session_id, String::new());
+        let (op, requested_room_id, body) = match parse_client_command(&draft) {
+            Some(ClientCommand::Me(body)) => {
+                let body = body.trim().to_owned();
+                if body.is_empty() {
+                    self.set_omenchat_session_status(session_id, "usage: /me <action>".into());
+                    return Task::none();
+                }
+                (ChatOp::RoomAction, None, FrameBody::Text(body))
+            }
+            Some(ClientCommand::Notice(body)) => {
+                if !self
+                    .omenchat
+                    .omenchat_live_state
+                    .durable_notice_ack_negotiated(session_id)
+                {
+                    match self.handle_omenchat_draft_command(session_id, &draft) {
+                        OmenChatDraftCommandResult::HandledClear => {
+                            self.omenchat.chat_drafts.insert(session_id, String::new());
+                        }
+                        OmenChatDraftCommandResult::NotCommand
+                        | OmenChatDraftCommandResult::HandledKeep => {}
+                    }
+                    return Task::none();
+                }
+                let body = body.trim().to_owned();
+                if body.is_empty() {
+                    self.set_omenchat_session_status(session_id, "usage: /notice <text>".into());
+                    return Task::none();
+                }
+                (ChatOp::RoomNotice, None, FrameBody::Text(body))
+            }
+            Some(ClientCommand::Part(room)) => {
+                let Some(session) = self.omenchat.chat_client.session(session_id) else {
+                    self.set_omenchat_session_status(
+                        session_id,
+                        "OMENchat session is unavailable".into(),
+                    );
+                    return Task::none();
+                };
+                let room_id = room
+                    .as_deref()
+                    .map(str::trim)
+                    .map(|room| room.trim_start_matches('#'))
+                    .filter(|room| !room.is_empty())
+                    .and_then(|room| {
+                        session
+                            .rooms
+                            .iter()
+                            .find(|candidate| candidate.name.eq_ignore_ascii_case(room))
+                            .map(|room| room.room_id)
+                    })
+                    .unwrap_or(session.active_room.room_id);
+                (ChatOp::PartRoom, Some(room_id), FrameBody::Empty)
+            }
+            Some(ClientCommand::Topic(topic)) => {
+                let topic = topic.trim();
+                if !chat_text_fits(topic, CHAT_ROOM_TOPIC_MAX_BYTES) {
+                    self.set_omenchat_session_status(
+                        session_id,
+                        "room topic exceeds client limits".into(),
+                    );
+                    return Task::none();
+                }
+                let command = format!("topic {topic}").trim().to_owned();
+                (ChatOp::Command, None, FrameBody::Text(command))
+            }
+            Some(ClientCommand::CreateRoom { room, topic }) => {
+                let room = room.trim().trim_start_matches('#');
+                let topic = topic
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|topic| !topic.is_empty());
+                if room.is_empty()
+                    || crate::chat::live::normalize_created_room_name(room).is_empty()
+                    || !chat_text_fits(room, CHAT_ROOM_NAME_MAX_BYTES)
+                    || topic.is_some_and(|topic| !chat_text_fits(topic, CHAT_ROOM_TOPIC_MAX_BYTES))
+                {
+                    self.set_omenchat_session_status(
+                        session_id,
+                        "room name or topic is empty or exceeds client limits".into(),
+                    );
+                    return Task::none();
+                }
+                let command = topic
+                    .map(|topic| format!("create {room} {topic}"))
+                    .unwrap_or_else(|| format!("create {room}"));
+                (ChatOp::Command, None, FrameBody::Text(command))
+            }
+            Some(ClientCommand::Unban(target)) => {
+                let target = target.trim().trim_start_matches('@');
+                let Some(session) = self.omenchat.chat_client.session(session_id) else {
+                    self.set_omenchat_session_status(
+                        session_id,
+                        "OMENchat session is unavailable".into(),
+                    );
+                    return Task::none();
+                };
+                if !crate::chat::live::durable_user_target_is_correlatable(session, target) {
+                    match self.handle_omenchat_draft_command(session_id, &draft) {
+                        OmenChatDraftCommandResult::HandledClear => {
+                            self.omenchat.chat_drafts.insert(session_id, String::new());
+                        }
+                        OmenChatDraftCommandResult::NotCommand
+                        | OmenChatDraftCommandResult::HandledKeep => {}
+                    }
+                    return Task::none();
+                }
+                (
+                    ChatOp::Command,
+                    None,
+                    FrameBody::Text(format!("unban {target}")),
+                )
+            }
+            Some(ClientCommand::Role { target, role }) => {
+                let target = target.trim().trim_start_matches('@');
+                let Some((role, _)) = crate::chat::live::normalized_role_label(role.trim()) else {
+                    self.set_omenchat_session_status(
+                        session_id,
+                        "usage: /role <user> <standard|trusted|mod|admin>".into(),
+                    );
+                    return Task::none();
+                };
+                let Some(session) = self.omenchat.chat_client.session(session_id) else {
+                    self.set_omenchat_session_status(
+                        session_id,
+                        "OMENchat session is unavailable".into(),
+                    );
+                    return Task::none();
+                };
+                if !crate::chat::live::durable_user_target_is_correlatable(session, target) {
+                    match self.handle_omenchat_draft_command(session_id, &draft) {
+                        OmenChatDraftCommandResult::HandledClear => {
+                            self.omenchat.chat_drafts.insert(session_id, String::new());
+                        }
+                        OmenChatDraftCommandResult::NotCommand
+                        | OmenChatDraftCommandResult::HandledKeep => {}
+                    }
+                    return Task::none();
+                }
+                (
+                    ChatOp::Command,
+                    None,
+                    FrameBody::Text(format!("role {target} {role}")),
+                )
+            }
+            Some(
+                command @ (ClientCommand::Kick(_)
+                | ClientCommand::Ban(_)
+                | ClientCommand::Mute(_)
+                | ClientCommand::Unmute(_)),
+            ) => {
+                let (action, target) = match command {
+                    ClientCommand::Kick(target) => ("kick", target),
+                    ClientCommand::Ban(target) => ("ban", target),
+                    ClientCommand::Mute(target) => ("mute", target),
+                    ClientCommand::Unmute(target) => ("unmute", target),
+                    _ => return Task::none(),
+                };
+                let target = target.trim().trim_start_matches('@');
+                let Some(session) = self.omenchat.chat_client.session(session_id) else {
+                    self.set_omenchat_session_status(
+                        session_id,
+                        "OMENchat session is unavailable".into(),
+                    );
+                    return Task::none();
+                };
+                if !crate::chat::live::durable_user_target_is_correlatable(session, target) {
+                    match self.handle_omenchat_draft_command(session_id, &draft) {
+                        OmenChatDraftCommandResult::HandledClear => {
+                            self.omenchat.chat_drafts.insert(session_id, String::new());
+                        }
+                        OmenChatDraftCommandResult::NotCommand
+                        | OmenChatDraftCommandResult::HandledKeep => {}
+                    }
+                    return Task::none();
+                }
+                (
+                    ChatOp::Command,
+                    None,
+                    FrameBody::Text(format!("{action} {target}")),
+                )
+            }
+            Some(_) => {
+                match self.handle_omenchat_draft_command(session_id, &draft) {
+                    OmenChatDraftCommandResult::HandledClear => {
+                        self.omenchat.chat_drafts.insert(session_id, String::new());
+                    }
+                    OmenChatDraftCommandResult::NotCommand
+                    | OmenChatDraftCommandResult::HandledKeep => {}
+                }
                 return Task::none();
             }
-            OmenChatDraftCommandResult::HandledKeep => return Task::none(),
-        }
+            None => {
+                let Some(body) = self.omenchat_room_message_draft_body(session_id, draft) else {
+                    return Task::none();
+                };
+                (ChatOp::RoomMessage, None, body)
+            }
+        };
 
         let Some(client_instance_id) = self.omenchat.omenchat_live_state.client_instance_id()
         else {
@@ -110,7 +639,7 @@ impl DesktopApp {
             );
             return Task::none();
         };
-        let Some((server_destination, room_id)) = self
+        let Some((server_destination, active_room_id)) = self
             .omenchat
             .chat_client
             .session(session_id)
@@ -124,6 +653,16 @@ impl DesktopApp {
             self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
             return Task::none();
         };
+        let room_id = if matches!(
+            &body,
+            FrameBody::Text(command)
+                if op == ChatOp::Command
+                    && command.split_whitespace().next() == Some("create")
+        ) {
+            None
+        } else {
+            Some(requested_room_id.unwrap_or(active_room_id))
+        };
         let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
             return Task::none();
         };
@@ -132,9 +671,9 @@ impl DesktopApp {
             server_destination,
             authenticated_identity_hash,
             client_instance_id,
-            op: ChatOp::RoomMessage,
-            room_id: Some(room_id),
-            body: FrameBody::Text(draft),
+            op,
+            room_id,
+            body,
             created_at,
             expires_at: created_at.saturating_add(DURABLE_MUTATION_INTENT_LIFETIME_SECONDS),
             correlation_id: None,
@@ -161,6 +700,89 @@ impl DesktopApp {
                 },
             ))
         })
+    }
+
+    fn omenchat_room_message_draft_body(
+        &mut self,
+        session_id: ChatSessionId,
+        body: String,
+    ) -> Option<FrameBody> {
+        let reply = self
+            .omenchat
+            .omenchat_reply_drafts
+            .get(&session_id)
+            .copied();
+        let mentions = self
+            .omenchat
+            .omenchat_selected_mentions
+            .get(&session_id)
+            .map(|mentions| mentions.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if reply.is_none() && mentions.is_empty() {
+            return Some(FrameBody::Text(body));
+        }
+        if !self
+            .omenchat
+            .omenchat_live_state
+            .reply_mentions_negotiated(session_id)
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "reply/mention metadata was not sent because reply-mentions-v1 is unavailable"
+                    .into(),
+            );
+            return None;
+        }
+        let Some(session) = self.omenchat.chat_client.session(session_id) else {
+            self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
+            return None;
+        };
+        let room_id = session.active_room.room_id;
+        if reply.is_some_and(|reply| {
+            reply.room_id != room_id
+                || !session.events.iter().any(|event| {
+                    event.room_id == room_id
+                        && event.event_id == reply.event_id
+                        && matches!(
+                            event.kind,
+                            ChatEventKind::Message { .. } | ChatEventKind::RichMessage { .. }
+                        )
+                })
+        }) {
+            self.set_omenchat_session_status(
+                session_id,
+                "the selected reply target is no longer available in this room".into(),
+            );
+            return None;
+        }
+        if mentions.iter().any(|user_id| {
+            *user_id == 0 || !session.users.iter().any(|user| user.user_id == *user_id)
+        }) {
+            self.set_omenchat_session_status(
+                session_id,
+                "a selected mention is no longer a member of this room".into(),
+            );
+            return None;
+        }
+        match (RichMessageBody {
+            body,
+            reply_to: reply.map(|reply| ReplyReference {
+                room_id: reply.room_id,
+                event_id: reply.event_id,
+            }),
+            mentioned_user_ids: mentions,
+        })
+        .into_frame_body()
+        {
+            Ok(body) => Some(body),
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("reply/mention metadata is invalid: {error}"),
+                );
+                None
+            }
+        }
     }
 
     pub(in crate::desktop) fn update_omenchat_mutation_completion(
@@ -198,6 +820,15 @@ impl DesktopApp {
                     next,
                     result,
                 );
+                Task::none()
+            }
+            OmenChatMutationCompletionMessage::Rejected {
+                session_id,
+                mutation_id,
+                reason,
+                result,
+            } => {
+                self.finish_omenchat_mutation_rejection(session_id, mutation_id, reason, result);
                 Task::none()
             }
             OmenChatMutationCompletionMessage::Resolved {
@@ -276,6 +907,27 @@ impl DesktopApp {
     pub(in crate::desktop) fn cancel_omenchat_mutation_resolution(&mut self) {
         self.omenchat.omenchat_mutation_resolution_confirmation = None;
         self.app.status.task = "OMENchat mutation resolution cancelled".into();
+    }
+
+    pub(in crate::desktop) fn toggle_omenchat_recovered_mutation_review(
+        &mut self,
+        server_destination: String,
+    ) {
+        if self
+            .omenchat
+            .omenchat_recovered_mutations_expanded_for
+            .as_deref()
+            == Some(server_destination.as_str())
+        {
+            self.omenchat.omenchat_recovered_mutations_expanded_for = None;
+            self.omenchat.omenchat_mutation_resolution_confirmation = None;
+            self.app.status.task =
+                "earlier OMENchat send remains unresolved; review was collapsed".into();
+        } else {
+            self.omenchat.omenchat_recovered_mutations_expanded_for = Some(server_destination);
+            self.app.status.task =
+                "reviewing an earlier OMENchat send; the current connection is unaffected".into();
+        }
     }
 
     pub(in crate::desktop) fn confirm_omenchat_mutation_resolution(&mut self) -> Task<Message> {
@@ -388,7 +1040,7 @@ impl DesktopApp {
         })
     }
 
-    fn recovered_omenchat_retry_session_id(
+    pub(in crate::desktop) fn recovered_omenchat_retry_session_id(
         &self,
         intent: &OutboundMutationIntent,
     ) -> Result<ChatSessionId, String> {
@@ -425,17 +1077,54 @@ impl DesktopApp {
                     .into(),
             );
         }
-        let Some(room_id) = intent.room_id else {
+        let command_name = (intent.op == ChatOp::Command)
+            .then(|| match &intent.body {
+                FrameBody::Text(command) => command.split_whitespace().next(),
+                _ => None,
+            })
+            .flatten();
+        if intent.op == ChatOp::Command
+            && !matches!(
+                command_name,
+                Some("topic" | "create" | "role" | "unban" | "kick" | "ban" | "mute" | "unmute")
+            )
+        {
+            return Err("this recovered OMENchat command is not enabled for durable retry".into());
+        }
+        let room_id = intent.room_id;
+        if command_name == Some("create") && room_id.is_some() {
+            return Err(
+                "recovered OMENchat room creation has an invalid room scope; it was not sent"
+                    .into(),
+            );
+        }
+        if command_name != Some("create") && room_id.is_none() {
             return Err("recovered OMENchat mutation has no room identity; it was not sent".into());
-        };
+        }
         let Some(session_id) = self
             .omenchat
             .chat_client
             .sessions()
             .iter()
             .find(|session| {
-                session.server.destination == intent.server_destination
-                    && session.active_room.room_id == room_id
+                if session.server.destination != intent.server_destination {
+                    return false;
+                }
+                if command_name == Some("create") {
+                    true
+                } else if intent.op == ChatOp::PartRoom
+                    || matches!(
+                        command_name,
+                        Some("role" | "unban" | "kick" | "ban" | "mute" | "unmute")
+                    )
+                {
+                    session
+                        .rooms
+                        .iter()
+                        .any(|room| Some(room.room_id) == room_id)
+                } else {
+                    Some(session.active_room.room_id) == room_id
+                }
             })
             .map(|session| session.session_id)
         else {
@@ -462,6 +1151,82 @@ impl DesktopApp {
                 "the live OMENchat peer did not negotiate durable mutations; retry is unavailable"
                     .into(),
             );
+        }
+        if intent.op == ChatOp::RoomMessage
+            && RichMessageBody::from_frame_body(&intent.body).is_ok()
+            && !self
+                .omenchat
+                .omenchat_live_state
+                .reply_mentions_negotiated(session_id)
+        {
+            return Err(
+                "the live OMENchat peer did not negotiate reply-mentions-v1; this rich mutation was not retried"
+                    .into(),
+            );
+        }
+        if intent.op == ChatOp::RoomReaction {
+            if !self
+                .omenchat
+                .omenchat_live_state
+                .reactions_negotiated(session_id)
+            {
+                return Err(
+                    "the live OMENchat peer did not negotiate reactions-v1; this reaction was not retried"
+                        .into(),
+                );
+            }
+            if ReactionRequest::from_frame_body(&intent.body).is_err() {
+                return Err(
+                    "the recovered OMENchat reaction request is malformed; it was not sent".into(),
+                );
+            }
+        }
+        if intent.op == ChatOp::RoomMessageRevision {
+            if !self
+                .omenchat
+                .omenchat_live_state
+                .message_revisions_negotiated(session_id)
+            {
+                return Err(
+                    "the live OMENchat peer did not negotiate message-revisions-v1; this revision was not retried"
+                        .into(),
+                );
+            }
+            if MessageRevisionRequest::from_frame_body(&intent.body).is_err() {
+                return Err(
+                    "the recovered OMENchat message revision request is malformed; it was not sent"
+                        .into(),
+                );
+            }
+        }
+        if intent.op == ChatOp::RoomPin {
+            if !self
+                .omenchat
+                .omenchat_live_state
+                .pins_negotiated(session_id)
+            {
+                return Err(
+                    "the live OMENchat peer did not negotiate room-pins-v1; this pin mutation was not retried"
+                        .into(),
+                );
+            }
+            let Ok(request) = PinRequest::from_frame_body(&intent.body) else {
+                return Err(
+                    "the recovered OMENchat pin request is malformed; it was not sent".into(),
+                );
+            };
+            let pin_room_id = room_id.ok_or_else(|| {
+                "the recovered OMENchat pin request has no room identity; it was not sent"
+                    .to_string()
+            })?;
+            if self.omenchat_pin_action_for_target(session_id, pin_room_id, request.target_event_id)
+                != Some(request.action)
+            {
+                return Err(
+                    "the recovered OMENchat pin request no longer has authoritative permission evidence; it was not sent"
+                        .into(),
+                );
+            }
         }
         if self
             .omenchat
@@ -515,6 +1280,7 @@ impl DesktopApp {
         self.omenchat
             .omenchat_recovered_mutation_intents
             .retain(|intent| intent.mutation_id != mutation_id);
+        self.remove_recovered_omenchat_operation(mutation_id);
         if let Some(status) = status_override {
             self.app.status.task = status;
             return;
@@ -593,8 +1359,11 @@ impl DesktopApp {
         self.omenchat.omenchat_recovered_mutation_intents = current;
         self.omenchat.omenchat_other_identity_mutation_intents = other_count;
         self.omenchat.omenchat_mutation_recovery_state = OmenChatMutationRecoveryState::Loaded;
+        let projection_error = self
+            .replace_recovered_omenchat_operation_snapshot(now)
+            .err();
         let total = prepared.saturating_add(uncertain).saturating_add(expired);
-        self.app.status.task = if total == 0 && other_count == 0 {
+        let status = if total == 0 && other_count == 0 {
             "OMENchat durable mutation recovery found no unresolved intents".into()
         } else {
             format!(
@@ -602,6 +1371,47 @@ impl DesktopApp {
                 other_count
             )
         };
+        self.app.status.task = if let Some(error) = projection_error {
+            tracing::warn!(%error, "bounded OMENchat Operations projection was rejected");
+            format!("{status}; Operations projection unavailable: {error}")
+        } else {
+            status
+        };
+    }
+
+    fn replace_recovered_omenchat_operation_snapshot(
+        &mut self,
+        observed_at_unix_seconds: i64,
+    ) -> Result<(), String> {
+        let records = self
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .map(|intent| {
+                crate::operations::omenchat::recovered_mutation_record(
+                    intent,
+                    observed_at_unix_seconds,
+                    false,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.app
+            .operation_history
+            .replace_domain_snapshot(
+                crate::operations::OperationDomain::OmenChatMutation,
+                records,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn remove_recovered_omenchat_operation(&mut self, mutation_id: MutationId) {
+        self.app
+            .operation_history
+            .remove(crate::operations::OperationId::opaque_128(
+                crate::operations::OperationDomain::OmenChatMutation,
+                mutation_id.into_bytes(),
+            ));
     }
 
     fn mark_prepared_omenchat_mutation_uncertain(
@@ -623,6 +1433,21 @@ impl DesktopApp {
             .omenchat
             .omenchat_live_state
             .durable_mutations_negotiated(session_id)
+            || (intent.op == ChatOp::RoomReaction
+                && !self
+                    .omenchat
+                    .omenchat_live_state
+                    .reactions_negotiated(session_id))
+            || (intent.op == ChatOp::RoomMessageRevision
+                && !self
+                    .omenchat
+                    .omenchat_live_state
+                    .message_revisions_negotiated(session_id))
+            || (intent.op == ChatOp::RoomPin
+                && !self
+                    .omenchat
+                    .omenchat_live_state
+                    .pins_negotiated(session_id))
             || !self
                 .omenchat
                 .omenchat_live_transports
@@ -724,6 +1549,14 @@ impl DesktopApp {
             {
                 *recovered_intent = intent.clone();
             }
+            if let Err(error) =
+                self.replace_recovered_omenchat_operation_snapshot(current_unix_seconds())
+            {
+                tracing::warn!(
+                    %error,
+                    "bounded OMENchat Operations projection did not accept an uncertain transition"
+                );
+            }
         }
         let Some(transport) = self.omenchat.omenchat_live_transports.get_mut(&session_id) else {
             self.set_omenchat_session_status(
@@ -735,13 +1568,79 @@ impl DesktopApp {
         };
         let (link_id, events, outgoing, resources) = {
             let link_id = transport.link_id;
-            let events = crate::chat::live::send_uncertain_durable_room_text(
-                &mut self.omenchat.chat_client,
-                &mut self.omenchat.omenchat_live_state,
-                transport,
-                session_id,
-                &intent,
-            );
+            let events = match intent.op {
+                ChatOp::RoomReaction => crate::chat::live::send_uncertain_durable_reaction(
+                    &mut self.omenchat.chat_client,
+                    &mut self.omenchat.omenchat_live_state,
+                    transport,
+                    session_id,
+                    &intent,
+                ),
+                ChatOp::RoomMessageRevision => {
+                    crate::chat::live::send_uncertain_durable_message_revision(
+                        &mut self.omenchat.chat_client,
+                        &mut self.omenchat.omenchat_live_state,
+                        transport,
+                        session_id,
+                        &intent,
+                    )
+                }
+                ChatOp::RoomPin => crate::chat::live::send_uncertain_durable_pin(
+                    &mut self.omenchat.chat_client,
+                    &mut self.omenchat.omenchat_live_state,
+                    transport,
+                    session_id,
+                    &intent,
+                ),
+                ChatOp::PartRoom => crate::chat::live::send_uncertain_durable_part_room(
+                    &mut self.omenchat.chat_client,
+                    &mut self.omenchat.omenchat_live_state,
+                    transport,
+                    session_id,
+                    &intent,
+                ),
+                ChatOp::Command => match &intent.body {
+                    FrameBody::Text(command)
+                        if command.split_whitespace().next() == Some("create") =>
+                    {
+                        crate::chat::live::send_uncertain_durable_create(
+                            &mut self.omenchat.chat_client,
+                            &mut self.omenchat.omenchat_live_state,
+                            transport,
+                            session_id,
+                            &intent,
+                        )
+                    }
+                    FrameBody::Text(command)
+                        if matches!(
+                            command.split_whitespace().next(),
+                            Some("role" | "unban" | "kick" | "ban" | "mute" | "unmute")
+                        ) =>
+                    {
+                        crate::chat::live::send_uncertain_durable_user_command(
+                            &mut self.omenchat.chat_client,
+                            &mut self.omenchat.omenchat_live_state,
+                            transport,
+                            session_id,
+                            &intent,
+                        )
+                    }
+                    _ => crate::chat::live::send_uncertain_durable_topic(
+                        &mut self.omenchat.chat_client,
+                        &mut self.omenchat.omenchat_live_state,
+                        transport,
+                        session_id,
+                        &intent,
+                    ),
+                },
+                _ => crate::chat::live::send_uncertain_durable_room_text(
+                    &mut self.omenchat.chat_client,
+                    &mut self.omenchat.omenchat_live_state,
+                    transport,
+                    session_id,
+                    &intent,
+                ),
+            };
             let outgoing = transport.take_outgoing_frames();
             let resources = transport.take_outgoing_resources();
             (link_id, events, outgoing, resources)
@@ -752,12 +1651,54 @@ impl DesktopApp {
         let failed = events
             .iter()
             .any(|event| matches!(event, ChatClientEvent::Error { .. }));
-        if !failed && !recovered {
+        if !failed && !recovered && intent.op == ChatOp::RoomMessageRevision {
+            if let Ok(sent) = MessageRevisionRequest::from_frame_body(&intent.body) {
+                let matches_draft = self
+                    .omenchat
+                    .omenchat_revision_drafts
+                    .get(&session_id)
+                    .is_some_and(|draft| {
+                        Some(draft.room_id) == intent.room_id
+                            && draft.event_id == sent.target_event_id
+                            && sent.replacement.as_deref() == Some(draft.replacement.as_str())
+                    });
+                if matches_draft {
+                    self.omenchat.omenchat_revision_drafts.remove(&session_id);
+                }
+            }
+        } else if !failed
+            && !recovered
+            && !matches!(
+                intent.op,
+                ChatOp::RoomReaction | ChatOp::RoomMessageRevision | ChatOp::RoomPin
+            )
+        {
             self.omenchat.chat_drafts.insert(session_id, String::new());
+            if let Ok(sent) = RichMessageBody::from_frame_body(&intent.body) {
+                let selected_reply =
+                    self.omenchat
+                        .omenchat_reply_drafts
+                        .get(&session_id)
+                        .map(|reply| ReplyReference {
+                            room_id: reply.room_id,
+                            event_id: reply.event_id,
+                        });
+                let selected_mentions = self
+                    .omenchat
+                    .omenchat_selected_mentions
+                    .get(&session_id)
+                    .map(|mentions| mentions.iter().copied().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if selected_reply == sent.reply_to && selected_mentions == sent.mentioned_user_ids {
+                    self.omenchat.omenchat_reply_drafts.remove(&session_id);
+                    self.omenchat.omenchat_selected_mentions.remove(&session_id);
+                }
+            }
         }
         if events.iter().any(|event| {
-            matches!(event, ChatClientEvent::EventAppended { event, .. }
-                if !is_omenchat_local_echo_event(event))
+            matches!(event, ChatClientEvent::RoomsUpdated { .. })
+                || matches!(event, ChatClientEvent::EventAppended { event, .. }
+                    if !is_omenchat_local_echo_event(event))
         }) {
             self.persist_omenchat_session(session_id);
         }
@@ -803,7 +1744,7 @@ impl DesktopApp {
         let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
             return Vec::new();
         };
-        transitions
+        let mut tasks = transitions
             .filter_map(|(session_id, mutation_id, next)| {
                 let reply = match worker.try_transition(
                     mutation_id,
@@ -843,7 +1784,44 @@ impl DesktopApp {
                     },
                 ))
             })
-            .collect()
+            .collect::<Vec<_>>();
+        tasks.extend(events.iter().filter_map(|event| {
+            let ChatClientEvent::DurableMutationRejected {
+                session_id,
+                mutation_id,
+                reason,
+            } = event
+            else {
+                return None;
+            };
+            let reply = match worker.try_remove_rejected(*mutation_id) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        ?mutation_id,
+                        %error,
+                        "durable OMENchat rejection was not admitted for persistence"
+                    );
+                    return None;
+                }
+            };
+            let (session_id, mutation_id, reason) = (*session_id, *mutation_id, *reason);
+            Some(Task::perform(
+                await_intent_worker_reply(reply),
+                move |result| {
+                    Message::OmenChatMutationCompletion(Box::new(
+                        OmenChatMutationCompletionMessage::Rejected {
+                            session_id,
+                            mutation_id,
+                            reason,
+                            result: result.map_err(|error| error.to_string()),
+                        },
+                    ))
+                },
+            ))
+        }));
+        tasks
     }
 
     fn finish_omenchat_mutation_acknowledgement(
@@ -889,6 +1867,7 @@ impl DesktopApp {
             self.omenchat
                 .omenchat_recovered_mutation_intents
                 .retain(|intent| intent.mutation_id != mutation_id);
+            self.remove_recovered_omenchat_operation(mutation_id);
         }
     }
 
@@ -956,6 +1935,7 @@ impl DesktopApp {
         self.omenchat
             .omenchat_recovered_mutation_intents
             .retain(|intent| intent.mutation_id != mutation_id);
+        self.remove_recovered_omenchat_operation(mutation_id);
         let status = if next == OutboundMutationState::Conflict {
             "server rejected the durable mutation because its identity conflicts with a retained operation; it will not be retried"
         } else {
@@ -963,6 +1943,118 @@ impl DesktopApp {
         };
         self.set_omenchat_session_status(session_id, status.into());
     }
+
+    fn finish_omenchat_mutation_rejection(
+        &mut self,
+        session_id: ChatSessionId,
+        mutation_id: MutationId,
+        reason: crate::chat::DurableMutationRejectionReason,
+        result: Result<IntentRemoval, String>,
+    ) {
+        let intent = match result {
+            Ok(IntentRemoval::Removed(intent)) => intent,
+            Ok(IntentRemoval::StateMismatch {
+                current: OutboundMutationState::Acknowledged,
+            }) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    "durable OMENchat acknowledgement won a concurrent rejection race".into(),
+                );
+                return;
+            }
+            Ok(other) => {
+                tracing::warn!(
+                    session_id,
+                    ?mutation_id,
+                    removal = ?other,
+                    "durable OMENchat rejection did not remove its uncertain intent"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    ?mutation_id,
+                    %error,
+                    "failed to resolve a rejected durable OMENchat mutation"
+                );
+                self.set_omenchat_session_status(
+                    session_id,
+                    "server rejected the message, but local recovery state could not be updated"
+                        .into(),
+                );
+                return;
+            }
+        };
+        if intent.mutation_id != mutation_id {
+            tracing::warn!(
+                session_id,
+                ?mutation_id,
+                removed = ?intent.mutation_id,
+                "ignored mismatched rejected OMENchat mutation intent"
+            );
+            return;
+        }
+        self.omenchat
+            .omenchat_recovered_mutation_intents
+            .retain(|candidate| candidate.mutation_id != mutation_id);
+        self.remove_recovered_omenchat_operation(mutation_id);
+
+        let active_room_id = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.active_room.room_id);
+        let restored = if let Some(text) = rejected_room_message_draft(
+            &intent,
+            active_room_id,
+            self.omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+        ) {
+            self.omenchat.chat_drafts.insert(session_id, text);
+            true
+        } else {
+            false
+        };
+        let reason_text = match reason {
+            crate::chat::DurableMutationRejectionReason::SlowMode => "slow mode",
+        };
+        let status = if restored {
+            format!("server {reason_text} rejected the message; its draft was restored")
+        } else {
+            format!(
+                "server {reason_text} rejected the message; the current composer and room were left unchanged"
+            )
+        };
+        self.set_omenchat_session_status(session_id, status);
+    }
+}
+
+fn rejected_room_message_draft(
+    intent: &OutboundMutationIntent,
+    active_room_id: Option<u32>,
+    current_draft: Option<&str>,
+) -> Option<String> {
+    if intent.room_id != active_room_id || current_draft.is_some_and(|draft| !draft.is_empty()) {
+        return None;
+    }
+    let text = match intent.op {
+        ChatOp::RoomMessage => RichMessageBody::from_frame_body(&intent.body)
+            .map(|rich| rich.body)
+            .or_else(|_| match &intent.body {
+                FrameBody::Text(text) => Ok(text.clone()),
+                _ => Err("unsupported rejected message body"),
+            })
+            .ok()?,
+        ChatOp::RoomAction => match &intent.body {
+            FrameBody::Text(text) => format!("/me {text}"),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (!text.is_empty()).then_some(text)
 }
 
 fn current_unix_seconds() -> i64 {
@@ -979,11 +2071,344 @@ mod tests {
     use crate::app::{current_epoch_ms, App};
     use crate::chat::codec::encode_frame;
     use crate::chat::protocol::{
-        with_session_accept_negotiation, ClientInstanceId, Frame, FrameValue,
+        with_session_accept_negotiation, ClientInstanceId, Frame, FrameValue, PinSnapshot,
         SessionAcceptNegotiation, DURABLE_MUTATION_CAPABILITY, PROTOCOL_NAME,
     };
-    use crate::chat::{ChatClientRequest, OmenChatDescriptor};
+    use crate::chat::{
+        ChatClientRequest, ChatEvent, ChatRoomSummary, ChatServerSummary, ChatSessionView,
+        ChatUserSummary, OmenChatDescriptor,
+    };
     use crate::desktop::DesktopOmenChatTransport;
+
+    #[test]
+    fn rejected_room_message_restores_only_an_unchanged_matching_composer() {
+        let plain = OutboundMutationIntent {
+            server_destination: "destination".into(),
+            authenticated_identity_hash: vec![1; 16],
+            client_instance_id: ClientInstanceId::new([2; 16]),
+            mutation_id: MutationId::new([3; 16]),
+            request_hash: crate::chat::protocol::RequestHash::new([4; 32]),
+            op: ChatOp::RoomMessage,
+            room_id: Some(7),
+            body: FrameBody::Text("restore me".into()),
+            state: OutboundMutationState::SentUncertain,
+            created_at: 1,
+            expires_at: 2,
+            correlation_id: None,
+        };
+
+        assert_eq!(
+            rejected_room_message_draft(&plain, Some(7), Some("")),
+            Some("restore me".into())
+        );
+        assert_eq!(
+            rejected_room_message_draft(&plain, Some(7), Some("newer text")),
+            None
+        );
+        assert_eq!(rejected_room_message_draft(&plain, Some(8), None), None);
+
+        let mut action = plain.clone();
+        action.op = ChatOp::RoomAction;
+        action.body = FrameBody::Text("waves".into());
+        assert_eq!(
+            rejected_room_message_draft(&action, Some(7), None),
+            Some("/me waves".into())
+        );
+
+        let mut rich = plain.clone();
+        rich.body = RichMessageBody {
+            body: "rich draft".into(),
+            reply_to: Some(ReplyReference {
+                room_id: 7,
+                event_id: 9,
+            }),
+            mentioned_user_ids: vec![11],
+        }
+        .into_frame_body()
+        .expect("rich body");
+        assert_eq!(
+            rejected_room_message_draft(&rich, Some(7), None),
+            Some("rich draft".into())
+        );
+    }
+
+    #[test]
+    fn room_message_and_reaction_composers_gate_negotiated_capabilities() {
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths: crate::config::AppPaths::from_root(std::env::temp_dir().join(format!(
+                "omenbrowser-rich-composer-unit-{}-{}",
+                std::process::id(),
+                current_epoch_ms()
+            ))),
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+        let session_id = desktop.omenchat.chat_client.reserve_session_id();
+        desktop.omenchat.chat_client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "server".into(),
+                destination: "destination".into(),
+                display_name: "Server".into(),
+            },
+            rooms: vec![ChatRoomSummary {
+                server_id: "server".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            }],
+            active_room: ChatRoomSummary {
+                server_id: "server".into(),
+                room_id: 1,
+                name: "lobby".into(),
+                topic: None,
+                unread: 0,
+                joined: true,
+            },
+            users: vec![ChatUserSummary {
+                server_id: "server".into(),
+                user_id: 7,
+                display_name: "Alice".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+            }],
+            events: vec![ChatEvent {
+                server_id: "server".into(),
+                room_id: 1,
+                event_id: 9,
+                actor_user_id: Some(7),
+                actor_display_name: Some("Alice".into()),
+                at_unix: 1,
+                kind: ChatEventKind::Message {
+                    body: "original".into(),
+                },
+            }],
+            status: "ready".into(),
+        });
+
+        assert_eq!(
+            desktop.omenchat_room_message_draft_body(session_id, "plain".into()),
+            Some(FrameBody::Text("plain".into()))
+        );
+        desktop.omenchat.omenchat_reply_drafts.insert(
+            session_id,
+            crate::desktop::omenchat_desktop_state::OmenChatReplyDraft {
+                room_id: 1,
+                event_id: 9,
+            },
+        );
+        desktop
+            .omenchat
+            .omenchat_selected_mentions
+            .entry(session_id)
+            .or_default()
+            .insert(7);
+        assert_eq!(
+            desktop.omenchat_room_message_draft_body(session_id, "blocked".into()),
+            None
+        );
+
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_reply_mentions_negotiated_for_test(session_id, true);
+        let rich = desktop
+            .omenchat_room_message_draft_body(session_id, "rich".into())
+            .expect("rich body");
+        assert_eq!(
+            RichMessageBody::from_frame_body(&rich).expect("decode rich body"),
+            RichMessageBody {
+                body: "rich".into(),
+                reply_to: Some(ReplyReference {
+                    room_id: 1,
+                    event_id: 9,
+                }),
+                mentioned_user_ids: vec![7],
+            }
+        );
+
+        let client_instance_id = ClientInstanceId::new([0x71; 16]);
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_client_instance_id(Some(client_instance_id));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_durable_mutations_negotiated_for_test(session_id, true);
+        desktop.omenchat.omenchat_authenticated_identity_hash = Some(vec![0x72; 16]);
+        desktop.omenchat.omenchat_live_transports.insert(
+            session_id,
+            DesktopOmenChatTransport::new([0x73; 16], current_epoch_ms()),
+        );
+        let recovered = OutboundMutationIntent {
+            server_destination: "destination".into(),
+            authenticated_identity_hash: vec![0x72; 16],
+            client_instance_id,
+            mutation_id: MutationId::new([0x74; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomMessage,
+                Some(1),
+                &rich,
+            )
+            .expect("rich request hash"),
+            op: ChatOp::RoomMessage,
+            room_id: Some(1),
+            body: rich,
+            state: OutboundMutationState::SentUncertain,
+            created_at: 1,
+            expires_at: i64::MAX,
+            correlation_id: None,
+        };
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&recovered),
+            Ok(session_id)
+        );
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_reply_mentions_negotiated_for_test(session_id, false);
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered)
+            .expect_err("capability loss must block recovered rich retry")
+            .contains("did not negotiate reply-mentions-v1"));
+
+        let reaction_body = ReactionRequest {
+            target_event_id: 9,
+            token: ReactionToken::Heart,
+            action: ReactionAction::Add,
+        }
+        .into_frame_body()
+        .expect("reaction body");
+        let recovered_reaction = OutboundMutationIntent {
+            mutation_id: MutationId::new([0x75; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomReaction,
+                Some(1),
+                &reaction_body,
+            )
+            .expect("reaction request hash"),
+            op: ChatOp::RoomReaction,
+            body: reaction_body,
+            ..recovered.clone()
+        };
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_reaction)
+            .expect_err("dormant capability must block recovered reaction retry")
+            .contains("did not negotiate reactions-v1"));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_reactions_negotiated_for_test(session_id, true);
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&recovered_reaction),
+            Ok(session_id)
+        );
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_reactions_negotiated_for_test(session_id, false);
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_reaction)
+            .is_err());
+
+        let revision_body = MessageRevisionRequest {
+            target_event_id: 9,
+            action: crate::chat::protocol::MessageRevisionAction::Correct,
+            replacement: Some("corrected".into()),
+        }
+        .into_frame_body()
+        .expect("message revision body");
+        let recovered_revision = OutboundMutationIntent {
+            mutation_id: MutationId::new([0x76; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomMessageRevision,
+                Some(1),
+                &revision_body,
+            )
+            .expect("message revision request hash"),
+            op: ChatOp::RoomMessageRevision,
+            body: revision_body,
+            ..recovered.clone()
+        };
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_revision)
+            .expect_err("dormant capability must block recovered revision retry")
+            .contains("did not negotiate message-revisions-v1"));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_message_revisions_negotiated_for_test(session_id, true);
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&recovered_revision),
+            Ok(session_id)
+        );
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_message_revisions_negotiated_for_test(session_id, false);
+
+        assert!(desktop
+            .omenchat
+            .chat_client
+            .bind_local_user_id(session_id, 7));
+        desktop
+            .omenchat
+            .chat_client
+            .session_mut(session_id)
+            .expect("session")
+            .users[0]
+            .role_bits = crate::chat::CHAT_ROLE_MODERATOR;
+        desktop
+            .omenchat
+            .chat_client
+            .replace_pin_snapshot(
+                session_id,
+                1,
+                &PinSnapshot {
+                    target_event_ids: vec![9],
+                    entries: Vec::new(),
+                },
+            )
+            .expect("authoritative pin target");
+        let pin_body = PinRequest {
+            target_event_id: 9,
+            action: PinAction::Pin,
+        }
+        .into_frame_body()
+        .expect("pin body");
+        let recovered_pin = OutboundMutationIntent {
+            mutation_id: MutationId::new([0x77; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::RoomPin,
+                Some(1),
+                &pin_body,
+            )
+            .expect("pin request hash"),
+            op: ChatOp::RoomPin,
+            body: pin_body,
+            ..recovered
+        };
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_pin)
+            .expect_err("dormant capability must block recovered pin retry")
+            .contains("did not negotiate room-pins-v1"));
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_pins_negotiated_for_test(session_id, true);
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&recovered_pin),
+            Ok(session_id)
+        );
+        desktop.omenchat.chat_client.mark_pins_stale(session_id);
+        assert!(desktop
+            .recovered_omenchat_retry_session_id(&recovered_pin)
+            .expect_err("authority loss must block recovered pin retry")
+            .contains("authoritative permission evidence"));
+    }
 
     #[tokio::test]
     async fn negotiated_room_send_persists_before_transport_and_persists_ack() {
@@ -1143,6 +2568,524 @@ mod tests {
         ]);
         assert!(recover_intents(&desktop).is_empty());
 
+        let topic_before = desktop
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .expect("session")
+            .active_room
+            .topic
+            .clone();
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "/topic durable room metadata".into());
+        let _prepare_topic_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        let prepared_topic = recover_intents(&desktop)
+            .into_iter()
+            .next()
+            .expect("prepared topic intent");
+        assert_eq!(prepared_topic.op, ChatOp::Command);
+        assert_eq!(prepared_topic.room_id, Some(1));
+        assert_eq!(
+            prepared_topic.body,
+            FrameBody::Text("topic durable room metadata".into())
+        );
+        assert_eq!(prepared_topic.state, OutboundMutationState::Prepared);
+        let _transition_topic_task = desktop
+            .mark_prepared_omenchat_mutation_uncertain(session_id, Ok(prepared_topic.clone()));
+        let uncertain_topic = recover_intents(&desktop)
+            .into_iter()
+            .find(|intent| intent.mutation_id == prepared_topic.mutation_id)
+            .expect("uncertain topic intent");
+        let _send_topic_task = desktop.send_persisted_uncertain_omenchat_mutation(
+            session_id,
+            Ok(IntentTransition::Updated(uncertain_topic)),
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(2)
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_client
+                .session(session_id)
+                .expect("session")
+                .active_room
+                .topic,
+            topic_before
+        );
+        assert!(desktop
+            .omenchat
+            .omenchat_live_state
+            .durable_mutation_is_pending(session_id, prepared_topic.mutation_id));
+        let _topic_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id,
+                mutation_id: prepared_topic.mutation_id,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
+
+        for (index, command) in ["kick Bob", "ban Bob", "mute Bob", "unmute Bob"]
+            .into_iter()
+            .enumerate()
+        {
+            desktop
+                .omenchat
+                .chat_drafts
+                .insert(session_id, format!("/{command}"));
+            let _prepare_moderation_task =
+                desktop.send_omenchat_draft_with_durable_intent(session_id);
+            let prepared_moderation = recover_intents(&desktop)
+                .into_iter()
+                .next()
+                .expect("prepared moderation intent");
+            assert_eq!(prepared_moderation.op, ChatOp::Command, "{command}");
+            assert_eq!(prepared_moderation.room_id, Some(1), "{command}");
+            assert_eq!(
+                prepared_moderation.body,
+                FrameBody::Text(command.into()),
+                "{command}"
+            );
+            let _transition_moderation_task = desktop.mark_prepared_omenchat_mutation_uncertain(
+                session_id,
+                Ok(prepared_moderation.clone()),
+            );
+            let uncertain_moderation = recover_intents(&desktop)
+                .into_iter()
+                .find(|intent| intent.mutation_id == prepared_moderation.mutation_id)
+                .expect("uncertain moderation intent");
+            assert_eq!(
+                desktop.recovered_omenchat_retry_session_id(&uncertain_moderation),
+                Ok(session_id),
+                "{command}"
+            );
+            let _send_moderation_task = desktop.send_persisted_uncertain_omenchat_mutation(
+                session_id,
+                Ok(IntentTransition::Updated(uncertain_moderation)),
+            );
+            assert_eq!(
+                desktop
+                    .omenchat
+                    .omenchat_live_transports
+                    .get(&session_id)
+                    .map(|transport| transport.chat_frames_out),
+                Some(3 + index as u64),
+                "{command}"
+            );
+            let _moderation_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+                ChatClientEvent::DurableMutationAcknowledged {
+                    session_id,
+                    mutation_id: prepared_moderation.mutation_id,
+                },
+            ]);
+            assert!(recover_intents(&desktop).is_empty(), "{command}");
+        }
+
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "/role deadbeef mod".into());
+        let _legacy_identity_prefix_role =
+            desktop.send_omenchat_draft_with_durable_intent(session_id);
+        assert!(recover_intents(&desktop).is_empty());
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(7)
+        );
+
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "/role Bob moderator".into());
+        let _prepare_role_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        let prepared_role = recover_intents(&desktop)
+            .into_iter()
+            .next()
+            .expect("prepared role intent");
+        assert_eq!(prepared_role.op, ChatOp::Command);
+        assert_eq!(prepared_role.room_id, Some(1));
+        assert_eq!(prepared_role.body, FrameBody::Text("role Bob mod".into()));
+        let _transition_role_task = desktop
+            .mark_prepared_omenchat_mutation_uncertain(session_id, Ok(prepared_role.clone()));
+        let uncertain_role = recover_intents(&desktop)
+            .into_iter()
+            .find(|intent| intent.mutation_id == prepared_role.mutation_id)
+            .expect("uncertain role intent");
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&uncertain_role),
+            Ok(session_id)
+        );
+        let _send_role_task = desktop.send_persisted_uncertain_omenchat_mutation(
+            session_id,
+            Ok(IntentTransition::Updated(uncertain_role)),
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(8)
+        );
+        let _role_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id,
+                mutation_id: prepared_role.mutation_id,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
+
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "/unban Bob".into());
+        let _prepare_unban_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        let prepared_unban = recover_intents(&desktop)
+            .into_iter()
+            .next()
+            .expect("prepared unban intent");
+        assert_eq!(prepared_unban.op, ChatOp::Command);
+        assert_eq!(prepared_unban.room_id, Some(1));
+        assert_eq!(prepared_unban.body, FrameBody::Text("unban Bob".into()));
+        let _transition_unban_task = desktop
+            .mark_prepared_omenchat_mutation_uncertain(session_id, Ok(prepared_unban.clone()));
+        let uncertain_unban = recover_intents(&desktop)
+            .into_iter()
+            .find(|intent| intent.mutation_id == prepared_unban.mutation_id)
+            .expect("uncertain unban intent");
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&uncertain_unban),
+            Ok(session_id)
+        );
+        let _send_unban_task = desktop.send_persisted_uncertain_omenchat_mutation(
+            session_id,
+            Ok(IntentTransition::Updated(uncertain_unban)),
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(9)
+        );
+        let _unban_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id,
+                mutation_id: prepared_unban.mutation_id,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
+
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "/create #op!s Durable operations".into());
+        let _prepare_create_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        let prepared_create = recover_intents(&desktop)
+            .into_iter()
+            .next()
+            .expect("prepared create intent");
+        assert_eq!(prepared_create.op, ChatOp::Command);
+        assert_eq!(prepared_create.room_id, None);
+        assert_eq!(
+            prepared_create.body,
+            FrameBody::Text("create op!s Durable operations".into())
+        );
+        assert_eq!(prepared_create.state, OutboundMutationState::Prepared);
+        let _transition_create_task = desktop
+            .mark_prepared_omenchat_mutation_uncertain(session_id, Ok(prepared_create.clone()));
+        let uncertain_create = recover_intents(&desktop)
+            .into_iter()
+            .find(|intent| intent.mutation_id == prepared_create.mutation_id)
+            .expect("uncertain create intent");
+        assert_eq!(
+            desktop.recovered_omenchat_retry_session_id(&uncertain_create),
+            Ok(session_id)
+        );
+        let _send_create_task = desktop.send_persisted_uncertain_omenchat_mutation(
+            session_id,
+            Ok(IntentTransition::Updated(uncertain_create)),
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(10)
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_client
+                .session(session_id)
+                .expect("session")
+                .rooms
+                .len(),
+            1
+        );
+        assert!(desktop
+            .omenchat
+            .omenchat_live_state
+            .durable_mutation_is_pending(session_id, prepared_create.mutation_id));
+        let _create_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id,
+                mutation_id: prepared_create.mutation_id,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
+
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "/notice legacy-compatible".into());
+        let _legacy_notice_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        assert!(recover_intents(&desktop).is_empty());
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(11)
+        );
+
+        let notice_accept_body = with_session_accept_negotiation(
+            FrameBody::Fields(vec![
+                FrameValue::String(PROTOCOL_NAME.into()),
+                FrameValue::Array(Vec::new()),
+            ]),
+            &SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    crate::chat::protocol::DURABLE_NOTICE_ACK_CAPABILITY.into(),
+                ],
+            },
+        )
+        .expect("notice acknowledgement negotiation");
+        let mut transport = desktop
+            .omenchat
+            .omenchat_live_transports
+            .remove(&session_id)
+            .expect("live transport");
+        assert!(transport.push_incoming_frame(
+            encode_frame(&Frame::new(
+                ChatOp::SessionAccept,
+                2,
+                None,
+                notice_accept_body,
+            ))
+            .expect("notice accept frame"),
+            current_epoch_ms(),
+        ));
+        let _ = crate::chat::live::drain_live_events_with_state(
+            &mut desktop.omenchat.chat_client,
+            &mut desktop.omenchat.omenchat_live_state,
+            &mut transport,
+            Some(session_id),
+        );
+        desktop
+            .omenchat
+            .omenchat_live_transports
+            .insert(session_id, transport);
+        assert!(desktop
+            .omenchat
+            .omenchat_live_state
+            .durable_notice_ack_negotiated(session_id));
+
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "/me waves".into());
+        let _prepare_action_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        let prepared_action = recover_intents(&desktop)
+            .into_iter()
+            .next()
+            .expect("prepared action intent");
+        assert_eq!(prepared_action.op, ChatOp::RoomAction);
+        assert_eq!(prepared_action.body, FrameBody::Text("waves".into()));
+        assert_eq!(prepared_action.state, OutboundMutationState::Prepared);
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+            Some("/me waves")
+        );
+
+        let _transition_action_task = desktop
+            .mark_prepared_omenchat_mutation_uncertain(session_id, Ok(prepared_action.clone()));
+        let uncertain_action = recover_intents(&desktop)
+            .into_iter()
+            .find(|intent| intent.mutation_id == prepared_action.mutation_id)
+            .expect("uncertain action intent");
+        assert_eq!(uncertain_action.state, OutboundMutationState::SentUncertain);
+        let _send_action_task = desktop.send_persisted_uncertain_omenchat_mutation(
+            session_id,
+            Ok(IntentTransition::Updated(uncertain_action.clone())),
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+            Some("")
+        );
+        assert!(desktop
+            .omenchat
+            .omenchat_live_state
+            .durable_mutation_is_pending(session_id, prepared_action.mutation_id));
+        let _action_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id,
+                mutation_id: prepared_action.mutation_id,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
+
+        let joined_before_part = desktop
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .expect("session")
+            .active_room
+            .joined;
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "/notice maintenance".into());
+        let _prepare_notice_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        let prepared_notice = recover_intents(&desktop)
+            .into_iter()
+            .next()
+            .expect("prepared notice intent");
+        assert_eq!(prepared_notice.op, ChatOp::RoomNotice);
+        assert_eq!(prepared_notice.body, FrameBody::Text("maintenance".into()));
+        assert_eq!(prepared_notice.state, OutboundMutationState::Prepared);
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+            Some("/notice maintenance")
+        );
+
+        let _transition_notice_task = desktop
+            .mark_prepared_omenchat_mutation_uncertain(session_id, Ok(prepared_notice.clone()));
+        let uncertain_notice = recover_intents(&desktop)
+            .into_iter()
+            .find(|intent| intent.mutation_id == prepared_notice.mutation_id)
+            .expect("uncertain notice intent");
+        assert_eq!(uncertain_notice.state, OutboundMutationState::SentUncertain);
+        let _send_notice_task = desktop.send_persisted_uncertain_omenchat_mutation(
+            session_id,
+            Ok(IntentTransition::Updated(uncertain_notice)),
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_drafts
+                .get(&session_id)
+                .map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(13)
+        );
+        assert!(desktop
+            .omenchat
+            .omenchat_live_state
+            .durable_mutation_is_pending(session_id, prepared_notice.mutation_id));
+        let _notice_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id,
+                mutation_id: prepared_notice.mutation_id,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
+
+        desktop
+            .omenchat
+            .chat_drafts
+            .insert(session_id, "/part".into());
+        let _prepare_part_task = desktop.send_omenchat_draft_with_durable_intent(session_id);
+        let prepared_part = recover_intents(&desktop)
+            .into_iter()
+            .next()
+            .expect("prepared part intent");
+        assert_eq!(prepared_part.op, ChatOp::PartRoom);
+        assert_eq!(prepared_part.room_id, Some(1));
+        assert_eq!(prepared_part.body, FrameBody::Empty);
+        assert_eq!(prepared_part.state, OutboundMutationState::Prepared);
+        let _transition_part_task = desktop
+            .mark_prepared_omenchat_mutation_uncertain(session_id, Ok(prepared_part.clone()));
+        let uncertain_part = recover_intents(&desktop)
+            .into_iter()
+            .find(|intent| intent.mutation_id == prepared_part.mutation_id)
+            .expect("uncertain part intent");
+        let _send_part_task = desktop.send_persisted_uncertain_omenchat_mutation(
+            session_id,
+            Ok(IntentTransition::Updated(uncertain_part)),
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .map(|transport| transport.chat_frames_out),
+            Some(13)
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .and_then(|transport| transport.last_tx_frame.as_deref()),
+            Some("part room")
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .chat_client
+                .session(session_id)
+                .expect("session")
+                .active_room
+                .joined,
+            joined_before_part
+        );
+        assert!(desktop
+            .omenchat
+            .omenchat_live_state
+            .durable_mutation_is_pending(session_id, prepared_part.mutation_id));
+        let _part_ack_tasks = desktop.omenchat_mutation_persistence_tasks(&[
+            ChatClientEvent::DurableMutationAcknowledged {
+                session_id,
+                mutation_id: prepared_part.mutation_id,
+            },
+        ]);
+        assert!(recover_intents(&desktop).is_empty());
+
         desktop
             .omenchat
             .chat_drafts
@@ -1199,7 +3142,7 @@ mod tests {
                 .omenchat_live_transports
                 .get(&session_id)
                 .map(|transport| transport.chat_frames_out),
-            Some(2)
+            Some(14)
         );
         let _terminal_tasks = desktop.omenchat_mutation_persistence_tasks(&[
             ChatClientEvent::DurableMutationTerminal {
@@ -1282,6 +3225,104 @@ mod tests {
             now.saturating_sub(10),
             now.saturating_add(100),
         );
+        let uncertain_action = persist_recovery_fixture_for_op(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            ChatOp::RoomAction,
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_notice = persist_recovery_fixture_for_op(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            ChatOp::RoomNotice,
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_part = persist_recovery_fixture_for_op(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            ChatOp::PartRoom,
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_topic = persist_recovery_fixture_for_op(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            ChatOp::Command,
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_create = persist_recovery_create_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_role = persist_recovery_user_command_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            "role Bob mod",
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_unban = persist_recovery_user_command_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            "unban 42",
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_kick = persist_recovery_user_command_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            "kick Bob",
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_ban = persist_recovery_user_command_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            "ban Bob",
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_mute = persist_recovery_user_command_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            "mute Bob",
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
+        let uncertain_unmute = persist_recovery_user_command_fixture(
+            &store,
+            vec![0x62; 16],
+            client_instance_id,
+            "unmute Bob",
+            OutboundMutationState::SentUncertain,
+            now.saturating_sub(10),
+            now.saturating_add(100),
+        );
         let _other_identity = persist_recovery_fixture(
             &store,
             vec![0x66; 16],
@@ -1315,13 +3356,100 @@ mod tests {
         );
         assert_eq!(
             desktop.omenchat.omenchat_recovered_mutation_intents.len(),
-            3
+            14
         );
         assert_eq!(desktop.omenchat.omenchat_other_identity_mutation_intents, 1);
         assert!(desktop.app.status.task.contains("1 prepared"));
-        assert!(desktop.app.status.task.contains("1 uncertain"));
+        assert!(desktop.app.status.task.contains("12 uncertain"));
         assert!(desktop.app.status.task.contains("1 expired"));
         assert!(desktop.app.status.task.contains("nothing was resent"));
+        assert!(
+            desktop
+                .omenchat
+                .omenchat_recovered_mutations_expanded_for
+                .is_none(),
+            "recovery must remain collapsed until the user asks to review it"
+        );
+        desktop.toggle_omenchat_recovered_mutation_review(uncertain.server_destination.clone());
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_recovered_mutations_expanded_for
+                .as_deref(),
+            Some(uncertain.server_destination.as_str())
+        );
+        desktop.omenchat.omenchat_mutation_resolution_confirmation =
+            Some(OmenChatMutationResolutionConfirmation {
+                mutation_id: uncertain.mutation_id,
+                expected: uncertain.state,
+                next: OutboundMutationState::SentUncertain,
+            });
+        desktop.toggle_omenchat_recovered_mutation_review(uncertain.server_destination.clone());
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutations_expanded_for
+            .is_none());
+        assert!(
+            desktop
+                .omenchat
+                .omenchat_mutation_resolution_confirmation
+                .is_none(),
+            "collapsing review must not leave a hidden confirmation active"
+        );
+        assert_eq!(desktop.app.operation_history.metrics().items, 14);
+        assert_eq!(
+            desktop
+                .app
+                .operation_history
+                .records()
+                .filter(|record| {
+                    record.id.domain == crate::operations::OperationDomain::OmenChatMutation
+                })
+                .count(),
+            14
+        );
+        let prepared_operation = desktop
+            .app
+            .operation_history
+            .records()
+            .find(|record| {
+                record.id
+                    == crate::operations::OperationId::opaque_128(
+                        crate::operations::OperationDomain::OmenChatMutation,
+                        prepared.mutation_id.into_bytes(),
+                    )
+            })
+            .expect("prepared operation projection");
+        assert_eq!(
+            prepared_operation.state,
+            crate::operations::OperationState::Waiting
+        );
+        assert!(!prepared_operation.valid_actions.iter().any(|action| {
+            matches!(
+                action,
+                crate::operations::OperationAction::ExplicitSend
+                    | crate::operations::OperationAction::ExplicitSafeRetry
+            )
+        }));
+        let expired_operation = desktop
+            .app
+            .operation_history
+            .records()
+            .find(|record| {
+                record.id
+                    == crate::operations::OperationId::opaque_128(
+                        crate::operations::OperationDomain::OmenChatMutation,
+                        expired.mutation_id.into_bytes(),
+                    )
+            })
+            .expect("expired operation projection");
+        assert_eq!(
+            expired_operation.state,
+            crate::operations::OperationState::Reconciling
+        );
+        assert!(expired_operation.evidence.iter().any(|evidence| {
+            evidence.kind == crate::operations::OperationEvidenceKind::Expiration
+        }));
         assert!(desktop.omenchat.omenchat_live_transports.is_empty());
         assert!(desktop
             .omenchat
@@ -1333,6 +3461,75 @@ mod tests {
             .omenchat_recovered_mutation_intents
             .iter()
             .any(|intent| intent.mutation_id == uncertain.mutation_id));
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| {
+                intent.mutation_id == uncertain_action.mutation_id
+                    && intent.op == ChatOp::RoomAction
+                    && intent.state == OutboundMutationState::SentUncertain
+            }));
+        for (expected, command) in [
+            (uncertain_role.mutation_id, "role Bob mod"),
+            (uncertain_unban.mutation_id, "unban 42"),
+            (uncertain_kick.mutation_id, "kick Bob"),
+            (uncertain_ban.mutation_id, "ban Bob"),
+            (uncertain_mute.mutation_id, "mute Bob"),
+            (uncertain_unmute.mutation_id, "unmute Bob"),
+        ] {
+            assert!(desktop
+                .omenchat
+                .omenchat_recovered_mutation_intents
+                .iter()
+                .any(|intent| {
+                    intent.mutation_id == expected
+                        && intent.op == ChatOp::Command
+                        && intent.room_id == Some(1)
+                        && intent.body == FrameBody::Text(command.into())
+                        && intent.state == OutboundMutationState::SentUncertain
+                }));
+        }
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| {
+                intent.mutation_id == uncertain_create.mutation_id
+                    && intent.op == ChatOp::Command
+                    && intent.room_id.is_none()
+                    && intent.body == FrameBody::Text("create recovered Recovered room".into())
+                    && intent.state == OutboundMutationState::SentUncertain
+            }));
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| {
+                intent.mutation_id == uncertain_topic.mutation_id
+                    && intent.op == ChatOp::Command
+                    && intent.body == FrameBody::Text("topic recovered topic".into())
+                    && intent.state == OutboundMutationState::SentUncertain
+            }));
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| {
+                intent.mutation_id == uncertain_part.mutation_id
+                    && intent.op == ChatOp::PartRoom
+                    && intent.body == FrameBody::Empty
+                    && intent.state == OutboundMutationState::SentUncertain
+            }));
+        assert!(desktop
+            .omenchat
+            .omenchat_recovered_mutation_intents
+            .iter()
+            .any(|intent| {
+                intent.mutation_id == uncertain_notice.mutation_id
+                    && intent.op == ChatOp::RoomNotice
+                    && intent.state == OutboundMutationState::SentUncertain
+            }));
         desktop.omenchat.omenchat_mutation_intent_worker = Some(
             crate::chat::mutation_intent_worker::MutationIntentWorker::start(
                 desktop.app.paths.identity_storage_root(),
@@ -1404,6 +3601,13 @@ mod tests {
             .omenchat_recovered_mutation_intents
             .iter()
             .any(|intent| intent.mutation_id == prepared.mutation_id));
+        assert!(!desktop.app.operation_history.records().any(|record| {
+            record.id
+                == crate::operations::OperationId::opaque_128(
+                    crate::operations::OperationDomain::OmenChatMutation,
+                    prepared.mutation_id.into_bytes(),
+                )
+        }));
         assert!(desktop
             .app
             .status
@@ -1430,6 +3634,13 @@ mod tests {
             .status
             .task
             .contains("no network action occurred"));
+        assert!(!desktop.app.operation_history.records().any(|record| {
+            record.id
+                == crate::operations::OperationId::opaque_128(
+                    crate::operations::OperationDomain::OmenChatMutation,
+                    expired.mutation_id.into_bytes(),
+                )
+        }));
         desktop.finish_omenchat_mutation_resolution(
             uncertain.mutation_id,
             OutboundMutationState::Abandoned,
@@ -1442,6 +3653,13 @@ mod tests {
             .omenchat_recovered_mutation_intents
             .iter()
             .any(|intent| intent.mutation_id == uncertain.mutation_id));
+        assert!(!desktop.app.operation_history.records().any(|record| {
+            record.id
+                == crate::operations::OperationId::opaque_128(
+                    crate::operations::OperationDomain::OmenChatMutation,
+                    uncertain.mutation_id.into_bytes(),
+                )
+        }));
         assert!(desktop.app.status.task.contains("already terminal"));
         assert!(desktop.omenchat.omenchat_live_transports.is_empty());
         desktop
@@ -1478,13 +3696,42 @@ mod tests {
         created_at: i64,
         expires_at: i64,
     ) -> crate::chat::mutation_intents::OutboundMutationIntent {
+        persist_recovery_fixture_for_op(
+            store,
+            authenticated_identity_hash,
+            client_instance_id,
+            ChatOp::RoomMessage,
+            state,
+            created_at,
+            expires_at,
+        )
+    }
+
+    fn persist_recovery_fixture_for_op(
+        store: &crate::chat::mutation_intents::MutationIntentStore,
+        authenticated_identity_hash: Vec<u8>,
+        client_instance_id: ClientInstanceId,
+        op: ChatOp,
+        state: OutboundMutationState,
+        created_at: i64,
+        expires_at: i64,
+    ) -> crate::chat::mutation_intents::OutboundMutationIntent {
+        let body = if op == ChatOp::PartRoom {
+            FrameBody::Empty
+        } else if op == ChatOp::Command {
+            FrameBody::Text("topic recovered topic".into())
+        } else if op == ChatOp::RoomAction {
+            FrameBody::Text("recovered action".into())
+        } else {
+            FrameBody::Text("recovered body".into())
+        };
         let request = OwnedPrepareOutboundMutation {
             server_destination: "00112233445566778899aabbccddeeff".into(),
             authenticated_identity_hash,
             client_instance_id,
-            op: ChatOp::RoomMessage,
+            op,
             room_id: Some(1),
-            body: FrameBody::Text("recovered body".into()),
+            body,
             created_at,
             expires_at,
             correlation_id: None,
@@ -1501,6 +3748,75 @@ mod tests {
         {
             IntentTransition::Updated(intent) => intent,
             other => panic!("unexpected recovery fixture transition: {other:?}"),
+        }
+    }
+
+    fn persist_recovery_create_fixture(
+        store: &crate::chat::mutation_intents::MutationIntentStore,
+        authenticated_identity_hash: Vec<u8>,
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+        created_at: i64,
+        expires_at: i64,
+    ) -> crate::chat::mutation_intents::OutboundMutationIntent {
+        let request = OwnedPrepareOutboundMutation {
+            server_destination: "00112233445566778899aabbccddeeff".into(),
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::Command,
+            room_id: None,
+            body: FrameBody::Text("create recovered Recovered room".into()),
+            created_at,
+            expires_at,
+            correlation_id: None,
+        };
+        let prepared = store
+            .persist_prepared(request.as_borrowed())
+            .expect("persist create recovery fixture");
+        if state == OutboundMutationState::Prepared {
+            return prepared;
+        }
+        match store
+            .transition(prepared.mutation_id, OutboundMutationState::Prepared, state)
+            .expect("transition create recovery fixture")
+        {
+            IntentTransition::Updated(intent) => intent,
+            other => panic!("unexpected create recovery fixture transition: {other:?}"),
+        }
+    }
+
+    fn persist_recovery_user_command_fixture(
+        store: &crate::chat::mutation_intents::MutationIntentStore,
+        authenticated_identity_hash: Vec<u8>,
+        client_instance_id: ClientInstanceId,
+        command: &str,
+        state: OutboundMutationState,
+        created_at: i64,
+        expires_at: i64,
+    ) -> crate::chat::mutation_intents::OutboundMutationIntent {
+        let request = OwnedPrepareOutboundMutation {
+            server_destination: "00112233445566778899aabbccddeeff".into(),
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::Command,
+            room_id: Some(1),
+            body: FrameBody::Text(command.into()),
+            created_at,
+            expires_at,
+            correlation_id: None,
+        };
+        let prepared = store
+            .persist_prepared(request.as_borrowed())
+            .expect("persist user-command recovery fixture");
+        if state == OutboundMutationState::Prepared {
+            return prepared;
+        }
+        match store
+            .transition(prepared.mutation_id, OutboundMutationState::Prepared, state)
+            .expect("transition user-command recovery fixture")
+        {
+            IntentTransition::Updated(intent) => intent,
+            other => panic!("unexpected user-command recovery fixture transition: {other:?}"),
         }
     }
 }

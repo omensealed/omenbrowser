@@ -125,6 +125,19 @@ impl DesktopApp {
         }
     }
 
+    pub(super) fn update_confirm_conversation_pane_direct_stamp(&mut self, conversation_id: u64) {
+        if self.select_conversation_by_id(conversation_id) {
+            self.app.confirm_active_conversation_direct_stamp();
+            self.sync_conversation_body_editor(conversation_id);
+        }
+    }
+
+    pub(super) fn update_cancel_conversation_pane_direct_stamp(&mut self, conversation_id: u64) {
+        if self.select_conversation_by_id(conversation_id) {
+            self.app.cancel_active_conversation_direct_stamp();
+        }
+    }
+
     pub(super) fn update_prepare_latest_lxmf_retry_for_conversation(
         &mut self,
         conversation_id: u64,

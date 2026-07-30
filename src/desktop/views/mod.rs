@@ -4,6 +4,7 @@ pub(super) mod diagnostics;
 pub(super) mod directory;
 pub(super) mod directory_model;
 pub(super) mod help;
+pub(super) mod history_search;
 pub(super) mod identities;
 pub(super) mod interfaces;
 pub(super) mod logs;
@@ -12,6 +13,7 @@ pub(super) mod network_doctor;
 mod network_doctor_model;
 #[cfg(feature = "chat-client")]
 pub(super) mod omenchat;
+mod operations;
 pub(super) mod plugins;
 pub(super) mod settings;
 pub(super) mod shell;

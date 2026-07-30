@@ -5,8 +5,8 @@ use std::sync::{mpsc, Arc};
 use omenchat_protocol::MutationId;
 
 use super::mutation_intents::{
-    queued_prepare_bytes, IntentTransition, MutationIntentStore, OutboundMutationIntent,
-    OutboundMutationState, OwnedPrepareOutboundMutation,
+    queued_prepare_bytes, IntentRemoval, IntentTransition, MutationIntentStore,
+    OutboundMutationIntent, OutboundMutationState, OwnedPrepareOutboundMutation,
 };
 
 pub const MUTATION_INTENT_WORKER_QUEUE_ITEMS: usize = 32;
@@ -69,6 +69,10 @@ enum WorkerCommand {
         expected: OutboundMutationState,
         next: OutboundMutationState,
         reply: mpsc::SyncSender<anyhow::Result<IntentTransition>>,
+    },
+    RemoveRejected {
+        mutation_id: MutationId,
+        reply: mpsc::SyncSender<anyhow::Result<IntentRemoval>>,
     },
     Recover {
         reply: mpsc::SyncSender<anyhow::Result<Vec<OutboundMutationIntent>>>,
@@ -149,6 +153,11 @@ impl MutationIntentWorker {
                             thread_counters.completed.fetch_add(1, Ordering::Relaxed);
                             let _ = reply.send(result);
                         }
+                        WorkerCommand::RemoveRejected { mutation_id, reply } => {
+                            let result = store.remove_rejected_uncertain(mutation_id);
+                            thread_counters.completed.fetch_add(1, Ordering::Relaxed);
+                            let _ = reply.send(result);
+                        }
                         WorkerCommand::Recover { reply } => {
                             let result = store.recover_nonterminal();
                             thread_counters.completed.fetch_add(1, Ordering::Relaxed);
@@ -222,6 +231,15 @@ impl MutationIntentWorker {
     ) -> Result<IntentWorkerReply<Vec<OutboundMutationIntent>>, IntentWorkerSubmitError> {
         let (reply, receive) = mpsc::sync_channel(1);
         self.try_submit(WorkerCommand::Recover { reply }, 64)?;
+        Ok(receive)
+    }
+
+    pub fn try_remove_rejected(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<IntentWorkerReply<IntentRemoval>, IntentWorkerSubmitError> {
+        let (reply, receive) = mpsc::sync_channel(1);
+        self.try_submit(WorkerCommand::RemoveRejected { mutation_id, reply }, 128)?;
         Ok(receive)
     }
 
@@ -431,6 +449,52 @@ mod tests {
             OutboundMutationState::SentUncertain
         );
         drop(reopened);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn worker_removes_only_the_rejected_uncertain_intent() {
+        let root = isolated_root("rejection");
+        let worker = MutationIntentWorker::start(&root).expect("worker");
+        let intent = worker
+            .try_prepare(request())
+            .expect("prepare admission")
+            .recv()
+            .expect("prepare reply")
+            .expect("prepare result");
+        worker
+            .try_transition(
+                intent.mutation_id,
+                OutboundMutationState::Prepared,
+                OutboundMutationState::SentUncertain,
+            )
+            .expect("transition admission")
+            .recv()
+            .expect("transition reply")
+            .expect("transition result");
+
+        assert!(matches!(
+            worker
+                .try_remove_rejected(intent.mutation_id)
+                .expect("removal admission")
+                .recv()
+                .expect("removal reply")
+                .expect("removal result"),
+            IntentRemoval::Removed(OutboundMutationIntent {
+                mutation_id,
+                state: OutboundMutationState::SentUncertain,
+                ..
+            }) if mutation_id == intent.mutation_id
+        ));
+        assert!(worker
+            .try_recover()
+            .expect("recover admission")
+            .recv()
+            .expect("recover reply")
+            .expect("recover result")
+            .is_empty());
+        assert_eq!(worker.metrics().completed, 4);
+        worker.shutdown().expect("shutdown");
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

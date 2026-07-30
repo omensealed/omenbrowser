@@ -484,6 +484,22 @@ Two-client recent-history smoke:
 bash scripts/release-omenchat-smoke.sh --multi-client
 ```
 
+Negotiated reaction qualification uses the same isolated harness and forces
+the bounded reaction snapshot through the existing Resource transport:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --reaction-smoke \
+  --multi-client \
+  --restart-server
+```
+
+The reaction option persists each mutation intent before transmission,
+deliberately discards one acknowledgement, replays the exact mutation, verifies
+the original result, tests logical no-op and removal, and requires an
+authoritative Resource snapshot. It creates isolated browser identities and
+omenchatd state; it never uses the maintainer's normal roots.
+
 Server-process restart with the same isolated server and browser roots:
 
 ```bash
@@ -505,6 +521,13 @@ The first exchange creates a marker only inside the harness's temporary root.
 The wrapper then drains and restarts current omenchatd without stopping the
 client process. The client must observe the old link close, open a different
 link, reconnect the same in-memory session, and receive a second echoed message.
+It also negotiates reactions, pins, and message revisions before and after
+replacement. Each mutation family deliberately loses and exactly replays an
+acknowledgement, then requires its authoritative snapshot, semantic no-op or
+terminal inverse operation, and clean-intent evidence. Pin qualification runs
+before revision qualification because the revision scenario deliberately
+tombstones their shared smoke-message target; attempting to pin that deleted
+event must remain a truthful `HistoryUnavailable` rejection.
 The retained report contains only versions and booleans. This exercises the
 headless product smoke path; an interactive Iced-window restart soak remains a
 separate presentation/lifecycle check.
@@ -522,6 +545,68 @@ identity/root discovers and fetches the same Resource. The harness requires
 typed upload completion and Resource-available events with the exact byte count
 for both clients. Reticulum Resource integrity remains enforced; raw payloads,
 resource IDs, identities, destinations, paths, and reports are deleted.
+
+Bounded local-history reducer and packaged SQLite capability:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  history_search::tests
+cargo test --locked --no-default-features --features desktop-product \
+  packaged_sqlite_build_exposes_working_fts5
+```
+
+The reducer tests use in-memory fixtures only. They enforce query, term, scan,
+result, and copied-text ceilings and prove that opaque IDs, arbitrary LXMF
+fields, and private attachment paths are not searchable. The FTS5 test creates
+only a temporary table on an in-memory bundled-SQLite connection; no user
+database or schema is touched.
+
+The opt-in maximum-work measurement is excluded from normal test runs because
+its deterministic fixture retains 64 MiB of message text:
+
+```bash
+cargo test --release --locked --no-default-features \
+  --features desktop-product \
+  history_search::tests::measure_maximum_bounded_lxmf_search \
+  -- --ignored --exact --nocapture
+```
+
+It prints reducer-only full-miss and capped-hit durations. It is a measurement,
+not a hardware-specific pass/fail benchmark, and it never opens an application
+root or persistent store.
+
+The OMENchat read-only history-store boundary is covered by:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  read_only_store
+cargo test --locked --no-default-features --features desktop-product \
+  history_search_loader
+cargo test --locked --no-default-features --features desktop-product \
+  read_only_thread_listing
+cargo test --locked --no-default-features --features desktop-product \
+  persisted_search_combines_bounded_stores
+```
+
+These tests use unique temporary paths. They verify read access, query-only
+write rejection, non-creation of a missing database and parent directory, and
+newest-first item/byte-bounded event loading. The LXMF fixture additionally
+proves malformed JSON fails without creating recovery backups.
+The combined fixture searches both isolated stores, verifies global ordering,
+and ensures opaque routing keys never become presentation or searchable text.
+
+Desktop search ownership and exhaustive routing:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  history_search_state::tests
+cargo test --locked --no-default-features --features desktop-product \
+  history_search_messages_have_one_compile_time_route
+```
+
+The owner tests prove one active job, newest-only pending replacement,
+stale-completion rejection, and shutdown invalidation. They do not open a
+store or start a Tokio task.
 
 Current-product NomadNet page request qualification:
 
@@ -1242,6 +1327,39 @@ integrity-check a private staging copy, preserve the previous active database,
 and prove the selected source remains unchanged. Corrupt/current-schema inputs
 and active WAL state are refused. An injected atomic-publication failure leaves
 the active and source databases unchanged and removes staging/WAL/SHM files.
+Schema-6 tests migrate a representative schema-5 database without losing
+reaction state and inject failure at every revision table/index/version/commit
+boundary. Recovery tests also prove that a schema-5 export preserves reaction
+state while removing every schema-6 revision object, and that a deeper
+schema-4 export removes both feature layers.
+Schema-7 tests migrate representative schema-6 history without eagerly seeding
+or scanning it, lazily initialize the high-water mark, inject rollback at every
+sequence table/version/commit boundary, preserve monotonic IDs across
+concurrent writers and deletion of newest/all retained rows, and fail closed
+at SQLite integer exhaustion. The confirmation-gated schema-6 export removes
+only sequence metadata while retaining ordinary history, reactions, and
+message revisions.
+Schema-8 tests migrate schema 7 without scanning history, inject failure at
+each usage-table/version/commit boundary, advance legacy accounting in
+256-event batches across restart-safe cursors, account an append during
+backfill exactly once, compare stable retained bytes to the bounded source
+rows, and roll back event/sequence changes on accounting exhaustion. The
+schema-7 copy preserves sequences and history while removing only the usage
+ledger.
+Focused dormant revision-executor tests cover author/moderator/mute policy,
+immutable originals, cross-room/non-message/deleted targets, eight corrections
+plus tombstone, reaction cleanup, soft/hard state saturation, bounded audit
+pruning, revision-ID non-reuse, transaction and result-codec rollback, exact
+restart replay without repeat fan-out, hash conflict, and identical
+inline/Resource snapshot decoding. `message-revisions-v1` remains rejected by
+normal capability negotiation.
+Dormant live-plumbing tests request the capability through the real session
+path and prove the resulting production binding stays disabled. Separate
+isolated tests inject a capable binding to cover same-room, identity-matched
+fan-out; exclusion of base and stale-identity Links; join/history-following
+snapshots; exact replay without repeated fan-out; and binding retirement after
+identity replacement or Link close. Injection is test-only and does not claim
+capability activation.
 An injected migration executes one schema statement and then fails on the next.
 That test proves the partial schema is transactionally removed, the source
 marker and version 0 survive, and the backup stays readable.
@@ -2954,9 +3072,335 @@ accounting.
 ```
 
 These tests use isolated SQLite paths and an in-memory captured transport. They
-do not prove cross-link, server-restart, mixed-version, Python, or live Reticulum
-retry idempotency; protocol v1 lacks the durable session nonce required to make
-that claim safely.
+exercise the legacy same-Link cache and do not by themselves prove cross-Link,
+server-restart, mixed-version, Python, or live Reticulum retry idempotency. The
+separate negotiated durable-mutation tests below cover deterministic cross-Link
+and restart behavior.
+
+## Shared Operations/Transfers model
+
+The frontend-neutral operation-model fixtures distinguish
+queue/transport/receipt state from authoritative peer delivery, reject delivery
+without authoritative evidence, require bounded Resource totals for progress,
+coalesce repeated updates by stable operation ID, evict only terminal history,
+reject saturation consisting only of unresolved work, incrementally expire
+completed records, and reject excessive text, evidence, or action retention.
+They also prove atomic per-domain snapshot replacement, rejection of mixed or
+duplicate snapshot identities, preservation of other domains under replacement
+or saturation, and exact byte release on removal.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::tests --lib
+```
+
+`App` owns the bounded history and Network Doctor provides a compact read-only
+desktop consumer. A dedicated desktop workspace, the TUI surface, and general
+runtime event adapters do not exist yet. The owner creates no worker, timer,
+subscription, persistence file, network peer, or user-state access.
+
+The OMENchat recovery adapter adds deterministic fixtures for prepared,
+uncertain, past-expiry, retry-blocked, terminal, and redaction cases:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::omenchat::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::views::omenchat::accessibility_tests --lib
+```
+
+These tests do not transmit a mutation or access the maintainer's identity,
+Reticulum, OMENchat server, or persistent application root. They verify only
+the read-only projection and the existing recovery card. Server/client restart
+and replay behavior remains covered by the isolated durable-mutation tests.
+
+The isolated desktop restart-recovery fixture additionally proves that all
+current-identity recovered intents atomically populate the shared owner,
+other-identity intents do not, past-expiry records remain nonterminal, no
+transmission action is stored in the conservative snapshot, and explicit
+resolution removes the exact records:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::omenchat_mutations::tests::restart_recovery_is_identity_scoped_visible_and_never_transmits \
+  --lib
+```
+
+The shared presentation-model fixtures verify deterministic attention-first
+sorting, row limits and omission counts, active/attention/completed/domain
+filter semantics, bounded ASCII-insensitive search, opaque-ID exclusion,
+control-character sanitization, UTF-8-safe target/evidence truncation, exact
+authoritative progress, valid-action preservation, and stable shared labels:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::presentation::tests --lib
+```
+
+This is a pure read-only projection over in-memory bounded history. It does not
+render Iced or Ratatui widgets and does not touch identities, Reticulum,
+OMENchat peers, storage, or network state.
+
+The first desktop consumer is the passive Network Doctor card. Its model tests
+cover explicit empty state, the fixed eight-row limit and omitted count,
+attention-first ordering, shared transport/authority terminology, opaque-ID
+omission, and authoritative-only byte progress:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::views::operations::tests --lib
+```
+
+These fixtures are entirely in memory and exercise no Iced action, worker,
+timer, subscription, persistent root, identity, Reticulum peer, or OMENchat
+server.
+
+The TUI Network Doctor model and route fixtures cover the same empty state,
+fixed row limit, omissions, attention ordering, terminology, opaque-ID
+omission, and authoritative-progress behavior. The route smoke uses a generated
+temporary application root and proves Network Doctor renders the Operations
+view rather than its previous placeholder:
+
+```bash
+cargo test --locked --no-default-features --features tui \
+  ui::operations::tests --lib
+```
+
+The temporary root is removed after rendering. No runtime backend, identity,
+Reticulum peer, OMENchat server, timer, worker, or input action is started.
+Interactive filter/action controls remain a later gate.
+
+The typed path-observation adapter fixtures prove destination normalization,
+stable opaque correlation, control/size rejection, known versus unknown
+semantics, hop evidence, coalescing, route-loss reopening, stale-observation
+rejection, unrelated-event omission, no peer-delivery claim, and saturation
+that preserves unresolved work:
+
+```bash
+cargo test --locked --no-default-features --features tui \
+  operations::path::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  operations::path::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_projects_path_observations --lib
+```
+
+These are deterministic in-memory or isolated-root tests. They do not request a
+path, warm a destination, start Reticulum, contact a peer, or touch the
+maintainer's identity/configuration. The adapter intentionally has no fixture
+for typed request failure because `PathUpdated` does not expose request
+identity, timeout, failure, or reason; live path request behavior remains a
+separate smoke/interoperability gate.
+
+The OMENchat connection projection fixtures prove all typed connection-state
+mappings, stable session correlation, normalized and bounded public targets,
+transition coalescing, stale-state rejection, session-close removal, no
+transport/receipt/delivery claim, and saturation behavior:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::connection::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_connection_state_is_bounded_by_sessions_and_join_is_event_driven --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  close_omenchat_session_clears_live_transport_and_retry_state --lib
+```
+
+The tests use isolated application roots and the existing typed desktop state
+reducer. They do not start Reticulum, establish a Link, authenticate to an
+OMENchat server, reconnect over the network, or inspect private identity
+material. Live open/close/reconnect behavior remains covered by the documented
+OMENchat smoke and interoperability gates.
+
+The typed LXMF SDK Operations fixtures prove every v0.9.6 delivery-state
+mapping, backend-dependent terminal-sent behavior, opaque message correlation,
+peer-target retention, bounded reason handling, exact attempts/sequence,
+transition and evidence coalescing, duplicate/stale rejection, terminal
+regression protection, inconsistent terminal-flag rejection, no private event
+metadata retention, exact native-evidence correlation, RNS-proof and
+propagation-acceptance boundaries, uncertain peer activity/no-receipt
+semantics, raw-detail omission, timestamp fallback, terminal precedence, and
+legacy status compatibility, contradictory-flag rejection, stronger-evidence
+precedence, and saturation behavior:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::lxmf::tests --lib
+
+cargo test --locked --no-default-features --features tui \
+  operations::lxmf::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_projects_typed_sdk_delivery --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_correlates_native_lxmf_evidence --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_projects_legacy_lxmf_status --lib
+```
+
+These tests construct typed runtime events in memory and use an isolated
+application root. They do not send LXMF, start Reticulum, contact a peer,
+observe a live receipt, synchronize propagation, or establish Python
+interoperability. Live peer-delivery proof remains a separate smoke and
+interoperability gate.
+
+The runtime event-stream Operations fixtures prove independent source
+correlation, gap/recovery state, cursor ordering, duplicate rejection,
+successful completion, incomplete recovery, reopening after a later gap,
+bounded evidence, and omission of raw upstream cursors and recovery error
+text:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::event_stream::tests --lib
+
+cargo test --locked --no-default-features --features tui \
+  operations::event_stream::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  runtime_handler_projects_event_gap --lib
+```
+
+These tests use typed in-memory events and an isolated application root. They
+do not force broadcast lag, connect to an SDK/RPC daemon, request a snapshot,
+or change the existing event worker. The worker's bounded lag and recovery
+tests remain the behavioral recovery gate.
+
+The propagation-sync Operations fixtures prove app-generation correlation,
+queue/start/progress/intermediate/final state boundaries, blocked and failed
+outcomes, task-result finalization, stable destination normalization,
+unrelated-event rejection, exclusion of ambiguous `Complete/Progress`, raw
+detail/count omission, stale and duplicate rejection, repeated-progress
+coalescing, terminal precedence, bounded evidence, late-target omission, and
+unresolved-history saturation:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  operations::propagation::tests --lib
+
+cargo test --locked --no-default-features --features tui \
+  operations::propagation::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  propagation_sync_operations_require_app_correlation --lib
+```
+
+These are deterministic in-memory and isolated-root tests. They do not select a
+live propagation node, establish a Link, synchronize LXMF, contact a peer, or
+prove peer delivery. Existing propagation smoke and Python interoperability
+remain the live gates.
+
+The typed Resource adapter fixtures prove stable opaque correlation, transfer
+identifier and browser-operation redaction, offer/progress coalescing, retained
+authoritative totals, regression and malformed-total rejection, completion
+without a peer-delivery claim, distinct failure/cancellation, terminal
+precedence over late progress, and saturation that preserves unresolved work:
+
+```bash
+cargo test --locked --no-default-features --features tui \
+  operations::resource::tests --lib
+
+cargo test --locked --no-default-features --features desktop-product \
+  operations::resource::tests --lib
+```
+
+The existing application Resource handler tests additionally verify that typed
+events populate both Network Doctor and the shared owner without changing
+status or browser-correlation behavior:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  network_doctor_runtime_handler_records --lib
+```
+
+All fixtures are generated in memory or under the existing isolated test
+roots. They do not start Reticulum, transfer a Resource, contact an OMENchat
+server, or touch the maintainer's application data. Live Resource
+interoperability remains a separate smoke/release gate.
+
+## OMENchat negotiated durable room and user mutations
+
+Negotiated `/me` sends must persist a `RoomAction` intent before transport,
+transition it to uncertain, emit the canonical durable envelope, and correlate
+the matching `MessageAck`. Negotiated `/notice` additionally requires
+`durable-room-notice-ack-v1`, follows the same intent boundary, and uses notice
+kind `3` in the acknowledgement. Older, ordinary, and downgraded protocol-v1
+notices retain their `RoomEvent` response and legacy send path. Recovery exposes
+uncertain actions and notices after client restart but never automatically
+transmits them. Negotiated `/part` persists an empty-body PartRoom intent and
+must leave local membership unchanged until an exact correlated
+`CommandResult`; restart recovery exposes the uncertain leave without sending
+it. Negotiated `/topic` persists the normalized command and retains the prior
+local room metadata until an exact correlated result. Negotiated `/create`
+persists a roomless command, adds no optimistic room, and accepts only the
+server-normalized requested room in an otherwise exact result. Server tests require
+exact replay after Link replacement and server restart to retain the original
+result without another event, rate charge, metadata revision, or fan-out;
+mutation-ID reuse with different content must conflict.
+Negotiated `/role` and `/unban` persist canonical commands and require the
+returned catalog-known numeric ID or display name plus role/ban state to match. Hex
+identity-prefix-only targets retain the legacy path because the result has no
+identity hash. Their replacement-Link and restart replays must not repeat user
+mutation, audit event, rate admission, or fan-out.
+Negotiated `/kick`, `/ban`, `/mute`, and `/unmute` use the same persistent
+intent and exact user/result-state boundary. Client regressions reject a wrong
+user or wrong ban/mute state before acknowledging. Server regressions execute
+all four once, replay without another mutation/event/rate admission, and prove
+that a lost kick response closes only the originally selected Link rather than
+a replacement Link.
+The recovered-intent panel classifies those operations without displaying
+their request bodies, targets, mutation identifiers, or hashes. Pure label
+coverage checks redaction, relative expiry, and bounded destination shortening.
+The existing restart fixture proves that unavailable retry never creates a
+confirmation or transport frame, while stop-tracking and expiry remain
+explicit confirmed storage-only actions.
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  negotiated_room_text_persists_before_transport_and_acknowledges --lib
+cargo test --locked --no-default-features --features desktop-product \
+  durable_room_action_sends_canonical_envelope_and_correlates_acknowledgement --lib
+cargo test --locked --no-default-features --features desktop-product \
+  durable_room_notice_sends_canonical_envelope_and_correlates_acknowledgement --lib
+cargo test --locked --no-default-features --features desktop-product \
+  durable_part_waits_for_matching_result_before_leaving_and_acknowledging --lib
+cargo test --locked --no-default-features --features desktop-product \
+  durable_topic_waits_for_matching_result_before_updating_and_acknowledging --lib
+cargo test --locked --no-default-features --features desktop-product \
+  durable_create_waits_for_matching_normalized_room_before_acknowledging --lib
+cargo test --locked --no-default-features --features desktop-product \
+  durable_role_and_unban_require_matching_user_and_result_state --lib
+cargo test --locked --no-default-features --features desktop-product \
+  durable_active_peer_moderation_requires_exact_user_and_status_result --lib
+cargo test --locked --no-default-features --features desktop-product \
+  restart_recovery_is_identity_scoped_visible_and_never_transmits --lib
+cargo test --locked --no-default-features --features desktop-product \
+  recovered_mutation_labels_are_redacted_and_semantic --lib
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    durable_create
+  cargo test --locked --no-default-features --features server-headless \
+    durable_role
+  cargo test --locked --no-default-features --features server-headless \
+    durable_unban
+  cargo test --locked --no-default-features --features server-headless \
+    durable_active_peer_moderation_executes_once_for_each_action
+  cargo test --locked --no-default-features --features server-headless \
+    durable_kick_commit_survives_lost_response_without_disconnecting_replacement
+)
+```
+
+All fixtures use isolated temporary SQLite roots and captured in-memory
+transports. They do not establish live Reticulum, mixed-version, Python,
+packaged-platform, or physical-interface interoperability.
 
 ## omenchatd duplicate peer-link retirement
 
@@ -3620,7 +4064,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.6-2` must report
+therefore exits with the expected signal status; current `0.9.6-4` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -3647,7 +4091,1307 @@ crash durability. The live cases prove both client/server directions for one
 session/message exchange. The restart cases prove both client-state roots
 reopen after the opposite-version server process restarts, not live automatic
 reconnect. The history-Resource cases prove both mixed application directions.
-The same scheduled workflow also runs the current-product continuous reconnect
-case and the current-product two-client upload/Resource case, retaining only
-their redacted reports. Physical power-loss durability remains separate
-evidence.
+The same scheduled workflow uses a separate bounded current-product job for the
+continuous reconnect, two-client upload/Resource, and direct NomadNet page
+cases, retaining only their redacted reports. Keeping current-only cases out of
+the long historical mixed-release job prevents a late current-product failure
+from invalidating or forcing repetition of already completed mixed-version
+evidence. Physical power-loss durability remains separate evidence.
+
+## OMENchat routed-path admission
+
+The native adapter regression
+`clean_omenchat_accepts_known_routed_paths_without_app_hop_cutoff` verifies
+that OMENbrowser delegates hop limits to Reticulum 0.9.6. Known 1-, 3-, 13-,
+and 127-hop paths are usable; an unknown path still requires discovery. Run it
+with:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  clean_omenchat_accepts_known_routed_paths_without_app_hop_cutoff
+```
+
+This is a deterministic admission-policy test. It does not prove the
+maintainer's public-gateway/private-gateway deployment, which still requires a
+live announce, path, link, and OMENchat exchange smoke test from an isolated
+client root.
+
+## omenchatd multiple TCP clients
+
+The standalone server config tests add two TCP clients, retain an unrelated
+TCP listener, list only redacted endpoint/IFAC state, delete one endpoint, and
+verify the owner-only recovery backup. The live Reticulum test parses the
+generated configuration, starts two independent loopback TCP client workers,
+and requires bounded shutdown to join both workers:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full tcp_client
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  live_runtime_owns_two_configured_tcp_client_workers
+```
+
+These tests use isolated temporary server homes. The loopback workers prove
+multi-interface ownership and shutdown, not connectivity through the
+maintainer's WNS/private-gateway topology.
+
+## OMENchat mentions-only unread policy
+
+The client-store, model, live reducer, and hidden-pane regressions verify that
+the per-room preference defaults off, survives an isolated SQLite reopen,
+rejects invalid stored booleans, and accepts only an exact bound numeric
+mention while enabled:
+
+```bash
+cargo test --locked --no-default-features --features desktop-dev mute_except
+cargo test --locked --no-default-features --features desktop-dev \
+  hidden_omenchat_muted_room_counts_only_authoritative_mentions_as_unread
+```
+
+These tests do not activate `reply-mentions-v1`, send a live notification, or
+claim server-authoritative read receipts. They prove local bounded unread
+presentation and persistence only.
+
+## OMENchat negotiated reaction client state
+
+These isolated regressions exercise the shared GUI/TUI model, identity-scoped
+SQLite cache, negotiated live parser, and bounded inline/Resource snapshot
+transport. They prove duplicate deltas are idempotent, explicit-target
+snapshots are authoritative only for their page, overload rolls back prior
+state, and restart restores eligible retained targets. Presentation tests prove
+actor deduplication, fixed token ordering, identity/room/target scoping, exact
+counts, and local-user highlighting in the non-interactive Iced timeline model.
+They also prove restart/reconnect clears non-persistent snapshot evidence while
+retaining bounded cache rows and that the next snapshot prunes targets no
+longer present in resident history. Dormant action tests require both
+capabilities, prohibit optimistic state, match acknowledgement identity and
+request fields, preserve canonical intents over restart, and block recovered
+retry after capability loss. Production requests and accepts `reactions-v1`
+only as an explicit extension of a valid durable-mutation negotiation.
+
+```bash
+cargo test --locked --no-default-features --features desktop-dev reaction --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  client_reactions_are_authoritative_bounded_and_restart_safe --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_delta_and_snapshot_parsers_are_negotiated_bounded_and_authoritative --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  client_transport_decodes_reaction_inline_and_resource_snapshots --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_snapshot_overload_rolls_back_prior_page_state --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_summaries_are_deduplicated_ordered_and_identity_scoped --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  omenchat_timeline_uses_shared_read_only_reaction_presentation --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_snapshot_evidence_and_rows_follow_retained_history --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  durable_reaction --lib
+cargo test --locked --no-default-features --features desktop-dev \
+  reaction_intent_survives_restart --lib
+```
+
+Standalone server qualification and explicit isolated measurements:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    reaction --lib
+  cargo test --locked --no-default-features --features server-headless \
+    reaction_state_retention_measurement --lib -- --ignored --nocapture
+  OMEN_REACTION_MEASUREMENT_ITEMS=4096 \
+    cargo test --locked --no-default-features --features server-headless \
+    reaction_state_retention_measurement --lib -- --ignored --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    durable_replay_retention_measurement --lib -- --ignored --nocapture
+)
+cargo test --locked --no-default-features --features desktop-dev \
+  durable_intent_retention_measurement --lib -- --ignored --nocapture
+```
+
+The measurement tests use unique temporary SQLite roots, remove their files,
+and print observations rather than enforcing hardware-dependent latency
+thresholds. The 2026-07-26 qualification results and remaining live smoke are
+recorded in `docs/audits/omenchat-reactions-qualification.md`.
+
+The Ratatui Messages workspace currently covers LXMF conversations and has no
+OMENchat session/timeline model. The omenchatd TUI is server administration and
+has no client-local user identity. These commands therefore do not claim a TUI
+reaction rendering path.
+
+## OMENchat message-revision contract
+
+The shared correction/tombstone contract uses reserved operations 35–39 and
+activates them only through explicit `message-revisions-v1` negotiation:
+
+```bash
+cargo test --locked -p omenchat-protocol
+cargo test --locked --no-default-features --features desktop-product \
+  message_revision --lib
+cargo test --locked --no-default-features --features desktop-product \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity --lib
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    message_revision --lib
+  cargo test --locked --no-default-features --features server-full \
+    message_revision -- --nocapture
+)
+```
+
+The shared tests cover exact request/action/replacement shapes, bounds,
+acknowledgement/event agreement, canonical explicit-target snapshots,
+capability dependency, and a stable durable hash. Both independent frame
+codecs preserve the same correction bytes. Client and server tests prove
+explicit request/accept dependency, unsolicited acceptance rejection,
+downgrade clearing, and base-only peer isolation. The server-full focus also
+covers persistence/execution, Link-scoped fan-out, history snapshots, replay
+suppression, and retirement.
+The desktop-dev focus covers the separate immutable-event revision projection,
+stable item/byte bounds, additive cache and restart recovery, transactional
+capacity rollback, ordered/idempotent deltas, authoritative snapshots,
+fail-closed snapshot evidence, durable-intent recovery, and inline/Resource
+decoding:
+
+```bash
+cargo test --locked --no-default-features --features desktop-dev \
+  message_revision --lib -- --nocapture
+```
+
+Production requests revisions only beside durable mutations and a persistent
+client instance identifier; unsolicited acceptance cannot activate the
+reducer. Unit tests do not claim native package or interactive GUI support.
+
+The deterministic pre-activation qualification additionally runs the bounded
+retention cleanup/fault and database-recovery filters documented in
+`docs/audits/omenchat-message-revisions-qualification.md`. Capability-loss
+regressions prove that action targets disappear and a late acknowledgement
+cannot resolve pending intent outside the negotiated session. Mixed-version
+evidence means unchanged ordinary protocol-v1 traffic and no optional revision
+operation; it does not claim that an adjacent peer implements this capability.
+The current/current process gate is:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --revision-smoke --multi-client
+bash scripts/run-omenchat-continuous-reconnect.sh \
+  --report target/omenchat-continuous-reconnect-revision-report.json
+```
+
+It covers deliberately lost acknowledgement, exact replay, correction and
+tombstone Resource snapshots, two isolated client roots, and one continuous
+client across an orderly server restart and replacement Link.
+
+The binary-only implementation for these OMENchat process gates lives in
+`src/omenchat_smoke.rs`. The root CLI module retains argument parsing and shared
+runtime-configuration helpers; the child module owns the bounded live-smoke
+transport, waits, reconnect flow, mutation qualification, and report
+formatting. This is an ownership boundary only: CLI flags and report fields are
+unchanged. The extraction record and rollback are documented in
+`docs/audits/omenchat-smoke-module-extraction.md`.
+
+## Bounded local-history desktop search
+
+These focused desktop-product tests exercise explicit-submit state, the
+one-active/one-replaceable-pending owner, exhaustive message routing, truthful
+limit presentation, and fail-closed validation of persisted LXMF and OMENchat
+jump targets:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::history_search::tests
+cargo test --locked --no-default-features --features desktop-product \
+  desktop::history_search_state::tests
+cargo test --locked --no-default-features --features desktop-product \
+  presentation_labels_sources_and_every_limit_truthfully
+cargo test --locked --no-default-features --features desktop-product \
+  history_search_messages_have_one_compile_time_route
+```
+
+All storage tests use explicit temporary roots. An interactive packaged-app
+smoke must still verify text-input focus, result density, and jump scroll
+restoration; unit tests do not claim display-server behavior.
+
+## OMENchat safe invitation URI
+
+The first dormant invitation slice is a pure bounded parser/serializer. It has
+no production connection, trust, persistence, or QR caller:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  chat::invitation::tests --lib
+```
+
+The tests cover the exact legacy plain URI, enhanced canonical ordering,
+outer/field boundaries, hexadecimal normalization, room overflow, malformed
+percent/UTF-8 data, unsupported or duplicate fields, authority tricks, and
+secret-field omission. They also cover all Directory identity-evidence classes,
+conflicting duplicate precedence, one-item preview replacement, invalid-input
+preservation, explicit cancellation, and conflict-blocked confirmation.
+Desktop preview confirmation and deferred room admission use the development
+profile because their deterministic session tests exercise the mock runtime:
+
+```bash
+cargo test --locked --no-default-features --features desktop-dev \
+  --lib invitation_room
+cargo test --locked --no-default-features --features desktop-dev \
+  --lib cancelling_or_replacing_an_invitation
+```
+
+These tests prove exact destination/session binding, exact numeric catalog
+match, cross-session isolation, mismatch clearing, cancellation, and
+replacement. Native live smoke must still confirm a real authenticated catalog
+and join; QR presentation requires separate tests before activation.
+
+Canonical clipboard generation is covered in the production profile:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  --lib omenchat_invitations
+```
+
+The tests verify joined-room and bounded-label serialization, omission of an
+unjoined room, fail-closed omission of conflicting identity evidence, missing
+session handling, and no session-state mutation. A packaged display smoke must
+still confirm the share icon writes the canonical URI to the native clipboard.
+QR rendering/import remains outside this test claim.
+
+Enhanced Micron link routing uses the same invitation reducer:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  --lib enhanced_micron_link
+cargo test --locked --no-default-features --features desktop-dev \
+  --lib plain_micron_omenchat_link
+```
+
+The production tests prove valid and malformed enhanced links cannot bypass
+confirmation. The development-profile test proves the compatible plain link
+still reaches the deterministic mock open path. A packaged interaction smoke
+must still cover both keyboard-focused and pointer link activation. QR
+rendering/import remains outside this claim.
+
+Canonical product QR generation and ownership:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  --lib qr_owner
+bash scripts/verify-product-features.sh
+cargo check --locked --no-default-features \
+  --features desktop-product-static-media
+```
+
+The tests prove one-item replacement, toggle/close and session cleanup,
+canonical 2 KiB input, missing-session failure, and byte-identical clipboard
+text after the visible QR is created. The graph gate requires Iced QR and
+locked `qrcode 0.13.0` in both canonical products. Packaged native smoke must
+still verify QR contrast/scanning, layout at supported UI scales, clipboard
+behavior, and absence of camera/image-import permissions. Camera and image-file
+QR decoding are not implemented.
+
+The desktop quick-open activation adds focused tests proving parse-only input
+does not create a session or mutate Directory state, a conflicting fingerprint
+cannot be confirmed, cancellation is explicit, and confirmation consumes the
+preview before returning the existing asynchronous open task. These tests do
+not execute the returned Iced task or claim live Link establishment:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  invitation --lib
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_domain_messages_have_one_compile_time_route --lib
+```
+
+The dormant omenchatd history-compaction primitive has a focused isolated
+SQLite gate:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-full history_retention -- --nocapture)
+```
+
+It covers the 64-original transaction ceiling, exact usage-ledger accounting,
+projection-aware batch reduction, excessive single-event fan-out refusal,
+surviving versus selected replies, upload/durable-replay preservation,
+monotonic event IDs, and rollback at every cleanup/ledger/commit boundary.
+The explicit primitive remains inert under the default configuration. The live
+production store invokes it only when `[history_retention].enabled = true`.
+
+Typed policy and redacted maintenance-status coverage uses:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-full history_retention_ -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-full \
+  machine_readable_status_and_doctor_are_valid_and_redacted -- --nocapture)
+```
+
+The tests prove disabled defaults, exact round-trip, enabled zero-limit
+rejection, hard-maximum clamping, a 256-room read ceiling, truncation evidence,
+complete/incomplete/missing ledger classification, read-only behavior, and
+machine-output redaction.
+
+The same focused `history_retention` gate covers admission integration:
+disabled compatibility; independent age, item, and byte triggers; retention of
+one oversized newest event; ordinary insert compaction; incomplete-ledger
+refusal; and rollback of the insertion, sequence, dependency cleanup, and usage
+ledger when restoring a ceiling would require more than the 64-event batch.
+The full server suite additionally exercises durable writers through the shared
+store boundary. Live mixed-version and restart/Resource smoke remain separate
+release gates.
+
+## Dormant OMENchat pin contract
+
+The first pin slice reserves the shared operations and bounded wire shapes
+without advertising or accepting `room-pins-v1`:
+
+```bash
+cargo test --locked -p omenchat-protocol
+cargo test --locked --no-default-features --features desktop-product \
+  --lib pins_v1_fixture_is_bidirectionally_exact_and_dormant
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pins_v1_fixture_is_bidirectionally_exact_and_dormant)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pin_capability_requires_explicit_durable_request)
+```
+
+These tests cover exact request/ack/event/snapshot shapes, malformed and
+trailing values, identifier and timestamp validation, snapshot count and
+canonical-order bounds, target scoping, canonical durable hash inputs, and
+byte-exact agreement between the independent desktop and server codecs. They
+do not claim storage, authorization, replay, fan-out, client projection, UI,
+mixed-version live behavior, or capability activation.
+
+Schema-9 dormant pin storage, migration faults, bounded admission, compaction,
+and the guarded schema-8 copy use isolated SQLite roots:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless store::pins::tests -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pin_schema -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless compaction_ -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless schema_eight_export -- --nocapture)
+```
+
+The store tests do not advertise `room-pins-v1`. Dormant transactional server
+execution, restart replay, conflict handling, role authorization, Link-scoped
+snapshots, and capable-room-only fan-out use:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless dormant_pin -- --nocapture)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pin_events_fan_out_only -- --nocapture)
+```
+
+These tests bind the internal Link capability state explicitly. After the
+separate activation slice, production negotiation tests prove the desktop
+requests `room-pins-v1` only with durable identity and omenchatd refuses a
+pin-only request.
+
+The dormant desktop projection, identity-scoped SQLite cache, restart-stale
+authority, inline snapshot decoding, and read-only timeline labels use:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product --lib \
+  client_pins_are_bounded_authoritative_and_restart_stale
+cargo test --locked --no-default-features --features desktop-product --lib \
+  pin_store_is_restart_safe_ordered_and_snapshot_authoritative
+cargo test --locked --no-default-features --features desktop-product --lib \
+  pin_delta_and_snapshot_reducers_remain_dormant_and_authoritative
+cargo test --locked --no-default-features --features desktop-product --lib \
+  omenchat_timeline_distinguishes_authoritative_and_cached_pins
+cargo test --locked --no-default-features --features desktop-product --lib \
+  client_transport_decodes_dormant_pin_snapshot_inline
+```
+
+Restart preserves bounded cached pin rows but deliberately clears authority.
+The timeline renders authoritative state as `📌 pinned` and unreconciled
+restart state as `📌 pinned · cached`. No pin action is rendered in a
+production session. Production negotiation remains unchanged; mixed-version
+live qualification and capability activation remain separate slices.
+
+The next dormant slice exercises pin/unpin controls only through test-bound
+negotiation state:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product --lib \
+  durable_pin_
+cargo test --locked --no-default-features --features desktop-product --lib \
+  pin_controls_require_test_negotiation_role_authority_and_current_state
+cargo test --locked --no-default-features --features desktop-product --lib \
+  pin_prepare_persists_before_send_and_preserves_ordinary_draft
+cargo test --locked --no-default-features --features desktop-product --lib \
+  dormant_pin_intent_kind_is_restart_safe_without_capability_activation
+cargo test --locked --no-default-features --features desktop-product --lib \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity
+```
+
+These tests require current moderator/administrator and retained-target
+evidence, persist intent before transmission, permit only one pending pin
+mutation per target, reject mismatched ACKs, preserve uncertainty across
+restart, and keep accepted mutation evidence separate until an authoritative
+delta or exact-target snapshot arrives. Post-ACK confirmation slots share the
+existing 256-global/64-per-session mutation budget and clear on capability or
+Link loss. The final test now proves the production desktop requests
+`room-pins-v1` only inside the persistent durable negotiation envelope. The
+session activation test proves unsolicited acceptance and downgrade remain
+fail closed; the standalone server test proves a pin-only request is refused.
+
+The dormant deterministic qualification filter and explicit isolated
+measurement are:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product pin --lib
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pin --lib)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless pin_state_retention_measurement \
+  --lib -- --ignored --nocapture)
+```
+
+The server filter includes exact global active saturation, per-room/global
+audit replacement, and the maximum 256-target/64-entry inline frame. The
+measurement uses one isolated temporary database, checkpoints it before sizing,
+removes it afterward, and reports observations rather than release thresholds.
+Exact deterministic, activation, and live-process evidence is in
+`docs/audits/omenchat-pins-qualification.md`.
+
+Activated current/current pins are qualified with isolated roots and a
+moderator role assigned through omenchatd's confirmation-gated headless admin
+CLI:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 45 \
+  --out <isolated-output-root> \
+  --message "pin reconnect qualification" \
+  --pin-smoke \
+  --continuous-client-reconnect
+```
+
+The gate covers pin capability and authority, deliberately withheld
+acknowledgement, exact durable replay, authoritative bounded-inline snapshot,
+semantic no-op, unpin, persistent-intent cleanup, graceful server restart, and
+replacement-Link recovery. It does not weaken role checks or automatically
+resend uncertain mutations. The server's small large-batch threshold still
+forces Resource transport for eligible history/reaction/revision batches;
+`PinSnapshot` is intentionally a separately bounded compressed inline frame.
+
+## OMENchat announcement-room contract
+
+The announcement-room wire boundary is covered by:
+
+```bash
+cargo test --locked -p omenchat-protocol room_policy -- --nocapture
+cargo test --locked -p omenchat-protocol announcement_room -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  announcement_room_values_are_byte_exact_and_negotiation_scoped --lib
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    announcement_room --lib -- --nocapture
+)
+```
+
+These tests require exact legacy four-field and negotiated five-field room
+values, independent desktop/server MessagePack agreement, fixed known policy
+bits, bounds, explicit negotiation shape, and production capability acceptance.
+They do not alone claim schema 11, authorization, presentation, or process
+traffic. Evidence is in
+`docs/audits/omenchat-announcement-rooms-wire-qualification.md`.
+
+The slow-mode scalar and production wire extension are covered independently:
+
+```bash
+cargo test --locked -p omenchat-protocol -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  slow_mode_room_value_is_byte_exact_and_shape_scoped --lib -- --nocapture
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    slow_mode_room_value_is_byte_exact_and_shape_scoped --lib -- --nocapture
+)
+```
+
+These gates require exact four-/five-/six-field shape isolation, a bounded
+`slow_mode_seconds` scalar, identical desktop/server MessagePack bytes, typed
+error number 1017, and the `durable-mutations-v1` capability dependency.
+Canonical products negotiate and enforce the extension; shape and codec
+qualification remains independently covered below. Evidence is in
+`docs/audits/omenchat-slow-mode-wire-qualification.md`.
+
+Schema-12 slow-mode storage and guarded schema-11 rollback are covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    slow_mode --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    schema_eleven --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    every_slow_mode_schema_fault_boundary --lib -- --nocapture
+)
+```
+
+These tests require disabled-by-default migration without history scans,
+transactional rollback at every schema-12 boundary, a readable pre-v12
+schema-11 backup, scalar/revision atomicity, fixed item/logical-byte bounds,
+64-row incremental expired pruning, fail-closed saturation, restart
+persistence, and publication-failure cleanup. The operator rollback command is:
+
+```bash
+omenchatd database export-schema11-copy \
+  --to <new-database-path> --confirm --home <server-home>
+```
+
+The staged copy removes only `slow_mode_seconds`,
+`room_slow_mode_admissions`, and its expiry index. Evidence is in
+`docs/audits/omenchat-slow-mode-storage-qualification.md`.
+
+The admission matrix retains `SessionEngine::with_test_slow_mode` for isolated
+boundary control; canonical constructors enable capability negotiation and
+enforcement through `omenchat-slow-mode`:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless slow_mode -- --nocapture
+```
+
+This matrix proves that exact durable replay bypasses cooldown work, a new
+event, replay result, and persisted deadline commit or roll back together,
+leave/rejoin does not clear admission, and restart remains conservatively
+protected. Announcement-policy, malformed-body, and role rejections consume no
+cooldown. The in-process owner has no worker or timer and is separately tested
+for bounded pruning, fail-closed capacity, competing reservation
+serialization, rollback-on-drop, and backward monotonic observations. A
+dormancy regression omits the production feature, sets a nonzero scalar, and
+proves an explicitly feature-disabled build retains prior behavior without
+creating admission state. Evidence is in
+`docs/audits/omenchat-slow-mode-admission-qualification.md`.
+
+The stopped-server scalar administration/status slice is covered by:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless slow_mode -- --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  cli_parses_admin_config_and_room_commands -- --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  cli_room_mutations_use_the_initialized_administrative_database_path \
+  -- --nocapture
+```
+
+The command is:
+
+```bash
+omenchatd rooms set-slow-mode <room-id> off|<1..=86400> \
+  --confirm --home <server-home>
+```
+
+Tests require missing confirmation/invalid bounds to fail, an active writer to
+block the command, and a stopped-server update to report and persist its prior
+and configured values. A no-op keeps the room revision; enable/disable changes
+increment it once. Human and JSON room status expose the scalar and report
+enforcement from the selected build identity (`active` in canonical server
+profiles). Evidence for the pre-activation administration slice is in
+`docs/audits/omenchat-slow-mode-administration-qualification.md`.
+
+The bounded shared policy/client presentation slice is covered by:
+
+```bash
+cargo test --locked -p omenchat-protocol room_policy -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  slow_mode_projection -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  slow_mode_indicator -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  room_policy_projection_is_catalog_bounded -- --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full dashboard_room -- --nocapture
+```
+
+The shared DTO rejects unknown policy bits and values above 86,400 seconds.
+Client projection is keyed by session/room, capped by the existing 256-room
+session ceiling, cleared on session removal/capability loss, and retains no
+strings or payloads. The six-field value is accepted only for a negotiated
+slow-mode session; legacy and announcement-only parsers still reject that
+shape. Iced renders only a static label and omenchatd TUI reports the selected
+build's enforcement status. Activation adds no worker, timer, polling
+subscription, retry, queue, cache, or dependency. Pre-activation projection
+evidence is in
+`docs/audits/omenchat-slow-mode-client-projection-qualification.md`.
+
+Native Linux Iced projection, admission, typed rejection, and exact draft
+recovery are covered by the isolated Xvfb/i3 harness:
+
+```bash
+bash scripts/run-omenchat-slow-mode-gui-qualification.sh \
+  --evidence /tmp/omenchat-slow-mode-gui-evidence
+```
+
+The harness requires Xvfb, i3, `xdotool`, `xprop`, `xclip`, ImageMagick
+`import`, `jq`, `rg`, and Python 3. It creates fresh browser/server roots and
+identities, uses only loopback Reticulum TCP, and leaves screenshots,
+structured logs, the exact copied rejected draft, and a read-only SQLite
+observation in the selected evidence directory. It requires one admitted
+message and no second committed message. See
+`docs/audits/omenchat-slow-mode-gui-qualification.md`.
+
+The same isolated gate records optimized process and server-runtime
+measurements when given a bounded nonzero sample duration:
+
+```bash
+OMENCHAT_SLOW_MODE_WARMUP_SECONDS=10 \
+OMENCHAT_SLOW_MODE_SAMPLE_SECONDS=30 \
+  bash scripts/run-omenchat-slow-mode-gui-qualification.sh \
+  --evidence /tmp/omenchat-slow-mode-measurement
+```
+
+The measurement path currently requires Linux `/proc`. Durations of at least
+30 seconds additionally assert one active Link, empty transport/event queues,
+and clean server worker/queue drain. It emits raw per-process samples,
+process/runtime summaries, both structured logs, shutdown latency, screenshots,
+the SQLite observation, and the exact rejected draft. See
+`docs/audits/omenchat-slow-mode-resource-qualification.md`.
+
+Canonical product activation and the feature-disabled rollback boundary are
+checked by:
+
+```bash
+bash scripts/verify-product-features.sh
+cargo test --locked --no-default-features --features desktop-product \
+  slow_mode_projection_is_bounded_and_follows_product_capability
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    slow_mode_product_feature_requires_durable_mutations_and_encodes_exact_shape
+  cargo test --locked --no-default-features \
+    dormant_slow_mode_setting_does_not_change_production_session_behavior
+)
+```
+
+The verifier requires `omenchat-slow-mode` in all four canonical products and
+rejects `omenchat-slow-mode-qualification`. The latter depends on the product
+feature but owns only deterministic process-test hooks. See
+`docs/audits/omenchat-slow-mode-activation.md`.
+
+Schema-11 announcement-room storage and guarded rollback are covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    version_ten_database_adds_constrained_room_policy_and_slow_mode_storage \
+    --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_policy_schema --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    schema_ten_export --lib -- --nocapture
+)
+```
+
+These tests prove the ordinary default and SQLite constraint, transactional
+rollback at every schema-11 fault boundary, readable pre-v11 backup,
+confirmation-gated parsing, preservation of schema-10 moderation audit, removal
+of only `policy_bits`, and cleanup after injected publication failure. The
+operator command is:
+
+```bash
+omenchatd database export-schema10-copy \
+  --to <new-database-path> --confirm --home <server-home>
+```
+
+omenchatd must be stopped. The destination must not exist. This does not
+activate room policy, authorization, negotiation, or presentation. Evidence is
+in `docs/audits/omenchat-announcement-rooms-storage-qualification.md`.
+
+Announcement-room server authorization and stopped-server administration are
+covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    announcement_room --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_content_policy --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_policy_update --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_policy_maintenance_refuses_an_active_writer --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    cli_parses_admin_config_and_room_commands --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    cli_room_mutations_use_the_initialized_administrative_database_path \
+    --lib -- --nocapture
+)
+```
+
+These tests cover standard/trusted rejection, moderator publication, legacy
+messages/actions/notices, durable message replay after a role change,
+reactions, revisions, upload offer/publication boundaries, absence of event,
+rate, replay-effect, pending-upload, file, and ledger side effects, atomic
+policy/revision rollback, idempotency, restart, strict CLI vocabulary, and
+dormant negotiation. Effective policy is available through:
+
+```bash
+omenchatd rooms list --json --home <server-home>
+```
+
+This does not claim negotiated room-policy evidence, GUI/TUI controls, process
+traffic, or adjacent-version compatibility. Evidence is in
+`docs/audits/omenchat-announcement-rooms-authorization-qualification.md`.
+
+Current/current real-Link member authorization and restart persistence are
+covered by:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out <isolated-output-root> \
+  --message "announcement policy qualification" \
+  --announcement-rejection-smoke \
+  --restart-server
+```
+
+The member-rejection mode performs one normal server start before stopped-server policy
+maintenance. While that server is live, the harness first requires the policy
+command to fail with the exclusive-maintenance refusal. It then stops the
+server, applies policy, restarts, and requires typed policy error `1016` and no
+committed message both before and after an orderly restart. The browser reuses its isolated
+identity root and opens a new Link; each attempted message is explicit and no
+uncertain mutation is resent automatically. Production capability negotiation
+remains dormant, so this gate does not claim five-field catalog/delta traffic,
+same-process capability recovery, moderator/resource process traffic, native
+GUI observation, or adjacent-binary support for a capability older peers
+cannot advertise. Evidence is in
+`docs/audits/omenchat-announcement-rooms-process-qualification.md`.
+
+Authorized moderator message and Resource publication, including role/policy
+persistence across restart, are covered by:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out <isolated-output-root> \
+  --message "announcement moderator qualification" \
+  --announcement-moderator-smoke \
+  --upload-file fixtures/omenchat/v0_6_0_1_wire.rs \
+  --restart-server
+```
+
+The harness registers exactly one isolated standard user while the room is
+ordinary and proves live policy maintenance is refused, stops omenchatd,
+identifies that user through the redacted headless
+JSON command, applies confirmation-gated moderator role plus announcement
+policy, and restarts. The unchanged client must observe its message echo,
+upload completion, and fetched Resource, then publish another message after an
+orderly restart. This still does not activate or claim negotiated room-policy
+projection.
+
+The expected-rejection wait short-circuits only for the typed announcement
+restriction. It must continue collecting after unrelated operation errors; the
+normal headless `--pin-smoke` process case is the regression gate for that
+shared wait behavior.
+
+Replacement-Link policy ownership is covered through the production lifecycle:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  announcement_policy_clears_on_replacement_link_and_requires_renegotiation \
+  --lib -- --nocapture
+```
+
+This drives the production reconnect/retirement function with a captured
+transport. It proves stale policy is cleared before reopening, is not inherited
+from a replacement that does not accept the capability, and is restored only
+after a fresh explicit request/accept. Real-Link replacement evidence is
+recorded separately in the process qualification audit.
+
+Server acceptance and the initial-catalog encoder boundary are covered
+independently:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  announcement_rooms --lib -- --nocapture
+```
+
+The production engine accepts only an explicit request and encodes
+authoritative policy through the five-field shared room value. The test helper
+keeps the same boundary independently controllable.
+
+Per-Link mixed-format shaping is covered separately:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  test_enabled_announcement_rooms_shape_join_and_delta_per_authenticated_link \
+  --lib -- --nocapture
+```
+
+One authenticated Link negotiates policy while a simultaneous legacy Link
+does not. The test requires five-field JoinAccept/RoomDelta values only on the
+negotiated Link, four-field values on the legacy Link, and binding removal on
+identity replacement.
+
+The adjacent process matrix combines immutable `v0.9.6-3` live traffic in both
+directions with a current per-Link legacy/media-policy shaping and admission
+regression plus negotiated current/current replacement-Link traffic:
+
+```bash
+bash scripts/run-omenchat-room-shape-compatibility.sh \
+  --report target/omenchat-room-shape-compatibility.json
+```
+
+The current qualification client requires the adjacent server's legacy
+four-field shape and records that announcement rooms, moderation audit, and
+room media policy were not negotiated and that neither policy bits nor an
+upload ceiling were projected. The adjacent parser is permissive, so its
+successful current qualification-server run is treated only as ordinary
+compatibility. The captured current server test requires simultaneous
+four-field/seven-field shaping and admits a 300-KiB legacy offer while applying
+the 256-KiB room ceiling only to the negotiated Link. Current/current process
+cases require the seven-field ceiling on both initial and replacement Links.
+The harness never fabricates capability support for the adjacent peer. It does
+not claim an adjacent-binary attachment Resource transfer. Evidence is in
+`docs/audits/omenchat-room-media-policy-adjacent-qualification.md`. This is a
+long local/release-candidate gate and is not part of the quick release check.
+
+Production announcement-room feature identities are checked with:
+
+```bash
+cargo test --locked --no-default-features \
+  --features desktop-product \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity \
+  --lib -- --nocapture
+
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features \
+  --features server-headless \
+  announcement_room --lib -- --nocapture
+
+bash scripts/verify-product-features.sh
+```
+
+The first two commands require request/accept behavior in canonical builds.
+The product assertion requires canonical animated, static-media, headless, and
+full server graphs to include `omenchat-announcement-rooms`.
+
+Real-Link negotiation and replacement-Link qualification uses those canonical
+binaries:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out <isolated-output-root> \
+  --message "negotiated announcement qualification" \
+  --announcement-negotiation-smoke \
+  --restart-server
+```
+
+The mode requires negotiated capability and authoritative room-policy
+evidence, the exact local preflight error, no queued publication frame, and no
+committed message in both reports. It does not call local queue admission a
+server rejection. Run the ordinary `--announcement-rejection-smoke` against
+canonical binaries separately to preserve typed server-error `1016`
+enforcement evidence.
+
+Native Linux GUI presentation was additionally observed with those
+qualification binaries against an isolated loopback server under Xvfb/i3.
+The connected Iced pane must show the announcement-room banner, retain a local
+draft, and leave member Send/Attach actions inert. After an attempted Send,
+the isolated server's shutdown counters must still report `chat:0`. Exact
+setup, evidence boundaries, and limitations are recorded in
+`docs/audits/omenchat-announcement-rooms-gui-qualification.md`.
+
+Standard-member upload rejection before server acceptance or allocation is
+covered by:
+
+```bash
+bash scripts/release-omenchat-smoke.sh \
+  --browser-bin target/debug/omenbrowser_rs \
+  --server-bin src/server/target/debug/omenchatd \
+  --tcp 127.0.0.1:<unused-port> \
+  --path-wait 20 \
+  --out <isolated-output-root> \
+  --message "announcement upload rejection qualification" \
+  --announcement-upload-rejection-smoke \
+  --upload-file fixtures/omenchat/v0_6_0_1_wire.rs \
+  --restart-server
+```
+
+Both client reports must contain typed policy rejection with no upload
+acceptance, completion, or committed upload event. Before and after the orderly
+restart, the isolated server doctor must report zero tracked/disk upload files
+and bytes, and the upload root must contain no regular file. The machine
+doctor remains redacted; this local isolated harness uses the human detail
+line rather than weakening that boundary.
+
+The moderation-audit foundation reserves a read-only operation range and
+bounded shared types. Canonical products still neither request nor accept
+`moderation-audit-v1`:
+
+```bash
+cargo test --locked -p omenchat-protocol moderation_audit -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  moderation_audit --lib
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless moderation_audit --lib)
+```
+
+These gates cover exact request/cursor/limit shape, the fixed action/result
+vocabulary, forbidden extra fields, identifier/timestamp/display-name bounds,
+known role/status bits, newest-first unique paging, item/owned-byte ceilings,
+room scoping, independent byte-exact codecs, authorized inline/Resource page
+equality, exclusive cursors and end markers, immediate role-loss denial,
+authenticated Link-scoped capability invalidation, the bounded ephemeral
+desktop projection, file-backed server restart, stable duplicate reads,
+delayed Resource replay, oversized/invalid Resource rejection before pending
+retention, invalid-page projection clearing, Resource-purpose validation, and
+explicit production refusal to accept the dormant capability. Schema-10
+storage, durable transaction coupling,
+migration faults, and guarded schema-9/schema-8 exports are covered separately
+in `docs/audits/omenchat-moderation-audit-storage-qualification.md`. These
+commands do not claim a current/current process restart, adjacent-binary live
+interoperability, active Reticulum Resource cancellation, process Resource
+delivery, resource measurements, or activation. Paging
+evidence is in
+`docs/audits/omenchat-moderation-audit-paging-qualification.md`; wire evidence
+is in `docs/audits/omenchat-moderation-audit-qualification.md`.
+
+The explicit isolated moderation-audit measurements are:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  moderation_audit_projection_measurement --lib -- --ignored --nocapture
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    moderation_audit_retention_measurement --lib -- --ignored --nocapture
+)
+```
+
+They exercise the configured client and per-room server ceilings using
+temporary isolated state, print host observations, and remove their files.
+They are not hardware-independent latency thresholds.
+
+The moderation-audit cancellation assessment reuses the real loopback
+Reticulum sender-cancel gate:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    reticulum_loopback_resource_cancel_crosses_wire_and_production_bridge \
+    -- --ignored --nocapture
+)
+```
+
+It proves outbound initiator cancellation and production bridge cleanup, not
+receiver-side cancellation of an inbound audit page. The locked
+`reticulum-rs-transport 0.9.6` API has no public receiver-cancel operation.
+Keep that distinction in test and release claims.
+
+The non-product current/current moderation-audit process gate is:
+
+```bash
+bash scripts/run-omenchat-moderation-audit-qualification.sh \
+  --report /tmp/omen-moderation-audit-qualification-report.json
+```
+
+It builds both roots with
+`omenchat-moderation-audit-resource-qualification`, which is a non-product
+extension of `omenchat-moderation-audit-qualification`; both qualification
+hooks imply the real, still-non-product `omenchat-moderation-audit` capability
+feature. It promotes an isolated registered identity to moderator, keeps a
+second identified target Link active, persists and sends one durable mute, and
+requires the matching non-empty audit row, Resource transport provenance, and
+explicit `ModerationAuditEnd`. It orderly-restarts omenchatd and requires the
+same Resource-delivered persisted row with a stable server destination. The
+gate found and now guards the production payload bridge's
+`ModerationAuditResource` classification. Canonical product profiles reject
+the real feature and both qualification hooks. This proves
+independent-process Resource delivery, not receiver-side cancellation of an
+active inbound Resource.
+Adjacent ordinary traffic and explicit negative moderation-audit negotiation
+are covered by `scripts/run-omenchat-room-shape-compatibility.sh`; the adjacent
+peer never shipped the audit operation, so no audit request is sent to it.
+
+The feature-boundary and receiver-cancellation activation decision is recorded
+in `docs/audits/omenchat-moderation-audit-activation-review.md`.
+
+Schema-13 dormant room media-policy storage and the guarded schema-12 copy are
+covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    version_twelve_database_adds_nullable_constrained_room_upload_policy \
+    --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    every_media_policy_schema_fault_boundary_rolls_back_to_version_twelve \
+    --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    schema_twelve_export --lib -- --nocapture
+)
+```
+
+The migration tests preserve representative announcement policy, slow-mode
+admission, and upload-ledger rows; prove `NULL`, zero, and the inclusive 10-MiB
+ceiling; reject negative and excessive values; and inject failures before the
+schema change, version update, and commit. The export tests require a new
+destination, explicit confirmation at the CLI boundary, atomic publication,
+cleanup after injected publication failure, and a schema-12 copy that omits
+only `upload_max_file_bytes`. The active schema-13 database is not modified.
+Production negotiation and upload enforcement remain inactive. Evidence is in
+`docs/audits/omenchat-room-media-policy-storage-qualification.md`.
+
+The store-owned resolver and qualification-only enforcement boundary are
+covered by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-headless \
+    effective_room_upload_policy_is_store_owned_bounded_and_persistent \
+    --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    room_media_policy --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-headless \
+    upload_publication_rechecks_membership --lib -- --nocapture
+)
+```
+
+These tests prove exact `NULL`/zero/minimum semantics, the shared 10-MiB
+ceiling, idempotent policy persistence across engine restart, dormant canonical
+behavior, policy rejection before command-rate consumption, legacy three-field
+rejections, publication-time policy changes, pending-offer release, membership
+revalidation, and no filesystem/ledger publication after rejection. No product
+feature or capability acceptance is enabled. Evidence is in
+`docs/audits/omenchat-room-media-policy-enforcement-qualification.md`.
+
+The stopped-server room media-policy administration/status slice is covered
+by:
+
+```bash
+(
+  cd src/server
+  cargo test --locked --no-default-features --features server-full \
+    room_upload_policy --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-full \
+    upload_policy_cli --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-full \
+    room_status_projection --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-full \
+    dashboard_room_projection --lib -- --nocapture
+  cargo test --locked --no-default-features --features server-full \
+    cli_parses_release_runbook_server_commands --lib -- --nocapture
+)
+```
+
+The command is:
+
+```bash
+omenchatd rooms set-upload-policy <room-id> \
+  inherit|disabled|<1..=10485760> --confirm --home <server-home>
+```
+
+Tests require strict values and explicit confirmation, active-writer refusal,
+selected isolated-home ownership, transactional previous/configured values,
+idempotent revision behavior, injected pre-commit rollback, and missing-room
+failure. Human/JSON/TUI status distinguishes configured and effective policy,
+is bounded to 1,024 rooms and 1 MiB, reports truncation, and explicitly labeled
+enforcement inactive at that staged checkpoint. Production activation is
+recorded separately in
+`docs/audits/omenchat-room-media-policy-activation-review.md`. Evidence for the
+administrative slice is in
+`docs/audits/omenchat-room-media-policy-administration-qualification.md`.
+
+The bounded client projection and static Iced presentation are covered by:
+
+```bash
+cargo test --locked -p omenchat-protocol \
+  room_upload_policy_projection -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  room_media_policy_projection --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  room_upload_policy_indicator --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  negotiated_room_upload_policy --lib -- --nocapture
+cargo test --locked --no-default-features --features desktop-product \
+  omenchat_upload_file_limit --lib -- --nocapture
+```
+
+The projection distinguishes no negotiated evidence from `inherit`,
+`disabled`, and a bounded maximum. It remains in the existing
+256-room-per-session map, combines a positive room ceiling with the
+authenticated server maximum, and clears through the existing room-policy
+lifecycle. The Iced composer shows only authoritative evidence, disables
+Attach only when that evidence says disabled, and performs metadata-based
+local rejection before reading or queueing file contents. Production runtime
+selection now requests and accepts the seven-field shape; peers that do not
+negotiate it preserve legacy upload behavior. Evidence is in
+`docs/audits/omenchat-room-media-policy-client-projection-qualification.md`.
+
+The deterministic request/acceptance and real-Link projection gate is:
+
+```bash
+bash scripts/run-omenchat-room-media-policy-qualification.sh \
+  --report /tmp/omen-room-media-policy-report.json
+```
+
+The wrapper builds the root and standalone server independently with the
+production feature plus `omenchat-room-media-policy-qualification`, uses
+isolated browser/server roots
+and a dynamically allocated loopback TCP endpoint, performs the normal
+database migration lifecycle before stopped-server room administration, and
+then runs three homes with cumulative negotiation. The first commits and
+fetches a 64-KiB Resource under a 256-KiB room ceiling, orderly-restarts the
+server, and requires policy re-projection. The second requires typed rejection
+for a 300-KiB Resource offer. The third requires typed rejection for a disabled
+room. Both rejection homes must retain an empty upload ledger and filesystem.
+It has bounded startup/client deadlines and removes isolated roots. It does not
+prove adjacent-version compatibility, receiver cancellation, GUI attachment
+behavior, or long-duration resource use. Evidence is in
+`docs/audits/omenchat-room-media-policy-resource-qualification.md`.
+
+Run the opt-in optimized room upload retention measurement with:
+
+```bash
+cargo test --release --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features \
+  --features server-headless,omenchat-room-media-policy-qualification \
+  room_media_policy_resource_retention_measurement \
+  --lib -- --ignored --nocapture
+```
+
+The measurement creates isolated SQLite and upload roots, admits 32 negotiated
+64-KiB Resources through the normal durable upload path, crosses a 512-KiB
+per-identity quota four times, and requires exactly eight retained files,
+524,288 retained ledger/disk bytes, zero pending offers, and no missing,
+mismatched, orphan, or unsafe paths. It reports optimized offer/publication
+latency, checkpointed database bytes, and Linux RSS when `/proc` is available;
+these observations are not hardware-independent thresholds. It does not add a
+worker, timer, queue, retry, or product feature.
+
+The same review verified that locked `reticulum-rs-transport 0.9.6`
+`Transport::cancel_resource` removes outbound state and sends
+`ResourceInitiatorCancel`. There is no public receiver-side cancellation
+operation or inbound advertisement handle. Inbound failure remains observable
+after a remote cancellation or transport failure, but OMENchat cannot safely
+initiate receiver cancellation without an upstream API or private transport
+access. Do not call the receiver-cancellation gate passed and do not fork the
+transport to hide the limitation. Evidence and local observations are in
+`docs/audits/omenchat-room-media-policy-resource-measurement.md`.
+
+Run the isolated native Linux Iced attachment gate with:
+
+```bash
+bash scripts/run-omenchat-room-media-policy-gui-qualification.sh \
+  --evidence /tmp/omenchat-room-media-policy-gui-evidence
+```
+
+The harness requires Xvfb, i3, `xdotool`, `xprop`, ImageMagick `import`, `jq`,
+`ripgrep`, Python 3, and the standard `truncate`/`find` tools. It builds the
+desktop and standalone server independently with only the non-product room
+media-policy qualification hook, creates three separate browser/server
+identity and storage roots, and connects only to dynamically allocated
+loopback TCP endpoints.
+
+The accepted case selects a deterministic 64-KiB file through the normal Iced
+Attach action under a negotiated 256-KiB room ceiling, then requires exactly
+one 65,536-byte SQLite upload row and its durable file. The over-limit case
+selects a 300,000-byte file and requires the GUI to report the room ceiling
+truthfully while retaining zero upload rows/files. The disabled case clicks
+the inert Attach control and likewise requires zero upload state. Each case
+captures before/after screenshots, uses normal Alt-F4/SIGTERM shutdown, and
+requires the desktop drain marker. The deterministic picker path and automatic
+OMENchat URI are compiled only into qualification builds; canonical product
+feature verification rejects this feature. Evidence is in
+`docs/audits/omenchat-room-media-policy-gui-qualification.md`.
+
+An opt-in optimized process observation reuses the same harness:
+
+```bash
+OMENCHAT_ROOM_MEDIA_POLICY_WARMUP_SECONDS=5 \
+OMENCHAT_ROOM_MEDIA_POLICY_SAMPLE_SECONDS=30 \
+bash scripts/run-omenchat-room-media-policy-gui-qualification.sh \
+  --evidence /tmp/omenchat-room-media-policy-gui-process
+```
+
+Positive durations, bounded to 300 seconds, require Linux `/proc` and use
+release-profile binaries. The accepted case records five samples before the
+Attach action and the requested one-second samples after durable acceptance.
+It reports CPU, RSS/private dirty memory, threads, FDs, and bounded shutdown;
+a 30-second-or-longer run also requires the server queue snapshot and final
+drain telemetry to show empty transport/event queues and no worker join
+failure. A zero duration remains the fast default and adds no measurement
+delay. Evidence and the limitations of a single software-rendered loopback
+observation are in
+`docs/audits/omenchat-room-media-policy-process-measurement.md`.
+
+The real, still-non-product feature now has a first explicit desktop
+presentation slice:
+
+```bash
+cargo test --locked --no-default-features \
+  --features desktop-product,omenchat-moderation-audit \
+  moderation_audit --lib
+```
+
+The focused tests require moderator/admin authority, one single-flight manual
+64-record first-page request, a truthful receiving state, explicit end/empty
+completion, bounded failure text, newest-first record labels, and immediate
+evidence clearing on local role or Link-authority loss. “Load older” uses the
+oldest retained audit ID as an exclusive cursor, rejects duplicates/cursor
+violations, stale page/end sequence correlations, and responses above the
+requested limit; it accumulates only within the existing 256-record/512-KiB
+client ceilings and stops at explicit end or the local retention ceiling. A
+full page is “complete; more may exist,” not an indefinitely receiving
+transfer. The panel never polls, automatically retries, or exposes a false
+inbound-Resource Cancel action. Canonical desktop/static-media and standalone
+server products require the real capability; both process-qualification hooks
+remain forbidden. A separate root TUI consumer is not fabricated: that TUI's
+Messages workspace is LXMF-only and omenchatd's TUI has no client identity. Any
+future OMENchat client TUI must reuse this projection. Hosted native,
+interoperability, and package gates remain release-candidate work.
+
+Focused schema/storage gates:
+
+```bash
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless moderation_audit --lib)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless durable_active_peer_moderation_executes_once_for_each_action --lib)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless schema_eight_export --lib)
+(cd src/server && cargo test --locked --no-default-features \
+  --features server-headless schema_nine_export --lib)
+```

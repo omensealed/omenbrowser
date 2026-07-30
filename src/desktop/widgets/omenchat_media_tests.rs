@@ -3,6 +3,20 @@ use super::*;
 
 const FIXTURE_RETICULUM_HASH: &str = "00112233445566778899aabbccddeeff";
 
+#[cfg(feature = "omenchat-room-media-policy-qualification")]
+#[test]
+fn room_media_policy_qualification_picker_requires_a_nonempty_explicit_path() {
+    assert_eq!(qualification_omenchat_upload_path(None), None);
+    assert_eq!(
+        qualification_omenchat_upload_path(Some(std::ffi::OsString::new())),
+        None
+    );
+    assert_eq!(
+        qualification_omenchat_upload_path(Some("/tmp/qualification-upload.bin".into())),
+        Some(PathBuf::from("/tmp/qualification-upload.bin"))
+    );
+}
+
 #[test]
 fn omenchat_media_hints_offer_reticulum_load_without_clearweb_fetch() {
     let settings = crate::storage::settings::ClearwebPrivacySettings::default();

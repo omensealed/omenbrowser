@@ -50,6 +50,41 @@ pub(in crate::desktop) fn messages_view_for_conversation(
     } else {
         "Trust"
     };
+    let direct_stamp_confirmation: Element<'_, Message> = if let Some(confirmation) =
+        conversation.direct_stamp_confirmation.as_ref()
+    {
+        container(
+                column![
+                    text(format!(
+                        "Peer requires direct stamp cost {} (confirmation threshold: above {}). No message has been sent.",
+                        confirmation.advertised_cost, confirmation.ask_above
+                    ))
+                    .size(ui_size(13)),
+                    row![
+                        omen_button_owned(
+                            format!("Confirm Cost {}", confirmation.advertised_cost),
+                            Message::Conversation(
+                                ConversationMessage::ConfirmPaneDirectStamp(conversation_id)
+                            ),
+                        ),
+                        subtle_button(
+                            "Cancel",
+                            Message::Conversation(
+                                ConversationMessage::CancelPaneDirectStamp(conversation_id)
+                            ),
+                        ),
+                    ]
+                    .spacing(8)
+                ]
+                .spacing(6),
+            )
+            .padding([8, 10])
+            .width(Length::Fill)
+            .style(status_container_style)
+            .into()
+    } else {
+        column![].into()
+    };
     let composer = section_card(
         "Write Message",
         column![
@@ -103,6 +138,7 @@ pub(in crate::desktop) fn messages_view_for_conversation(
             conversation_attachment_draft_rows(conversation_id, &conversation.attachments),
             text("Enter inserts a new line. Use Send to deliver the draft.").size(ui_size(12)),
             conversation_delivery_state_line(conversation),
+            direct_stamp_confirmation,
             row![
                 tooltip_button(
                     button(centered_toolbar_icon(ICON_ATTACH))

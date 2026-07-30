@@ -28,6 +28,7 @@ pub const DIRECTORY_MAX_DESTINATION_BYTES: usize = 1024;
 pub const DIRECTORY_MAX_DISPLAY_NAME_BYTES: usize = 16 * 1024;
 pub const DIRECTORY_MAX_ASSOCIATED_HASH_BYTES: usize = 1024;
 pub const DIRECTORY_IDENTITY_HASH_BYTES: usize = 32;
+pub const DEFAULT_AUTOMATIC_DIRECT_STAMP_COST: u8 = 8;
 static DIRECTORY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,11 +76,49 @@ impl TryFrom<u8> for TrustLevel {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PreferredDelivery {
     Direct,
     Propagated,
+    DirectOnly,
+    PropagatedOnly,
+}
+
+impl PreferredDelivery {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct preferred",
+            Self::Propagated => "propagated preferred",
+            Self::DirectOnly => "direct only",
+            Self::PropagatedOnly => "propagated only",
+        }
+    }
+
+    pub fn allows_direct(self) -> bool {
+        !matches!(self, Self::PropagatedOnly)
+    }
+
+    pub fn allows_propagated(self) -> bool {
+        !matches!(self, Self::DirectOnly)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryFallbackPolicy {
+    #[default]
+    Ask,
+    Automatic,
+}
+
+impl DeliveryFallbackPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "ask before fallback",
+            Self::Automatic => "automatic safe fallback",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -94,6 +133,14 @@ pub struct DirectoryEntry {
     pub saved: bool,
     pub identify_on_connect: bool,
     pub preferred_delivery: Option<PreferredDelivery>,
+    #[serde(default)]
+    pub delivery_fallback: DeliveryFallbackPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_automatic_direct_stamp_cost: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_above_direct_stamp_cost: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer_reply_ticket: Option<bool>,
     pub sort_rank: Option<i32>,
     pub hosts_node: bool,
     pub associated_hash: Option<String>,
@@ -120,6 +167,10 @@ impl DirectoryEntry {
             saved: false,
             identify_on_connect: false,
             preferred_delivery: None,
+            delivery_fallback: DeliveryFallbackPolicy::Ask,
+            max_automatic_direct_stamp_cost: None,
+            ask_above_direct_stamp_cost: None,
+            offer_reply_ticket: None,
             sort_rank: None,
             hosts_node,
             associated_hash: None,
@@ -167,6 +218,44 @@ pub enum PropagationNodeCompatibility {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeSelection {
+    Candidate,
+    Pinned,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeEvidence {
+    Ready,
+    UnverifiedIdentity,
+    StaleAnnounce,
+    UnknownAnnounceAge,
+    PathNotKnown,
+    PathUnknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeRefreshEvidence {
+    Running,
+    Refreshed,
+    NoPath,
+    Cancelled,
+    TimedOut,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationNodeSyncEvidence {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PropagationNodeRecord {
     pub destination_hash: String,
@@ -174,14 +263,24 @@ pub struct PropagationNodeRecord {
     pub display_name: String,
     pub display_name_authenticated: bool,
     pub selected: bool,
+    pub selection: PropagationNodeSelection,
     pub saved: bool,
     pub trusted: bool,
     pub trust_level: TrustLevel,
     pub last_seen: f64,
+    pub announce_age_seconds: Option<u64>,
     pub freshness: PropagationNodeFreshness,
     pub path_state: PropagationNodePathState,
     pub advertised_stamp_cost: Option<u8>,
     pub compatibility: PropagationNodeCompatibility,
+    pub evidence: PropagationNodeEvidence,
+    pub refresh: Option<PropagationNodeRefreshEvidence>,
+    pub refresh_observed_epoch_ms: Option<u64>,
+    pub refresh_cooldown_remaining_seconds: Option<u64>,
+    pub sync: Option<PropagationNodeSyncEvidence>,
+    pub last_sync_epoch_ms: Option<u64>,
+    pub last_successful_sync_epoch_ms: Option<u64>,
+    pub last_sync_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -190,6 +289,30 @@ pub struct PropagationNodeInventory {
     pub total_candidates: usize,
     pub retained_bytes: usize,
     pub truncated: bool,
+}
+
+impl PropagationNodeInventory {
+    pub(crate) fn enforce_bounds(&mut self) {
+        let nodes = std::mem::take(&mut self.nodes);
+        let mut retained =
+            Vec::with_capacity(nodes.len().min(PROPAGATION_NODE_INVENTORY_MAX_ITEMS));
+        let mut retained_bytes = 0_usize;
+        let mut truncated = self.truncated;
+        for node in nodes {
+            let node_bytes = propagation_node_record_bytes(&node);
+            if retained.len() == PROPAGATION_NODE_INVENTORY_MAX_ITEMS
+                || retained_bytes.saturating_add(node_bytes) > PROPAGATION_NODE_INVENTORY_MAX_BYTES
+            {
+                truncated = true;
+                continue;
+            }
+            retained_bytes = retained_bytes.saturating_add(node_bytes);
+            retained.push(node);
+        }
+        self.nodes = retained;
+        self.retained_bytes = retained_bytes;
+        self.truncated = truncated;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -334,7 +457,10 @@ impl DirectoryService {
             entry.trusted = existing.trusted;
             entry.saved = existing.saved;
             entry.identify_on_connect = existing.identify_on_connect;
-            entry.preferred_delivery = existing.preferred_delivery.clone();
+            entry.preferred_delivery = existing.preferred_delivery;
+            entry.delivery_fallback = existing.delivery_fallback;
+            entry.max_automatic_direct_stamp_cost = existing.max_automatic_direct_stamp_cost;
+            entry.ask_above_direct_stamp_cost = existing.ask_above_direct_stamp_cost;
             entry.sort_rank = existing.sort_rank;
             entry.hosts_node = existing.hosts_node || kind == DirectoryKind::Node;
             entry.associated_hash = associated_hash.or_else(|| existing.associated_hash.clone());
@@ -416,6 +542,10 @@ impl DirectoryService {
         entry.trust_level = TrustLevel::Unknown;
         entry.identify_on_connect = false;
         entry.preferred_delivery = None;
+        entry.delivery_fallback = DeliveryFallbackPolicy::Ask;
+        entry.max_automatic_direct_stamp_cost = None;
+        entry.ask_above_direct_stamp_cost = None;
+        entry.offer_reply_ticket = None;
         self.persist_entry_change(destination_hash, entry.clone())?;
         Ok(Some(entry))
     }
@@ -488,6 +618,62 @@ impl DirectoryService {
         Ok(Some(entry))
     }
 
+    pub fn set_delivery_fallback(
+        &mut self,
+        destination_hash: &str,
+        delivery_fallback: DeliveryFallbackPolicy,
+    ) -> crate::error::AppResult<Option<DirectoryEntry>> {
+        let Some(mut entry) = self.find(destination_hash) else {
+            return Ok(None);
+        };
+        entry.delivery_fallback = delivery_fallback;
+        entry.saved = true;
+        self.persist_entry_change(destination_hash, entry.clone())?;
+        Ok(Some(entry))
+    }
+
+    pub fn set_max_automatic_direct_stamp_cost(
+        &mut self,
+        destination_hash: &str,
+        cost: Option<u8>,
+    ) -> crate::error::AppResult<Option<DirectoryEntry>> {
+        let Some(mut entry) = self.find(destination_hash) else {
+            return Ok(None);
+        };
+        entry.max_automatic_direct_stamp_cost = cost;
+        entry.saved = true;
+        self.persist_entry_change(destination_hash, entry.clone())?;
+        Ok(Some(entry))
+    }
+
+    pub fn set_ask_above_direct_stamp_cost(
+        &mut self,
+        destination_hash: &str,
+        cost: Option<u8>,
+    ) -> crate::error::AppResult<Option<DirectoryEntry>> {
+        let Some(mut entry) = self.find(destination_hash) else {
+            return Ok(None);
+        };
+        entry.ask_above_direct_stamp_cost = cost;
+        entry.saved = true;
+        self.persist_entry_change(destination_hash, entry.clone())?;
+        Ok(Some(entry))
+    }
+
+    pub fn set_offer_reply_ticket(
+        &mut self,
+        destination_hash: &str,
+        offer: Option<bool>,
+    ) -> crate::error::AppResult<Option<DirectoryEntry>> {
+        let Some(mut entry) = self.find(destination_hash) else {
+            return Ok(None);
+        };
+        entry.offer_reply_ticket = offer;
+        entry.saved = true;
+        self.persist_entry_change(destination_hash, entry.clone())?;
+        Ok(Some(entry))
+    }
+
     pub fn set_identify_on_connect(
         &mut self,
         destination_hash: &str,
@@ -548,28 +734,14 @@ impl DirectoryService {
         nodes.sort_by(propagation_node_record_order);
 
         let total_candidates = nodes.len();
-        let mut retained =
-            Vec::with_capacity(nodes.len().min(PROPAGATION_NODE_INVENTORY_MAX_ITEMS));
-        let mut retained_bytes = 0_usize;
-        let mut truncated = false;
-        for node in nodes {
-            let node_bytes = propagation_node_record_bytes(&node);
-            if retained.len() == PROPAGATION_NODE_INVENTORY_MAX_ITEMS
-                || retained_bytes.saturating_add(node_bytes) > PROPAGATION_NODE_INVENTORY_MAX_BYTES
-            {
-                truncated = true;
-                continue;
-            }
-            retained_bytes = retained_bytes.saturating_add(node_bytes);
-            retained.push(node);
-        }
-
-        PropagationNodeInventory {
-            nodes: retained,
+        let mut inventory = PropagationNodeInventory {
+            nodes,
             total_candidates,
-            retained_bytes,
-            truncated,
-        }
+            retained_bytes: 0,
+            truncated: false,
+        };
+        inventory.enforce_bounds();
+        inventory
     }
 
     pub fn known_nodes(&self) -> Vec<DirectoryEntry> {
@@ -852,7 +1024,14 @@ impl DirectoryService {
 }
 
 fn is_persistent_entry(entry: &DirectoryEntry) -> bool {
-    entry.saved || entry.trusted || entry.identify_on_connect || entry.preferred_delivery.is_some()
+    entry.saved
+        || entry.trusted
+        || entry.identify_on_connect
+        || entry.preferred_delivery.is_some()
+        || entry.delivery_fallback != DeliveryFallbackPolicy::Ask
+        || entry.max_automatic_direct_stamp_cost.is_some()
+        || entry.ask_above_direct_stamp_cost.is_some()
+        || entry.offer_reply_ticket.is_some()
 }
 
 fn directory_entries_match_ignoring_last_seen(
@@ -868,6 +1047,10 @@ fn directory_entries_match_ignoring_last_seen(
         && left.saved == right.saved
         && left.identify_on_connect == right.identify_on_connect
         && left.preferred_delivery == right.preferred_delivery
+        && left.delivery_fallback == right.delivery_fallback
+        && left.max_automatic_direct_stamp_cost == right.max_automatic_direct_stamp_cost
+        && left.ask_above_direct_stamp_cost == right.ask_above_direct_stamp_cost
+        && left.offer_reply_ticket == right.offer_reply_ticket
         && left.sort_rank == right.sort_rank
         && left.hosts_node == right.hosts_node
         && left.associated_hash == right.associated_hash
@@ -899,10 +1082,32 @@ fn merged_entry(primary: Option<&DirectoryEntry>, secondary: &DirectoryEntry) ->
     };
     entry.saved = primary.saved || secondary.saved;
     entry.identify_on_connect = primary.identify_on_connect || secondary.identify_on_connect;
-    entry.preferred_delivery = primary
-        .preferred_delivery
-        .clone()
-        .or_else(|| secondary.preferred_delivery.clone());
+    entry.preferred_delivery = primary.preferred_delivery.or(secondary.preferred_delivery);
+    entry.delivery_fallback =
+        if primary.saved || primary.delivery_fallback != DeliveryFallbackPolicy::Ask {
+            primary.delivery_fallback
+        } else {
+            secondary.delivery_fallback
+        };
+    entry.max_automatic_direct_stamp_cost = if primary.saved {
+        primary.max_automatic_direct_stamp_cost
+    } else {
+        primary
+            .max_automatic_direct_stamp_cost
+            .or(secondary.max_automatic_direct_stamp_cost)
+    };
+    entry.ask_above_direct_stamp_cost = if primary.saved {
+        primary.ask_above_direct_stamp_cost
+    } else {
+        primary
+            .ask_above_direct_stamp_cost
+            .or(secondary.ask_above_direct_stamp_cost)
+    };
+    entry.offer_reply_ticket = if primary.saved {
+        primary.offer_reply_ticket
+    } else {
+        primary.offer_reply_ticket.or(secondary.offer_reply_ticket)
+    };
     entry.sort_rank = primary.sort_rank.or(secondary.sort_rank);
     entry.hosts_node = primary.hosts_node || secondary.hosts_node;
     entry.associated_hash = primary
@@ -961,6 +1166,22 @@ fn propagation_node_record(
         .unwrap_or_default();
     let selected =
         selected_hash.is_some_and(|hash| hash.eq_ignore_ascii_case(&entry.destination_hash));
+    let announce_age_seconds =
+        (entry.last_seen > 0.0 && entry.last_seen.is_finite() && now.is_finite())
+            .then(|| (now.max(entry.last_seen) - entry.last_seen).floor() as u64);
+    let evidence = if !metadata_authenticated {
+        PropagationNodeEvidence::UnverifiedIdentity
+    } else {
+        match freshness {
+            PropagationNodeFreshness::Stale => PropagationNodeEvidence::StaleAnnounce,
+            PropagationNodeFreshness::Unknown => PropagationNodeEvidence::UnknownAnnounceAge,
+            PropagationNodeFreshness::Fresh => match path_state {
+                PropagationNodePathState::Known => PropagationNodeEvidence::Ready,
+                PropagationNodePathState::NotKnown => PropagationNodeEvidence::PathNotKnown,
+                PropagationNodePathState::Unknown => PropagationNodeEvidence::PathUnknown,
+            },
+        }
+    };
 
     PropagationNodeRecord {
         destination_hash: entry.destination_hash,
@@ -968,10 +1189,16 @@ fn propagation_node_record(
         display_name,
         display_name_authenticated: metadata_authenticated,
         selected,
+        selection: if selected {
+            PropagationNodeSelection::Pinned
+        } else {
+            PropagationNodeSelection::Candidate
+        },
         saved: entry.saved,
         trusted: entry.trusted,
         trust_level: entry.trust_level,
         last_seen: entry.last_seen,
+        announce_age_seconds,
         freshness,
         path_state,
         advertised_stamp_cost: metadata_authenticated
@@ -982,6 +1209,14 @@ fn propagation_node_record(
         } else {
             PropagationNodeCompatibility::Unknown
         },
+        evidence,
+        refresh: None,
+        refresh_observed_epoch_ms: None,
+        refresh_cooldown_remaining_seconds: None,
+        sync: None,
+        last_sync_epoch_ms: None,
+        last_successful_sync_epoch_ms: None,
+        last_sync_error: None,
     }
 }
 
@@ -1011,11 +1246,12 @@ fn propagation_freshness_rank(freshness: PropagationNodeFreshness) -> u8 {
 }
 
 fn propagation_node_record_bytes(node: &PropagationNodeRecord) -> usize {
-    const FIXED_BYTES: usize = 128;
+    const FIXED_BYTES: usize = 224;
     FIXED_BYTES
         .saturating_add(node.destination_hash.len())
         .saturating_add(node.identity_hash.as_ref().map_or(0, String::len))
         .saturating_add(node.display_name.len())
+        .saturating_add(node.last_sync_error.as_ref().map_or(0, String::len))
 }
 
 fn preferred_display_name(
@@ -1379,10 +1615,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        publish_directory_bytes, timestamp_secs, DirectoryAnnounceMetadata, DirectoryKind,
-        DirectoryService, PropagationNodeCompatibility, PropagationNodeFreshness,
-        PropagationNodePathState, PublishMode, PROPAGATION_NODE_INVENTORY_MAX_BYTES,
-        PROPAGATION_NODE_INVENTORY_MAX_ITEMS,
+        merged_entry, publish_directory_bytes, timestamp_secs, DeliveryFallbackPolicy,
+        DirectoryAnnounceMetadata, DirectoryEntry, DirectoryKind, DirectoryService,
+        PreferredDelivery, PropagationNodeCompatibility, PropagationNodeEvidence,
+        PropagationNodeFreshness, PropagationNodePathState, PropagationNodeSelection, PublishMode,
+        PROPAGATION_NODE_INVENTORY_MAX_BYTES, PROPAGATION_NODE_INVENTORY_MAX_ITEMS,
     };
 
     fn isolated_directory(label: &str) -> (std::path::PathBuf, DirectoryService) {
@@ -1394,6 +1631,104 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create isolated root");
         let service = DirectoryService::new(root.join("directory.json")).expect("directory");
         (root, service)
+    }
+
+    #[test]
+    fn delivery_policy_preserves_legacy_json_and_adds_strict_modes() {
+        assert_eq!(
+            serde_json::from_str::<PreferredDelivery>("\"direct\"").expect("legacy direct"),
+            PreferredDelivery::Direct
+        );
+        assert_eq!(
+            serde_json::from_str::<PreferredDelivery>("\"propagated\"").expect("legacy propagated"),
+            PreferredDelivery::Propagated
+        );
+        for (encoded, policy) in [
+            ("\"direct_only\"", PreferredDelivery::DirectOnly),
+            ("\"propagated_only\"", PreferredDelivery::PropagatedOnly),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<PreferredDelivery>(encoded).expect("strict policy"),
+                policy
+            );
+            assert_eq!(
+                serde_json::to_string(&policy).expect("encode strict policy"),
+                encoded
+            );
+        }
+        assert!(PreferredDelivery::Direct.allows_direct());
+        assert!(PreferredDelivery::Direct.allows_propagated());
+        assert!(!PreferredDelivery::DirectOnly.allows_propagated());
+        assert!(!PreferredDelivery::PropagatedOnly.allows_direct());
+
+        let legacy = serde_json::json!({
+            "destination_hash": "peer",
+            "display_name": "Peer",
+            "kind": "peer",
+            "trusted": false,
+            "trust_level": 2,
+            "saved": true,
+            "identify_on_connect": false,
+            "preferred_delivery": "direct",
+            "sort_rank": null,
+            "hosts_node": false,
+            "associated_hash": null,
+            "node_associated_hash": null,
+            "last_seen": 0.0
+        });
+        let decoded: DirectoryEntry =
+            serde_json::from_value(legacy).expect("legacy directory entry");
+        assert_eq!(decoded.delivery_fallback, DeliveryFallbackPolicy::Ask);
+        assert_eq!(decoded.max_automatic_direct_stamp_cost, None);
+        assert_eq!(decoded.ask_above_direct_stamp_cost, None);
+        assert_eq!(decoded.offer_reply_ticket, None);
+    }
+
+    #[test]
+    fn explicit_ask_fallback_wins_directory_merge() {
+        let mut saved = DirectoryEntry::new("peer", "Peer", DirectoryKind::Peer);
+        saved.saved = true;
+        saved.delivery_fallback = DeliveryFallbackPolicy::Ask;
+        let mut automatic = saved.clone();
+        automatic.saved = false;
+        automatic.delivery_fallback = DeliveryFallbackPolicy::Automatic;
+        automatic.max_automatic_direct_stamp_cost = Some(2);
+        automatic.ask_above_direct_stamp_cost = Some(1);
+        automatic.offer_reply_ticket = Some(true);
+
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).delivery_fallback,
+            DeliveryFallbackPolicy::Ask
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).max_automatic_direct_stamp_cost,
+            None
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).ask_above_direct_stamp_cost,
+            None
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).offer_reply_ticket,
+            None
+        );
+        saved.saved = false;
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).delivery_fallback,
+            DeliveryFallbackPolicy::Automatic
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).max_automatic_direct_stamp_cost,
+            Some(2)
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).ask_above_direct_stamp_cost,
+            Some(1)
+        );
+        assert_eq!(
+            merged_entry(Some(&saved), &automatic).offer_reply_ticket,
+            Some(true)
+        );
     }
 
     #[test]
@@ -1423,10 +1758,13 @@ mod tests {
         assert_eq!(node.display_name, "Authenticated Relay");
         assert!(node.display_name_authenticated);
         assert!(node.selected);
+        assert_eq!(node.selection, PropagationNodeSelection::Pinned);
+        assert!(node.announce_age_seconds.is_some_and(|age| age <= 1));
         assert_eq!(node.freshness, PropagationNodeFreshness::Fresh);
         assert_eq!(node.path_state, PropagationNodePathState::Known);
         assert_eq!(node.advertised_stamp_cost, Some(13));
         assert_eq!(node.compatibility, PropagationNodeCompatibility::Compatible);
+        assert_eq!(node.evidence, PropagationNodeEvidence::Ready);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1453,6 +1791,8 @@ mod tests {
         assert_eq!(node.advertised_stamp_cost, None);
         assert_eq!(node.path_state, PropagationNodePathState::Unknown);
         assert_eq!(node.compatibility, PropagationNodeCompatibility::Unknown);
+        assert_eq!(node.selection, PropagationNodeSelection::Candidate);
+        assert_eq!(node.evidence, PropagationNodeEvidence::UnverifiedIdentity);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1495,23 +1835,59 @@ mod tests {
 
         let inventory = service.propagation_node_inventory(None, &BTreeMap::new(), now);
 
+        let stale = inventory
+            .nodes
+            .iter()
+            .find(|node| node.destination_hash == "stale-relay")
+            .expect("stale relay");
+        assert_eq!(stale.freshness, PropagationNodeFreshness::Stale);
+        assert_eq!(stale.evidence, PropagationNodeEvidence::StaleAnnounce);
+        assert!(stale
+            .announce_age_seconds
+            .is_some_and(|age| age > super::PROPAGATION_NODE_FRESH_SECONDS as u64));
+        let unknown = inventory
+            .nodes
+            .iter()
+            .find(|node| node.destination_hash == "unknown-relay")
+            .expect("unknown relay");
+        assert_eq!(unknown.freshness, PropagationNodeFreshness::Unknown);
         assert_eq!(
-            inventory
-                .nodes
-                .iter()
-                .find(|node| node.destination_hash == "stale-relay")
-                .expect("stale relay")
-                .freshness,
-            PropagationNodeFreshness::Stale
+            unknown.evidence,
+            PropagationNodeEvidence::UnknownAnnounceAge
         );
+        assert_eq!(unknown.announce_age_seconds, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn propagation_inventory_distinguishes_unknown_and_negative_path_evidence() {
+        let (root, mut service) = isolated_directory("path-evidence");
+        service
+            .ingest_announce_with_identity_metadata(
+                "path-relay",
+                "Path Relay",
+                DirectoryKind::Propagation,
+                DirectoryAnnounceMetadata {
+                    identity_hash: Some("55".repeat(16)),
+                    associated_hash: None,
+                    node_associated_hash: None,
+                    lxmf_stamp_cost: None,
+                },
+            )
+            .expect("ingest relay");
+
+        let unknown = service.propagation_node_inventory(None, &BTreeMap::new(), timestamp_secs());
         assert_eq!(
-            inventory
-                .nodes
-                .iter()
-                .find(|node| node.destination_hash == "unknown-relay")
-                .expect("unknown relay")
-                .freshness,
-            PropagationNodeFreshness::Unknown
+            unknown.nodes[0].evidence,
+            PropagationNodeEvidence::PathUnknown
+        );
+
+        let negative_path =
+            BTreeMap::from([("path-relay".into(), PropagationNodePathState::NotKnown)]);
+        let not_known = service.propagation_node_inventory(None, &negative_path, timestamp_secs());
+        assert_eq!(
+            not_known.nodes[0].evidence,
+            PropagationNodeEvidence::PathNotKnown
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1581,7 +1957,7 @@ mod tests {
                 .expect("ingest large relay");
         }
 
-        let inventory = service.propagation_node_inventory(
+        let mut inventory = service.propagation_node_inventory(
             Some("large-relay-0039"),
             &BTreeMap::new(),
             timestamp_secs(),
@@ -1590,6 +1966,14 @@ mod tests {
         assert!(inventory.truncated);
         assert!(inventory.nodes.len() < 40);
         assert!(inventory.retained_bytes <= PROPAGATION_NODE_INVENTORY_MAX_BYTES);
+        assert_eq!(inventory.nodes[0].destination_hash, "large-relay-0039");
+        let before_enrichment = inventory.nodes.len();
+        for node in &mut inventory.nodes {
+            node.last_sync_error = Some("e".repeat(crate::operations::OPERATION_TEXT_MAX_BYTES));
+        }
+        inventory.enforce_bounds();
+        assert!(inventory.retained_bytes <= PROPAGATION_NODE_INVENTORY_MAX_BYTES);
+        assert!(inventory.nodes.len() <= before_enrichment);
         assert_eq!(inventory.nodes[0].destination_hash, "large-relay-0039");
         assert_eq!(
             service

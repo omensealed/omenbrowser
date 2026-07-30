@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+readonly repo_root
+report_path=""
+while (($#)); do
+  case "$1" in
+    --report)
+      [[ $# -ge 2 ]] || {
+        echo "--report requires a path" >&2
+        exit 2
+      }
+      report_path=$2
+      shift 2
+      ;;
+    *)
+      echo "usage: $0 [--report /path/to/report.json]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/omen-moderation-audit-qualification.XXXXXX")
+cleanup() {
+  rm -rf -- "$temporary_root"
+}
+trap cleanup EXIT INT TERM
+trap 'status=$?; echo "moderation-audit qualification failed at line $LINENO (status $status)" >&2' ERR
+
+cargo build --locked --manifest-path "$repo_root/Cargo.toml" \
+  --no-default-features \
+  --features desktop-product,omenchat-moderation-audit-resource-qualification \
+  --bin omenbrowser_rs
+cargo build --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
+  --no-default-features \
+  --features server-headless,omenchat-moderation-audit-resource-qualification \
+  --bin omenchatd
+
+browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
+server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
+port=$(python3 -c \
+  'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+run_dir=$(bash "$repo_root/scripts/release-omenchat-smoke.sh" \
+  --browser-bin "$browser_bin" \
+  --server-bin "$server_bin" \
+  --tcp "127.0.0.1:$port" \
+  --path-wait 10 \
+  --out "$temporary_root/smoke" \
+  --message "current/current moderation-audit qualification" \
+  --moderation-audit-smoke | tail -n 1)
+
+grep -qx 'outcome: pass' "$run_dir/summary.txt"
+grep -qx 'moderation_audit_smoke: 1' "$run_dir/summary.txt"
+grep -qx 'restart_destination_stable: 1' "$run_dir/summary.txt"
+grep -qx 'restart_stop: orderly' "$run_dir/summary.txt"
+
+summary="$temporary_root/report.json"
+python3 - "$run_dir" "$summary" <<'PY'
+import json
+import pathlib
+import sys
+
+run_dir = pathlib.Path(sys.argv[1])
+reports = [
+    json.loads((run_dir / name).read_text(encoding="utf-8"))
+    for name in ("omenchat-smoke.json", "omenchat-smoke-restart.json")
+]
+
+def qualified(report):
+    stages = {
+        stage.get("stage"): stage
+        for stage in report.get("stages", [])
+        if isinstance(stage, dict) and isinstance(stage.get("stage"), str)
+    }
+    capability = stages.get("capability_observation", {})
+    page = stages.get("moderation_audit_read", {})
+    return (
+        report.get("classification", {}).get("outcome") == "pass"
+        and capability.get("moderation_audit_negotiated") is True
+        and page.get("ok") is True
+        and page.get("record_count", 0) >= 1
+        and page.get("resource_delivery") is True
+        and page.get("end_seen") is True
+    )
+
+report = {
+    "status": "pass" if all(map(qualified, reports)) else "fail",
+    "isolated_loopback": True,
+    "resource_forcing_is_qualification_only": True,
+    "authorized_nonempty_read": all(map(qualified, reports)),
+    "resource_delivery": all(map(qualified, reports)),
+    "explicit_end_observed": all(map(qualified, reports)),
+    "server_restart": True,
+    "server_destination_stable": True,
+}
+pathlib.Path(sys.argv[2]).write_text(
+    json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+)
+if report["status"] != "pass":
+    raise SystemExit("moderation-audit process qualification evidence was incomplete")
+PY
+
+if [[ -n "$report_path" ]]; then
+  mkdir -p -- "$(dirname -- "$report_path")"
+  cp -- "$summary" "$report_path"
+fi
+cat "$summary"

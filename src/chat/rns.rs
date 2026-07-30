@@ -93,15 +93,22 @@ impl ChatLinkTransport for CapturedChatTransport {
 pub enum ChatLinkEvent {
     Frame(Frame),
     InlineBatch {
+        seq: u32,
         op: ChatOp,
         room_id: Option<u32>,
         values: Vec<FrameValue>,
     },
     ResourceBatch {
+        seq: u32,
         op: ChatOp,
         room_id: Option<u32>,
         offer: ResourceOffer,
         values: Vec<FrameValue>,
+    },
+    ResourceDeferred {
+        seq: u32,
+        op: ChatOp,
+        room_id: Option<u32>,
     },
     UploadResource {
         room_id: Option<u32>,
@@ -128,23 +135,42 @@ pub fn recv_chat_event<T: ChatLinkTransport>(
     };
     let frame = decode_frame(&bytes)?;
     match frame.op {
-        ChatOp::HistoryInline | ChatOp::UserListSnapshotInline => {
+        ChatOp::HistoryInline
+        | ChatOp::UserListSnapshotInline
+        | ChatOp::ReactionSnapshotInline
+        | ChatOp::MessageRevisionSnapshotInline
+        | ChatOp::ModerationAuditInline
+        | ChatOp::PinSnapshot => {
             let values = decode_compressed_values_body(&frame.body)?;
             Ok(Some(ChatLinkEvent::InlineBatch {
+                seq: frame.seq,
                 op: frame.op,
                 room_id: frame.room_id,
                 values,
             }))
         }
-        ChatOp::HistoryResourceOffer | ChatOp::UserListSnapshotResource => {
+        ChatOp::HistoryResourceOffer
+        | ChatOp::UserListSnapshotResource
+        | ChatOp::ReactionSnapshotResource
+        | ChatOp::MessageRevisionSnapshotResource
+        | ChatOp::ModerationAuditResource => {
             let offer = decode_resource_offer_body(&frame.body)?;
             validate_resource_offer(&offer, frame.op)?;
             let Some(payload) = transport.fetch_resource(&offer.resource_id)? else {
                 transport.defer_resource_offer(&offer.resource_id, bytes)?;
-                return Ok(None);
+                return if frame.op == ChatOp::ModerationAuditResource {
+                    Ok(Some(ChatLinkEvent::ResourceDeferred {
+                        seq: frame.seq,
+                        op: frame.op,
+                        room_id: frame.room_id,
+                    }))
+                } else {
+                    Ok(None)
+                };
             };
             let values = decode_resource_batch_payload(&offer, &payload)?;
             Ok(Some(ChatLinkEvent::ResourceBatch {
+                seq: frame.seq,
                 op: frame.op,
                 room_id: frame.room_id,
                 offer,
@@ -177,13 +203,16 @@ fn validate_resource_offer(offer: &ResourceOffer, op: ChatOp) -> anyhow::Result<
     if offer.resource_id.is_empty() || offer.resource_id.len() > CHAT_RESOURCE_ID_MAX_BYTES {
         anyhow::bail!("OMENchat resource offer id is empty or exceeds client limits");
     }
-    let expected_purpose = match op {
-        ChatOp::HistoryResourceOffer => "history",
-        ChatOp::UserListSnapshotResource => "userlist",
+    let purpose_matches = match op {
+        ChatOp::HistoryResourceOffer => matches!(offer.purpose.as_str(), "history" | "recent"),
+        ChatOp::UserListSnapshotResource => offer.purpose == "userlist",
+        ChatOp::ReactionSnapshotResource => offer.purpose.starts_with("reactions:"),
+        ChatOp::MessageRevisionSnapshotResource => offer.purpose.starts_with("message-revisions:"),
+        ChatOp::ModerationAuditResource => offer.purpose.starts_with("moderation-audit:"),
         _ => anyhow::bail!("OMENchat operation is not a batch resource offer"),
     };
-    if offer.purpose != expected_purpose {
-        anyhow::bail!("OMENchat resource offer purpose mismatch: expected {expected_purpose}");
+    if !purpose_matches {
+        anyhow::bail!("OMENchat resource offer purpose mismatch for its operation");
     }
     Ok(())
 }
@@ -450,6 +479,323 @@ mod tests {
     }
 
     #[test]
+    fn client_transport_decodes_reaction_inline_and_resource_snapshots() {
+        let snapshot = crate::chat::protocol::ReactionSnapshot {
+            target_event_ids: vec![10],
+            entries: vec![crate::chat::protocol::ReactionSnapshotEntry {
+                target_event_id: 10,
+                actor_user_id: 7,
+                token: crate::chat::protocol::ReactionToken::Heart,
+                created_at_unix: 2,
+            }],
+        };
+        let FrameBody::Fields(values) = snapshot.into_frame_body().expect("snapshot") else {
+            panic!("snapshot fields");
+        };
+        let batch = compressed_values_batch(&values).expect("batch");
+        let resource_id = "reactions:1:test".to_owned();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ReactionSnapshotInline,
+                1,
+                Some(1),
+                compressed_values_body(&values).expect("inline body"),
+            ))
+            .expect("push inline");
+        transport.insert_resource(
+            resource_id.clone(),
+            compressed_values_payload(&values).expect("payload"),
+        );
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ReactionSnapshotResource,
+                2,
+                Some(1),
+                resource_offer_body(&ResourceOffer {
+                    resource_id,
+                    compression: super::super::protocol::Compression::Bzip2,
+                    uncompressed_len: batch.uncompressed_len,
+                    compressed_len: batch.bytes.len() as u64,
+                    purpose: "reactions:2:fixture".into(),
+                }),
+            ))
+            .expect("push resource");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("inline"),
+            Some(ChatLinkEvent::InlineBatch {
+                op: ChatOp::ReactionSnapshotInline,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("resource"),
+            Some(ChatLinkEvent::ResourceBatch {
+                op: ChatOp::ReactionSnapshotResource,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+    }
+
+    #[test]
+    fn client_transport_decodes_moderation_audit_inline_and_resource_pages() {
+        let page = crate::chat::protocol::ModerationAuditPage {
+            records: vec![crate::chat::protocol::ModerationAuditRecord {
+                audit_id: 9,
+                room_id: 1,
+                actor_user_id: 2,
+                actor_display_name_at_action: "Moderator".into(),
+                target_user_id: Some(3),
+                target_display_name_at_action: Some("Member".into()),
+                action: crate::chat::protocol::ModerationAuditAction::Mute,
+                committed_at_unix: 4,
+                result_role_bits: None,
+                result_status_bits: Some(2),
+            }],
+        };
+        let values = page.into_frame_values().expect("page values");
+        let batch = compressed_values_batch(&values).expect("batch");
+        let resource_id = "moderation-audit:2:newest".to_owned();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ModerationAuditInline,
+                1,
+                Some(1),
+                compressed_values_body(&values).expect("inline body"),
+            ))
+            .expect("push inline");
+        transport.insert_resource(
+            resource_id.clone(),
+            compressed_values_payload(&values).expect("payload"),
+        );
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ModerationAuditResource,
+                2,
+                Some(1),
+                resource_offer_body(&ResourceOffer {
+                    resource_id,
+                    compression: super::super::protocol::Compression::Bzip2,
+                    uncompressed_len: batch.uncompressed_len,
+                    compressed_len: batch.bytes.len() as u64,
+                    purpose: "moderation-audit:2:newest".into(),
+                }),
+            ))
+            .expect("push resource");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("inline"),
+            Some(ChatLinkEvent::InlineBatch {
+                seq: 1,
+                op: ChatOp::ModerationAuditInline,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("resource"),
+            Some(ChatLinkEvent::ResourceBatch {
+                seq: 2,
+                op: ChatOp::ModerationAuditResource,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+    }
+
+    #[test]
+    fn moderation_audit_resource_deferral_replays_and_invalid_offers_are_not_retained() {
+        let page = crate::chat::protocol::ModerationAuditPage {
+            records: vec![crate::chat::protocol::ModerationAuditRecord {
+                audit_id: 11,
+                room_id: 1,
+                actor_user_id: 2,
+                actor_display_name_at_action: "Moderator".into(),
+                target_user_id: Some(3),
+                target_display_name_at_action: Some("Member".into()),
+                action: crate::chat::protocol::ModerationAuditAction::Ban,
+                committed_at_unix: 5,
+                result_role_bits: None,
+                result_status_bits: Some(1),
+            }],
+        };
+        let values = page.into_frame_values().expect("page values");
+        let batch = compressed_values_batch(&values).expect("batch");
+        let payload = compressed_values_payload(&values).expect("payload");
+        let resource_id = "moderation-audit:3:newest".to_owned();
+        let offer = ResourceOffer {
+            resource_id: resource_id.clone(),
+            compression: super::super::protocol::Compression::Bzip2,
+            uncompressed_len: batch.uncompressed_len,
+            compressed_len: batch.bytes.len() as u64,
+            purpose: "moderation-audit:3:newest".into(),
+        };
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::ModerationAuditResource,
+                3,
+                Some(1),
+                resource_offer_body(&offer),
+            ))
+            .expect("push deferred offer");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("resource is pending"),
+            Some(ChatLinkEvent::ResourceDeferred {
+                seq: 3,
+                op: ChatOp::ModerationAuditResource,
+                room_id: Some(1),
+            })
+        ));
+        assert_eq!(
+            transport
+                .pending_resource_offers
+                .get(&resource_id)
+                .map(VecDeque::len),
+            Some(1)
+        );
+        transport.insert_resource(resource_id.clone(), payload);
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("replayed page"),
+            Some(ChatLinkEvent::ResourceBatch {
+                op: ChatOp::ModerationAuditResource,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+        assert!(!transport.pending_resource_offers.contains_key(&resource_id));
+
+        for invalid_offer in [
+            ResourceOffer {
+                purpose: "history".into(),
+                ..offer.clone()
+            },
+            ResourceOffer {
+                resource_id: "moderation-audit:3:oversized".into(),
+                uncompressed_len: (crate::chat::protocol::batch::MAX_BATCH_UNCOMPRESSED_BYTES + 1)
+                    as u64,
+                ..offer
+            },
+        ] {
+            let mut transport = CapturedChatTransport::default();
+            transport
+                .push_incoming_frame(&Frame::new(
+                    ChatOp::ModerationAuditResource,
+                    4,
+                    Some(1),
+                    resource_offer_body(&invalid_offer),
+                ))
+                .expect("push invalid offer");
+            recv_chat_event(&mut transport).expect_err("invalid offer must fail closed");
+            assert!(transport.pending_resource_offers.is_empty());
+        }
+    }
+
+    #[test]
+    fn client_transport_decodes_dormant_message_revision_snapshots() {
+        let snapshot = crate::chat::protocol::MessageRevisionSnapshot {
+            target_event_ids: vec![10],
+            entries: vec![crate::chat::protocol::MessageRevisionSnapshotEntry {
+                target_event_id: 10,
+                latest_revision_event_id: 20,
+                action: crate::chat::protocol::MessageRevisionAction::Correct,
+                actor_user_id: 7,
+                at_unix: 2,
+                replacement: Some("corrected".into()),
+                revision_number: 1,
+            }],
+        };
+        let FrameBody::Fields(values) = snapshot.into_frame_body().expect("snapshot") else {
+            panic!("snapshot fields");
+        };
+        let batch = compressed_values_batch(&values).expect("batch");
+        let resource_id = "message-revisions:1:test".to_owned();
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::MessageRevisionSnapshotInline,
+                1,
+                Some(1),
+                compressed_values_body(&values).expect("inline body"),
+            ))
+            .expect("push inline");
+        transport.insert_resource(
+            resource_id.clone(),
+            compressed_values_payload(&values).expect("payload"),
+        );
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::MessageRevisionSnapshotResource,
+                2,
+                Some(1),
+                resource_offer_body(&ResourceOffer {
+                    resource_id,
+                    compression: super::super::protocol::Compression::Bzip2,
+                    uncompressed_len: batch.uncompressed_len,
+                    compressed_len: batch.bytes.len() as u64,
+                    purpose: "message-revisions:2:fixture".into(),
+                }),
+            ))
+            .expect("push resource");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("inline"),
+            Some(ChatLinkEvent::InlineBatch {
+                op: ChatOp::MessageRevisionSnapshotInline,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("resource"),
+            Some(ChatLinkEvent::ResourceBatch {
+                op: ChatOp::MessageRevisionSnapshotResource,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+    }
+
+    #[test]
+    fn client_transport_decodes_dormant_pin_snapshot_inline() {
+        let snapshot = crate::chat::protocol::PinSnapshot {
+            target_event_ids: vec![10],
+            entries: vec![crate::chat::protocol::PinSnapshotEntry {
+                target_event_id: 10,
+                pin_event_id: 20,
+                actor_user_id: 7,
+                pinned_at_unix: 2,
+            }],
+        };
+        let FrameBody::Fields(values) = snapshot.into_frame_body().expect("snapshot") else {
+            panic!("snapshot fields");
+        };
+        let mut transport = CapturedChatTransport::default();
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::PinSnapshot,
+                1,
+                Some(1),
+                compressed_values_body(&values).expect("inline body"),
+            ))
+            .expect("push inline");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("inline"),
+            Some(ChatLinkEvent::InlineBatch {
+                op: ChatOp::PinSnapshot,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
+    }
+
+    #[test]
     fn resource_offer_is_replayed_after_delayed_resource_arrives() {
         let values = vec![FrameValue::String("late history".into())];
         let resource_id = "history:1:late".to_owned();
@@ -518,6 +864,41 @@ mod tests {
 
         assert!(error.to_string().contains("purpose mismatch"));
         assert!(transport.pending_resource_offers.is_empty());
+    }
+
+    #[test]
+    fn recent_history_resource_purpose_matches_server_sync_contract() {
+        let values = vec![FrameValue::String("recent history".into())];
+        let batch = compressed_values_batch(&values).expect("resource batch");
+        let resource_id = "recent:1:fixture".to_owned();
+        let mut transport = CapturedChatTransport::default();
+        transport.insert_resource(
+            resource_id.clone(),
+            compressed_values_payload(&values).expect("resource payload"),
+        );
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::HistoryResourceOffer,
+                1,
+                Some(1),
+                resource_offer_body(&ResourceOffer {
+                    resource_id,
+                    compression: super::super::protocol::Compression::Bzip2,
+                    uncompressed_len: batch.uncompressed_len,
+                    compressed_len: batch.bytes.len() as u64,
+                    purpose: "recent".into(),
+                }),
+            ))
+            .expect("push recent offer");
+
+        assert!(matches!(
+            recv_chat_event(&mut transport).expect("recent history resource"),
+            Some(ChatLinkEvent::ResourceBatch {
+                op: ChatOp::HistoryResourceOffer,
+                values: decoded,
+                ..
+            }) if decoded == values
+        ));
     }
 
     #[test]

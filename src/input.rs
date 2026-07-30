@@ -156,6 +156,7 @@ pub enum InputTarget {
     SettingsIdentityPath,
     SettingsReticulumConfigPath,
     DiagnosticsKnownDestinationsPath,
+    OperationsSearch,
     SettingsLogMaxBytes,
     SettingsLogRetainFiles,
     SettingsLogLoadRecentEntries,
