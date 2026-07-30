@@ -135,6 +135,10 @@ evidence. The reserved durable-intent operation has a bounded live sender and
 exact typed acknowledgement correlation. The desktop has a bounded correction
 draft separate from the ordinary composer, explicit deletion confirmation,
 durable prepare-before-send actions, and author/moderator/mute/depth checks.
+omenchatd returns the authoritative revision event to the capable originating
+Link as well as other capable joined Links, so the editor updates from the
+same validated delta as every other client. The acknowledgement remains
+mutation-correlation evidence and exact replay does not fan out again.
 Those controls require authoritative target evidence plus explicitly
 negotiated `durable-mutations-v1` and `message-revisions-v1`. The client
 requests the revision capability only with its persistent client instance
@@ -239,6 +243,9 @@ Pin/unpin controls require current moderator/administrator role, joined-room
 membership, retained target eligibility, exact-target authority, durable
 identity, and both negotiated capabilities. Intent is persisted before send;
 an ACK is presented only as accepted pending an authoritative room update.
+That authoritative pin event is returned to the capable originating Link as
+well as other capable joined Links; exact replay returns only its original
+result.
 Older, base-only, downgraded, or unsolicited peers cannot activate them.
 
 An offline non-destructive schema-7 downgrade artifact can be created with

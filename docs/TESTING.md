@@ -4261,7 +4261,9 @@ codecs preserve the same correction bytes. Client and server tests prove
 explicit request/accept dependency, unsolicited acceptance rejection,
 downgrade clearing, and base-only peer isolation. The server-full focus also
 covers persistence/execution, Link-scoped fan-out, history snapshots, replay
-suppression, and retirement.
+suppression, and retirement. Fan-out includes the capability-bound origin, so
+the editing client consumes the same authoritative revision event as its
+peers; exact replay returns another acknowledgement without another event.
 The desktop-dev focus covers the separate immutable-event revision projection,
 stable item/byte bounds, additive cache and restart recovery, transactional
 capacity rollback, ordered/idempotent deltas, authoritative snapshots,
@@ -4509,7 +4511,9 @@ snapshots, and capable-room-only fan-out use:
 These tests bind the internal Link capability state explicitly. After the
 separate activation slice, production negotiation tests prove the desktop
 requests `room-pins-v1` only with durable identity and omenchatd refuses a
-pin-only request.
+pin-only request. The capable origin and another capable room Link each receive
+one authoritative event; legacy and identity-replaced Links receive none, and
+exact replay does not fan out again.
 
 The dormant desktop projection, identity-scoped SQLite cache, restart-stale
 authority, inline snapshot decoding, and read-only timeline labels use:

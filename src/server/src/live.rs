@@ -1161,9 +1161,9 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             if broadcast.op == ChatOp::ReactionEvent {
                 self.broadcast_reaction_event(&broadcast)?;
             } else if broadcast.op == ChatOp::MessageRevisionEvent {
-                self.broadcast_message_revision_event(link_id, &broadcast)?;
+                self.broadcast_message_revision_event(&broadcast)?;
             } else if broadcast.op == ChatOp::PinEvent {
-                self.broadcast_pin_event(link_id, &broadcast)?;
+                self.broadcast_pin_event(&broadcast)?;
             } else {
                 self.broadcast_room_event(link_id, &broadcast)?;
             }
@@ -1233,7 +1233,6 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
 
     fn broadcast_message_revision_event(
         &mut self,
-        origin_link_id: LinkId,
         response: &crate::protocol::Frame,
     ) -> ServerResult<()> {
         if response.op != ChatOp::MessageRevisionEvent {
@@ -1246,7 +1245,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             .link_rooms
             .iter()
             .filter_map(|(link_id, joined_room_id)| {
-                (*link_id != origin_link_id && *joined_room_id == room_id).then_some(*link_id)
+                (*joined_room_id == room_id).then_some(*link_id)
             })
             .filter(|link_id| {
                 let Some(binding) = self.durable_sessions.get(link_id) else {
@@ -1266,11 +1265,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         Ok(())
     }
 
-    fn broadcast_pin_event(
-        &mut self,
-        origin_link_id: LinkId,
-        response: &crate::protocol::Frame,
-    ) -> ServerResult<()> {
+    fn broadcast_pin_event(&mut self, response: &crate::protocol::Frame) -> ServerResult<()> {
         if response.op != ChatOp::PinEvent {
             return Ok(());
         }
@@ -1281,7 +1276,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             .link_rooms
             .iter()
             .filter_map(|(link_id, joined_room_id)| {
-                (*link_id != origin_link_id && *joined_room_id == room_id).then_some(*link_id)
+                (*joined_room_id == room_id).then_some(*link_id)
             })
             .filter(|link_id| {
                 let Some(binding) = self.durable_sessions.get(link_id) else {
@@ -3618,6 +3613,11 @@ mod tests {
         for link_id in [origin_link, capable_link, legacy_link, wrong_identity_link] {
             live.link_rooms.insert(link_id, 1);
         }
+        let origin_peer = ServerPeer {
+            identity_hash: b"revision-origin".to_vec(),
+            display_name: "Origin".into(),
+            lxmf_destination: None,
+        };
         let capable_peer = ServerPeer {
             identity_hash: b"revision-capable".to_vec(),
             display_name: "Capable".into(),
@@ -3633,10 +3633,23 @@ mod tests {
             display_name: "Replacement".into(),
             lxmf_destination: None,
         };
+        live.peers.insert(origin_link, origin_peer.clone());
         live.peers.insert(capable_link, capable_peer.clone());
         live.peers.insert(legacy_link, legacy_peer.clone());
         live.peers
             .insert(wrong_identity_link, mismatched_peer.clone());
+        live.durable_sessions.insert(
+            origin_link,
+            DurableSessionBinding {
+                identity_hash: origin_peer.identity_hash,
+                client_instance_id: ClientInstanceId::new([0x74; 16]),
+                durable_notice_ack: true,
+                reply_mentions: true,
+                reactions: false,
+                message_revisions: true,
+                pins: false,
+            },
+        );
         live.durable_sessions.insert(
             capable_link,
             DurableSessionBinding {
@@ -3674,19 +3687,30 @@ mod tests {
             },
         );
 
-        live.broadcast_message_revision_event(
-            origin_link,
-            &Frame::new(ChatOp::MessageRevisionEvent, 9, Some(1), FrameBody::Empty),
-        )
+        live.broadcast_message_revision_event(&Frame::new(
+            ChatOp::MessageRevisionEvent,
+            9,
+            Some(1),
+            FrameBody::Empty,
+        ))
         .expect("message revision fanout");
-        assert_eq!(live.transport().frames.len(), 1);
-        assert_eq!(live.transport().frames[0].link_id, capable_link);
-        assert_eq!(
-            decode_frame(&live.transport().frames[0].bytes)
-                .expect("captured message revision")
-                .op,
-            ChatOp::MessageRevisionEvent
-        );
+        assert_eq!(live.transport().frames.len(), 2);
+        let mut recipients = live
+            .transport()
+            .frames
+            .iter()
+            .map(|frame| {
+                assert_eq!(
+                    decode_frame(&frame.bytes)
+                        .expect("captured message revision")
+                        .op,
+                    ChatOp::MessageRevisionEvent
+                );
+                frame.link_id
+            })
+            .collect::<Vec<_>>();
+        recipients.sort_unstable();
+        assert_eq!(recipients, vec![origin_link, capable_link]);
     }
 
     #[test]
@@ -3700,6 +3724,11 @@ mod tests {
         for link_id in [origin_link, capable_link, legacy_link, wrong_identity_link] {
             live.link_rooms.insert(link_id, 1);
         }
+        let origin_peer = ServerPeer {
+            identity_hash: b"pin-origin".to_vec(),
+            display_name: "Origin".into(),
+            lxmf_destination: None,
+        };
         let capable_peer = ServerPeer {
             identity_hash: b"pin-capable".to_vec(),
             display_name: "Capable".into(),
@@ -3715,10 +3744,23 @@ mod tests {
             display_name: "Replacement".into(),
             lxmf_destination: None,
         };
+        live.peers.insert(origin_link, origin_peer.clone());
         live.peers.insert(capable_link, capable_peer.clone());
         live.peers.insert(legacy_link, legacy_peer.clone());
         live.peers
             .insert(wrong_identity_link, replacement_peer.clone());
+        live.durable_sessions.insert(
+            origin_link,
+            DurableSessionBinding {
+                identity_hash: origin_peer.identity_hash,
+                client_instance_id: ClientInstanceId::new([0x80; 16]),
+                durable_notice_ack: true,
+                reply_mentions: true,
+                reactions: true,
+                message_revisions: true,
+                pins: true,
+            },
+        );
         live.durable_sessions.insert(
             capable_link,
             DurableSessionBinding {
@@ -3756,19 +3798,23 @@ mod tests {
             },
         );
 
-        live.broadcast_pin_event(
-            origin_link,
-            &Frame::new(ChatOp::PinEvent, 9, Some(1), FrameBody::Empty),
-        )
-        .expect("pin fanout");
-        assert_eq!(live.transport().frames.len(), 1);
-        assert_eq!(live.transport().frames[0].link_id, capable_link);
-        assert_eq!(
-            decode_frame(&live.transport().frames[0].bytes)
-                .expect("captured pin")
-                .op,
-            ChatOp::PinEvent
-        );
+        live.broadcast_pin_event(&Frame::new(ChatOp::PinEvent, 9, Some(1), FrameBody::Empty))
+            .expect("pin fanout");
+        assert_eq!(live.transport().frames.len(), 2);
+        let mut recipients = live
+            .transport()
+            .frames
+            .iter()
+            .map(|frame| {
+                assert_eq!(
+                    decode_frame(&frame.bytes).expect("captured pin").op,
+                    ChatOp::PinEvent
+                );
+                frame.link_id
+            })
+            .collect::<Vec<_>>();
+        recipients.sort_unstable();
+        assert_eq!(recipients, vec![origin_link, capable_link]);
     }
 
     #[test]
@@ -3979,6 +4025,15 @@ mod tests {
                 })
                 .count(),
             2
+        );
+        assert_eq!(
+            decoded
+                .iter()
+                .filter(|(link_id, frame)| {
+                    *link_id == origin_link && frame.op == ChatOp::PinEvent
+                })
+                .count(),
+            1
         );
         assert_eq!(
             decoded
@@ -4252,6 +4307,15 @@ mod tests {
                 })
                 .count(),
             2
+        );
+        assert_eq!(
+            decoded
+                .iter()
+                .filter(|(link_id, frame)| {
+                    *link_id == origin_link && frame.op == ChatOp::MessageRevisionEvent
+                })
+                .count(),
+            1
         );
         assert_eq!(
             decoded
