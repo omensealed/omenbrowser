@@ -14,6 +14,8 @@ This is a narrow OMENchat correctness and presentation revision over
 - Moderation audit is an explicit authorized action with a close control.
   Unauthorized sessions no longer show an unusable audit panel.
 - Remote user names retain mention toggling without the room-button border.
+- Passive room upload policy no longer occupies a persistent composer banner;
+  upload enforcement and actionable disabled/rejection feedback remain.
 - The release reaction smoke now waits for actual Resource snapshot evidence
   after the live delta instead of returning early from already-correct client
   state.
