@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{AppError, AppResult};
 use crate::messaging::{
     AttachmentSummary, DeliveryMode, MessageEnvelope, MessageSummary, NativeLxmfReplyTicket,
-    TransportMethod as AppTransportMethod,
+    TransportMethod as AppTransportMethod, LXMF_SOURCE_AUTHENTICATED_FIELD,
 };
 use crate::storage::files::atomic_replace;
 
@@ -712,6 +712,7 @@ fn decode_wire_message_inner(
     source_identity: Option<&Identity>,
 ) -> AppResult<MessageSummary> {
     let (wire, message) = decode_wire_and_message(bytes)?;
+    let mut source_authenticated = false;
     if let Some(source_identity) = source_identity {
         let expected_source = lxmf_delivery_destination_hash(source_identity);
         if wire.source != expected_source {
@@ -726,6 +727,7 @@ fn decode_wire_message_inner(
                 "LXMF signature is missing or invalid".into(),
             ));
         }
+        source_authenticated = true;
     }
     let peer_hash = hex16(&wire.source);
     let message_id = hex32(&wire.try_message_id().map_err(|err| {
@@ -736,7 +738,10 @@ fn decode_wire_message_inner(
     } else {
         attachment_summaries_from_fields(message.fields.as_ref())?
     };
-    let fields = native_lxmf_summary_fields_from_message_fields(message.fields.as_ref());
+    let mut fields = native_lxmf_summary_fields_from_message_fields(message.fields.as_ref());
+    if source_authenticated {
+        fields.insert(LXMF_SOURCE_AUTHENTICATED_FIELD.into(), "true".into());
+    }
 
     Ok(MessageSummary {
         peer_hash: peer_hash.clone(),
@@ -2838,6 +2843,7 @@ mod tests {
         assert!(summary.incoming);
         assert!(summary.unread);
         assert!(summary.message_id.is_some());
+        assert!(!summary.fields.contains_key(LXMF_SOURCE_AUTHENTICATED_FIELD));
     }
 
     #[test]
@@ -2866,6 +2872,76 @@ mod tests {
 
         assert_eq!(summary.peer_hash, source);
         assert_eq!(summary.title, "Verified");
+        assert_eq!(
+            summary
+                .fields
+                .get(LXMF_SOURCE_AUTHENTICATED_FIELD)
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[cfg(feature = "chat-client")]
+    #[test]
+    fn signed_native_invitation_wire_enters_preview_without_history_or_action() {
+        let provider = NativeReticulumIdentityProvider;
+        let private = provider
+            .create_identity_material("invitation-sender")
+            .expect("native identity");
+        let signer = PrivateIdentity::from_private_key_bytes(&private).expect("signer");
+        let source = hex16_bytes(&lxmf_delivery_destination_hash(signer.as_identity()));
+        let payload = crate::chat::handoff::OmenChatInvitePayload::new(
+            DEST,
+            "lobby",
+            "Lobby",
+            "Verified inviter",
+            &source,
+        );
+        let envelope = MessageEnvelope {
+            peer_hash: DEST.into(),
+            title: crate::chat::handoff::OMENCHAT_INVITE_PROTOCOL.into(),
+            body: String::from_utf8(payload.encode().expect("encode invitation"))
+                .expect("JSON UTF-8"),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: None,
+            attachments: Vec::new(),
+        };
+        let outbound = build_outbound_message(&envelope, &source).expect("outbound invitation");
+        let wire = encode_signed_wire_message(&outbound, &private).expect("signed invitation");
+        let summary = decode_verified_wire_message(&wire, signer.as_identity())
+            .expect("production invitation verification");
+
+        let root = CurrentLxmfRoot::new();
+        let paths = crate::config::AppPaths::from_root(root.0.clone());
+        paths.ensure().expect("isolated app paths");
+        let mut app = crate::app::App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        });
+        assert!(
+            app.enqueue_runtime_event(crate::runtime::RuntimeBusEvent::MessageReceived(summary,))
+        );
+        assert_eq!(app.drain_internal_events(), 1);
+
+        let preview = app
+            .omenchat_lxmf_invitation_preview
+            .pending()
+            .expect("authenticated invitation preview");
+        assert_eq!(preview.payload.server_destination, DEST);
+        assert_eq!(preview.payload.inviter_destination, source);
+        assert_eq!(
+            preview.sender_evidence,
+            crate::chat::handoff::OmenChatInviteSenderEvidence::AuthenticatedMatch
+        );
+        assert!(app
+            .messaging_service
+            .conversation(&source)
+            .expect("empty control-message thread")
+            .messages
+            .is_empty());
+        assert!(app.status.task.contains("no connection has been opened"));
     }
 
     #[test]
@@ -3521,6 +3597,13 @@ mod tests {
         assert_eq!(summary.peer_hash, hex16_bytes(&sender_hash));
         assert_eq!(summary.title, "Verified propagated");
         assert_eq!(summary.transport_method, AppTransportMethod::Propagated);
+        assert_eq!(
+            summary
+                .fields
+                .get(LXMF_SOURCE_AUTHENTICATED_FIELD)
+                .map(String::as_str),
+            Some("true")
+        );
         assert_eq!(
             summary
                 .fields

@@ -10,7 +10,10 @@ sample_seconds="${SAMPLE_SECONDS:-600}"
 interval_seconds="${INTERVAL_SECONDS:-1}"
 headless="${HEADLESS:-auto}"
 recurring_app_messages_per_minute="${RECURRING_APP_MESSAGES_PER_MINUTE:-pending}"
+recurring_app_messages_source="${RECURRING_APP_MESSAGES_SOURCE:-unmeasured}"
 perf_record_seconds="${PERF_RECORD_SECONDS:-0}"
+measurement_section="${MEASUREMENT_SECTION:-browser}"
+measurement_preset="${MEASUREMENT_PRESET:-normal}"
 output="${1:-/tmp/omenbrowser-rs-idle-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 case "$warmup_seconds:$sample_seconds:$interval_seconds" in
@@ -26,6 +29,14 @@ case "$recurring_app_messages_per_minute" in
 esac
 case "$perf_record_seconds" in
   ''|*[!0-9]*) echo "PERF_RECORD_SECONDS must be a non-negative integer" >&2; exit 2 ;;
+esac
+case "$measurement_section" in
+  browser|monitoring) ;;
+  *) echo "MEASUREMENT_SECTION must be browser or monitoring" >&2; exit 2 ;;
+esac
+case "$measurement_preset" in
+  normal|low-power) ;;
+  *) echo "MEASUREMENT_PRESET must be normal or low-power" >&2; exit 2 ;;
 esac
 if [[ ! -x "$binary" ]]; then
   echo "release binary is missing or not executable: $binary" >&2
@@ -80,6 +91,26 @@ cleanup() {
   rm -rf "$session_root"
 }
 trap cleanup EXIT INT TERM
+
+if [[ "$measurement_section" != "browser" || "$measurement_preset" != "normal" ]]; then
+  command -v jq >/dev/null 2>&1 || {
+    echo "missing idle measurement fixture tool: jq" >&2
+    exit 2
+  }
+  mkdir -p "$app_root"
+  low_power=false
+  if [[ "$measurement_preset" == "low-power" ]]; then low_power=true; fi
+  printf '{"reticulum_instance_mode":"external","periodic_lxmf_sync":false,"ui":{"low_power_mode":%s,"active_workspace_section":"%s"}}\n' \
+    "$low_power" "$measurement_section" >"$app_root/settings.json"
+  jq -e \
+    --argjson low_power "$low_power" \
+    --arg section "$measurement_section" \
+    '.reticulum_instance_mode == "external" and
+     .periodic_lxmf_sync == false and
+     .ui.low_power_mode == $low_power and
+     .ui.active_workspace_section == $section' \
+    "$app_root/settings.json" >/dev/null
+fi
 
 if [[ "$headless" == "1" ]]; then
   display_number=$((420 + ($$ % 200)))
@@ -235,13 +266,31 @@ if [[ "$app_status" -ne 0 ]]; then
   exit 1
 fi
 
+if [[ "$measurement_section" != "browser" || "$measurement_preset" != "normal" ]]; then
+  expected_low_power=false
+  if [[ "$measurement_preset" == "low-power" ]]; then expected_low_power=true; fi
+  jq -e \
+    --argjson low_power "$expected_low_power" \
+    --arg section "$measurement_section" \
+    '.reticulum_instance_mode == "external" and
+     .ui.low_power_mode == $low_power and
+     .ui.active_workspace_section == $section' \
+    "$app_root/settings.json" >/dev/null || {
+      echo "desktop did not preserve the isolated measurement policy" >&2
+      exit 1
+    }
+fi
+
 {
   printf 'utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'binary=%s\n' "$(realpath "$binary")"
   printf 'binary_bytes=%s\n' "$(stat -c %s "$binary")"
+  printf 'binary_sha256=%s\n' "$(sha256sum "$binary" | awk '{print $1}')"
   printf 'warmup_seconds=%s\nsample_seconds=%s\ninterval_seconds=%s\n' "$warmup_seconds" "$sample_seconds" "$interval_seconds"
   printf 'headless=%s\n' "$headless"
+  printf 'measurement_section=%s\nmeasurement_preset=%s\n' "$measurement_section" "$measurement_preset"
   printf 'recurring_app_messages_per_minute=%s\n' "$recurring_app_messages_per_minute"
+  printf 'recurring_app_messages_source=%s\n' "$recurring_app_messages_source"
   printf 'perf_record_seconds=%s\nperf_record_status=%s\n' "$perf_record_seconds" "$perf_record_status"
   printf 'display=%s\nwayland_display=%s\n' "${DISPLAY:-}" "${WAYLAND_DISPLAY:-}"
   if [[ -n "$window_ns" ]]; then printf 'startup_to_window_ms=%s\n' "$(( (window_ns - start_ns) / 1000000 ))"; else printf 'startup_to_window_ms=pending\n'; fi

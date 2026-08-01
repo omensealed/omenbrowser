@@ -228,6 +228,7 @@ cargo fmt --check
 bash -n scripts/test-desktop-shutdown.sh
 bash -n scripts/measure-desktop-idle.sh
 bash -n scripts/compare-desktop-idle.sh
+bash -n scripts/measure-low-power-desktop.sh
 bash -n scripts/measure-pane-stress.sh
 bash -n scripts/measure-durable-mutation-retention.sh
 bash -n scripts/measure-omenchatd-backpressure.sh
@@ -241,6 +242,8 @@ bash -n scripts/test-tui-lifecycle.sh
 bash -n scripts/test-tui-real-pty.sh
 bash -n scripts/test-native-cli-identity.sh
 bash -n scripts/package-macos.sh
+bash -n scripts/package-linux-arm64-omenchatd.sh
+bash -n scripts/test-linux-arm64-headless.sh
 
 echo "== TUI dependency check =="
 bash scripts/verify-tui-dependencies.sh

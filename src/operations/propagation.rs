@@ -12,6 +12,51 @@ use super::{
 
 const UNKNOWN_PROPAGATION_TARGET: &str = "selected propagation node";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PropagationOperationCounts {
+    pub queued: usize,
+    pub in_flight: usize,
+    pub settled: usize,
+    pub failed: usize,
+    pub expired: usize,
+    pub cancelled: usize,
+    pub uncertain: usize,
+}
+
+pub fn propagation_operation_counts(history: &OperationHistory) -> PropagationOperationCounts {
+    let mut counts = PropagationOperationCounts::default();
+    for record in history.records().filter(|record| {
+        matches!(
+            record.id.domain,
+            OperationDomain::LxmfMessage | OperationDomain::PropagationSync
+        )
+    }) {
+        match record.state {
+            OperationState::Waiting | OperationState::Queued => counts.queued += 1,
+            OperationState::Dispatching
+            | OperationState::TransportAccepted
+            | OperationState::ReceiptObserved
+            | OperationState::Transferring
+            | OperationState::Active
+            | OperationState::Reconciling
+            | OperationState::EventGap => counts.in_flight += 1,
+            OperationState::Delivered | OperationState::Completed => counts.settled += 1,
+            OperationState::Failed | OperationState::Rejected => counts.failed += 1,
+            OperationState::Expired => counts.expired += 1,
+            OperationState::Cancelled => counts.cancelled += 1,
+        }
+        if record.authority == EvidenceAuthority::Uncertain
+            || matches!(
+                record.state,
+                OperationState::Reconciling | OperationState::EventGap
+            )
+        {
+            counts.uncertain += 1;
+        }
+    }
+    counts
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PropagationSyncOutcome<'a> {
     pub succeeded: bool,
@@ -364,6 +409,28 @@ mod tests {
         let records = history.records().collect::<Vec<_>>();
         assert_eq!(records.len(), 1);
         records[0]
+    }
+
+    #[test]
+    fn status_counts_are_domain_scoped_and_keep_uncertainty_orthogonal() {
+        let mut history = OperationHistory::default();
+        begin_propagation_sync(&mut history, 1, Some(NODE), 10).expect("queued");
+        begin_propagation_sync(&mut history, 2, Some(NODE), 10).expect("reconciling");
+        let mut reconciling = history
+            .records()
+            .find(|record| record.id == propagation_operation_id(2))
+            .expect("record")
+            .clone();
+        reconciling.state = OperationState::Reconciling;
+        reconciling.authority = EvidenceAuthority::Uncertain;
+        reconciling.updated_at_unix_ms = 11;
+        history.upsert(reconciling).expect("update");
+
+        let counts = propagation_operation_counts(&history);
+        assert_eq!(counts.queued, 1);
+        assert_eq!(counts.in_flight, 1);
+        assert_eq!(counts.uncertain, 1);
+        assert_eq!(counts.settled, 0);
     }
 
     #[test]

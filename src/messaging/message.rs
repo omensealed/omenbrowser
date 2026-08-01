@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 static OUTBOUND_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub const OUTBOUND_OPERATION_ID_MAX_BYTES: usize = 192;
+pub const LXMF_SOURCE_AUTHENTICATED_FIELD: &str = "native_lxmf_source_authenticated";
 pub const OUTBOUND_IDEMPOTENCY_FIELD: &str = "native_lxmf_sdk_idempotency_key";
 pub const OUTBOUND_CORRELATION_FIELD: &str = "native_lxmf_sdk_correlation_id";
 pub const OUTBOUND_TTL_FIELD: &str = "native_lxmf_sdk_ttl_ms";

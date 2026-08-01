@@ -189,6 +189,14 @@ mutex is released before signature/payload decoding and is never held across an
 await. Verification therefore adds no unbounded or async-worker CPU path.
 Rejections emit a redacted ingress diagnostic and never include key material.
 
+After successful source/destination matching and signature verification, the
+project-owned summary records `native_lxmf_source_authenticated=true`.
+Unverified decode helpers omit that field. This additive evidence lets later
+application-payload reducers distinguish a cryptographically authenticated
+LXMF sender from a destination merely claimed inside message content; it is not
+peer delivery evidence, trust, authorization, or proof that an external
+SDK/RPC backend applied the same verification path.
+
 This contract covers direct clean-transport link data/resources and decrypted
 propagation payloads. Propagated data is decrypted with the local recipient
 identity inside the same bounded worker, then its embedded source is resolved
@@ -309,6 +317,16 @@ isolated attachment root. OMENbrowser therefore does not expose a misleading
 would need capability negotiation, mixed-version behavior, and an explicit
 pre-transfer admission boundary before such a threshold becomes meaningful.
 
+The first dormant Resource-reference envelope is now defined under the proposed
+`omen-lxmf-resource-reference-v1` capability. It permits no automatic transfer,
+decode, or launch and has no runtime caller. Its application reference is a
+random offer/correlation identifier, not a Reticulum Resource hash: the locked
+0.9.6 public Resource API binds hashes and part requests to an active Link
+transfer rather than exposing a durable object fetch. A future authenticated
+accept exchange must start the actual Resource and bind its observed hash to
+the accepted offer. The detailed activation and storage gates are recorded in
+`docs/design/LXMF_RESOURCE_REFERENCE_ATTACHMENTS_CHECKPOINT.md`.
+
 Propagation-node diagnostics also project operational evidence already owned
 elsewhere in the application. The current single-flight refresh contributes
 its outcome, observation time, and cooldown remaining at snapshot time. The
@@ -401,13 +419,55 @@ without adding a per-message redraw timer. Legacy rows that already have both
 operation identifiers but no deadline receive one 24-hour migration window on
 their next explicit retry.
 
-The tagged 0.9 `RpcBackendClient` currently removes `ttl_ms`, idempotency, and
-correlation fields when translating its SDK request to `sdk_send_v2`. OMEN still
-sets the typed request and enforces the absolute deadline locally, while the
-embedded RPC bridge retains the fields. A live external-daemon test and an
-upstream transport fix remain required before claiming daemon-side TTL
-enforcement. A late authoritative terminal event may still correct local
-history after reconciliation.
+The pinned 0.9.6 `RpcBackendClient` removes `ttl_ms`, idempotency, correlation,
+and extensions when translating its SDK request to `sdk_send_v2`. Its public
+daemon request contract also has no field for an explicit reply ticket.
+OMEN's deterministic loopback capture test exercises the real published client
+and proves the following boundary:
+
+| External RPC send property | 0.9.6 result |
+|---|---|
+| source, destination, payload fields | preserved |
+| direct/propagated method | preserved |
+| stamp cost | preserved |
+| request a fresh ticket | preserved |
+| direct-to-propagated fallback choice | preserved |
+| TTL or absolute expiry | dropped |
+| idempotency key | dropped |
+| correlation identifier | dropped |
+| extensions | dropped |
+| explicit remembered reply ticket | unsupported by the public request |
+| cancellation identity | daemon-returned message ID is preserved |
+
+OMEN still sets the complete typed request, persists the operation identity,
+and rejects locally expired work before dispatch. That is local admission and
+reconciliation, not daemon-side TTL or duplicate suppression. Ordinary external
+RPC sends therefore remain usable, but their remote TTL, idempotency, and
+correlation guarantees are explicitly unproven. OMEN never automatically
+retries an uncertain external send. An explicit remembered reply ticket is
+rejected before opening the RPC connection because silently discarding it could
+change stamp policy. The embedded RPC bridge independently retains these
+fields. A late authoritative terminal event may still correct local history
+after reconciliation.
+
+The desktop and TUI diagnostics now project this distinction through one
+event-driven propagation/backend evidence model. It retains only the latest
+typed propagation status and summarizes the existing bounded operation history
+into queued, in-flight, settled, failed, expired, cancelled, and uncertain
+counts. Managed mode labels application TTL/idempotency/correlation separately
+from authoritative peer-delivery evidence. External mode explicitly labels the
+three daemon guarantees unproven and repeats the no-automatic-retry rule. The
+panel adds no worker, polling subscription, or retained status history.
+
+`authenticated_lxmf_source_evidence` is a separate runtime capability. The
+managed native decoder reports it only while the native LXMF transport is
+active and sets the per-message marker only after destination derivation and
+signature verification. Mock mode reports it unsupported. The published
+external SDK/RPC path remains unproven and its messages cannot create an
+OMENchat invitation preview merely by using the invitation title.
+
+The minimal reproducer and upstream contract evidence are recorded in
+`docs/upstream/LXMF_SDK_0_9_6_RPC_SEND_FIELD_REPRODUCER.md`.
 
 Cancellation preserves the upstream typed outcomes `accepted`,
 `already_terminal`, `not_found`, `too_late_to_cancel`, and `unsupported` at the

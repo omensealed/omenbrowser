@@ -9,6 +9,23 @@ use super::omenchat_desktop_state::OmenChatInvitationQr;
 use super::{DesktopApp, Message};
 
 impl DesktopApp {
+    pub(in crate::desktop) fn preview_lxmf_omenchat_invitation_at(
+        &mut self,
+        message: &crate::messaging::MessageSummary,
+        now_unix: u64,
+    ) -> Result<bool, crate::chat::handoff::OmenChatLxmfInviteAdmissionError> {
+        let recognized = self
+            .app
+            .omenchat_lxmf_invitation_preview
+            .admit_message_at(message, now_unix)?;
+        if recognized {
+            self.app.status.task =
+                "review the authenticated LXMF OMENchat invitation; opening remains disabled"
+                    .into();
+        }
+        Ok(recognized)
+    }
+
     pub(in crate::desktop) fn preview_omenchat_invitation(
         &mut self,
         value: &str,
@@ -163,6 +180,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::chat::OmenChatDescriptor;
+    use crate::desktop::OmenChatMessage;
     use crate::directory::DirectoryEntry;
     use crate::micron::render::HitAction;
 
@@ -195,6 +213,102 @@ mod tests {
         session.active_room.room_id = 7;
         session.active_room.joined = true;
         (desktop, session_id)
+    }
+
+    fn lxmf_invitation_message(authenticated: bool) -> crate::messaging::MessageSummary {
+        let mut payload = crate::chat::handoff::OmenChatInvitePayload::new(
+            DESTINATION,
+            "lobby",
+            "Lobby",
+            "Inviter",
+            IDENTITY,
+        );
+        payload.requested_role = crate::chat::handoff::OmenChatInviteRole::Mod;
+        payload.intro_message = Some("Review this invitation".into());
+        let mut fields = std::collections::BTreeMap::new();
+        if authenticated {
+            fields.insert(
+                crate::messaging::LXMF_SOURCE_AUTHENTICATED_FIELD.into(),
+                "true".into(),
+            );
+        }
+        crate::messaging::MessageSummary {
+            peer_hash: IDENTITY.into(),
+            peer_label: "inviter".into(),
+            title: crate::chat::handoff::OMENCHAT_INVITE_PROTOCOL.into(),
+            content: String::from_utf8(payload.encode().expect("encode LXMF invite"))
+                .expect("JSON UTF-8"),
+            timestamp: 100.0,
+            transport_method: crate::messaging::TransportMethod::Direct,
+            delivered: false,
+            failed: false,
+            incoming: true,
+            unread: true,
+            message_id: Some("invite-message".into()),
+            fields,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn lxmf_invitation_preview_and_dismiss_never_open_join_or_trust() {
+        let (mut desktop, _) = desktop_with_session("omenbrowser-rs-lxmf-invitation-preview");
+        let sessions_before = desktop.omenchat.chat_client.sessions().len();
+        let directory_before = desktop.app.directory_state.entries.clone();
+
+        assert!(desktop
+            .preview_lxmf_omenchat_invitation_at(&lxmf_invitation_message(true), 100)
+            .expect("authenticated preview"));
+        let preview = desktop
+            .app
+            .omenchat_lxmf_invitation_preview
+            .pending()
+            .expect("pending LXMF preview");
+        assert_eq!(preview.payload.server_destination, DESTINATION);
+        assert_eq!(preview.payload.room_id, "lobby");
+        assert_eq!(
+            preview.sender_evidence,
+            crate::chat::handoff::OmenChatInviteSenderEvidence::AuthenticatedMatch
+        );
+        assert_eq!(
+            desktop.omenchat.chat_client.sessions().len(),
+            sessions_before
+        );
+        assert_eq!(desktop.app.directory_state.entries, directory_before);
+        assert!(desktop.app.status.task.contains("opening remains disabled"));
+
+        let _task = desktop
+            .dispatch_omenchat_message(Message::OmenChat(OmenChatMessage::DismissLxmfInvitation))
+            .expect("dismiss route");
+        assert!(desktop
+            .app
+            .omenchat_lxmf_invitation_preview
+            .pending()
+            .is_none());
+        assert_eq!(
+            desktop.omenchat.chat_client.sessions().len(),
+            sessions_before
+        );
+        assert_eq!(desktop.app.directory_state.entries, directory_before);
+        assert!(desktop.app.status.task.contains("no connection was opened"));
+    }
+
+    #[test]
+    fn unauthenticated_lxmf_invitation_never_enters_desktop_preview() {
+        let (mut desktop, _) =
+            desktop_with_session("omenbrowser-rs-unauthenticated-lxmf-invitation");
+        let error = desktop
+            .preview_lxmf_omenchat_invitation_at(&lxmf_invitation_message(false), 100)
+            .expect_err("unverified message must fail");
+        assert!(matches!(
+            error,
+            crate::chat::handoff::OmenChatLxmfInviteAdmissionError::UnauthenticatedMessage
+        ));
+        assert!(desktop
+            .app
+            .omenchat_lxmf_invitation_preview
+            .pending()
+            .is_none());
     }
 
     #[test]

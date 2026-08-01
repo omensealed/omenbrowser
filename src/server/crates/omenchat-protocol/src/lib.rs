@@ -31,6 +31,36 @@ pub type Revision = u64;
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const PROTOCOL_NAME: &str = "omenchat-v0.1";
 
+/// Capabilities requested by every durable-capable current client build.
+///
+/// Product-feature-gated room policy and moderation capabilities are appended
+/// separately. Keeping this list in the shared wire crate lets both workspaces
+/// detect capability drift without duplicating string literals.
+pub const BASE_DURABLE_SESSION_CAPABILITIES: [&str; 6] = [
+    DURABLE_MUTATION_CAPABILITY,
+    DURABLE_NOTICE_ACK_CAPABILITY,
+    REPLY_MENTIONS_CAPABILITY,
+    REACTIONS_CAPABILITY,
+    MESSAGE_REVISIONS_CAPABILITY,
+    ROOM_PINS_CAPABILITY,
+];
+
+/// Complete capability vocabulary implemented by the current protocol-v1
+/// client/server pair. Negotiation remains explicit; this is not an
+/// advertisement and does not activate a capability by itself.
+pub const KNOWN_SESSION_CAPABILITIES: [&str; 10] = [
+    DURABLE_MUTATION_CAPABILITY,
+    DURABLE_NOTICE_ACK_CAPABILITY,
+    REPLY_MENTIONS_CAPABILITY,
+    REACTIONS_CAPABILITY,
+    MESSAGE_REVISIONS_CAPABILITY,
+    ROOM_PINS_CAPABILITY,
+    ANNOUNCEMENT_ROOMS_CAPABILITY,
+    ROOM_SLOW_MODE_CAPABILITY,
+    ROOM_MEDIA_POLICY_CAPABILITY,
+    MODERATION_AUDIT_CAPABILITY,
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Compression {
@@ -381,5 +411,23 @@ mod tests {
         assert_eq!(fixtures::v0_9_6_3::PROTOCOL_VERSION, PROTOCOL_VERSION);
         assert_eq!(fixtures::v0_9_6_3::PROTOCOL_NAME, PROTOCOL_NAME);
         assert!(!fixtures::v0_9_6_3::ORDINARY_ROOM_MESSAGE.is_empty());
+    }
+
+    #[test]
+    fn authoritative_capability_vocabulary_is_unique_and_within_wire_bounds() {
+        let unique = KNOWN_SESSION_CAPABILITIES
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), KNOWN_SESSION_CAPABILITIES.len());
+        assert!(KNOWN_SESSION_CAPABILITIES.len() <= SESSION_CAPABILITY_MAX_ITEMS);
+        assert!(KNOWN_SESSION_CAPABILITIES.iter().all(|capability| {
+            capability.is_ascii()
+                && !capability.is_empty()
+                && capability.len() <= SESSION_CAPABILITY_MAX_BYTES
+        }));
+        assert!(BASE_DURABLE_SESSION_CAPABILITIES
+            .iter()
+            .all(|capability| unique.contains(capability)));
     }
 }

@@ -1,18 +1,18 @@
 # Reticulum 0.9 UDP Resource transmit-buffer report
 
-Date verified: 2026-07-16
+Date last verified: 2026-07-31
 
-Affected package: `reticulum-rs-transport` 0.9.0 through 0.9.5
+Current affected package: crates.io `reticulum-rs-transport = 0.9.6`,
+checksum
+`149873f10b5c575718976ceb6be2dfc25a6adb0d4df012b7b80b135af40c788e`
 
-Also observed in: upstream tags `v0.9.1`, `v0.9.5`, and commit
-`7cafc5b4be21ff4f777d0f2300cfb79e5d0da23c` on `main`
+Historical affected packages: 0.9.0 through 0.9.5.
 
-Upstream `v0.9.5` was published on 2026-07-16 at 21:25 UTC. Its tagged UDP
-worker still declares `BUFFER_SIZE` as `size_of::<Packet>() * 3` and silently
-ignores `Packet::serialize` failure, so it is not an adoption candidate for
-this blocker. OMEN now follows the maintainer-approved exact 0.9.5 family for
-parity work, while retaining this known-red Resource gate and the isolated
-candidate patch as upstream evidence.
+The exact locked 0.9.6 registry source still declares `BUFFER_SIZE` as
+`size_of::<Packet>() * 3` in `src/iface/udp.rs`. OMEN retains the known-red
+Resource gates and this report as upstream-ready evidence. It does not carry a
+fork, patch override, protocol-limit reduction, or application fragmentation
+workaround.
 
 Suggested upstream issue title:
 
@@ -52,9 +52,11 @@ cargo test --locked --no-default-features --features server-headless \
   -- --ignored --nocapture
 ```
 
-Unmodified 0.9.0 and 0.9.5 result:
+Unmodified locked 0.9.6 result on 2026-07-31:
 
 - receiver accepts the Resource advertisement;
+- the advertisement declares 4,176 transfer bytes, 4,117 data bytes, and nine
+  parts;
 - receiver sends ten valid encrypted Resource requests;
 - sender diagnostics report `sender_present=true`, `built=4`, and
   `responses=4` for every request;
@@ -140,8 +142,9 @@ pinned Python UDP/Resource interoperability, dependency-source checks, and the
 Resource performance measurements. Do not mark UDP Resource parity complete
 from this temporary candidate alone.
 
-For v0.9.5-1, the maintainer classifies this unchanged published-0.9.5 defect
-as a documented upstream limitation rather than an OMEN release blocker. The
-known-red tests and this adoption gate remain unchanged, and release notes must
-not claim maximum UDP Resource parity. OMEN will wait for an immutable upstream
-release and will not submit, fork, or carry the candidate patch in production.
+For the current 0.9.6-aligned product, the maintainer classifies this unchanged
+published defect as a documented upstream limitation rather than an OMEN
+release blocker. The known-red tests and adoption gate remain unchanged, and
+release notes must not claim maximum UDP Resource parity. OMEN will wait for an
+immutable upstream release and will not submit, fork, or carry the candidate
+patch in production.

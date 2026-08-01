@@ -114,6 +114,7 @@ pub enum RuntimeCapability {
     Stamps,
     PropagationStatus,
     Attachments,
+    AuthenticatedLxmfSourceEvidence,
     SharedInstance,
     PathMetadata,
     InterfaceMutation,

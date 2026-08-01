@@ -3,8 +3,12 @@
 //! Release and packaging gates consume this output, so keep feature names and
 //! ordering stable unless those consumers are migrated in the same change.
 
-const COMPILED_FEATURES: [(&str, bool); 11] = [
+const COMPILED_FEATURES: [(&str, bool); 12] = [
     ("desktop-product", cfg!(feature = "desktop-product")),
+    (
+        "desktop-product-static-media",
+        cfg!(feature = "desktop-product-static-media"),
+    ),
     ("desktop-dev", cfg!(feature = "desktop-dev")),
     ("desktop-test", cfg!(feature = "desktop-test")),
     ("mock-runtime", cfg!(feature = "mock-runtime")),
@@ -36,6 +40,8 @@ pub fn product_profile() -> &'static str {
         "desktop-dev"
     } else if cfg!(feature = "desktop-product") {
         "desktop-product"
+    } else if cfg!(feature = "desktop-product-static-media") {
+        "desktop-product-static-media"
     } else {
         "custom"
     }
@@ -121,6 +127,8 @@ mod tests {
             "desktop-dev"
         } else if cfg!(feature = "desktop-product") {
             "desktop-product"
+        } else if cfg!(feature = "desktop-product-static-media") {
+            "desktop-product-static-media"
         } else {
             "custom"
         };

@@ -6,7 +6,7 @@ crate version or a saved mode name.
 
 ## Managed integrated mode
 
-`reticulum_instance_mode = "managed"` is the supported v0.9.6-5 product mode.
+`reticulum_instance_mode = "managed"` is the supported v0.9.6-6 product mode.
 OMENbrowser owns the runtime lifecycle, identity attachment, configured
 interfaces, bounded event workers, and orderly shutdown. The diagnostics
 lifecycle and capability snapshots report what that active adapter actually
@@ -102,7 +102,7 @@ owns interfaces and identities before external mode can start network work.
 ## Migration and rollback
 
 Existing external-mode configuration is preserved without conversion. To use
-the integrated v0.9.6-5 runtime, select Managed and restart. Do not delete
+the integrated v0.9.6-6 runtime, select Managed and restart. Do not delete
 identity, configuration, history, or cache data. Rolling back this safety gate
 is source-only, but should not be done without a tested shared backend because
 the former behavior launched an integrated runtime while labeling it External.

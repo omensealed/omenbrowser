@@ -47,6 +47,12 @@ impl DesktopApp {
                     "OMENchat invitation cancelled; no connection was opened".into();
                 Ok(Task::none())
             }
+            Message::OmenChat(OmenChatMessage::DismissLxmfInvitation) => {
+                self.app.omenchat_lxmf_invitation_preview.cancel();
+                self.app.status.task =
+                    "LXMF OMENchat invitation dismissed; no connection was opened".into();
+                Ok(Task::none())
+            }
             Message::OmenChat(OmenChatMessage::ToggleRooms) => {
                 self.update_toggle_omenchat_rooms();
                 Ok(Task::none())

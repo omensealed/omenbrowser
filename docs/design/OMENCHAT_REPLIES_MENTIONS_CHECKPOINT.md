@@ -1,9 +1,16 @@
 # OMENchat replies and mentions checkpoint
 
-Status: implementation in progress; server/client storage dormant, no production wire activation
-Baseline: OMENbrowser/omenchatd v0.9.6-3, planned v0.9.6-4  
+Status: implemented and production-active; retained as a historical design and activation record
+Baseline: designed on OMENbrowser/omenchatd v0.9.6-3 and activated for v0.9.6-4
 Protocol baseline: version `1`, name `omenchat-v0.1`  
-Proposed additive capability: `reply-mentions-v1`
+Additive capability: `reply-mentions-v1`
+
+> Historical reading note: the proposal and staged Unit 1–5 sections below
+> intentionally describe the capability while it was dormant. The later
+> “Implementation progress” and activation sections record how those gates were
+> completed. The authoritative current status is the capability matrix in
+> `docs/OMENCHAT_PROTOCOL.md`; this file must not be read as evidence that the
+> current production path is dormant.
 
 ## Current implementation evidence
 
@@ -26,11 +33,12 @@ The current checkout already has the prerequisites that Unit 6A must reuse:
   This permits a fail-soft rich request shape whose first field remains the
   ordinary message body, but capability negotiation is still mandatory.
 
-The client event model still has no reply reference, mention identifiers,
-local-user identifier, mention counter, or mute-except-mentions setting. The
-client SQLite store has no schema version and applies idempotent `ALTER TABLE`
-additions. omenchatd is now at schema version 4 and creates a guarded,
-owner-only SQLite backup before migration.
+At the original design checkpoint, the client event model still had no reply
+reference, mention identifiers, local-user identifier, mention counter, or
+mute-except-mentions setting. Those gaps were subsequently closed by the
+implementation units recorded later in this document. The client SQLite store
+continues to use guarded idempotent column additions; omenchatd's versioned
+migration creates a guarded, owner-only SQLite backup before migration.
 
 ## Compatibility invariants
 
@@ -291,10 +299,11 @@ OMENbrowser:
 - malformed/oversized rich events do not mutate state;
 - no automatic retry after uncertain send or capability loss.
 
-## Approval and implementation order
+## Historical approval and implementation order
 
-This checkpoint deliberately makes no wire, schema, configuration, or runtime
-change. After review, implement as separate rollback units:
+The original checkpoint deliberately made no wire, schema, configuration, or
+runtime change. The reviewed work was then implemented as separate rollback
+units:
 
 1. inert shared protocol capability, bounded rich-body/event helpers, and
    compatibility vectors;
@@ -306,8 +315,9 @@ change. After review, implement as separate rollback units:
    count, and mute-except-mentions;
 6. mixed-version, crash, resource, and measurement gates.
 
-Do not advertise `reply-mentions-v1` until all six units pass. Do not combine
-schema activation and user-facing controls into one patch.
+The activation rule was not to advertise `reply-mentions-v1` until all six
+units passed, and not to combine schema activation and user-facing controls in
+one patch. The progress record below documents completion and activation.
 
 ## Implementation progress
 

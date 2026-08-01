@@ -36,6 +36,22 @@ policy remain in omenchatd.
 Crossterm. `server-full` adds the optional interactive TUI and is used for the
 combined release package so existing `omenchatd tui` behavior is preserved.
 
+### Linux ARM64
+
+The first Linux ARM64 product is the standalone `server-headless` daemon. The
+manual/reusable `Linux ARM64 headless` workflow checks and tests the shared
+protocol and server on a native GitHub-hosted ARM64 VM, then creates an
+`omenchatd-<version>-linux-aarch64.tar.gz` archive using an isolated server
+home. It does not run on every push or pull request.
+
+Cross/QEMU execution, hosted native ARM execution, and physical Raspberry Pi
+(or equivalent) qualification are separate evidence levels. The maintained
+local release gate is `bash scripts/test-linux-arm64-headless.sh`; a successful
+run is sufficient for Linux ARM64 headless release qualification. See
+`../../docs/maintenance/LINUX_ARM64_HEADLESS.md` before describing the package
+as Raspberry Pi or physically tested. The archive does not install or
+auto-start a system service and never shares OMENbrowser application state.
+
 Initial commands:
 
 ```bash
@@ -203,7 +219,7 @@ files are modified. Run `doctor` before restarting. Restore is deliberately an
 offline, explicit `--confirm` operation.
 
 Schema 11 stores an explicit ordinary/announcement policy per room. The
-v0.9.6-5 policy-administration contract is deliberately restart-only: stop
+v0.9.6-6 policy-administration contract is deliberately restart-only: stop
 omenchatd, run the maintenance command, then restart omenchatd. The command
 fails closed while the live server owns the database. This release does not
 reload policy or fan out policy deltas from an offline maintenance process:
@@ -298,7 +314,7 @@ omenchatd database export-schema12-copy \
   --confirm --home ~/.omenchatd
 ```
 
-The destination must not exist. The command removes only the dormant
+The destination must not exist. The command removes only the
 `upload_max_file_bytes` room column from a private staged copy. It retains
 slow-mode settings and admissions, announcement policy, the upload ledger,
 history, identities, and every earlier schema layer. It never edits the active
@@ -344,8 +360,9 @@ omenchatd database export-schema9-copy \
 The destination must not exist. The command removes only schema-10
 client-visible moderation-audit rows and indexes from a staged copy. It
 preserves schema-9 pins and every earlier history, replay, identity, user,
-room, and upload layer. The capability remains dormant, so this stored audit
-is operator-recoverable state rather than active client-visible traffic.
+room, and upload layer. Canonical server profiles activate the bounded,
+capability-negotiated, read-only moderation-audit path; authorization remains
+required.
 
 To prepare a separate schema-8-compatible rollback copy while retaining the
 active schema-13 database, stop the server cleanly and run:
@@ -410,8 +427,8 @@ proves exclusive access, copies through SQLite's backup API, removes only the
 schema-6 message-revision tables and indexes in a staged transaction, sets
 `user_version = 5`, and validates integrity and foreign keys before atomic
 publication. The active database is never replaced or modified. Reaction
-state and ordinary history are preserved; dormant revision state is
-intentionally absent.
+state and ordinary history are preserved; revision state is intentionally
+absent from the compatibility copy.
 
 For a deeper schema-4-compatible rollback copy, run:
 
@@ -556,10 +573,11 @@ active through bounded shutdown. Run it with the command documented in
 Post-cancel Resource completion and Python/mixed-version peers remain separate
 interop gates.
 
-The separate two-process completion/cancel/reuse gate is currently red and
-blocks a claim of live UDP Resource parity, but the maintainer classifies the
-published upstream 0.9.5 limitation as non-blocking for the version-aligned
-OMEN release. Its receiver obtains the baseline
+The separate two-process completion/cancel/reuse gate was rerun on the exact
+locked crates.io 0.9.6 transport on 2026-07-31. It remains red and blocks a
+claim of live UDP Resource parity, but the maintainer classifies the published
+upstream limitation as non-blocking for the version-aligned OMEN release. Its
+receiver obtains the baseline
 advertisement and sends valid requests; its sender receives, decrypts, and
 hash-matches every request but sends no Resource parts before the receiver's
 retry budget expires. The explicit command and evidence boundary are recorded
@@ -570,8 +588,7 @@ The failure is isolated to the published Reticulum UDP worker: its 456-byte
 layout-derived transmit buffer cannot serialize a 483-byte maximum Resource
 wire packet and silently drops the serialization error. This remains unchanged
 in upstream v0.9.1 and `main` as checked on 2026-07-16; no protocol-limit or
-application-fragmentation workaround is enabled here
-for v0.9.5-1.
+application-fragmentation workaround is enabled.
 
 Persistent SQLite connections enable foreign-key checks, WAL journaling,
 NORMAL synchronization, and a five-second busy timeout. Event ID allocation and
@@ -677,21 +694,17 @@ the same durable transaction that inserts the event and replay result. Its
 single event encoder preserves metadata across fan-out, inline history, and
 resource history; restart replay cannot duplicate the event. Version 5 adds
 constrained active-reaction and append-only reaction-audit tables plus their
-target/retention indexes. A dormant transactionally durable executor now
-implements bounded add/remove state, exact replay/conflict handling,
-incremental audit retention, authoritative inline/resource snapshots, and
-capability-scoped live fan-out. `reactions-v1` remains unadvertised and
-unaccepted, so negotiated production clients cannot reach that executor yet.
+target/retention indexes. The production `reactions-v1` path implements
+bounded add/remove state, exact replay/conflict handling, incremental audit
+retention, authoritative inline/resource snapshots, and capability-scoped live
+fan-out.
 Version 6 adds constrained message-revision current-state and append-only audit
-tables plus lookup/retention indexes. A dormant transactional executor now
-enforces author/moderator/mute policy, immutable originals, correction and
-storage ceilings, incremental audit pruning, reaction cleanup, exact durable
-replay, and inline/Resource snapshots. Migration and rollback/export support
-is active, but `message-revisions-v1` remains unrequested and unaccepted:
-normal clients cannot reach the executor, and no client UI action exists yet.
-Dormant Link-scoped plumbing is present for capability-filtered
-live events and history-following snapshots, but the production acceptance
-gate remains false; it does not activate the wire feature.
+tables plus lookup/retention indexes. The production
+`message-revisions-v1` executor enforces author/moderator/mute policy,
+immutable originals, correction and storage ceilings, incremental audit
+pruning, reaction cleanup, exact durable replay, and inline/Resource
+snapshots. The current client requests the capability and exposes bounded
+correction/tombstone actions only after explicit acceptance.
 Version 7 adds a persistent per-room event-ID high-water mark. Existing rooms
 seed it lazily from their indexed maximum on the first new event, so migration
 does not scan history. Event allocation advances the high-water mark and
@@ -705,12 +718,19 @@ transaction, while legacy rows advance by at most 256 per append or explicit
 maintenance call. The backfill cursor survives restart and retention remains
 disabled until accounting is complete. Accounting failure rolls back event
 insertion and sequence advancement.
-Versions 9 and 10 add bounded pin and moderation-audit storage. Version 11 adds
+Versions 9 and 10 add bounded pin and moderation-audit storage. Canonical
+profiles activate both only through explicit negotiation, with moderation
+audit additionally restricted by role. Version 11 adds
 the constrained announcement-room policy scalar, and version 12 adds the
 bounded slow-mode scalar plus its admission table and expiry index. Version 13
-adds only nullable, constrained `upload_max_file_bytes` room storage. The
-schema-13 value is dormant until capability negotiation and upload enforcement
-are activated together in a later qualified slice.
+adds nullable, constrained `upload_max_file_bytes` room storage. Canonical
+profiles activate its enforcement only after cumulative
+`durable-mutations-v1`, `announcement-rooms-v1`,
+`room-slow-mode-v1`, and `room-media-policy-v1` acceptance.
+
+The authoritative current client/server capability matrix is maintained in
+`../../docs/OMENCHAT_PROTOCOL.md`. Older “dormant” descriptions in migration
+records describe their staging release and are not current product state.
 The store also contains an explicit compaction primitive. It requires complete
 accounting, removes no more than 64 original events per immediate transaction,
 bounds dependent reply/reaction/revision work to 20,000 rows, and updates all
@@ -783,7 +803,7 @@ and the completed pre-migration backup remains available.
 The confirmation-gated restore command described above validates and migrates
 that retained artifact through a staging database before replacement, and
 preserves the prior active database for rollback.
-The separate `export-schema12-copy` command removes only dormant per-room
+The separate `export-schema12-copy` command removes only per-room
 upload-ceiling storage while preserving slow-mode state and every earlier
 layer.
 The separate `export-schema11-copy` command removes only slow-mode settings and

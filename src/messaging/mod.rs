@@ -2,6 +2,7 @@ pub mod conversation;
 pub(crate) mod lxmf_labels;
 pub mod lxmf_router;
 pub mod message;
+pub mod resource_reference;
 pub mod service;
 pub mod store;
 
@@ -17,10 +18,16 @@ pub use lxmf_router::{
 #[allow(unused_imports)]
 pub use message::{
     AttachmentSummary, DeliveryMode, DeliveryState, MessageEnvelope, MessageSummary,
-    NativeLxmfReplyTicket, OutboundOperationIdentity, TransportMethod, OUTBOUND_CORRELATION_FIELD,
-    OUTBOUND_CREATED_AT_FIELD, OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST,
-    OUTBOUND_DEFAULT_TTL_MS, OUTBOUND_EXPIRES_AT_FIELD, OUTBOUND_IDEMPOTENCY_FIELD,
-    OUTBOUND_MAX_TTL_MS, OUTBOUND_MIN_TTL_MS, OUTBOUND_OPERATION_ID_MAX_BYTES, OUTBOUND_TTL_FIELD,
+    NativeLxmfReplyTicket, OutboundOperationIdentity, TransportMethod,
+    LXMF_SOURCE_AUTHENTICATED_FIELD, OUTBOUND_CORRELATION_FIELD, OUTBOUND_CREATED_AT_FIELD,
+    OUTBOUND_DEFAULT_MAX_AUTOMATIC_DIRECT_STAMP_COST, OUTBOUND_DEFAULT_TTL_MS,
+    OUTBOUND_EXPIRES_AT_FIELD, OUTBOUND_IDEMPOTENCY_FIELD, OUTBOUND_MAX_TTL_MS,
+    OUTBOUND_MIN_TTL_MS, OUTBOUND_OPERATION_ID_MAX_BYTES, OUTBOUND_TTL_FIELD,
+};
+#[allow(unused_imports)]
+pub use resource_reference::{
+    LxmfResourcePendingOffer, LxmfResourcePendingOfferError, LxmfResourcePendingOfferOwner,
+    LxmfResourceReferenceEnvelope, LxmfResourceReferenceError, LXMF_RESOURCE_REFERENCE_CAPABILITY,
 };
 #[allow(unused_imports)]
 pub use service::{LxmfCancellationUpdate, MessagingService, OutboundComposeRequest};

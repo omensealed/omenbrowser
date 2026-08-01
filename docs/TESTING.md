@@ -1052,6 +1052,22 @@ scripts/compare-desktop-idle.sh \
 The comparator refuses mismatched durations. It reports scheduler context
 switches as a proxy distinct from application-message counts and incorporates
 `perf stat` task-clock when available.
+
+For the user-selectable low-power comparison, use the maintained paired runner.
+It keeps Monitoring visible, creates and validates isolated normal/low-power
+settings, and refuses a binary-hash change between cases:
+
+```sh
+OMENBROWSER_BINARY=target/release/omenbrowser_rs \
+  WARMUP_SECONDS=60 SAMPLE_SECONDS=600 HEADLESS=1 \
+  scripts/measure-low-power-desktop.sh /tmp/omen-low-power-results
+```
+
+Repeat with `CASE_ORDER=low-power-first` and a new output directory when order
+or shader-cache effects are suspected. The recorded 60 and 12 application
+messages per minute are the configured subscription cadence, not a scheduler
+observation. The raw `/proc`, `pidstat`, and `perf` values remain observed
+measurements.
 For harness-only smoke validation, shorten the run with `WARMUP_SECONDS` and
 `SAMPLE_SECONDS`; do not publish those short values as a performance baseline.
 GPU/frame activity requires appropriate vendor tooling and remains a separate
@@ -1898,6 +1914,39 @@ On the 2026-07-12 Linux x86_64 release build, the canonical animated binary was
 (0.46%) reduction. This is a linkage-size comparison only; native
 startup-to-interactive and RSS/GPU comparisons remain pending.
 
+The persisted low-power runtime policy reuses the reduced-motion boundary and
+slows the already visibility-gated monitoring sample from one second to five
+seconds. It does not change network or persistence semantics. Its focused
+regressions are:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  settings_low_power_toggle_persists_without_overwriting_motion_preference --lib
+cargo test --locked --no-default-features --features desktop-product \
+  low_power_mode_reduces_visible_monitoring_wakeups_without_disabling_samples --lib
+cargo test --locked --no-default-features --features desktop-product \
+  --test app_settings low_power_preference_round_trips_without_changing_motion_preference
+cargo test --locked --no-default-features --features tui \
+  settings_low_power_action_routes_shared_persisted_policy --lib
+```
+
+The interval comparison is deterministic: a continuously visible affected
+view admits at most 60 normal samples or 12 low-power samples per minute. This
+is not a total-process CPU claim. Follow the four-case native measurement
+procedure in `docs/maintenance/LOW_POWER_PRESET.md` before reporting CPU, RSS,
+GPU, or compositor improvements.
+
+On 2026-08-01, a software-rendered Linux x86_64 canonical pair used a 20-second
+warmup and 120 samples per case. Normal/low-power median CPU was 4.878%/0.974%,
+task-clock was 5,711.40/1,857.38 ms, median RSS was 222,652/223,408 KiB, private
+dirty was 45,434/44,268 KiB, and FDs remained 60. A reverse-order static-media
+pair used a 10-second warmup and 60 samples: median CPU was 3.945%/0.976%,
+task-clock was 2,731.66/1,012.38 ms, median RSS was 223,140/223,940 KiB, and FDs
+remained 60. P95 CPU did not improve reliably. These results support reduced
+recurring work with neutral paired RSS/FD behavior; they are not native GPU,
+live-network, or cross-platform claims. The current animated/static binaries
+were 57,451,976/57,298,080 bytes, a 153,896-byte (0.268%) linkage reduction.
+
 The optional widget/icon audit uses:
 
 ```bash
@@ -2408,13 +2457,18 @@ The oversized request-resource ownership regressions use an isolated in-memory
 0.9 transport, synthetic active link, and temporary event channels. They wait
 for the outbound advertisement and require browser cancellation and response
 timeout to emit an actual initiator-cancel packet plus an outbound NomadNet
-resource lifecycle event. Metadata regressions separately prove successful
+resource lifecycle event. A pre-cancelled request test covers both primitive
+selectors and requires zero packet/Resource dispatch. After cancellation or
+timeout the channel must remain empty, proving the adapter does not replay the
+request through the other primitive. Metadata regressions separately prove successful
 small pages identify `reticulum-transport/direct-request`; Resource ownership
 tests continue to exercise the oversized compatibility primitive.
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
   nomadnet_request_releases_outbound_resource --lib
+cargo test --locked --no-default-features --features desktop-product \
+  pre_cancelled_nomadnet_request_dispatches_neither_packet_nor_resource --lib
 cargo test --locked --no-default-features --features desktop-product \
   native_request_backend_metadata_is_visible_in_status_and_trace --lib
 cargo test --locked --no-default-features --features desktop-product \
@@ -4064,7 +4118,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.6-5` must report
+therefore exits with the expected signal status; current `0.9.6-6` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -4149,9 +4203,12 @@ cargo test --locked --no-default-features --features desktop-dev \
   hidden_omenchat_muted_room_counts_only_authoritative_mentions_as_unread
 ```
 
-These tests do not activate `reply-mentions-v1`, send a live notification, or
-claim server-authoritative read receipts. They prove local bounded unread
-presentation and persistence only.
+These focused tests do not by themselves exercise the already active
+`reply-mentions-v1` negotiation, send a live notification, or claim
+server-authoritative read receipts. They prove local bounded unread
+presentation and persistence only; the negotiated capability, rich mutation,
+history, restart, and downgrade evidence is covered by the reply/mention
+protocol and live-client/server gates documented above.
 
 ## OMENchat negotiated reaction client state
 
@@ -4238,6 +4295,26 @@ OMENchat session/timeline model. The omenchatd TUI is server administration and
 has no client-local user identity. These commands therefore do not claim a TUI
 reaction rendering path.
 
+## OMENchat capability-matrix drift gate
+
+`omenchat-protocol::KNOWN_SESSION_CAPABILITIES` is the shared vocabulary behind
+the authoritative matrix in `docs/OMENCHAT_PROTOCOL.md`. Run:
+
+```bash
+cargo test --locked -p omenchat-protocol \
+  authoritative_capability_vocabulary
+cargo test --locked --no-default-features --features desktop-product \
+  live_open_requests_supported_durable_extensions_with_persistent_client_identity --lib
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  canonical_server_acceptance_covers_authoritative_capability_vocabulary --lib
+```
+
+These deterministic gates prove vocabulary bounds, the canonical client
+request, and canonical server acceptance. They do not replace a live
+prior-binary process test; the matrix marks that lane separately instead of
+calling downgrade fixtures live interoperability.
+
 ## OMENchat message-revision contract
 
 The shared correction/tombstone contract uses reserved operations 35–39 and
@@ -4306,6 +4383,20 @@ It covers deliberately lost acknowledgement, exact replay, correction and
 tombstone Resource snapshots, two isolated client roots, and one continuous
 client across an orderly server restart and replacement Link.
 
+The focused deterministic restart/failure gate is:
+
+```bash
+bash scripts/test-phase2-restart-evidence.sh
+```
+
+It consolidates client uncertainty recovery, external/embedded SDK boundaries,
+request cancellation without primitive replay, SQLite/upload process-kill
+recovery, durable server-restart and replacement-Link replay, and pending
+Resource/upload cleanup. It does not replace the live loopback command above,
+the Python interoperability lanes, or an external `reticulumd` lifecycle run.
+The current evidence and named environment-bound skips are recorded in
+`docs/reviews/OMENBROWSER_V0965_PHASE2.md`.
+
 The binary-only implementation for these OMENchat process gates lives in
 `src/omenchat_smoke.rs`. The root CLI module retains argument parsing and shared
 runtime-configuration helpers; the child module owns the bounded live-smoke
@@ -4338,8 +4429,7 @@ restoration; unit tests do not claim display-server behavior.
 
 ## OMENchat safe invitation URI
 
-The first dormant invitation slice is a pure bounded parser/serializer. It has
-no production connection, trust, persistence, or QR caller:
+The safe URI invitation slice begins with a pure bounded parser/serializer:
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
@@ -4352,6 +4442,86 @@ percent/UTF-8 data, unsupported or duplicate fields, authority tricks, and
 secret-field omission. They also cover all Directory identity-evidence classes,
 conflicting duplicate precedence, one-item preview replacement, invalid-input
 preservation, explicit cancellation, and conflict-blocked confirmation.
+
+The separate LXMF invitation control payload has a deterministic signed-wire
+evidence gate:
+
+```bash
+bash scripts/test-lxmf-invitation-evidence.sh
+```
+
+The script signs the real bounded invitation envelope, runs the production
+native verifier/decoder, admits the resulting runtime event into an isolated
+application root, and requires an authenticated review-only preview with no
+ordinary history row or connection action. It also runs forged/mismatched
+signature rejection, per-message authentication rejection, and desktop Dismiss
+tests. This is deterministic software evidence, not a live transport claim.
+
+An opt-in managed-native two-process lane is also available:
+
+```bash
+OMEN_LXMF_INVITE_BINARY=/absolute/path/to/omenbrowser_rs \
+OMEN_LXMF_INVITE_SENDER_ROOT=/isolated/sender-root \
+OMEN_LXMF_INVITE_RECEIVER_ROOT=/isolated/receiver-root \
+OMEN_LXMF_INVITE_SENDER_IDENTITY=/isolated/identities/sender \
+OMEN_LXMF_INVITE_RECEIVER_IDENTITY=/isolated/identities/receiver \
+OMEN_LXMF_INVITE_TCP_ENDPOINT=127.0.0.1:4242 \
+OMEN_LXMF_INVITE_SERVER_DESTINATION=0123456789abcdef0123456789abcdef \
+OMEN_LXMF_INVITE_EVIDENCE_ROOT=/isolated/evidence \
+bash scripts/run-lxmf-invitation-live.sh
+```
+
+The binary must be built with `desktop-product`. Both identity files must
+already exist and the two application roots must be distinct explicit test
+roots. The harness sends one tokenless, expiring direct invitation only after
+the existing bounded announce/path readiness check succeeds. It never retries
+the send automatically. The receiver examines at most 256 runtime events for
+at most 300 seconds and requires authenticated sender evidence, a preview, no
+ordinary history persistence, and no connection action. JSON evidence omits
+the invitation body and token. `OMEN_LXMF_INVITE_PASSPHRASE_FILE` may name a
+protected passphrase file; secrets are never placed in command arguments.
+
+This lane proves local managed-native transport only when actually run against
+the stated test gateway. Transport submission is not reported as peer
+delivery. It is not a mixed-version, external-RPC, public-network, package, or
+hardware claim.
+
+The exact prior-release downgrade classification is pinned to the reviewed
+`v0.9.6-5` tag and commit:
+
+```bash
+bash scripts/test-lxmf-invitation-prior-version.sh
+```
+
+The gate examines the immutable release source and requires that the payload
+type was dormant, the authenticated-source evidence marker was absent, and the
+generic inbound reducer persisted every message without recognizing the
+invitation control title. This proves a current sender would expose the JSON as
+ordinary history on the prior release. It is source-level deterministic
+evidence, not a live mixed-version transport run.
+
+The accepted inert capability foundation is exercised with:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  invitation_capability --lib
+```
+
+These tests cover request/response round trips, exact nonce correlation,
+canonical capability ordering, malformed/version/shape/trailing rejection,
+name/item/total byte limits, one-use support, deadline, cooldown, global
+in-flight capacity, cache item/byte accounting, invalid peers, late completion,
+and shutdown clearing. The module has no transport or UI caller, so this gate
+does not claim a registered capability destination or live peer proof.
+
+Outbound LXMF invitations remain disabled because there is no negotiated peer
+support signal and an older client may render the control JSON as ordinary
+message content. The diagnostic smoke command does not enable a product UI
+action. Prior-binary behavior is now classified as incompatible; external RPC
+provenance, packaged interaction, and a recorded execution of the opt-in live
+lane remain pending. Until capability negotiation and those gates exist, no
+Open, Join, Save, token-consumption, or outbound product invitation action may
+be enabled.
 Desktop preview confirmation and deferred room admission use the development
 profile because their deterministic session tests exercise the mock runtime:
 
@@ -5419,3 +5589,240 @@ Focused schema/storage gates:
 (cd src/server && cargo test --locked --no-default-features \
   --features server-headless schema_nine_export --lib)
 ```
+
+The clean managed-native desktop product now owns the receive-only LXMF
+invitation capability endpoint. Its focused codec/ownership and production
+lifecycle gates are:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  invitation_capability_endpoint --lib
+cargo test --locked --no-default-features --features desktop-product \
+  native_trait_lifecycle_and_capabilities_follow_active_transport --lib
+```
+
+This proves deterministic same-identity destination registration, bounded
+request/response handling, explicit cancellation and task join, and destination
+deregistration while another transport reference remains alive. The static-media
+product runs the same lifecycle regression. This does not constitute live peer
+interoperability and does not activate an outbound probe, invitation send, or UI
+action. External/shared RPC and standalone omenchatd do not own this endpoint.
+
+The production-owned but caller-inert managed-native probe adapter has focused
+preflight/correlation/lifecycle coverage:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  invitation_capability_probe --lib
+cargo test --locked --no-default-features \
+  --features desktop-product-static-media \
+  invitation_capability_probe --lib
+```
+
+The tests require pre-cancellation to dispatch no path or Link work, reject a
+public identity that does not derive the expected LXMF delivery destination,
+classify exact support/absence and nonce replay distinctly, clear bounded
+ephemeral evidence on runtime shutdown, and reject all future work from the
+stopped adapter. They do not execute a live two-process Link exchange. No UI or
+send caller can consume the evidence yet, and no uncertain probe is retried.
+
+The controlled two-process lane is:
+
+```bash
+OMEN_LXMF_INVITE_BINARY=/absolute/path/to/current/omenbrowser_rs \
+OMEN_LXMF_INVITE_PRIOR_BINARY=/absolute/path/to/v0.9.6-5/omenbrowser_rs \
+OMEN_LXMF_INVITE_SENDER_ROOT=/isolated/sender-root \
+OMEN_LXMF_INVITE_RECEIVER_ROOT=/isolated/receiver-root \
+OMEN_LXMF_INVITE_SENDER_IDENTITY=/isolated/identities/sender \
+OMEN_LXMF_INVITE_RECEIVER_IDENTITY=/isolated/identities/receiver \
+OMEN_LXMF_INVITE_TCP_ENDPOINT=127.0.0.1:4242 \
+OMEN_LXMF_INVITE_SERVER_DESTINATION=0123456789abcdef0123456789abcdef \
+OMEN_LXMF_INVITE_EVIDENCE_ROOT=/isolated/evidence \
+bash scripts/run-lxmf-invitation-capability-live.sh
+```
+
+The prior binary is optional, but omitting it skips downgrade evidence. The
+current receiver must report support; a prior receiver must not. Both cases
+require zero invitation sends and zero automatic retries. The command report
+contains no peer hash, nonce, identity material, message body, invitation body,
+or token. The harness deletes discovery output after extracting the public hash
+in memory, scrubs it from stderr, and fails if it remains anywhere under the
+evidence root. This lane requires two explicit isolated roots, existing
+non-symlink identity files, and a configured test TCP gateway. It has not passed
+until the script itself prints `PASS`.
+
+Before the live support cases, the harness also runs the current binary with
+`--lxmf-invitation-capability-cancel-after-ms 0`. This is a deterministic
+pre-cancellation/process-cleanup gate: it must classify the result as cancelled,
+must not report support, must not retry or send an invitation, and must shut the
+runtime down cleanly. It is not evidence for cancellation after network
+dispatch. The delay is bounded by the same 15-second total probe deadline and
+is available only with the explicit capability-probe command.
+
+`scripts/validate-lxmf-invitation-capability-report.py` validates each retained
+report against an allowlisted schema and the expected `supported`,
+`unsupported`, or `cancelled` case. Unknown fields are rejected so adding a
+destination, nonce, token, body, or other unreviewed evidence requires an
+explicit validator and documentation change.
+
+The dormant Phase 5 NomadNet update-pointer envelope has a deterministic gate:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  update_pointer --lib
+```
+
+This checks the 2-KiB total limit, field and time bounds, unknown-field
+rejection, canonical destination/path policy, stable deduplication tuple,
+followed-target admission, authenticated/unverified publisher evidence,
+per-publisher rate limits, item/byte capacities, unfollow cleanup, and bounded
+incremental expiry. It performs no topic operation or page fetch and is not
+evidence that either managed-native or external SDK topics are supported by the
+product.
+
+The locked SDK topic-surface and product-readiness classifier gate is:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  lxmf_topics --lib
+```
+
+It compiler-checks the exact 0.9.6 topic request/trait surface and confirms that
+profile/dependency presence cannot activate either current product backend.
+External receive eligibility additionally requires bounded negotiated
+capabilities, cursor-gap recovery, a proven topic event contract, and
+authenticated publisher events. This remains deterministic static evidence,
+not a live topic interoperability result.
+
+To capture negotiated capability evidence from an explicitly configured local
+SDK/RPC daemon without activating topic behavior:
+
+```bash
+cargo run --locked --no-default-features --features desktop-product -- \
+  --lxmf-topic-capability-probe \
+  --app-root /absolute/path/to/isolated-root \
+  --stdout
+```
+
+The isolated root's settings must contain `native_lxmf_sdk_rpc_endpoint` using
+an absolute Unix socket or literal loopback endpoint accepted by the existing
+validator. The command makes one bounded negotiation attempt and never calls
+topic subscribe/publish or daemon shutdown. It does not prove topic event
+schema, publisher authentication, cursor-gap recovery, NomadNet delivery, or
+Python interoperability. A daemon is not available in the default test
+environment, so this live result must be reported separately rather than
+inferred from unit tests.
+
+The locked 0.9.6 topic event/provenance reproducer is:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  locked_096_daemon_reproducer_has_no_publisher_or_subscription_cursor_proof \
+  --lib
+cargo test --locked --no-default-features \
+  topic_event_classifier_never_upgrades_generic_peer_or_payload_to_authentication \
+  --lib
+```
+
+The first test invokes the public in-memory RPC daemon and proves the current
+publication event, telemetry recovery record, and ignored subscription cursor
+behavior. The second is an empty-feature fail-closed classifier gate: generic
+peer or payload data never becomes authenticated publisher evidence, malformed
+or oversized wrappers are rejected, and no event is admitted. These are
+deterministic locked-crate findings, not live external-daemon, cross-process,
+Python, or Reticulum-network evidence.
+
+The dormant asynchronous OMENchat notice envelope and admission-owner gate is:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  chat::notice --lib
+```
+
+It checks the 1-KiB total bound, exact protocol/version, 128-bit lowercase
+notice ID, canonical server destination, kind-specific numeric pointer shapes,
+seven-day lifetime, clock skew, expiry, unknown-field rejection, and the
+absence of message/history/attachment/token/role/display text. It also checks
+disabled-by-default per-kind admission, required canonical authenticated-sender
+evidence, sender-scoped deduplication, eight-per-sender and 64-global
+ten-minute rate limits, 128-item and 64-KiB retention, exact room-summary
+coalescing, eight-entry incremental pruning, and shutdown clearing. Retained
+notices never authorize an automatic action. The owner has no caller and the
+gate performs no LXMF operation; it is not evidence that a runtime can
+authenticate the publisher or that any peer negotiated notice support.
+
+The dormant LXMF Resource-reference attachment envelope gate is:
+
+```bash
+cargo test --locked --no-default-features resource_reference --lib
+```
+
+It checks the 2-KiB envelope limit, exact protocol/version, lowercase SHA-256
+content hash, 1-byte through 64-MiB declaration, MIME/display-name hints,
+cross-platform filename rejection, 24-hour lifetime, canonical sender and
+128-bit offer identifiers, unknown fields, pre-decode overflow, authenticated
+sender matching, reference redaction, and hash-derived private storage name.
+The envelope always denies automatic transfer, decode, and executable launch.
+This test performs no capability negotiation, preview, Resource transfer,
+filesystem write, mixed-version exchange, or interoperability operation. Its
+application reference is not evidence of a redeemable Reticulum Resource.
+The same gate also covers the caller-inert pending-preview owner: 32-item/64-KiB
+global, 8-item/16-KiB per-peer, and 8-item/16-KiB per-conversation ceilings;
+eight-per-peer and 64-global ten-minute rate limits; 256 rate records;
+sender-scoped duplicate/conflict handling; rejection that retains rate
+evidence; eight-record incremental pruning; and shutdown clearing. The opaque
+conversation key is bounded and never used as a path. Local rejection sends no
+network response, and there is deliberately no accept or transfer method.
+
+The locked 0.9.6 public Resource correlation reproducer is:
+
+    cargo test --locked --no-default-features --features native-reticulum \
+      locked_096_public_resource --lib
+    cargo test --locked --no-default-features --features native-reticulum \
+      locked_096_resource_complete --lib
+
+The first test creates an in-memory activated Link using public APIs, proves
+that the pre-dispatch observed hash equals the returned and encrypted
+advertisement hashes, proves successful advertisement emits no terminal
+delivery evidence, and cancels by the same Link/hash with an
+OutboundCancelled event. The second compiler/runtime shape test records that
+completed payload and correlation metadata are exposed as owned byte vectors.
+This proves sender-side hash correlation and cancellation, not streaming file
+transfer, pre-completion receiver metadata, peer receipt, Python
+interoperability, or durable resume.
+
+## Linux ARM64 headless evidence
+
+Linux ARM64 qualification starts with standalone `omenchatd` and the shared
+`omenchat-protocol` crate, not the desktop GPU stack. The local cross-compile
+commands, opt-in native GitHub workflow, package contents, and physical-device
+soak checklist are maintained in
+`docs/maintenance/LINUX_ARM64_HEADLESS.md`.
+
+The basic cross-compile commands are compile evidence only:
+
+```bash
+CROSS_CONTAINER_ENGINE=podman CARGO_TARGET_DIR=target/aarch64-cross \
+  cross check --locked --manifest-path src/server/Cargo.toml \
+  --target aarch64-unknown-linux-gnu \
+  --no-default-features --features server-headless
+CROSS_CONTAINER_ENGINE=podman CARGO_TARGET_DIR=target/aarch64-cross \
+  cross check --locked \
+  --manifest-path src/server/crates/omenchat-protocol/Cargo.toml \
+  --target aarch64-unknown-linux-gnu
+```
+
+The maintained local release gate additionally executes ARM64 tests and the
+packaged lifecycle through Cross's QEMU runner:
+
+```bash
+bash scripts/test-linux-arm64-headless.sh
+```
+
+The `Linux ARM64 headless` Actions workflow may also be dispatched explicitly. It
+runs natively on ARM64, performs protocol/server test and strict Clippy gates,
+and packages an isolated-smoked headless server archive. It is not triggered by
+ordinary pushes or pull requests. Successful Podman/Cross execution satisfies
+the project ARM64 headless release gate. Neither that gate nor a hosted ARM VM
+is physical Raspberry Pi qualification; record the optional hardware soak only
+before making that narrower claim.

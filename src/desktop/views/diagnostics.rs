@@ -36,6 +36,13 @@ pub(in crate::desktop) fn diagnostics_view(desktop: &DesktopApp) -> Element<'_, 
         .fold(column![].spacing(3), |column, line| {
             column.push(wrapped_text_owned(line, 14))
         });
+    let propagation_backend = desktop
+        .app
+        .propagation_backend_status_lines()
+        .into_iter()
+        .fold(column![].spacing(3), |column, line| {
+            column.push(wrapped_text_owned(line, 14))
+        });
     let stage_cards = diagnostics_preview_stage_cards(&desktop.app.diagnostics_state.preview_lines)
         .into_iter()
         .take(12)
@@ -211,6 +218,7 @@ pub(in crate::desktop) fn diagnostics_view(desktop: &DesktopApp) -> Element<'_, 
                 ]
                 .spacing(4),
             ),
+            section_card("LXMF Propagation and Backend Evidence", propagation_backend),
             section_card(
                 "Structured Log Writer",
                 column![

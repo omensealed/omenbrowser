@@ -3,7 +3,7 @@ members = ["crates/omen-ifac-tcp", "crates/omenchat-protocol"]
 
 [package]
 name = "omenchatd"
-version = "0.9.6-5"
+version = "0.9.6-6"
 edition = "2021"
 rust-version = "1.85"
 description = "Standalone OMENchat server"
@@ -21,6 +21,10 @@ live-reticulum = ["dep:rand_core", "dep:reticulum-rs", "dep:rns_transport", "dep
 tui = ["dep:crossterm", "dep:ratatui"]
 server-headless = ["live-reticulum", "omenchat-announcement-rooms", "omenchat-slow-mode", "omenchat-room-media-policy", "omenchat-moderation-audit"]
 server-full = ["server-headless", "tui"]
+# Replies/mentions, reactions, revisions, pins, and durable mutation support
+# are always compiled for server builds but remain explicit Link-negotiated
+# protocol capabilities. The following product flags gate additional room
+# policy/audit capabilities rather than enabling the core wire vocabulary.
 # Capability-negotiated room policy projection. Authorization remains active
 # for every peer, including legacy peers that receive four-field room values.
 omenchat-announcement-rooms = []

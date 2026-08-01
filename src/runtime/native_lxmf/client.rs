@@ -6,6 +6,11 @@ pub struct NativeLxmfClientState {
 #[cfg(feature = "native-lxmf-sdk")]
 use crate::error::{AppError, AppResult};
 #[cfg(feature = "native-lxmf-sdk")]
+use crate::runtime::lxmf_topics::{
+    LxmfTopicCapabilityReport, LXMF_TOPIC_CAP_ASYNC_EVENTS, LXMF_TOPIC_CAP_CURSOR_REPLAY,
+    LXMF_TOPIC_CAP_FANOUT, LXMF_TOPIC_CAP_SUBSCRIPTIONS, LXMF_TOPIC_CAP_TOPICS,
+};
+#[cfg(feature = "native-lxmf-sdk")]
 use crate::runtime::LxmfCancelOutcome;
 #[cfg(feature = "native-lxmf-sdk")]
 use crate::runtime::{LxmfHistoryPage, LxmfHistoryRecord, LxmfHistoryRequest};
@@ -101,6 +106,17 @@ pub struct NativeLxmfSdkProbe {
 
 #[cfg(feature = "native-lxmf-sdk")]
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeLxmfTopicCapabilityProbe {
+    pub endpoint: String,
+    pub active_contract_version: u16,
+    pub capabilities: LxmfTopicCapabilityReport,
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+pub const NATIVE_LXMF_TOPIC_CAPABILITY_PROBE_DEADLINE_MS: u64 = 10_000;
+
+#[cfg(feature = "native-lxmf-sdk")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RpcNativeLxmfSdkSender {
     endpoint: String,
 }
@@ -160,6 +176,60 @@ impl RpcNativeLxmfSdkSender {
         validate_local_rpc_endpoint(self.endpoint.as_str())
             .ok()
             .map(|endpoint| endpoint.diagnostic_label)
+    }
+
+    /// Negotiates the topic-related SDK surface without subscribing, publishing,
+    /// starting a product worker, or sending a shutdown request to the daemon.
+    pub async fn probe_topic_capabilities(&self) -> AppResult<NativeLxmfTopicCapabilityProbe> {
+        self.probe_topic_capabilities_with_deadline(std::time::Duration::from_millis(
+            NATIVE_LXMF_TOPIC_CAPABILITY_PROBE_DEADLINE_MS,
+        ))
+        .await
+    }
+
+    async fn probe_topic_capabilities_with_deadline(
+        &self,
+        deadline: std::time::Duration,
+    ) -> AppResult<NativeLxmfTopicCapabilityProbe> {
+        let validated = validate_local_rpc_endpoint(self.endpoint.as_str())?;
+        let backend = lxmf_sdk::RpcBackendClient::new(self.endpoint.clone());
+        let client = lxmf_sdk::Client::new(backend);
+        let request = lxmf_sdk::StartRequest::new(lxmf_sdk::SdkConfig::desktop_local_default())
+            .with_requested_capabilities([
+                LXMF_TOPIC_CAP_TOPICS,
+                LXMF_TOPIC_CAP_SUBSCRIPTIONS,
+                LXMF_TOPIC_CAP_FANOUT,
+                LXMF_TOPIC_CAP_CURSOR_REPLAY,
+                LXMF_TOPIC_CAP_ASYNC_EVENTS,
+            ]);
+        let handle = tokio::time::timeout(deadline, client.start_async(request))
+            .await
+            .map_err(|_| {
+                AppError::Runtime("external LXMF topic capability negotiation timed out".into())
+            })?
+            .map_err(|error| {
+                AppError::Runtime(format!(
+                    "external LXMF topic capability negotiation failed ({:?})",
+                    error.category
+                ))
+            })?;
+        let capabilities = LxmfTopicCapabilityReport::external_negotiated(
+            &handle.effective_capabilities,
+            false,
+            false,
+            false,
+        )
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "external LXMF topic capability response was rejected: {error}"
+            ))
+        })?;
+
+        Ok(NativeLxmfTopicCapabilityProbe {
+            endpoint: validated.diagnostic_label,
+            active_contract_version: handle.active_contract_version,
+            capabilities,
+        })
     }
 }
 
@@ -295,6 +365,21 @@ impl EmbeddedNativeLxmfSdkSender {
 
 #[cfg(feature = "native-lxmf-sdk")]
 impl NativeLxmfSdkTicketCache {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, NativeLxmfSdkTicketCacheState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                *state = NativeLxmfSdkTicketCacheState::default();
+                self.state.clear_poison();
+                tracing::warn!(
+                    "recovered poisoned auxiliary native LXMF SDK ticket cache; cached tickets were discarded"
+                );
+                state
+            }
+        }
+    }
+
     pub fn capture_validate_record(&self, record: &rns_rpc::MessageRecord) -> io::Result<()> {
         let ticket = native_lxmf_sdk_record_ticket(record);
         if ticket
@@ -307,7 +392,7 @@ impl NativeLxmfSdkTicketCache {
             ));
         }
         let key = native_lxmf_sdk_ticket_cache_key(record.id.as_str());
-        let mut state = self.state.lock().expect("native LXMF SDK ticket cache");
+        let mut state = self.lock_state();
         if let Some(previous) = state.pending.remove(&key) {
             state.ticket_bytes = state
                 .ticket_bytes
@@ -336,7 +421,7 @@ impl NativeLxmfSdkTicketCache {
 
     pub fn take_ticket(&self, message_id: &str) -> Option<String> {
         let key = native_lxmf_sdk_ticket_cache_key(message_id);
-        let mut state = self.state.lock().expect("native LXMF SDK ticket cache");
+        let mut state = self.lock_state();
         state.order.retain(|stored| stored != &key);
         let removed = state.pending.remove(&key);
         state.ticket_bytes = state.ticket_bytes.saturating_sub(
@@ -350,11 +435,7 @@ impl NativeLxmfSdkTicketCache {
 
     #[cfg(test)]
     fn is_empty(&self) -> bool {
-        self.state
-            .lock()
-            .expect("native LXMF SDK ticket cache")
-            .pending
-            .is_empty()
+        self.lock_state().pending.is_empty()
     }
 }
 
@@ -1096,6 +1177,7 @@ impl NativeLxmfSdkSender for RpcNativeLxmfSdkSender {
     async fn send_plan(&self, plan: NativeLxmfSdkSendPlan) -> AppResult<NativeLxmfSdkSendReceipt> {
         validate_local_rpc_endpoint(self.endpoint.as_str())?;
         validate_sdk_send_plan_ttl(&plan)?;
+        validate_external_rpc_delivery_options(&plan)?;
 
         let endpoint = self.endpoint.clone();
         let send_request = plan.send_request;
@@ -1440,6 +1522,16 @@ fn validate_sdk_send_plan_ttl(plan: &NativeLxmfSdkSendPlan) -> AppResult<()> {
 }
 
 #[cfg(feature = "native-lxmf-sdk")]
+fn validate_external_rpc_delivery_options(plan: &NativeLxmfSdkSendPlan) -> AppResult<()> {
+    if plan.rpc_delivery.ticket.is_some() {
+        return Err(AppError::Unsupported(
+            "external LXMF SDK/RPC 0.9.6 cannot preserve an explicit reply ticket".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
 pub fn build_sdk_send_plan(
     envelope: &crate::messaging::MessageEnvelope,
     source_hash: &str,
@@ -1505,9 +1597,12 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 #[cfg(all(test, feature = "native-lxmf-sdk"))]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::sync::mpsc as std_mpsc;
     use std::sync::{Arc, Mutex};
+    use std::thread;
     use std::time::Duration;
 
     use crate::identity::IdentityMaterialProvider;
@@ -1542,6 +1637,192 @@ mod tests {
     struct RecordingOutboundBridge {
         tx: Mutex<std_mpsc::Sender<RecordedDelivery>>,
         ticket_cache: NativeLxmfSdkTicketCache,
+    }
+
+    fn capture_rpc_requests(
+        expected_requests: usize,
+    ) -> (
+        String,
+        std_mpsc::Receiver<Vec<rns_rpc::RpcRequest>>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind isolated RPC capture");
+        listener
+            .set_nonblocking(true)
+            .expect("set isolated RPC capture nonblocking");
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}/rpc",
+            listener.local_addr().expect("RPC capture address").port()
+        );
+        let (request_tx, request_rx) = std_mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut requests = Vec::with_capacity(expected_requests);
+            while requests.len() < expected_requests {
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "timed out waiting for isolated RPC request"
+                            );
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("isolated RPC accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("set RPC capture read timeout");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .expect("set RPC capture write timeout");
+                let mut request_bytes = Vec::new();
+                stream
+                    .read_to_end(&mut request_bytes)
+                    .expect("read isolated RPC request");
+                let body_start = request_bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                    .expect("isolated RPC request headers");
+                let request: rns_rpc::RpcRequest =
+                    rns_rpc::rpc::codec::decode_frame(&request_bytes[body_start..])
+                        .expect("decode isolated RPC request");
+                let result = match request.method.as_str() {
+                    "sdk_send_v2" => serde_json::json!({
+                        "message_id": "daemon-message-id"
+                    }),
+                    "sdk_cancel_message_v2" => serde_json::json!({
+                        "result": "Accepted"
+                    }),
+                    method => panic!("unexpected isolated RPC method {method}"),
+                };
+                let response = rns_rpc::RpcResponse {
+                    id: request.id,
+                    result: Some(result),
+                    error: None,
+                };
+                let response_body =
+                    rns_rpc::rpc::codec::encode_frame(&response).expect("encode RPC response");
+                let response_headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/msgpack\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                stream
+                    .write_all(response_headers.as_bytes())
+                    .and_then(|()| stream.write_all(&response_body))
+                    .expect("write isolated RPC response");
+                requests.push(request);
+            }
+            request_tx
+                .send(requests)
+                .expect("publish captured RPC requests");
+        });
+        (endpoint, request_rx, worker)
+    }
+
+    fn capture_topic_negotiation() -> (
+        String,
+        std_mpsc::Receiver<rns_rpc::RpcRequest>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind topic negotiation capture");
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}/rpc",
+            listener.local_addr().expect("topic capture address").port()
+        );
+        let (request_tx, request_rx) = std_mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept topic negotiation");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set topic capture read timeout");
+            let mut request_bytes = Vec::new();
+            let mut buffer = [0_u8; 4_096];
+            let body_end = loop {
+                let read = stream
+                    .read(&mut buffer)
+                    .expect("read topic negotiation request");
+                assert!(read > 0, "topic negotiation request closed before its body");
+                request_bytes.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request_bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&request_bytes[..header_end])
+                    .expect("topic negotiation HTTP headers");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("content length"))
+                        })
+                    })
+                    .expect("topic negotiation content length");
+                let body_end = header_end + content_length;
+                if request_bytes.len() >= body_end {
+                    break (header_end, body_end);
+                }
+            };
+            let request: rns_rpc::RpcRequest =
+                rns_rpc::rpc::codec::decode_frame(&request_bytes[body_end.0..body_end.1])
+                    .expect("decode topic negotiation request");
+
+            let mut capabilities =
+                lxmf_sdk::required_capabilities(lxmf_sdk::Profile::DesktopLocalRuntime)
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>();
+            for capability in [
+                crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_TOPICS,
+                crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_SUBSCRIPTIONS,
+                crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_FANOUT,
+                crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_CURSOR_REPLAY,
+                crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_ASYNC_EVENTS,
+            ] {
+                if !capabilities.iter().any(|current| current == capability) {
+                    capabilities.push(capability.to_owned());
+                }
+            }
+            let response = rns_rpc::RpcResponse {
+                id: request.id,
+                result: Some(serde_json::json!({
+                    "runtime_id": "topic-probe-runtime",
+                    "active_contract_version": 2,
+                    "effective_capabilities": capabilities,
+                    "effective_limits": {
+                        "max_poll_events": 64,
+                        "max_event_bytes": 65536,
+                        "max_batch_bytes": 262144,
+                        "max_extension_keys": 16,
+                        "idempotency_ttl_ms": 43200000
+                    },
+                    "contract_release": "0.9.6",
+                    "schema_namespace": "lxmf-sdk-v2",
+                    "sdk_version": "0.9.6",
+                    "python_reference": lxmf_sdk::ParityReference::default()
+                })),
+                error: None,
+            };
+            let response_body =
+                rns_rpc::rpc::codec::encode_frame(&response).expect("encode topic response");
+            let response_headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/msgpack\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            );
+            stream
+                .write_all(response_headers.as_bytes())
+                .and_then(|()| stream.write_all(&response_body))
+                .expect("write topic negotiation response");
+            request_tx.send(request).expect("publish topic request");
+        });
+        (endpoint, request_rx, worker)
     }
 
     #[derive(Default)]
@@ -2110,6 +2391,53 @@ mod tests {
     }
 
     #[test]
+    fn sdk_ticket_cache_recovers_poison_without_exposing_or_retaining_ticket_material() {
+        let cache = NativeLxmfSdkTicketCache::default();
+        let private_ticket = "private-ticket-material";
+        let record = rns_rpc::MessageRecord {
+            id: "message-before-poison".into(),
+            source: "source".into(),
+            destination: "peer".into(),
+            title: String::new(),
+            content: "body".into(),
+            timestamp: 0,
+            direction: "outbound".into(),
+            fields: Some(serde_json::json!({"_lxmf": {"ticket": private_ticket}})),
+            receipt_status: None,
+        };
+        cache
+            .capture_validate_record(&record)
+            .expect("capture ticket before poison");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.state.lock().expect("lock cache to poison it");
+            panic!("test-only ticket cache poison");
+        }));
+        assert!(panic.is_err());
+
+        assert_eq!(cache.take_ticket("message-before-poison"), None);
+        assert!(cache.is_empty());
+
+        let replacement = rns_rpc::MessageRecord {
+            id: "message-after-poison".into(),
+            fields: Some(serde_json::json!({"_lxmf": {"ticket": "replacement"}})),
+            ..record
+        };
+        cache
+            .capture_validate_record(&replacement)
+            .expect("cache remains usable after poison recovery");
+        assert_eq!(
+            cache.take_ticket("message-after-poison").as_deref(),
+            Some("replacement")
+        );
+
+        let recovery_text =
+            "recovered poisoned auxiliary native LXMF SDK ticket cache; cached tickets were discarded";
+        assert!(!recovery_text.contains(private_ticket));
+        assert!(!recovery_text.contains("replacement"));
+    }
+
+    #[test]
     fn sdk_wire_delivery_signs_record_and_applies_ticket_metadata() {
         let provider = NativeReticulumIdentityProvider;
         let source_identity = provider
@@ -2474,6 +2802,136 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn external_rpc_096_send_capture_proves_preserved_and_dropped_fields() {
+        let (endpoint, captured_rx, capture_worker) = capture_rpc_requests(2);
+        let mut operation =
+            OutboundOperationIdentity::validated("idem-external".into(), "corr-external".into())
+                .expect("valid operation");
+        operation.automatic_propagation_fallback = true;
+        let envelope = MessageEnvelope {
+            peer_hash: "peer".into(),
+            title: "external title".into(),
+            body: "external body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: true,
+            native_reply_ticket: None,
+            operation: Some(operation),
+            attachments: Vec::new(),
+        };
+        let plan = build_sdk_send_plan(&envelope, "source", Some(7));
+        assert!(matches!(plan.send_request.ttl_ms, Some(1..)));
+        assert_eq!(plan.rpc_delivery.ticket, None);
+
+        let sender = RpcNativeLxmfSdkSender::new(endpoint);
+        let receipt = sender
+            .send_plan(plan)
+            .await
+            .expect("external RPC capture send");
+        assert_eq!(receipt.message_id.as_deref(), Some("daemon-message-id"));
+        assert_eq!(receipt.state, "submitted_to_sdk_rpc");
+        assert_eq!(
+            sender
+                .cancel_delivery(
+                    receipt
+                        .message_id
+                        .as_deref()
+                        .expect("daemon cancellation identity"),
+                )
+                .await
+                .expect("external RPC capture cancellation"),
+            LxmfCancelOutcome::Accepted
+        );
+
+        let captured = captured_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured external RPC requests");
+        capture_worker.join().expect("join RPC capture worker");
+        assert_eq!(captured.len(), 2);
+
+        let send = &captured[0];
+        assert_eq!(send.method, "sdk_send_v2");
+        let params = send.params.as_ref().expect("sdk_send_v2 params");
+        assert_eq!(params["source"], "source");
+        assert_eq!(params["destination"], "peer");
+        assert_eq!(params["title"], "external title");
+        assert_eq!(params["content"], "external body");
+        assert_eq!(params["method"], "direct");
+        assert_eq!(params["stamp_cost"], 7);
+        assert_eq!(params["include_ticket"], true);
+        assert_eq!(params["try_propagation_on_fail"], true);
+
+        // The published lxmf-sdk 0.9.6 RpcBackendClient deliberately drops
+        // these SendRequest fields before constructing sdk_send_v2 params.
+        for absent in [
+            "idempotency_key",
+            "ttl_ms",
+            "correlation_id",
+            "extensions",
+            "ticket",
+        ] {
+            assert!(
+                params.get(absent).is_none(),
+                "upstream behavior changed: {absent} is now present"
+            );
+        }
+        let cancel = &captured[1];
+        assert_eq!(cancel.method, "sdk_cancel_message_v2");
+        assert_eq!(
+            cancel
+                .params
+                .as_ref()
+                .and_then(|params| params.get("message_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("daemon-message-id")
+        );
+    }
+
+    #[tokio::test]
+    async fn external_rpc_096_rejects_explicit_reply_ticket_before_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind isolated RPC sentinel");
+        listener
+            .set_nonblocking(true)
+            .expect("set isolated RPC sentinel nonblocking");
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}/rpc",
+            listener.local_addr().expect("RPC sentinel address").port()
+        );
+        let mut operation =
+            OutboundOperationIdentity::validated("idem-ticket".into(), "corr-ticket".into())
+                .expect("valid operation");
+        operation.automatic_propagation_fallback = false;
+        let ticket_bytes = vec![0x10, 0x20, 0x30];
+        let envelope = MessageEnvelope {
+            peer_hash: "peer".into(),
+            title: "ticket title".into(),
+            body: "ticket body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: Some(NativeLxmfReplyTicket {
+                ticket: ticket_bytes.clone(),
+                expires: current_unix_secs_f64() + 60.0,
+            }),
+            operation: Some(operation),
+            attachments: Vec::new(),
+        };
+        let plan = build_sdk_send_plan(&envelope, "source", None);
+        assert_eq!(plan.rpc_delivery.ticket.as_deref(), Some("102030"));
+
+        let error = RpcNativeLxmfSdkSender::new(endpoint)
+            .send_plan(plan)
+            .await
+            .expect_err("unsupported explicit reply ticket must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("cannot preserve an explicit reply ticket"));
+        assert!(!message.contains("102030"));
+        assert!(!message.contains(ticket_bytes.as_slice().escape_ascii().to_string().as_str()));
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
     #[test]
     fn rpc_sdk_sender_reports_missing_endpoint_before_dispatch() {
         let sender = RpcNativeLxmfSdkSender::new(" ");
@@ -2495,6 +2953,78 @@ mod tests {
             sender.diagnostic_endpoint().as_deref(),
             Some("loopback:37428")
         );
+    }
+
+    #[tokio::test]
+    async fn rpc_topic_capability_probe_negotiates_once_without_topic_or_shutdown_calls() {
+        let (endpoint, captured_rx, capture_worker) = capture_topic_negotiation();
+        let sender = RpcNativeLxmfSdkSender::new(endpoint);
+
+        let probe = sender
+            .probe_topic_capabilities()
+            .await
+            .expect("topic capability negotiation");
+        let request = captured_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured topic negotiation");
+        capture_worker.join().expect("join topic capture worker");
+
+        assert_eq!(
+            probe.endpoint.as_str(),
+            sender.diagnostic_endpoint().unwrap()
+        );
+        assert_eq!(probe.active_contract_version, 2);
+        assert!(probe.capabilities.topics);
+        assert!(probe.capabilities.subscriptions);
+        assert!(probe.capabilities.fanout);
+        assert!(probe.capabilities.cursor_replay);
+        assert!(probe.capabilities.async_events);
+        assert!(!probe.capabilities.may_activate_receive_adapter());
+        assert_eq!(request.method, "sdk_negotiate_v2");
+        let requested = request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("requested_capabilities"))
+            .and_then(serde_json::Value::as_array)
+            .expect("requested topic capabilities");
+        assert_eq!(requested.len(), 5);
+        for capability in [
+            crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_TOPICS,
+            crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_SUBSCRIPTIONS,
+            crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_FANOUT,
+            crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_CURSOR_REPLAY,
+            crate::runtime::lxmf_topics::LXMF_TOPIC_CAP_ASYNC_EVENTS,
+        ] {
+            assert!(requested
+                .iter()
+                .any(|value| value.as_str() == Some(capability)));
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_topic_capability_probe_has_one_total_deadline_and_redacts_endpoint_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled topic probe");
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}/rpc",
+            listener.local_addr().expect("stalled probe address").port()
+        );
+        let private_endpoint = endpoint.clone();
+        let worker = thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept stalled topic probe");
+            thread::sleep(Duration::from_millis(200));
+        });
+        let started = std::time::Instant::now();
+        let error = RpcNativeLxmfSdkSender::new(endpoint)
+            .probe_topic_capabilities_with_deadline(Duration::from_millis(50))
+            .await
+            .expect_err("stalled negotiation must time out");
+        let elapsed = started.elapsed();
+        worker.join().expect("join stalled topic probe worker");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(!error.to_string().contains(private_endpoint.as_str()));
+        assert!(elapsed >= Duration::from_millis(50));
+        assert!(elapsed < Duration::from_millis(500));
     }
 
     #[test]

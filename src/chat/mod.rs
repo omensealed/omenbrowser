@@ -6,11 +6,13 @@ pub mod commands;
 pub mod descriptor;
 pub mod handoff;
 pub mod invitation;
+pub mod invitation_capability;
 pub mod model;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod mutation_intent_worker;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod mutation_intents;
+pub mod notice;
 pub mod permissions;
 pub mod protocol;
 pub mod store;

@@ -164,11 +164,22 @@ reject product binaries whose commit or target identity is unavailable. Source
 archives built outside a Git checkout can provide the commit explicitly with
 `OMENBROWSER_GIT_COMMIT=<hex-commit>`.
 
+The maintained static-media build reports
+`profile=desktop-product-static-media` and its matching feature token rather
+than the generic `custom` identity, so measurement and support evidence can
+distinguish it from the animated product.
+
 For low-resource systems that do not need animated previews,
 `desktop-product-static-media` keeps the same live Reticulum/OMENchat product
 stack but excludes `iced_gif`. GIF files are still cached and shown through the
 static image path. It retains invitation QR presentation. The canonical
 `desktop-product` continues to enable animation.
+
+Both desktop builds also expose a persisted, default-off **Low-power mode** in
+Settings. It forces static media previews and changes the visible diagnostics
+sample cadence from one second to five seconds without changing networking,
+delivery, identity, or persistence behavior. See
+[`docs/maintenance/LOW_POWER_PRESET.md`](docs/maintenance/LOW_POWER_PRESET.md).
 
 Linux desktop builds enable Iced's X11 and Wayland backends and the XDG portal
 file picker. Those Linux-only features are excluded from native Windows and
@@ -423,6 +434,12 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
 
 ## Known Release Gaps
 
+- The authoritative current OMENchat capability matrix is in
+  `docs/OMENCHAT_PROTOCOL.md`. Durable mutations, replies/mentions, reactions,
+  message revisions, room pins, announcement rooms, slow mode, room media
+  policy, and authorized moderation audit are active only after explicit
+  per-Link negotiation. Deterministic downgrade coverage does not replace the
+  separately reported prior-binary live lane.
 - The crates and deterministic suites are aligned at Reticulum/LXMF 0.9.6.
   Isolated current-product OMENchat reconnect/upload and NomadNet portal fetches
   pass, as does the current Python NomadNet direct/Resource request-response

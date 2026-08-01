@@ -1023,7 +1023,7 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
                 "[reduced motion] {} | desktop animated previews={} | TUI animation=none",
                 app.settings.ui.reduce_motion,
                 if cfg!(feature = "chat-client-gif") {
-                    if app.settings.ui.reduce_motion {
+                    if app.effective_reduce_motion() {
                         "static frame"
                     } else {
                         "enabled"
@@ -1031,6 +1031,16 @@ fn render_settings(frame: &mut Frame, area: Rect, app: &App) {
                 } else {
                     "not compiled"
                 }
+            ),
+        ),
+        settings_action_line(
+            app,
+            settings_action_index(SettingsAction::ToggleLowPower),
+            format!(
+                "[low power] {} | effective reduced motion={} | visible diagnostics={}s",
+                app.settings.ui.low_power_mode,
+                app.effective_reduce_motion(),
+                if app.settings.ui.low_power_mode { 5 } else { 1 }
             ),
         ),
         Line::from(format!(
@@ -1450,6 +1460,12 @@ fn render_diagnostics(frame: &mut Frame, area: Rect, app: &App) {
                 .unwrap_or_else(|| "no diagnostics snapshot".into()),
         ),
     ];
+    content.push(Line::from("LXMF propagation/backend evidence:"));
+    content.extend(
+        app.propagation_backend_status_lines()
+            .into_iter()
+            .map(Line::from),
+    );
     if let Some(path) = &app.diagnostics_state.last_export_path {
         content.push(Line::from(format!(
             "last diagnostics export: {}",

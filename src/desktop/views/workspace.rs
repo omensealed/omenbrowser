@@ -87,6 +87,71 @@ impl DesktopApp {
         } else {
             column![].into()
         };
+        #[cfg(feature = "chat-client")]
+        let omenchat_lxmf_invitation = if let Some(preview) =
+            self.app.omenchat_lxmf_invitation_preview.pending()
+        {
+            let invitation = &preview.payload;
+            let mut details = column![
+                text("Review LXMF OMENchat invitation").size(ui_size(14)),
+                text(format!(
+                    "Server destination: {}",
+                    invitation.server_destination
+                ))
+                .size(ui_size(12)),
+                text(format!(
+                    "Room: {} · {}",
+                    invitation.room_id, invitation.room_display_name
+                ))
+                .size(ui_size(12)),
+                text(format!(
+                    "Inviter claim: {} · {}",
+                    invitation.inviter_display_name, invitation.inviter_destination
+                ))
+                .size(ui_size(12)),
+                text(preview.sender_evidence.label()).size(ui_size(12)),
+                text(format!(
+                    "Requested role: {}",
+                    invitation.requested_role.label()
+                ))
+                .size(ui_size(12)),
+                text(preview.replay_policy.label()).size(ui_size(12)),
+            ]
+            .spacing(4);
+            if invitation.room_password_required {
+                details = details.push(
+                    text("The room claims a password is required; no password was supplied or stored.")
+                        .size(ui_size(12)),
+                );
+            }
+            if let Some(expires_at) = invitation.expires_at_unix {
+                details = details.push(
+                    text(format!("Payload expiry (Unix UTC): {expires_at}")).size(ui_size(12)),
+                );
+            }
+            if let Some(introduction) = &invitation.intro_message {
+                details = details.push(
+                    text(format!("Introduction: {introduction}"))
+                        .size(ui_size(12))
+                        .wrapping(Wrapping::WordOrGlyph),
+                );
+            }
+            section_card(
+                "LXMF Invitation Preview",
+                details
+                    .push(
+                        text("Opening is disabled while transport provenance and token handling remain under qualification. This preview grants no trust or role.")
+                            .size(ui_size(12))
+                            .wrapping(Wrapping::WordOrGlyph),
+                    )
+                    .push(subtle_button(
+                        "Dismiss",
+                        Message::OmenChat(OmenChatMessage::DismissLxmfInvitation),
+                    )),
+            )
+        } else {
+            column![].into()
+        };
 
         let grid = pane_grid(
             &self.workspace.workspace_panes,
@@ -343,6 +408,7 @@ impl DesktopApp {
             hidden_conversation_panes,
             omenchat_opener,
             omenchat_invitation,
+            omenchat_lxmf_invitation,
             history_search,
             grid
         ]
@@ -566,7 +632,7 @@ impl DesktopApp {
             DesktopPane::OmenChat(session_id) => {
                 let animate_media = views::omenchat::omenchat_media_animation_allowed(
                     pane_visible,
-                    self.app.settings.ui.reduce_motion,
+                    self.app.effective_reduce_motion(),
                 );
                 views::omenchat::omenchat_view_for_session(self, *session_id, animate_media)
             }

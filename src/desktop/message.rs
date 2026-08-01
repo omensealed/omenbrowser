@@ -102,6 +102,7 @@ pub(in crate::desktop) enum ThemeMessage {
     SetTheme(String),
     SetFontSize(u16),
     ToggleReducedMotion,
+    ToggleLowPower,
 }
 
 #[derive(Clone, Debug)]
@@ -444,6 +445,7 @@ pub(in crate::desktop) enum OmenChatMessage {
     OpenServerEntry,
     ConfirmInvitation,
     CancelInvitation,
+    DismissLxmfInvitation,
     ToggleRooms,
     JoinRoom {
         session_id: ChatSessionId,

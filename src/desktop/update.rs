@@ -832,6 +832,10 @@ mod tests {
             Message::Theme(ThemeMessage::ToggleReducedMotion).route(),
             MessageRoute::Theme
         );
+        assert_eq!(
+            Message::Theme(ThemeMessage::ToggleLowPower).route(),
+            MessageRoute::Theme
+        );
     }
 
     #[test]

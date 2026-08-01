@@ -55,8 +55,10 @@ impl super::DesktopApp {
             .unwrap_or_else(Subscription::none);
         let monitoring_subscription =
             if section_needs_runtime_interface_sample(self.app.workspace.active_section) {
-                time::every(Duration::from_secs(1))
-                    .map(|_| Message::Shell(ShellMessage::MonitoringTick))
+                time::every(monitoring_sample_interval(
+                    self.app.settings.ui.low_power_mode,
+                ))
+                .map(|_| Message::Shell(ShellMessage::MonitoringTick))
             } else {
                 Subscription::none()
             };
@@ -90,6 +92,10 @@ impl super::DesktopApp {
                 .map(|id| Message::Shell(ShellMessage::WindowCloseRequested(id))),
         ])
     }
+}
+
+fn monitoring_sample_interval(low_power_mode: bool) -> Duration {
+    Duration::from_secs(if low_power_mode { 5 } else { 1 })
 }
 
 fn persistence_deadline_stream(deadline: &(u64, u64)) -> impl Stream<Item = Message> + 'static {
@@ -169,6 +175,12 @@ fn internal_event_stream(wake: &InternalEventWake) -> impl Stream<Item = Message
 mod tests {
     use super::*;
     use iced::futures::StreamExt;
+
+    #[test]
+    fn low_power_mode_reduces_visible_monitoring_wakeups_without_disabling_samples() {
+        assert_eq!(monitoring_sample_interval(false), Duration::from_secs(1));
+        assert_eq!(monitoring_sample_interval(true), Duration::from_secs(5));
+    }
 
     #[tokio::test]
     async fn persistence_deadline_stream_emits_once_at_the_requested_deadline() {
