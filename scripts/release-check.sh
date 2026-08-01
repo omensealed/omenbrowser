@@ -64,6 +64,9 @@ require_full_server_version() {
 }
 
 if [[ "$mode" == "package" ]]; then
+  echo "== Release notes finalized =="
+  bash scripts/verify-release-finalization.sh
+
   require_file() {
     local path="$1"
     if [[ ! -f "$path" ]]; then
@@ -233,6 +236,7 @@ bash -n scripts/measure-pane-stress.sh
 bash -n scripts/measure-durable-mutation-retention.sh
 bash -n scripts/measure-omenchatd-backpressure.sh
 bash -n scripts/measure-omenchatd-db.sh
+bash -n scripts/measure-omenchatd-idle.sh
 bash -n scripts/verify-release-version.sh
 bash -n scripts/verify-reticulum-train.sh
 bash -n scripts/verify-accepted-advisories.sh
