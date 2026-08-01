@@ -9,6 +9,8 @@ pub mod live;
 pub mod protocol;
 #[cfg(feature = "live-reticulum")]
 pub mod reticulum_live;
+#[cfg(feature = "live-reticulum")]
+mod runtime_policy;
 pub mod server_log;
 pub mod session;
 pub mod store;

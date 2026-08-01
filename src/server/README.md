@@ -100,6 +100,22 @@ startup clearly; disabled records remain inert. Runtime TCP reconnect remains
 owned by the Reticulum 0.9 interface worker, so a transient disconnect does not
 cause the TUI to create a competing second runtime.
 
+Live interface health is derived from each worker's current runtime state and
+liveness, not merely from configured interface records. Monitoring distinguishes
+configured, connecting, reconnecting, operational, degraded, terminal, and
+no-interface states. Only three consecutive terminal all-worker observations
+schedule one deduplicated full-runtime recovery. The five-second recovery
+deadline never blocks TUI input, rendering, Stop, quit, or shutdown, and ordinary
+TCP reconnect progress cancels any pending recovery. The TUI also requests a
+full redraw after live Reticulum events so direct output from the pinned
+transport cannot remain painted over the alternate-screen dashboard.
+
+Both headless and TUI-owned live runtimes use an omenchatd-local Tokio policy:
+one through four async workers according to available parallelism, at most eight
+blocking threads, and stable `omenchatd-headless`/`omenchatd-tui` worker names.
+The normal headless event loop waits on its bounded control and payload queues,
+shutdown signal, and required deadlines instead of waking every 25 ms.
+
 Identity creation is limited to a missing identity file or omenchatd's exact
 first-run placeholder. An existing malformed, unreadable, non-regular, or
 symlinked identity aborts startup without replacement. First-run publication is
@@ -553,12 +569,15 @@ ceilings, not operator-adjustable quota settings.
 Reticulum 0.9 Resource terminals are projected onto the bounded event control
 lane instead of being discarded. Outbound completion, failure, and
 cancellation remain counted even when their link has already closed. An
-inbound Resource failure releases all pending upload offers for the identified
-peer but leaves the link itself usable. Upstream failure events expose the link
-and transfer hash but not the failed Resource metadata, so omenchatd cannot
-safely claim exact upload-offer correlation; peer-scoped cleanup is the
-conservative policy. The `stats:` line reports terminal counts and released
-offer reservations. Successful Resource handling and wire fields are
+outbound application Resource ID is correlated to the exact Reticulum hash in a
+bounded, expiring per-link map and released on terminal, link close, shutdown,
+or TTL. Upstream inbound failure events expose the exact hash and expected byte
+count but not the failed Resource metadata/application ID. The server therefore
+releases one pending upload only when identity plus expected size selects exactly
+one candidate; unmatched or ambiguous failures remove none. Identity-wide
+cleanup remains reserved for link close, disconnect, replacement, and TTL. The
+`stats:` line reports exact outbound, unique inbound, unmatched, and ambiguous
+correlation counts. Successful Resource handling and wire fields are
 unchanged. A deterministic isolated regression feeds the public Reticulum 0.9
 terminal variants through the production Resource-event receiver and bounded
 control lane, then proves permits drain and the owned worker joins after

@@ -2344,6 +2344,53 @@ them with live page/message latency before changing product defaults.
 The `--two-core` case uses Linux `taskset` from `util-linux`; other platforms
 must apply their native CPU-affinity mechanism or run on low-core hardware.
 
+## omenchatd v0.9.6-7 recovery and event-loop gates
+
+The standalone server has a separate runtime policy: available parallelism is
+clamped to one through four async workers, the blocking pool is capped at eight,
+and headless/TUI workers have stable names. Live interface health is aggregated
+from current upstream status plus worker liveness. Connecting or reconnecting
+workers remain owned by the interface implementation; only three consecutive
+terminal all-worker samples schedule one deduplicated five-second runtime
+recovery. The pending deadline never sleeps in the TUI thread and Stop cancels
+it. A full redraw after drained live events repairs the alternate screen when
+the pinned transport writes a link-close diagnostic directly to stdout.
+
+Focused isolated gates are:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full interface_health --lib
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full pending_live_recovery --lib
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full event_wait_prioritizes_control --lib
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full runtime_policy --lib
+```
+
+The normal headless loop waits on the shutdown signal, bounded control/payload
+queues, announce deadline, one-second handshake sweep, and 30-second statistics
+deadline. It no longer uses an unconditional 25 ms wakeup. The queue test proves
+control priority, payload wakeup, continued operation after one lane closes,
+and prompt termination after both lanes close; existing saturation and shutdown
+tests retain bounded draining and permit-release coverage.
+
+Resource lifecycle events retain the exact 32-byte Reticulum hash. Outbound
+application IDs use a 256-item/1 MiB global, 16-item-per-link, six-hour map and
+are released on terminal, link close, shutdown, or expiry. Because pinned 0.9.6
+inbound failure events do not contain OMENchat metadata, upload failure cleanup
+removes one candidate only for a unique authenticated-identity plus expected-size
+match. Ambiguous or unmatched failures remove none. Run:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full resource_ --lib
+```
+
+These deterministic tests do not claim external reticulumd, physical interface,
+Python, native Windows/macOS, or GPU evidence.
+
 ## Identity material admission
 
 Identity-manager tests use only generated temporary roots. They admit an exact
@@ -4118,7 +4165,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.6-6` must report
+therefore exits with the expected signal status; current `0.9.6-7` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 

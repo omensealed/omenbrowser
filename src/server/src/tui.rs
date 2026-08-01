@@ -44,8 +44,7 @@ use crate::tui_text::traffic_delta_text;
 #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
 use crate::tui_text::{
     active_link_activity_label, active_link_monitoring_line, closed_link_monitoring_line,
-    closed_link_status_label, interface_health_label, ActiveLinkMonitoringText,
-    ClosedLinkMonitoringText,
+    closed_link_status_label, ActiveLinkMonitoringText, ClosedLinkMonitoringText,
 };
 use crate::tui_text::{
     admin_help_text, announce_interval_update_text, audit_summary_text, command_help_text,
@@ -279,6 +278,9 @@ fn run_dashboard(mut config: ServerConfig) -> ServerResult<()> {
     loop {
         app.tick_admin_database();
         app.tick_live_runtime();
+        if app.take_full_redraw() {
+            terminal.clear()?;
+        }
         terminal.draw(|frame| app.render(frame))?;
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
@@ -318,6 +320,11 @@ impl TerminalGuard {
         F: FnOnce(&mut Frame<'_>),
     {
         self.terminal.draw(render)?;
+        Ok(())
+    }
+
+    fn clear(&mut self) -> ServerResult<()> {
+        self.terminal.clear()?;
         Ok(())
     }
 }
@@ -530,6 +537,11 @@ struct AdminTui {
     next_live_stats: Instant,
     #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     live_status: String,
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+    pending_live_recovery: Option<PendingLiveRecovery>,
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+    live_runtime_generation: u64,
+    force_full_redraw: bool,
     last_announce_event: String,
 }
 
@@ -546,12 +558,36 @@ struct TuiLiveRuntime {
     interface_recovery_samples: u8,
 }
 
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+#[derive(Clone, Debug)]
+struct PendingLiveRecovery {
+    runtime_generation: u64,
+    cause: String,
+    scheduled_at: Instant,
+    due_at: Instant,
+    attempt: u8,
+}
+
+#[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+impl PendingLiveRecovery {
+    fn new(runtime_generation: u64, cause: impl Into<String>, now: Instant) -> Self {
+        Self {
+            runtime_generation,
+            cause: cause.into(),
+            scheduled_at: now,
+            due_at: now + Duration::from_secs(5),
+            attempt: 1,
+        }
+    }
+
+    fn is_due(&self, now: Instant, runtime_generation: u64) -> bool {
+        self.runtime_generation == runtime_generation && now >= self.due_at
+    }
+}
+
 #[cfg(feature = "live-reticulum")]
 fn start_admin_live_server(config: &ServerConfig) -> ServerResult<TuiLiveRuntime> {
-    let tokio = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| ServerError::Message(format!("tokio runtime failed: {error}")))?;
+    let tokio = crate::runtime_policy::build_runtime(crate::runtime_policy::TUI_THREAD_NAME)?;
     let runtime = tokio.block_on(reticulum_live::start_live_server(config))?;
     let stats = runtime.live_server.stats().clone();
     Ok(TuiLiveRuntime {
@@ -712,8 +748,17 @@ impl AdminTui {
             next_live_stats: Instant::now(),
             #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
             live_status: "live server not started".into(),
+            #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+            pending_live_recovery: None,
+            #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+            live_runtime_generation: 0,
+            force_full_redraw: false,
             last_announce_event: "none yet".into(),
         }
+    }
+
+    fn take_full_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.force_full_redraw)
     }
 
     fn tick_admin_database(&mut self) {
@@ -1130,6 +1175,7 @@ impl AdminTui {
 
     #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn start_live_runtime(&mut self) {
+        self.pending_live_recovery = None;
         if self.live.is_some() {
             self.status =
                 "live server already running; verify active clients and interfaces in Monitoring"
@@ -1155,6 +1201,8 @@ impl AdminTui {
                 live.last_interface_stats = last_interface_stats;
                 live.interface_recovery_samples = 0;
                 self.live = Some(live);
+                self.live_runtime_generation = self.live_runtime_generation.saturating_add(1);
+                self.force_full_redraw = true;
                 self.next_live_announce = Instant::now()
                     + Duration::from_secs(self.config.announce_interval_minutes.max(1) * 60);
                 self.next_live_stats = Instant::now() + Duration::from_secs(5);
@@ -1179,6 +1227,7 @@ impl AdminTui {
 
     #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn stop_live_runtime(&mut self) {
+        self.pending_live_recovery = None;
         if let Some(live) = self.live.take() {
             let shutdown = stop_admin_live_server(live, &self.config);
             let flushed = crate::server_log::flush(Duration::from_secs(1));
@@ -1201,6 +1250,7 @@ impl AdminTui {
                     format!("live server shutdown incomplete: {error}; log flush timed out; config was not changed")
                 }
             };
+            self.force_full_redraw = true;
         } else {
             self.status = "live server is not running; press g or Start Live Server".into();
         }
@@ -1242,9 +1292,94 @@ impl AdminTui {
     }
 
     #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+    fn schedule_live_recovery(&mut self, cause: impl Into<String>, now: Instant) {
+        if self.pending_live_recovery.is_some() {
+            return;
+        }
+        let pending = PendingLiveRecovery::new(self.live_runtime_generation, cause, now);
+        self.live_status = format!(
+            "live runtime recovery pending in {}s: {}",
+            pending.due_at.saturating_duration_since(now).as_secs(),
+            pending.cause
+        );
+        self.status = self.live_status.clone();
+        self.pending_live_recovery = Some(pending);
+        self.force_full_redraw = true;
+    }
+
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
+    fn execute_pending_live_recovery(&mut self, now: Instant) {
+        let Some(pending) = self.pending_live_recovery.as_ref() else {
+            return;
+        };
+        if pending.runtime_generation != self.live_runtime_generation {
+            self.pending_live_recovery = None;
+            return;
+        }
+        if !pending.is_due(now, self.live_runtime_generation) {
+            let remaining = pending.due_at.saturating_duration_since(now).as_secs();
+            self.live_status = format!(
+                "live runtime recovery pending in {remaining}s: {}",
+                pending.cause
+            );
+            return;
+        }
+        let Some(pending) = self.pending_live_recovery.take() else {
+            return;
+        };
+        let Some(live) = self.live.take() else {
+            return;
+        };
+        self.live_status = format!(
+            "live runtime recovery attempt {}: {}",
+            pending.attempt, pending.cause
+        );
+        self.force_full_redraw = true;
+        if let Err(error) = stop_admin_live_server(live, &self.config) {
+            self.live_status = format!(
+                "live runtime recovery stopped after shutdown failure: {error}; start it explicitly"
+            );
+            self.status = self.live_status.clone();
+            return;
+        }
+        match start_admin_live_server(&self.config) {
+            Ok(mut next_live) => {
+                let destination = hex_lower_local(&next_live.runtime.destination_hash);
+                next_live.last_stats = next_live.runtime.live_server.stats().summary_line();
+                next_live.last_stats_snapshot = next_live.runtime.live_server.stats().clone();
+                next_live.last_stats_at = Instant::now();
+                next_live.recent_stats = format!(
+                    "runtime recovered after {:?}; waiting for next sample",
+                    pending.scheduled_at.elapsed()
+                );
+                next_live.last_interface_stats = next_live.runtime.interface_stats_lines();
+                next_live.interface_recovery_samples = 0;
+                self.live = Some(next_live);
+                self.live_runtime_generation = self.live_runtime_generation.saturating_add(1);
+                self.next_live_announce = Instant::now()
+                    + Duration::from_secs(self.config.announce_interval_minutes.max(1) * 60);
+                self.next_live_stats = Instant::now() + Duration::from_secs(5);
+                self.live_status = format!(
+                    "live runtime recovered destination={destination}; {}",
+                    pending.cause
+                );
+                self.last_announce_event =
+                    announce_event_text("startup after bounded recovery", &destination);
+                self.status = self.live_status.clone();
+            }
+            Err(error) => {
+                self.live_status =
+                    format!("live runtime recovery failed: {error}; start it explicitly");
+                self.status = self.live_status.clone();
+            }
+        }
+    }
+
+    #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
     fn tick_live_runtime(&mut self) {
-        const LIVE_RUNTIME_RESTART_BACKOFF: Duration = Duration::from_secs(5);
         const INTERFACE_RECOVERY_SAMPLES: u8 = 3;
+        let now = Instant::now();
+        self.execute_pending_live_recovery(now);
         let Some(live) = self.live.as_mut() else {
             return;
         };
@@ -1260,49 +1395,16 @@ impl AdminTui {
                     "live server running | drained {drained} event(s) | {}",
                     live.runtime.live_server.stats().summary_line()
                 );
+                // reticulum-rs 0.9.6 prints Link-close diagnostics directly to
+                // stdout. Invalidate Ratatui's diff buffer after live events so
+                // its alternate-screen surface is restored on this same tick.
+                self.force_full_redraw = true;
             }
             Ok(_) => {}
             Err(error) => {
-                self.live_status = format!(
-                    "live event handling failed: {error}; restarting live runtime after {}s",
-                    LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
-                );
+                self.live_status = format!("live event handling failed: {error}; runtime retained");
                 self.status = self.live_status.clone();
-                std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
-                if let Err(shutdown_error) = shutdown_admin_live_runtime(live, &self.config) {
-                    self.live_status =
-                        format!("live runtime shutdown failed before restart: {shutdown_error}");
-                    self.status = self.live_status.clone();
-                    return;
-                }
-                match start_admin_live_server(&self.config) {
-                    Ok(next_live) => {
-                        let destination = hex_lower_local(&next_live.runtime.destination_hash);
-                        *live = next_live;
-                        live.last_stats = live.runtime.live_server.stats().summary_line();
-                        live.last_stats_snapshot = live.runtime.live_server.stats().clone();
-                        live.last_stats_at = Instant::now();
-                        live.recent_stats = "runtime restarted; waiting for next sample".into();
-                        live.last_interface_stats = live.runtime.interface_stats_lines();
-                        live.interface_recovery_samples = 0;
-                        self.next_live_announce = Instant::now()
-                            + Duration::from_secs(
-                                self.config.announce_interval_minutes.max(1) * 60,
-                            );
-                        self.next_live_stats = Instant::now() + Duration::from_secs(5);
-                        self.live_status =
-                            format!("live runtime restarted destination={destination}");
-                        self.last_announce_event =
-                            announce_event_text("startup after runtime restart", &destination);
-                        self.status = format!(
-                            "live runtime restarted: omenchat://{destination}; verify Monitoring"
-                        );
-                    }
-                    Err(restart_error) => {
-                        self.live_status = format!("live runtime restart failed: {restart_error}");
-                        self.status = self.live_status.clone();
-                    }
-                }
+                self.force_full_redraw = true;
                 return;
             }
         }
@@ -1320,44 +1422,9 @@ impl AdminTui {
                     self.last_announce_event = announce_event_text("automatic", &destination);
                 }
                 Err(error) => {
-                    self.live_status = format!(
-                        "live announce failed: {error}; restarting live runtime after {}s",
-                        LIVE_RUNTIME_RESTART_BACKOFF.as_secs()
-                    );
+                    self.live_status =
+                        format!("live announce failed: {error}; interface runtime retained");
                     self.status = self.live_status.clone();
-                    std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
-                    if let Err(shutdown_error) = shutdown_admin_live_runtime(live, &self.config) {
-                        self.live_status = format!(
-                            "live runtime shutdown failed before announce recovery: {shutdown_error}"
-                        );
-                        self.status = self.live_status.clone();
-                        return;
-                    }
-                    match start_admin_live_server(&self.config) {
-                        Ok(next_live) => {
-                            let destination = hex_lower_local(&next_live.runtime.destination_hash);
-                            *live = next_live;
-                            live.last_stats = live.runtime.live_server.stats().summary_line();
-                            live.last_stats_snapshot = live.runtime.live_server.stats().clone();
-                            live.last_stats_at = Instant::now();
-                            live.recent_stats = "runtime restarted after announce failure".into();
-                            live.last_interface_stats = live.runtime.interface_stats_lines();
-                            live.interface_recovery_samples = 0;
-                            self.live_status = format!(
-                                "live runtime restarted after announce failure destination={destination}"
-                            );
-                            self.last_announce_event = announce_event_text(
-                                "startup after announce recovery",
-                                &destination,
-                            );
-                            self.status = self.live_status.clone();
-                        }
-                        Err(restart_error) => {
-                            self.live_status =
-                                format!("live runtime restart failed: {restart_error}");
-                            self.status = self.live_status.clone();
-                        }
-                    }
                 }
             }
             self.next_live_announce =
@@ -1391,50 +1458,28 @@ impl AdminTui {
                     interface_health.label()
                 );
                 if live.interface_recovery_samples >= INTERFACE_RECOVERY_SAMPLES {
-                    self.status = format!(
-                        "interface watchdog restarting live runtime: {}",
+                    let cause = format!(
+                        "interface watchdog confirmed {} for {INTERFACE_RECOVERY_SAMPLES} samples",
                         interface_health.label()
                     );
-                    std::thread::sleep(LIVE_RUNTIME_RESTART_BACKOFF);
-                    if let Err(shutdown_error) = shutdown_admin_live_runtime(live, &self.config) {
-                        self.live_status = format!(
-                            "live runtime shutdown failed before interface recovery: {shutdown_error}"
-                        );
-                        self.status = self.live_status.clone();
-                        return;
-                    }
-                    match start_admin_live_server(&self.config) {
-                        Ok(next_live) => {
-                            let destination = hex_lower_local(&next_live.runtime.destination_hash);
-                            *live = next_live;
-                            live.last_stats = live.runtime.live_server.stats().summary_line();
-                            live.last_stats_snapshot = live.runtime.live_server.stats().clone();
-                            live.last_stats_at = Instant::now();
-                            live.recent_stats = "runtime restarted by interface watchdog".into();
-                            live.last_interface_stats = live.runtime.interface_stats_lines();
-                            live.interface_recovery_samples = 0;
-                            self.next_live_announce = Instant::now()
-                                + Duration::from_secs(
-                                    self.config.announce_interval_minutes.max(1) * 60,
-                                );
-                            self.live_status = format!(
-                                "live runtime restarted after interface watchdog destination={destination}"
-                            );
-                            self.last_announce_event = announce_event_text(
-                                "startup after interface watchdog",
-                                &destination,
-                            );
-                            self.status = self.live_status.clone();
-                        }
-                        Err(restart_error) => {
-                            self.live_status =
-                                format!("live runtime restart failed: {restart_error}");
-                            self.status = self.live_status.clone();
-                        }
-                    }
+                    // End the mutable runtime borrow before scheduling the one
+                    // generation-owned recovery record.
+                    let _ = live;
+                    self.schedule_live_recovery(cause, now);
+                    self.next_live_stats = now + Duration::from_secs(5);
+                    return;
                 }
             } else {
                 live.interface_recovery_samples = 0;
+                if self.pending_live_recovery.as_ref().is_some_and(|pending| {
+                    pending.runtime_generation == self.live_runtime_generation
+                }) {
+                    self.pending_live_recovery = None;
+                    self.live_status = format!(
+                        "live interface recovered without runtime restart: {}",
+                        interface_health.label()
+                    );
+                }
             }
             self.next_live_stats = now + Duration::from_secs(5);
         }
@@ -1469,7 +1514,7 @@ impl AdminTui {
             if let Some(live) = self.live.as_ref() {
                 lines.push(format!(
                     "interface: {}",
-                    interface_health_label(&live.last_interface_stats)
+                    live.runtime.interface_health().label()
                 ));
                 lines.push(format!(
                     "identity: {}",
@@ -5060,6 +5105,39 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    #[cfg(feature = "live-reticulum")]
+    #[test]
+    fn pending_live_recovery_is_deadline_driven_deduplicated_and_cancelled_by_stop() {
+        let now = Instant::now();
+        let pending = PendingLiveRecovery::new(7, "all workers terminal", now);
+        assert!(!pending.is_due(now + Duration::from_secs(4), 7));
+        assert!(pending.is_due(now + Duration::from_secs(5), 7));
+        assert!(!pending.is_due(now + Duration::from_secs(5), 8));
+
+        let root = temp_root("pending-live-recovery");
+        let config = ServerConfig::for_root(root.clone());
+        let mut app = AdminTui::new(config);
+        app.live_runtime_generation = 7;
+        app.schedule_live_recovery("first terminal sample set", now);
+        let first_due = app
+            .pending_live_recovery
+            .as_ref()
+            .map(|pending| pending.due_at)
+            .expect("pending recovery");
+        app.schedule_live_recovery("duplicate cause", now + Duration::from_secs(1));
+        let retained = app
+            .pending_live_recovery
+            .as_ref()
+            .expect("retained recovery");
+        assert_eq!(retained.due_at, first_due);
+        assert_eq!(retained.cause, "first terminal sample set");
+        assert!(app.take_full_redraw());
+
+        app.stop_live_runtime();
+        assert!(app.pending_live_recovery.is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
