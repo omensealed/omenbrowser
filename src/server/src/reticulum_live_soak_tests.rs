@@ -193,6 +193,7 @@ async fn production_queues_bound_slow_resource_consumers_and_keep_control_respon
                     RESOURCE_BYTES,
                     OmenchatLinkEvent::ResourceReceived {
                         link_id,
+                        resource_hash: [sequence as u8; 32],
                         data: vec![sequence as u8; RESOURCE_BYTES],
                         metadata: Some(b"omenchat-resource:queue-soak".to_vec()),
                     },

@@ -302,6 +302,13 @@ enum PendingUploadTake {
     IdentityMismatch,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingUploadFailureMatch {
+    Released,
+    Unmatched,
+    Ambiguous,
+}
+
 impl PendingUploadStore {
     fn insert(&mut self, resource_id: String, upload: PendingUpload, now: u64) -> bool {
         self.purge_expired(now);
@@ -353,6 +360,31 @@ impl PendingUploadStore {
         self.entries
             .retain(|_, upload| upload.identity_hash.as_slice() != identity_hash);
         before.saturating_sub(self.entries.len())
+    }
+
+    fn remove_unique_identity_size(
+        &mut self,
+        identity_hash: &[u8],
+        expected_size: u64,
+        now: u64,
+    ) -> PendingUploadFailureMatch {
+        self.purge_expired(now);
+        let mut matches = self.entries.iter().filter_map(|(resource_id, upload)| {
+            (upload.identity_hash.as_slice() == identity_hash
+                && upload.incoming_bytes == expected_size)
+                .then_some(resource_id.clone())
+        });
+        let Some(resource_id) = matches.next() else {
+            return PendingUploadFailureMatch::Unmatched;
+        };
+        if matches.next().is_some() {
+            return PendingUploadFailureMatch::Ambiguous;
+        }
+        if self.entries.remove(&resource_id).is_some() {
+            PendingUploadFailureMatch::Released
+        } else {
+            PendingUploadFailureMatch::Unmatched
+        }
     }
 
     fn metrics(&mut self, now: u64) -> (usize, usize, u64, u64) {
@@ -5246,6 +5278,18 @@ impl SessionEngine {
             .lock()
             .map_err(|_| ServerError::Message("pending upload lock poisoned".into()))?
             .remove_identity(identity_hash, unix_seconds()))
+    }
+
+    pub(crate) fn discard_unique_pending_upload_for_failure(
+        &self,
+        identity_hash: &[u8],
+        expected_size: u64,
+    ) -> ServerResult<PendingUploadFailureMatch> {
+        Ok(self
+            .pending_uploads
+            .lock()
+            .map_err(|_| ServerError::Message("pending upload lock poisoned".into()))?
+            .remove_unique_identity_size(identity_hash, expected_size, unix_seconds()))
     }
 
     fn store_pending_resource(&self, resource_id: String, payload: Vec<u8>) -> ServerResult<()> {

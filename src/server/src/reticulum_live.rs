@@ -46,6 +46,10 @@ const EVENT_CONTROL_ITEMS: usize = 64;
 const EVENT_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 const EVENT_PER_LINK_BYTES: usize = 8 * 1024 * 1024;
 const CONTROL_QUEUE_TIMEOUT: Duration = Duration::from_secs(2);
+const OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS: usize = 256;
+const OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS_PER_LINK: usize = 16;
+const OUTBOUND_RESOURCE_CORRELATION_MAX_BYTES: usize = 1024 * 1024;
+const OUTBOUND_RESOURCE_CORRELATION_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QueueMetricsSnapshot {
@@ -511,6 +515,7 @@ where
 struct ReticulumInterfaceStatus {
     label: String,
     kind: ReticulumInterfaceStatusKind,
+    worker: tokio::task::AbortHandle,
 }
 
 #[derive(Clone)]
@@ -521,6 +526,20 @@ enum ReticulumInterfaceStatusKind {
 }
 
 impl ReticulumInterfaceStatus {
+    fn observation(&self) -> InterfaceObservation {
+        let status = match &self.kind {
+            ReticulumInterfaceStatusKind::TcpClient(handle) => handle.to_json(),
+            ReticulumInterfaceStatusKind::IfacTcpClient(handle) => handle.to_json(),
+            ReticulumInterfaceStatusKind::TcpServer(handle) => handle.to_json(),
+        };
+        let state = match &self.kind {
+            ReticulumInterfaceStatusKind::TcpServer(_) => json_str(&status, "listener_state"),
+            ReticulumInterfaceStatusKind::TcpClient(_)
+            | ReticulumInterfaceStatusKind::IfacTcpClient(_) => json_str(&status, "stream_state"),
+        };
+        InterfaceObservation::new(state, !self.worker.is_finished())
+    }
+
     fn line(&self) -> String {
         match &self.kind {
             ReticulumInterfaceStatusKind::TcpClient(handle) => {
@@ -597,20 +616,99 @@ impl ReticulumInterfaceStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterfaceHealth {
-    Connected,
     NoInterfaces,
+    Starting,
+    Connecting,
+    Healthy,
+    Reconnecting,
+    Degraded,
+    Terminal,
 }
 
 impl InterfaceHealth {
     pub fn needs_runtime_restart(self) -> bool {
-        false
+        matches!(self, Self::Terminal)
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Connected => "connected",
             Self::NoInterfaces => "no interfaces configured",
+            Self::Starting => "configured; workers starting",
+            Self::Connecting => "interfaces connecting",
+            Self::Healthy => "operational",
+            Self::Reconnecting => "interfaces reconnecting",
+            Self::Degraded => "degraded; at least one interface operational",
+            Self::Terminal => "all interface workers terminal",
         }
+    }
+
+    pub fn machine_label(self) -> &'static str {
+        match self {
+            Self::NoInterfaces => "no_interface",
+            Self::Starting => "configured",
+            Self::Connecting => "connecting",
+            Self::Healthy => "operational",
+            Self::Reconnecting => "reconnecting",
+            Self::Degraded => "degraded",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InterfaceObservation {
+    state: String,
+    worker_alive: bool,
+}
+
+impl InterfaceObservation {
+    fn new(state: impl Into<String>, worker_alive: bool) -> Self {
+        Self {
+            state: state.into(),
+            worker_alive,
+        }
+    }
+}
+
+fn aggregate_interface_health(observations: &[InterfaceObservation]) -> InterfaceHealth {
+    if observations.is_empty() {
+        return InterfaceHealth::NoInterfaces;
+    }
+
+    let mut healthy = 0usize;
+    let mut reconnecting = 0usize;
+    let mut connecting = 0usize;
+    let mut starting = 0usize;
+    let mut terminal = 0usize;
+    for observation in observations {
+        if !observation.worker_alive {
+            terminal += 1;
+            continue;
+        }
+        match observation.state.as_str() {
+            "connected" | "listening" | "active" => healthy += 1,
+            "reconnecting" | "stale" => reconnecting += 1,
+            "connecting" | "binding" => connecting += 1,
+            "configured" | "starting" => starting += 1,
+            "closed" | "bind_error" | "failed" | "error" => terminal += 1,
+            _ => starting += 1,
+        }
+    }
+
+    if healthy == observations.len() {
+        InterfaceHealth::Healthy
+    } else if healthy > 0 {
+        InterfaceHealth::Degraded
+    } else if reconnecting > 0 {
+        InterfaceHealth::Reconnecting
+    } else if connecting > 0 {
+        InterfaceHealth::Connecting
+    } else if starting > 0 {
+        InterfaceHealth::Starting
+    } else if terminal == observations.len() {
+        InterfaceHealth::Terminal
+    } else {
+        InterfaceHealth::Degraded
     }
 }
 
@@ -640,17 +738,124 @@ enum TransportCommand {
 }
 
 struct ResourceOffer {
+    resource_id: String,
     payload: Vec<u8>,
     metadata: Vec<u8>,
 }
 
 impl ResourceOffer {
-    fn new(payload: Vec<u8>, metadata: Vec<u8>) -> Self {
-        Self { payload, metadata }
+    fn new(resource_id: String, payload: Vec<u8>, metadata: Vec<u8>) -> Self {
+        Self {
+            resource_id,
+            payload,
+            metadata,
+        }
     }
 
     fn queued_bytes(&self) -> usize {
-        self.payload.len().saturating_add(self.metadata.len())
+        self.resource_id
+            .len()
+            .saturating_add(self.payload.len())
+            .saturating_add(self.metadata.len())
+    }
+}
+
+#[derive(Debug)]
+struct OutboundResourceCorrelation {
+    resource_id: String,
+    inserted_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct OutboundResourceCorrelations {
+    entries: BTreeMap<(LinkId, [u8; 32]), OutboundResourceCorrelation>,
+    order: std::collections::VecDeque<(LinkId, [u8; 32])>,
+    retained_bytes: usize,
+    rejected: u64,
+    expired: u64,
+}
+
+impl OutboundResourceCorrelations {
+    fn insert(
+        &mut self,
+        link_id: LinkId,
+        resource_hash: [u8; 32],
+        resource_id: String,
+        now: Instant,
+    ) -> bool {
+        self.purge_expired(now);
+        let key = (link_id, resource_hash);
+        if let Some(previous) = self.entries.remove(&key) {
+            self.retained_bytes = self
+                .retained_bytes
+                .saturating_sub(previous.resource_id.len());
+        }
+        let per_link = self
+            .entries
+            .keys()
+            .filter(|(candidate, _)| *candidate == link_id)
+            .count();
+        if self.entries.len() >= OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS
+            || per_link >= OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS_PER_LINK
+            || self.retained_bytes.saturating_add(resource_id.len())
+                > OUTBOUND_RESOURCE_CORRELATION_MAX_BYTES
+        {
+            self.rejected = self.rejected.saturating_add(1);
+            return false;
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(resource_id.len());
+        self.entries.insert(
+            key,
+            OutboundResourceCorrelation {
+                resource_id,
+                inserted_at: now,
+            },
+        );
+        self.order.push_back(key);
+        true
+    }
+
+    fn take(&mut self, link_id: LinkId, resource_hash: [u8; 32], now: Instant) -> Option<String> {
+        self.purge_expired(now);
+        let entry = self.entries.remove(&(link_id, resource_hash))?;
+        self.retained_bytes = self.retained_bytes.saturating_sub(entry.resource_id.len());
+        Some(entry.resource_id)
+    }
+
+    fn remove_link(&mut self, link_id: LinkId) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|(candidate, _), entry| {
+            if *candidate == link_id {
+                self.retained_bytes = self.retained_bytes.saturating_sub(entry.resource_id.len());
+                false
+            } else {
+                true
+            }
+        });
+        before.saturating_sub(self.entries.len())
+    }
+
+    fn purge_expired(&mut self, now: Instant) {
+        while let Some(key) = self.order.front().copied() {
+            let expired = self.entries.get(&key).is_none_or(|entry| {
+                now.saturating_duration_since(entry.inserted_at)
+                    >= OUTBOUND_RESOURCE_CORRELATION_TTL
+            });
+            if !expired {
+                break;
+            }
+            self.order.pop_front();
+            if let Some(entry) = self.entries.remove(&key) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(entry.resource_id.len());
+                self.expired = self.expired.saturating_add(1);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.retained_bytes = 0;
     }
 }
 
@@ -659,6 +864,7 @@ impl ReticulumOmenchatTransport {
         transport: Arc<Transport>,
         log_path: std::path::PathBuf,
         shutdown: CancellationToken,
+        outbound_correlations: Arc<Mutex<OutboundResourceCorrelations>>,
     ) -> (Self, JoinHandle<()>) {
         let (tx, mut rx) = mpsc::channel::<Queued<TransportCommand>>(TRANSPORT_QUEUE_ITEMS);
         let (control_tx, mut control_rx) =
@@ -746,6 +952,7 @@ impl ReticulumOmenchatTransport {
                     }
                     TransportCommand::OfferResource { link_id, offer } => {
                         let payload_bytes = offer.payload.len();
+                        let resource_id = offer.resource_id;
                         match transport
                             .send_resource(
                                 &AddressHash::new(link_id),
@@ -755,13 +962,18 @@ impl ReticulumOmenchatTransport {
                             .await
                         {
                             Ok(hash) => {
+                                let retained = outbound_correlations
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .insert(link_id, hash.to_bytes(), resource_id, Instant::now());
                                 append_server_log_path(
                                     &log_path,
                                     format!(
-                                        "reticulum-rs OMENchat resource offered link={} hash={} bytes={}",
+                                        "reticulum-rs OMENchat resource offered link={} hash={} bytes={} correlation={}",
                                         hex_lower(&link_id),
                                         hash,
-                                        payload_bytes
+                                        payload_bytes,
+                                        if retained { "retained" } else { "rejected" }
                                     ),
                                 );
                             }
@@ -789,6 +1001,10 @@ impl ReticulumOmenchatTransport {
                     }
                 }
             }
+            outbound_correlations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
         });
 
         (
@@ -845,12 +1061,12 @@ impl OmenchatTransport for ReticulumOmenchatTransport {
     fn offer_resource(
         &mut self,
         link_id: LinkId,
-        _resource_id: String,
+        resource_id: String,
         payload: Vec<u8>,
         metadata: Vec<u8>,
     ) -> ServerResult<()> {
         let byte_count = payload.len() as u64;
-        let offer = ResourceOffer::new(payload, metadata);
+        let offer = ResourceOffer::new(resource_id, payload, metadata);
         let queued_bytes = offer.queued_bytes();
         let permit = self
             .queue_budget
@@ -949,10 +1165,8 @@ pub fn run_live_server(
     config: ServerConfig,
     qualification_slow_mode_transition_seconds: Option<u32>,
 ) -> ServerResult<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| ServerError::Message(format!("tokio runtime failed: {error}")))?;
+    let runtime =
+        crate::runtime_policy::build_runtime(crate::runtime_policy::HEADLESS_THREAD_NAME)?;
     runtime.block_on(run_live_server_async(
         config,
         qualification_slow_mode_transition_seconds,
@@ -998,6 +1212,7 @@ async fn run_live_server_async(
 
     if pending_shutdown.is_none() {
         println!("omenchatd reticulum-rs live server ready");
+        println!("readiness: {}", runtime.interface_health().machine_label());
         println!(
             "destination: {} ({})",
             runtime.destination_name,
@@ -1096,6 +1311,7 @@ async fn run_live_server_async(
         if Instant::now() >= next_stats {
             let stats = runtime.live_server.stats();
             println!("{}", stats.summary_line());
+            println!("readiness: {}", runtime.interface_health().machine_label());
             append_server_log(&config, stats.summary_line());
             let (transport_queue, event_queue) = runtime.queue_metrics();
             let queue_line = format!(
@@ -1110,9 +1326,24 @@ async fn run_live_server_async(
             next_stats = Instant::now() + stats_interval;
         }
 
+        let next_deadline = next_announce.min(next_handshake_sweep).min(next_stats);
         tokio::select! {
+            biased;
             reason = &mut shutdown_signal => break reason,
-            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            event = runtime.recv_next_event() => match event {
+                Some(event) => {
+                    if let Err(error) = runtime.live_server.handle_event(event).await {
+                        append_server_log_error(
+                            &config,
+                            format!("reticulum-rs live event failed: {error}"),
+                        );
+                    }
+                }
+                None => break Err(ServerError::Message(
+                    "reticulum-rs live event queues stopped unexpectedly".into(),
+                )),
+            },
+            _ = tokio::time::sleep_until(next_deadline.into()) => {}
         }
     };
 
@@ -1217,6 +1448,7 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
         budget: event_queue_budget.clone(),
         log_path: config.log_path(),
     };
+    let outbound_correlations = Arc::new(Mutex::new(OutboundResourceCorrelations::default()));
     let shutdown = CancellationToken::new();
     let mut owned_tasks = vec![
         OwnedTask::cancellable(spawn_link_event_bridge(
@@ -1224,6 +1456,7 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
             event_tx.clone(),
             config.clone(),
             shutdown.clone(),
+            outbound_correlations.clone(),
         )),
         OwnedTask::cancellable(spawn_received_data_bridge(
             transport.clone(),
@@ -1235,6 +1468,7 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
             event_tx,
             config.clone(),
             shutdown.clone(),
+            outbound_correlations.clone(),
         )),
     ];
     owned_tasks.extend(
@@ -1243,8 +1477,12 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
             .into_iter()
             .map(OwnedTask::interface),
     );
-    let (transport_impl, transport_worker) =
-        ReticulumOmenchatTransport::new(transport.clone(), config.log_path(), shutdown.clone());
+    let (transport_impl, transport_worker) = ReticulumOmenchatTransport::new(
+        transport.clone(),
+        config.log_path(),
+        shutdown.clone(),
+        outbound_correlations,
+    );
     owned_tasks.push(OwnedTask::cancellable(transport_worker));
     let transport_queue_budget = transport_impl.queue_budget.clone();
 
@@ -1306,11 +1544,12 @@ impl ReticulumLiveRuntime {
     }
 
     pub fn interface_health(&self) -> InterfaceHealth {
-        if self.interface_statuses.is_empty() {
-            InterfaceHealth::NoInterfaces
-        } else {
-            InterfaceHealth::Connected
-        }
+        let observations = self
+            .interface_statuses
+            .iter()
+            .map(ReticulumInterfaceStatus::observation)
+            .collect::<Vec<_>>();
+        aggregate_interface_health(&observations)
     }
 
     pub fn queue_metrics(&self) -> (QueueMetricsSnapshot, QueueMetricsSnapshot) {
@@ -1392,6 +1631,41 @@ impl ReticulumLiveRuntime {
             | Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
         }
         self.event_rx.try_recv().ok().map(|queued| queued.value)
+    }
+
+    async fn recv_next_event(&mut self) -> Option<OmenchatLinkEvent> {
+        recv_prioritized_event(&mut self.event_control_rx, &mut self.event_rx).await
+    }
+}
+
+async fn recv_prioritized_event(
+    control_rx: &mut mpsc::Receiver<Queued<OmenchatLinkEvent>>,
+    payload_rx: &mut mpsc::Receiver<Queued<OmenchatLinkEvent>>,
+) -> Option<OmenchatLinkEvent> {
+    loop {
+        if let Ok(queued) = control_rx.try_recv() {
+            return Some(queued.value);
+        }
+        if let Ok(queued) = payload_rx.try_recv() {
+            return Some(queued.value);
+        }
+        if control_rx.is_closed() && payload_rx.is_closed() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            queued = control_rx.recv(), if !control_rx.is_closed() => {
+                if let Some(queued) = queued {
+                    return Some(queued.value);
+                }
+            }
+            queued = payload_rx.recv(), if !payload_rx.is_closed() => {
+                if let Some(queued) = queued {
+                    return Some(queued.value);
+                }
+            }
+            else => continue,
+        }
     }
 }
 
@@ -1482,6 +1756,7 @@ fn spawn_link_event_bridge(
     event_tx: EventQueueSender,
     config: ServerConfig,
     shutdown: CancellationToken,
+    outbound_correlations: Arc<Mutex<OutboundResourceCorrelations>>,
 ) -> JoinHandle<()> {
     let log_path = event_tx.log_path.clone();
     let mut events = transport.in_link_events();
@@ -1555,6 +1830,10 @@ fn spawn_link_event_bridge(
                     }
                     LinkEvent::Closed => {
                         let link_id = address_hash_bytes(event.id);
+                        outbound_correlations
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .remove_link(link_id);
                         append_server_log_path(
                             &log_path,
                             format!("reticulum-rs in-link closed link={}", hex_lower(&link_id)),
@@ -1772,6 +2051,7 @@ fn spawn_resource_event_bridge(
     event_tx: EventQueueSender,
     config: ServerConfig,
     shutdown: CancellationToken,
+    outbound_correlations: Arc<Mutex<OutboundResourceCorrelations>>,
 ) -> JoinHandle<()> {
     spawn_resource_event_receiver(
         transport.clone(),
@@ -1779,6 +2059,7 @@ fn spawn_resource_event_bridge(
         event_tx,
         config,
         shutdown,
+        outbound_correlations,
     )
 }
 
@@ -1788,6 +2069,7 @@ fn spawn_resource_event_receiver(
     event_tx: EventQueueSender,
     config: ServerConfig,
     shutdown: CancellationToken,
+    outbound_correlations: Arc<Mutex<OutboundResourceCorrelations>>,
 ) -> JoinHandle<()> {
     let log_path = config.log_path();
     tokio::spawn(async move {
@@ -1823,8 +2105,12 @@ fn spawn_resource_event_receiver(
                             event_tx
                                 .send_control(OmenchatLinkEvent::ResourceTerminal {
                                     link_id,
+                                    resource_hash: event.hash.to_bytes(),
+                                    resource_id: None,
                                     direction: LiveResourceDirection::Inbound,
                                     outcome: LiveResourceOutcome::Failed,
+                                    expected_size: Some(failure.progress.total_bytes),
+                                    reason: (!reason.is_empty()).then_some(reason),
                                 })
                                 .await;
                             continue;
@@ -1833,6 +2119,7 @@ fn spawn_resource_event_receiver(
                             send_resource_terminal(
                                 &event_tx,
                                 &log_path,
+                                &outbound_correlations,
                                 event.link_id,
                                 event.hash,
                                 LiveResourceOutcome::Complete,
@@ -1844,6 +2131,7 @@ fn spawn_resource_event_receiver(
                             send_resource_terminal(
                                 &event_tx,
                                 &log_path,
+                                &outbound_correlations,
                                 event.link_id,
                                 event.hash,
                                 LiveResourceOutcome::Failed,
@@ -1855,6 +2143,7 @@ fn spawn_resource_event_receiver(
                             send_resource_terminal(
                                 &event_tx,
                                 &log_path,
+                                &outbound_correlations,
                                 event.link_id,
                                 event.hash,
                                 LiveResourceOutcome::Cancelled,
@@ -1955,6 +2244,7 @@ fn spawn_resource_event_receiver(
                         queued_bytes,
                         OmenchatLinkEvent::ResourceReceived {
                             link_id,
+                            resource_hash: event.hash.to_bytes(),
                             data: complete.data,
                             metadata: Some(metadata),
                         },
@@ -1975,11 +2265,16 @@ fn spawn_resource_event_receiver(
 async fn send_resource_terminal(
     event_tx: &EventQueueSender,
     log_path: &Path,
+    outbound_correlations: &Arc<Mutex<OutboundResourceCorrelations>>,
     link_hash: AddressHash,
     resource_hash: rns_transport::hash::Hash,
     outcome: LiveResourceOutcome,
 ) {
     let link_id = address_hash_bytes(link_hash);
+    let resource_id = outbound_correlations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take(link_id, resource_hash.to_bytes(), Instant::now());
     append_server_log_path(
         log_path,
         format!(
@@ -1991,8 +2286,12 @@ async fn send_resource_terminal(
     event_tx
         .send_control(OmenchatLinkEvent::ResourceTerminal {
             link_id,
+            resource_hash: resource_hash.to_bytes(),
+            resource_id,
             direction: LiveResourceDirection::Outbound,
             outcome,
+            expected_size: None,
+            reason: None,
         })
         .await;
 }
@@ -2047,7 +2346,9 @@ async fn attach_configured_interfaces(
                     let status = client.runtime_status_handle();
                     let context = manager.new_context(client);
                     let iface_address = *context.channel.address();
-                    tasks.push(tokio::spawn(ifac_tcp::IfacTcpClient::spawn(context)));
+                    let task = tokio::spawn(ifac_tcp::IfacTcpClient::spawn(context));
+                    let worker = task.abort_handle();
+                    tasks.push(task);
                     attached.push(ReticulumInterfaceStatus {
                         label: format!(
                             "{} tcp_client {address} ifac=configured iface={}",
@@ -2055,15 +2356,17 @@ async fn attach_configured_interfaces(
                             iface_address.to_hex_string()
                         ),
                         kind: ReticulumInterfaceStatusKind::IfacTcpClient(status),
+                        worker,
                     });
                 } else {
                     let client = rns_transport::iface::tcp_client::TcpClient::new(address.clone());
                     let status = client.runtime_status_handle();
                     let context = manager.new_context(client);
                     let iface_address = *context.channel.address();
-                    tasks.push(tokio::spawn(
-                        rns_transport::iface::tcp_client::TcpClient::spawn(context),
-                    ));
+                    let task =
+                        tokio::spawn(rns_transport::iface::tcp_client::TcpClient::spawn(context));
+                    let worker = task.abort_handle();
+                    tasks.push(task);
                     attached.push(ReticulumInterfaceStatus {
                         label: format!(
                             "{} tcp_client {address} ifac=none iface={}",
@@ -2071,6 +2374,7 @@ async fn attach_configured_interfaces(
                             iface_address.to_hex_string()
                         ),
                         kind: ReticulumInterfaceStatusKind::TcpClient(status),
+                        worker,
                     });
                 }
             }
@@ -2095,9 +2399,10 @@ async fn attach_configured_interfaces(
                 let mut manager = manager.lock().await;
                 let context = manager.new_context(server);
                 let iface_address = *context.channel.address();
-                tasks.push(tokio::spawn(
-                    rns_transport::iface::tcp_server::TcpServer::spawn(context),
-                ));
+                let task =
+                    tokio::spawn(rns_transport::iface::tcp_server::TcpServer::spawn(context));
+                let worker = task.abort_handle();
+                tasks.push(task);
                 attached.push(ReticulumInterfaceStatus {
                     label: format!(
                         "{} tcp_server {address} ifac=none iface={}",
@@ -2105,6 +2410,7 @@ async fn attach_configured_interfaces(
                         iface_address.to_hex_string()
                     ),
                     kind: ReticulumInterfaceStatusKind::TcpServer(status),
+                    worker,
                 });
             }
             Some(kind) => {
@@ -2412,21 +2718,31 @@ fn describe_live_event(event: &OmenchatLinkEvent) -> String {
         ),
         OmenchatLinkEvent::ResourceReceived {
             link_id,
+            resource_hash,
             data,
             metadata,
         } => format!(
-            "reticulum-rs resource received link={} bytes={} metadata_bytes={}",
+            "reticulum-rs resource received link={} hash={} bytes={} metadata_bytes={}",
             hex_lower(link_id),
+            hex_lower_32(resource_hash),
             data.len(),
             metadata.as_ref().map(Vec::len).unwrap_or(0)
         ),
         OmenchatLinkEvent::ResourceTerminal {
             link_id,
+            resource_hash,
+            resource_id,
             direction,
             outcome,
+            expected_size,
+            reason,
         } => format!(
-            "reticulum-rs resource terminal link={} direction={direction:?} outcome={outcome:?}",
-            hex_lower(link_id)
+            "reticulum-rs resource terminal link={} hash={} resource_id={} direction={direction:?} outcome={outcome:?} expected_bytes={} reason={}",
+            hex_lower(link_id),
+            hex_lower_32(resource_hash),
+            resource_id.as_deref().unwrap_or("unmapped"),
+            expected_size.map(|size| size.to_string()).unwrap_or_else(|| "unknown".into()),
+            reason.as_deref().unwrap_or("none")
         ),
         OmenchatLinkEvent::LinkClosed { link_id, reason } => format!(
             "reticulum-rs link closed link={} reason={}",
@@ -2539,9 +2855,136 @@ fn hex_lower(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn hex_lower_32(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interface_health_distinguishes_progress_from_terminal_workers() {
+        let configured = InterfaceObservation::new("configured", true);
+        let connecting = InterfaceObservation::new("connecting", true);
+        let reconnecting = InterfaceObservation::new("reconnecting", true);
+        let connected = InterfaceObservation::new("connected", true);
+        let closed = InterfaceObservation::new("closed", false);
+
+        assert_eq!(
+            aggregate_interface_health(&[]),
+            InterfaceHealth::NoInterfaces
+        );
+        assert_eq!(
+            aggregate_interface_health(&[configured]),
+            InterfaceHealth::Starting
+        );
+        assert_eq!(
+            aggregate_interface_health(&[connecting]),
+            InterfaceHealth::Connecting
+        );
+        assert_eq!(
+            aggregate_interface_health(&[reconnecting]),
+            InterfaceHealth::Reconnecting
+        );
+        assert_eq!(
+            aggregate_interface_health(std::slice::from_ref(&connected)),
+            InterfaceHealth::Healthy
+        );
+        assert_eq!(
+            aggregate_interface_health(&[connected, closed.clone()]),
+            InterfaceHealth::Degraded
+        );
+        assert_eq!(
+            aggregate_interface_health(&[closed]),
+            InterfaceHealth::Terminal
+        );
+    }
+
+    #[test]
+    fn reconnect_progress_never_requests_a_competing_runtime() {
+        for health in [
+            InterfaceHealth::Starting,
+            InterfaceHealth::Connecting,
+            InterfaceHealth::Healthy,
+            InterfaceHealth::Reconnecting,
+            InterfaceHealth::Degraded,
+            InterfaceHealth::NoInterfaces,
+        ] {
+            assert!(!health.needs_runtime_restart(), "{health:?}");
+        }
+        assert!(InterfaceHealth::Terminal.needs_runtime_restart());
+    }
+
+    #[test]
+    fn headless_loop_has_no_fixed_25ms_idle_poll() {
+        let source = include_str!("reticulum_live.rs");
+        let forbidden = ["tokio::time::sleep(Duration::from_", "millis(25))"].concat();
+        assert!(!source.contains(&forbidden));
+        assert!(source.contains("event = runtime.recv_next_event()"));
+        assert!(source.contains("next_announce.min(next_handshake_sweep).min(next_stats)"));
+    }
+
+    #[tokio::test]
+    async fn event_wait_prioritizes_control_and_tolerates_one_closed_lane() {
+        let budget = QueueBudget::new(1024, 1024);
+        let (control_tx, mut control_rx) = mpsc::channel(2);
+        let (payload_tx, mut payload_rx) = mpsc::channel(2);
+        let payload = OmenchatLinkEvent::LinkClosed {
+            link_id: [1; 16],
+            reason: Some("payload".into()),
+        };
+        let control = OmenchatLinkEvent::LinkClosed {
+            link_id: [2; 16],
+            reason: Some("control".into()),
+        };
+        payload_tx
+            .send(Queued {
+                value: payload,
+                _permit: budget.reserve([1; 16], 0).expect("payload permit"),
+            })
+            .await
+            .expect("payload queue");
+        control_tx
+            .send(Queued {
+                value: control,
+                _permit: budget.reserve([2; 16], 0).expect("control permit"),
+            })
+            .await
+            .expect("control queue");
+        assert!(matches!(
+            recv_prioritized_event(&mut control_rx, &mut payload_rx).await,
+            Some(OmenchatLinkEvent::LinkClosed { link_id, .. }) if link_id == [2; 16]
+        ));
+        assert!(matches!(
+            recv_prioritized_event(&mut control_rx, &mut payload_rx).await,
+            Some(OmenchatLinkEvent::LinkClosed { link_id, .. }) if link_id == [1; 16]
+        ));
+
+        drop(control_tx);
+        payload_tx
+            .send(Queued {
+                value: OmenchatLinkEvent::LinkClosed {
+                    link_id: [3; 16],
+                    reason: Some("payload after control close".into()),
+                },
+                _permit: budget.reserve([3; 16], 0).expect("payload permit"),
+            })
+            .await
+            .expect("payload queue");
+        assert!(matches!(
+            recv_prioritized_event(&mut control_rx, &mut payload_rx).await,
+            Some(OmenchatLinkEvent::LinkClosed { link_id, .. }) if link_id == [3; 16]
+        ));
+        drop(payload_tx);
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            recv_prioritized_event(&mut control_rx, &mut payload_rx)
+        )
+        .await
+        .expect("closed lanes must not spin or wait")
+        .is_none());
+    }
 
     #[test]
     fn resource_offer_preserves_owned_allocations() {
@@ -2550,11 +2993,39 @@ mod tests {
         let payload_ptr = payload.as_ptr();
         let metadata_ptr = metadata.as_ptr();
 
-        let offer = ResourceOffer::new(payload, metadata);
+        let offer = ResourceOffer::new("resource:test".into(), payload, metadata);
 
         assert_eq!(offer.payload.as_ptr(), payload_ptr);
         assert_eq!(offer.metadata.as_ptr(), metadata_ptr);
-        assert_eq!(offer.queued_bytes(), 1024 * 1024 + 4096);
+        assert_eq!(offer.queued_bytes(), 1024 * 1024 + 4096 + 13);
+    }
+
+    #[test]
+    fn outbound_resource_correlation_is_bounded_and_released_exactly() {
+        let now = Instant::now();
+        let link = [7; 16];
+        let mut correlations = OutboundResourceCorrelations::default();
+        assert!(correlations.insert(link, [1; 32], "history:one".into(), now));
+        assert_eq!(
+            correlations.take(link, [1; 32], now),
+            Some("history:one".into())
+        );
+        assert!(correlations.take(link, [1; 32], now).is_none());
+
+        for index in 0..OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS_PER_LINK {
+            assert!(correlations.insert(link, [index as u8; 32], format!("resource:{index}"), now,));
+        }
+        assert!(!correlations.insert(link, [0xff; 32], "overflow".into(), now));
+        assert_eq!(
+            correlations.entries.len(),
+            OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS_PER_LINK
+        );
+        assert_eq!(
+            correlations.remove_link(link),
+            OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS_PER_LINK
+        );
+        assert!(correlations.entries.is_empty());
+        assert_eq!(correlations.retained_bytes, 0);
     }
     use crate::transport::CapturedTransport;
 
@@ -3176,6 +3647,7 @@ mod tests {
             event_tx,
             config.clone(),
             shutdown.clone(),
+            Arc::new(Mutex::new(OutboundResourceCorrelations::default())),
         );
         let link_id = AddressHash::new([0x42; 16]);
 
@@ -3220,7 +3692,9 @@ mod tests {
                 .expect("production bridge owns resource receiver");
         }
 
-        for (_, expected_direction, expected_outcome) in cases {
+        for (sequence, (_, expected_direction, expected_outcome)) in cases.into_iter().enumerate() {
+            let expected_size = (sequence == 0).then_some(99);
+            let expected_reason = (sequence == 0).then(|| "forcedbridgefailure".to_string());
             let queued = tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
                 .await
                 .expect("terminal must cross bridge promptly")
@@ -3229,8 +3703,12 @@ mod tests {
                 queued.value,
                 OmenchatLinkEvent::ResourceTerminal {
                     link_id: [0x42; 16],
+                    resource_hash: [sequence as u8 + 1; 32],
+                    resource_id: None,
                     direction: expected_direction,
                     outcome: expected_outcome,
+                    expected_size,
+                    reason: expected_reason,
                 }
             );
             drop(queued);
@@ -3340,6 +3818,7 @@ mod tests {
             client_events,
             client_config.clone(),
             shutdown.clone(),
+            Arc::new(Mutex::new(OutboundResourceCorrelations::default())),
         );
 
         let destination = server_destination.lock().await.desc;
@@ -3416,8 +3895,12 @@ mod tests {
             cancelled.value,
             OmenchatLinkEvent::ResourceTerminal {
                 link_id: address_hash_bytes(link_id),
+                resource_hash: cancelled_hash.to_bytes(),
+                resource_id: None,
                 direction: LiveResourceDirection::Outbound,
                 outcome: LiveResourceOutcome::Cancelled,
+                expected_size: None,
+                reason: None,
             }
         );
         drop(cancelled);

@@ -35,6 +35,14 @@ The preset does **not**:
 - create another timer, worker, queue, cache, or task;
 - alter the static-media Cargo feature graph at runtime.
 
+The standalone omenchatd server uses its own bounded runtime policy rather than
+the desktop preset: available async parallelism is clamped to one through four
+workers and the Tokio blocking backstop is capped at eight threads. Its headless
+loop is event-driven and wakes for queue work, shutdown, announces, handshake
+sweeps, and statistics deadlines; it no longer uses a fixed 25 ms idle poll.
+These ownership bounds do not weaken the smaller SQLite, compression, queue, or
+Resource admission limits.
+
 ## Why there is no central `ResourceBudget`
 
 The current image/media, browser-page, message-history, operation-history,

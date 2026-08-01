@@ -10,7 +10,9 @@ use crate::protocol::{
     MODERATION_AUDIT_CAPABILITY, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
     ROOM_MEDIA_POLICY_CAPABILITY, ROOM_PINS_CAPABILITY, ROOM_SLOW_MODE_CAPABILITY,
 };
-use crate::session::{DurableMutationPeerContext, ServerPeer, SessionEngine};
+use crate::session::{
+    DurableMutationPeerContext, PendingUploadFailureMatch, ServerPeer, SessionEngine,
+};
 use crate::transport::{
     release_response_resource, send_response_frame_with_context, LinkId, OmenchatTransport,
     OMENCHAT_LINK_CONTEXT,
@@ -42,13 +44,18 @@ pub enum OmenchatLinkEvent {
     },
     ResourceReceived {
         link_id: LinkId,
+        resource_hash: [u8; 32],
         data: Vec<u8>,
         metadata: Option<Vec<u8>>,
     },
     ResourceTerminal {
         link_id: LinkId,
+        resource_hash: [u8; 32],
+        resource_id: Option<String>,
         direction: LiveResourceDirection,
         outcome: LiveResourceOutcome,
+        expected_size: Option<u64>,
+        reason: Option<String>,
     },
     LinkClosed {
         link_id: LinkId,
@@ -94,7 +101,11 @@ pub struct LiveServerStats {
     pub resource_outbound_complete: u64,
     pub resource_outbound_failed: u64,
     pub resource_outbound_cancelled: u64,
+    pub resource_outbound_correlated: u64,
     pub upload_offers_released_on_resource_failure: u64,
+    pub upload_failure_unique_matches: u64,
+    pub upload_failure_unmatched: u64,
+    pub upload_failure_ambiguous: u64,
     pub upload_offers_in: u64,
     pub upload_fetches_in: u64,
     pub upload_resources_in: u64,
@@ -377,7 +388,7 @@ pub struct ClosedLinkSummary {
 impl LiveServerStats {
     pub fn summary_line(&self) -> String {
         format!(
-            "stats: active_links={} links_opened={} links_closed={} handshakes=pending:{} rejected:{} expired:{} frames_in={} frames_out={} traffic_in={} traffic_out={} resource_out={} resource_terminal=in_failed:{} out_complete:{} out_failed:{} out_cancelled:{} upload_offers_released:{} uploads=offers_in:{} fetches_in:{} resources_in:{} ({}) inline_out:{} ({}) resource_offers_out:{} requests=session:{} room:{} chat:{} history:{} ping:{} command:{} resources_offered={} ignored_context={} unknown_link={} protocol_errors={} replay=hits:{} collisions:{} cache_rejected:{} cache_items:{} cache_bytes:{} pending_resources=items:{} bytes:{} rejected:{} pending_uploads=items:{} identities:{} rejected:{} expired:{}",
+            "stats: active_links={} links_opened={} links_closed={} handshakes=pending:{} rejected:{} expired:{} frames_in={} frames_out={} traffic_in={} traffic_out={} resource_out={} resource_terminal=in_failed:{} out_complete:{} out_failed:{} out_cancelled:{} upload_offers_released:{} uploads=offers_in:{} fetches_in:{} resources_in:{} ({}) inline_out:{} ({}) resource_offers_out:{} requests=session:{} room:{} chat:{} history:{} ping:{} command:{} resources_offered={} ignored_context={} unknown_link={} protocol_errors={} replay=hits:{} collisions:{} cache_rejected:{} cache_items:{} cache_bytes:{} pending_resources=items:{} bytes:{} rejected:{} pending_uploads=items:{} identities:{} rejected:{} expired:{} resource_correlation=outbound_exact:{} unique:{} unmatched:{} ambiguous:{}",
             self.active_links,
             self.links_opened,
             self.links_closed,
@@ -423,6 +434,10 @@ impl LiveServerStats {
             self.pending_upload_identities,
             self.pending_upload_rejected,
             self.pending_upload_expired,
+            self.resource_outbound_correlated,
+            self.upload_failure_unique_matches,
+            self.upload_failure_unmatched,
+            self.upload_failure_ambiguous,
         )
     }
 
@@ -694,6 +709,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             }
             OmenchatLinkEvent::ResourceReceived {
                 link_id,
+                resource_hash: _,
                 data,
                 metadata,
             } => {
@@ -748,24 +764,56 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             }
             OmenchatLinkEvent::ResourceTerminal {
                 link_id,
+                resource_hash: _,
+                resource_id,
                 direction,
                 outcome,
+                expected_size,
+                reason: _,
             } => {
+                if matches!(direction, LiveResourceDirection::Outbound) && resource_id.is_some() {
+                    self.stats.resource_outbound_correlated =
+                        self.stats.resource_outbound_correlated.saturating_add(1);
+                }
                 match (direction, outcome) {
                     (LiveResourceDirection::Inbound, LiveResourceOutcome::Failed) => {
                         self.stats.resource_inbound_failed =
                             self.stats.resource_inbound_failed.saturating_add(1);
-                        if let Some(identity_hash) = self
-                            .peers
-                            .get(&link_id)
-                            .map(|peer| peer.identity_hash.clone())
-                        {
-                            let released =
-                                self.discard_pending_uploads_for_identity(&identity_hash);
-                            self.stats.upload_offers_released_on_resource_failure = self
-                                .stats
-                                .upload_offers_released_on_resource_failure
-                                .saturating_add(released as u64);
+                        if let (Some(identity_hash), Some(expected_size)) = (
+                            self.peers
+                                .get(&link_id)
+                                .map(|peer| peer.identity_hash.clone()),
+                            expected_size,
+                        ) {
+                            match self.engine.discard_unique_pending_upload_for_failure(
+                                &identity_hash,
+                                expected_size,
+                            ) {
+                                Ok(PendingUploadFailureMatch::Released) => {
+                                    self.stats.upload_offers_released_on_resource_failure = self
+                                        .stats
+                                        .upload_offers_released_on_resource_failure
+                                        .saturating_add(1);
+                                    self.stats.upload_failure_unique_matches =
+                                        self.stats.upload_failure_unique_matches.saturating_add(1);
+                                }
+                                Ok(PendingUploadFailureMatch::Unmatched) => {
+                                    self.stats.upload_failure_unmatched =
+                                        self.stats.upload_failure_unmatched.saturating_add(1);
+                                }
+                                Ok(PendingUploadFailureMatch::Ambiguous) => {
+                                    self.stats.upload_failure_ambiguous =
+                                        self.stats.upload_failure_ambiguous.saturating_add(1);
+                                }
+                                Err(error) => {
+                                    self.stats.protocol_errors =
+                                        self.stats.protocol_errors.saturating_add(1);
+                                    self.stats.last_error = Some(error.to_string());
+                                }
+                            }
+                        } else {
+                            self.stats.upload_failure_unmatched =
+                                self.stats.upload_failure_unmatched.saturating_add(1);
                         }
                     }
                     (LiveResourceDirection::Outbound, LiveResourceOutcome::Complete) => {
@@ -7093,8 +7141,12 @@ mod tests {
 
         live.handle_event(OmenchatLinkEvent::ResourceTerminal {
             link_id,
+            resource_hash: [1; 32],
+            resource_id: None,
             direction: LiveResourceDirection::Inbound,
             outcome: LiveResourceOutcome::Failed,
+            expected_size: Some(4),
+            reason: Some("test failure".into()),
         })
         .expect("handle inbound failure");
 
@@ -7104,6 +7156,80 @@ mod tests {
         assert_eq!(stats.resource_inbound_failed, 1);
         assert_eq!(stats.upload_offers_released_on_resource_failure, 1);
         assert!(live.transport().closed_links.is_empty());
+        let _ = std::fs::remove_dir_all(upload_root);
+    }
+
+    #[test]
+    fn ambiguous_inbound_resource_failure_preserves_both_upload_offers() {
+        let upload_root = std::env::temp_dir().join(format!(
+            "omenchatd-live-resource-ambiguous-{}-{}",
+            std::process::id(),
+            current_unix_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&upload_root);
+        let engine = SessionEngine::with_limits(
+            OmenchatStore::in_memory().expect("store"),
+            SessionLimits {
+                rate_commands_per_minute: 0,
+                upload_quota_bytes: 1024,
+                upload_cache_root: Some(upload_root.clone()),
+                ..SessionLimits::default()
+            },
+        );
+        let link_id = [56u8; 16];
+        let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        live.handle_event(OmenchatLinkEvent::LinkOpened {
+            link_id,
+            peer: peer(),
+        })
+        .expect("open link");
+        for frame in [
+            Frame::new(ChatOp::JoinRoom, 1, None, FrameBody::Text("lobby".into())),
+            Frame::new(
+                ChatOp::UploadOffer,
+                2,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("first.bin".into()),
+                    FrameValue::U64(4),
+                ]),
+            ),
+            Frame::new(
+                ChatOp::UploadOffer,
+                3,
+                Some(1),
+                FrameBody::Fields(vec![
+                    FrameValue::String("second.bin".into()),
+                    FrameValue::U64(4),
+                ]),
+            ),
+        ] {
+            live.handle_event(OmenchatLinkEvent::LinkData {
+                link_id,
+                context: OMENCHAT_LINK_CONTEXT,
+                data: encode_frame(&frame).expect("encode frame"),
+            })
+            .expect("handle frame");
+        }
+        assert_eq!(live.stats().pending_upload_items, 2);
+
+        live.handle_event(OmenchatLinkEvent::ResourceTerminal {
+            link_id,
+            resource_hash: [9; 32],
+            resource_id: None,
+            direction: LiveResourceDirection::Inbound,
+            outcome: LiveResourceOutcome::Failed,
+            expected_size: Some(4),
+            reason: Some("receiver cancelled".into()),
+        })
+        .expect("handle ambiguous failure");
+
+        let stats = live.stats();
+        assert_eq!(stats.pending_upload_items, 2);
+        assert_eq!(stats.upload_offers_released_on_resource_failure, 0);
+        assert_eq!(stats.upload_failure_ambiguous, 1);
+        assert_eq!(stats.upload_failure_unique_matches, 0);
+        assert_eq!(stats.upload_failure_unmatched, 0);
         let _ = std::fs::remove_dir_all(upload_root);
     }
 
@@ -7119,15 +7245,23 @@ mod tests {
         ] {
             live.handle_event(OmenchatLinkEvent::ResourceTerminal {
                 link_id,
+                resource_hash: [2; 32],
+                resource_id: Some("outbound:test".into()),
                 direction: LiveResourceDirection::Outbound,
                 outcome,
+                expected_size: None,
+                reason: None,
             })
             .expect("handle outbound terminal");
         }
         live.handle_event(OmenchatLinkEvent::ResourceTerminal {
             link_id,
+            resource_hash: [3; 32],
+            resource_id: None,
             direction: LiveResourceDirection::Inbound,
             outcome: LiveResourceOutcome::Failed,
+            expected_size: None,
+            reason: None,
         })
         .expect("handle late inbound failure");
 
@@ -7136,6 +7270,7 @@ mod tests {
         assert_eq!(stats.resource_outbound_complete, 1);
         assert_eq!(stats.resource_outbound_failed, 1);
         assert_eq!(stats.resource_outbound_cancelled, 1);
+        assert_eq!(stats.resource_outbound_correlated, 3);
         assert_eq!(stats.unknown_link_packets, 0);
         assert_eq!(stats.protocol_errors, 0);
         assert!(stats.summary_line().contains(
